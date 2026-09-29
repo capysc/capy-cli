@@ -1,24 +1,36 @@
 /**
- * Dokploy Application adapter.
+ * Dokploy Application/Compose adapter.
  *
- * Delivers the `_SECRETS_BLOB` + `_PROJECT_KEY` pair `capy run` reads first
- * into a Dokploy Application's environment, then triggers a Dokploy
- * deployment and polls it to a real outcome. Individual secrets never reach
- * Dokploy: the service is expected to start with `capy run -- <app
- * command>`, which decrypts at boot and injects the values into the child
- * process only.
+ * CAP-682: delivery is PLAIN VALUES, not `_SECRETS_BLOB`/`_PROJECT_KEY` — no
+ * deploy token is minted for Dokploy (`needsDeployToken: false`). Each
+ * delivered var is written as its own `KEY=value` line inside Capy's managed
+ * block, and every pre-existing ACTIVE line outside the block that defines
+ * the same name is commented out (never deleted) with a stable marker, so
+ * the platform never reads two definitions of one var — see
+ * `dokployApi.ts`'s "Plaintext delivery" section
+ * (`mergeManagedValuesBlock`/`syncCommentedLines`) for the byte-exact
+ * mechanics. The app reads these values directly from its own process
+ * environment; there is no `capy run` decrypt step for a Dokploy target.
+ *
+ * Default mode is CI (a keep.lock PR; merging it is the deploy signal and
+ * triggers Dokploy's OWN auto-deploy — Capy never calls `compose.redeploy`/
+ * `application.deploy` in that mode). Direct mode remains available and
+ * still triggers + polls a real deploy, exactly as before.
  *
  * Dokploy stores an Application's environment as one text blob (plus
  * buildArgs / buildSecrets / createEnvFile) and only offers a whole-object
  * write, so every update is read → merge → write. Capy owns exactly one
- * marked block inside `env`; every other line is carried through verbatim.
- * The write is NOT atomic per key — a dashboard edit landing between our read
- * and our write is lost. We re-read after the write and fail loudly when the
- * stored env is not the one we wrote.
+ * marked block inside `env`; every other line is carried through verbatim
+ * (or commented, per the above — never deleted). The write is NOT atomic per
+ * key — a dashboard edit landing between our read and our write is lost. We
+ * re-read after the write and fail loudly when the stored env is not the one
+ * we wrote, AND when `dotenv.parse` of the stored env does not resolve every
+ * delivered name to Capy's own value.
  *
- * Deploys are meant to be REVERSIBLE: Capy never edits or deletes anything
- * outside its own block, so deleting the block (by hand, or via `capy deploy
- * remove`'s offer) returns the app to exactly its prior config.
+ * Deploys are meant to be REVERSIBLE: Capy never deletes anything outside its
+ * own block, so removing the block (by hand, or via `capy deploy
+ * targets-remove`'s offer) returns the env to exactly its prior config,
+ * byte-for-byte — including un-commenting whatever Capy commented.
  *
  * The API token is never written to `.capy/deploy.json`. The target stores
  * the NAME of the environment variable that holds it (default
@@ -37,8 +49,9 @@ import {
   RemoveOfferResult,
   TargetConfig,
 } from '../adapter';
-import { ERROR_CODES } from '../../types/index';
+import { ERROR_CODES, ErrorCode } from '../../types/index';
 import {
+  CAPY_OFF_MARKER,
   DEFAULT_TOKEN_ENV,
   DOKPLOY_CONNECTOR_SECRET_NAME,
   DOKPLOY_TARGET_SECRET_NAME,
@@ -47,7 +60,6 @@ import {
   DokployCompose,
   DokployDeployment,
   DokploySystemStoreCallOptions,
-  EnvWarning,
   FetchLike,
   MANAGED_BEGIN,
   MANAGED_END,
@@ -57,6 +69,7 @@ import {
   apiBase,
   createDokployClient,
   describeComposeEnvFileDisabled,
+  describeDokployPlainMergeProblem,
   describeDokployTokenProblem,
   describeEnvProblem,
   describeEnvWarning,
@@ -66,13 +79,19 @@ import {
   envProblems,
   envWarnings,
   mergeManagedBlock,
+  mergeManagedValuesBlock,
+  mismatchedDeliveredValues,
   outsideLines,
+  removeManagedValuesBlock,
   resolveDokployApiKey,
   resolveDokployToken,
   sortedCopy,
   splitManagedBlock,
   stripManagedBlock,
+  trackedGitBranch,
+  watchPathsExcludeKeep,
 } from '../dokployApi';
+import { repoRelPath } from '../git';
 
 /** Below this, a `composeType: 'stack'` target gets a WARNING, never a refusal — see `describeStackVersionWarning`. */
 const STACK_ENV_FILE_FIX_VERSION = 'v0.30.3';
@@ -81,6 +100,7 @@ const STACK_ENV_FILE_FIX_VERSION = 'v0.30.3';
 // client + env-merge primitives from this module today. New code should
 // import them from `dokployApi` directly.
 export {
+  CAPY_OFF_MARKER,
   DEFAULT_TOKEN_ENV,
   DokployApiError,
   MANAGED_BEGIN,
@@ -90,6 +110,7 @@ export {
   apiBase,
   createDokployClient,
   describeComposeEnvFileDisabled,
+  describeDokployPlainMergeProblem,
   describeDokployTokenProblem,
   describeEnvProblem,
   describeEnvWarning,
@@ -99,11 +120,16 @@ export {
   envProblems,
   envWarnings,
   mergeManagedBlock,
+  mergeManagedValuesBlock,
+  mismatchedDeliveredValues,
   outsideLines,
+  removeManagedValuesBlock,
   resolveDokployApiKey,
   resolveDokployToken,
   splitManagedBlock,
   stripManagedBlock,
+  trackedGitBranch,
+  watchPathsExcludeKeep,
 };
 export type {
   DokployApplication,
@@ -332,6 +358,57 @@ export function optionsProblem(config: TargetConfig): PreflightResult | null {
   return null;
 }
 
+/**
+ * CI-mode-only preflight (CAP-682): whether merging the deploy PR would
+ * actually reach Dokploy's own auto-deploy at all. Checked AFTER the env is
+ * readable (so a broken env still reports that problem first) but before
+ * any write — refusing here costs nothing, since CI mode never triggers a
+ * deploy itself either way. `null` (and skipped entirely) for direct mode,
+ * where none of this applies: Capy itself calls `application.deploy`/
+ * `compose.redeploy` directly.
+ */
+export function dokployCiPreflightProblem(
+  config: TargetConfig,
+  cwd: string,
+  entity: { autoDeploy?: boolean | null; branch?: string; customGitBranch?: string | null; watchPaths?: readonly string[] | null },
+): PreflightResult | null {
+  if (config.mode !== 'ci') return null;
+  const hint = `Run \`capy deploy --edit ${config.name}\` to fix, or switch this target to direct mode.`;
+  if (entity.autoDeploy !== true) {
+    return {
+      ok: false,
+      code: ERROR_CODES.DOKPLOY_AUTODEPLOY_OFF,
+      // COPY-FLAG: minimal neutral wording.
+      reason: 'this Dokploy service has auto-deploy turned off, so merging the deploy PR would never trigger a deploy',
+      hint: `Turn on "Auto Deploy" for this service in the Dokploy dashboard, or switch this target to direct mode (\`capy deploy --edit ${config.name}\`).`,
+    };
+  }
+  const tracked = trackedGitBranch(entity);
+  const base = config.gitBaseBranch;
+  if (!base || !tracked || tracked !== base) {
+    return {
+      ok: false,
+      code: ERROR_CODES.DOKPLOY_BRANCH_MISMATCH,
+      // COPY-FLAG: minimal neutral wording.
+      reason: tracked
+        ? `this Dokploy service tracks git branch "${tracked}", not this target's PR base "${base ?? '(unset)'}"`
+        : `this Dokploy service has no tracked git branch Capy could confirm against this target's PR base "${base ?? '(unset)'}"`,
+      hint,
+    };
+  }
+  const relKeep = repoRelPath(cwd, 'keep.lock');
+  if (watchPathsExcludeKeep(entity.watchPaths, relKeep)) {
+    return {
+      ok: false,
+      code: ERROR_CODES.DOKPLOY_WATCH_PATHS_EXCLUDE_KEEP,
+      // COPY-FLAG: minimal neutral wording.
+      reason: `this Dokploy service's watch paths don't cover ${relKeep}, so merging the deploy PR would never trigger a deploy`,
+      hint: `Add ${relKeep} to this service's watch paths in the Dokploy dashboard, or switch this target to direct mode.`,
+    };
+  }
+  return null;
+}
+
 /** A failed Dokploy call as a reason (and fix-it hint) a person can act on. */
 export function explainApiError(
   err: unknown,
@@ -362,24 +439,19 @@ export function explainApiError(
   }
 }
 
-/** `envWarnings` as the generic, printable `DeployWarning` shape. */
-function toDeployWarning(w: EnvWarning): DeployWarning {
-  return { code: w.code, names: w.names, message: describeEnvWarning(w) };
-}
-
 /**
  * CAP-679 (follow-up): `composeType: 'stack'` on a Dokploy below v0.30.3
- * ships `env_file` values — every one in the file, not only Capy's — to
- * containers with literal quotes (upstream fix d1830182). WARN, never
- * refuse: Capy cannot fix this on the Dokploy side, and the same problem
- * already affects every other var in the file.
+ * ships `env_file` values — every one in the file — to containers with
+ * literal quotes (upstream fix d1830182). WARN, never refuse: Capy cannot
+ * fix this on the Dokploy side, and the same problem already affects every
+ * other var in the file.
  *
- * `capy run` (5a of the follow-up) now strips ONE layer of surrounding
- * quotes from `_SECRETS_BLOB`/`_PROJECT_KEY` specifically, so Capy's OWN two
- * managed values survive this Dokploy bug once the CONTAINER's `capy` is new
- * enough — but values Capy doesn't manage are unaffected and still arrive
- * quoted either way, so the warning always fires for an old stack compose,
- * never just "until Dokploy is upgraded" as if that were the only fix.
+ * CAP-682: Capy's own delivered values are now PLAIN `KEY=value` lines like
+ * everything else in the file — there is no more `capy run` decrypt step to
+ * apply a mitigation on the container side, so this bug now affects Capy's
+ * own values exactly the same as any other var in an old stack compose (the
+ * text below was reworded for that — the code (`DOKPLOY_STACK_QUOTES`)
+ * stays the same).
  *
  * The version check itself can fail two ways, and both are now WARNED about
  * rather than silently skipped (`null`) as before — guessing "not old" when
@@ -400,7 +472,8 @@ async function composeStackVersionWarning(
     return {
       code: ERROR_CODES.DOKPLOY_VERSION_UNKNOWN,
       names: [],
-      // COPY-FLAG: minimal neutral wording.
+      // COPY-FLAG: minimal neutral wording (unchanged by CAP-682 — see this
+      // function's own doc).
       message:
         `could not read this Dokploy instance's version — this is a "stack" (Swarm) service, and env_file ` +
         `values may reach containers with literal quotes on Dokploy below ${STACK_ENV_FILE_FIX_VERSION}. ` +
@@ -412,12 +485,12 @@ async function composeStackVersionWarning(
   return {
     code: ERROR_CODES.DOKPLOY_STACK_QUOTES,
     names: [],
-    // COPY-FLAG: minimal neutral wording.
+    // COPY-FLAG: reworded for CAP-682 (plain-value delivery) — minimal neutral wording.
     message:
       `this is a Dokploy "stack" (Swarm) service on ${version.value}, below ${STACK_ENV_FILE_FIX_VERSION} — ` +
-      `env_file values arrive at the container wrapped in literal quotes. The container's \`capy\` must be ` +
-      `at least the release that strips one quote layer from _SECRETS_BLOB/_PROJECT_KEY (\`capy run\`) to ` +
-      `read them; values Capy doesn't manage will still arrive wrapped in quotes, as today.`,
+      `env_file values, including the ones Capy just wrote, arrive at the container wrapped in literal ` +
+      `quotes. Capy delivers plain values here now, so your app needs to strip the surrounding quotes ` +
+      `itself until this Dokploy instance is upgraded.`,
   };
 }
 
@@ -449,21 +522,20 @@ function lastLogLines(logs: string, n = 30): string {
     .join('\n');
 }
 
-/** Printed once a deploy succeeds: the wiring Capy never applies for you. */
-export function runtimeEpilogue(deployId: string | undefined): string {
-  const revoke = deployId ? `capy deploy revoke ${deployId}` : 'capy deploy revoke <deployId>';
+/**
+ * Printed once a plain-value Dokploy deploy succeeds (CAP-682). No deploy
+ * token is minted for Dokploy anymore, so there is nothing to `capy deploy
+ * revoke` — undo is `capy deploy targets-remove`, which removes Capy's block
+ * and un-comments whatever it commented, restoring the env exactly.
+ */
+// COPY-FLAG: new user-facing string, minimal/neutral wording.
+export function plainDeliveryEpilogue(targetName: string): string {
   return [
-    '  Your service must start through `capy run` to receive these secrets:',
+    '  Values are live in the Dokploy environment now — your app reads them',
+    '  directly from its own process environment. No `capy run` step needed.',
     '',
-    '    capy run -- <your start command>',
-    '',
-    '  Capy does not change your start or build settings. If the app already',
-    '  starts this way, there is nothing else to do.',
-    '',
-    `  To cut this deploy off:  ${revoke}`,
-    '  Revoking stops future boots from decrypting. It cannot take values back',
-    '  from a process that is already running — restart or redeploy the',
-    '  application after revoking.',
+    `  To undo this delivery:  capy deploy targets-remove ${targetName}`,
+    "  That removes Capy's block and restores any line it commented out.",
   ].join('\n');
 }
 
@@ -478,11 +550,29 @@ function manualStripHint(opts: DokployOptions): string {
 }
 
 /**
- * The Compose sequence (CAP-679): read → refuse on `createEnvFile: false` →
- * baseline `deployment.allByCompose` → merge ONLY the Capy block, byte-exact
- * elsewhere → `compose.saveEnvironment` → re-read and verify → redeploy
- * (unless `ctx.secretsOnly` / `ctx.noDeploy`) → poll `deployment.allByCompose`
- * to a real outcome, fetching logs on `error`.
+ * `config.vars` resolved against the decrypted branch `env` — the plain
+ * values BOTH the Application and Compose write paths deliver. Shared so
+ * "a selected var is missing from this branch" is one failure mode, not two.
+ */
+function deliveredValuesFor(
+  config: TargetConfig,
+  env: Record<string, string>,
+): { ok: true; values: ReadonlyArray<{ name: string; value: string }> } | { ok: false; missing: readonly string[] } {
+  const missing = config.vars.filter((name) => !(name in env));
+  if (missing.length > 0) return { ok: false, missing };
+  return { ok: true, values: config.vars.map((name) => ({ name, value: env[name] })) };
+}
+
+/**
+ * The Compose sequence (CAP-679, plain-value delivery per CAP-682): read →
+ * refuse on `createEnvFile: false` → merge delivered vars as plain values
+ * into the Capy block, commenting/un-commenting matching outside lines,
+ * byte-exact everywhere else → `compose.saveEnvironment` → re-read and
+ * verify (byte match AND every delivered value reads back exactly via
+ * `dotenv.parse`) → CI mode stops here (never calls `compose.redeploy` —
+ * merging the PR is what triggers Dokploy's own auto-deploy); direct mode
+ * takes a deployments baseline, redeploys, and polls to a real outcome,
+ * fetching logs on `error`.
  *
  * Kept as its own function (rather than threaded through the Application
  * `deploy()` body above) so the two never share control flow — the
@@ -503,9 +593,11 @@ async function deployComposeFlow(
     epilogue?: string,
   ): DeployResult => ({ ok: false, steps: [...steps, step], ...(epilogue ? { epilogue } : {}) });
 
-  if (!ctx.deployToken) {
-    return fail([], { label: 'runtime pair', status: 'fail', detail: 'no deploy token was minted' });
+  const delivered = deliveredValuesFor(config, ctx.env);
+  if (!delivered.ok) {
+    return fail([], { label: 'compose.saveEnvironment', status: 'fail', detail: `missing in branch ${config.branch}: ${delivered.missing.join(', ')}` });
   }
+  const { values } = delivered;
 
   // 1. Fresh read.
   const read = await settle(client.getCompose(composeId));
@@ -524,34 +616,29 @@ async function deployComposeFlow(
       code: ERROR_CODES.DOKPLOY_ENV_FILE_DISABLED,
     });
   }
-  const split = splitManagedBlock(current.env);
-  const problem = 'code' in split ? split : envProblems(current.env);
-  if (problem || 'code' in split) {
-    return fail(s1, {
-      label: 'env merge',
-      status: 'fail',
-      detail: problem ? describeEnvProblem(problem).reason : 'unreadable environment',
-    });
+  const problem = envProblems(current.env);
+  if (problem) {
+    return fail(s1, { label: 'env merge', status: 'fail', detail: describeEnvProblem(problem).reason });
   }
-  const envWarning = envWarnings(current.env, config.vars);
   const stackWarning = await composeStackVersionWarning(client, current);
-  const warnings: readonly DeployWarning[] = [
-    envWarning ? toDeployWarning(envWarning) : null,
-    stackWarning,
-  ].filter((w): w is DeployWarning => !!w);
-  const withWarnings = (r: DeployResult): DeployResult => (warnings.length ? { ...r, warnings } : r);
-  const nextEnv = mergeManagedBlock(split, ctx.deployToken);
+  const warnings: readonly DeployWarning[] | undefined = stackWarning ? [stackWarning] : undefined;
+  const withWarnings = (r: DeployResult): DeployResult => (warnings ? { ...r, warnings } : r);
 
-  // 2. Baseline — remembered BEFORE the write, same reason as the Application
-  //    path: Dokploy's redeploy call returns no id.
-  const baseline = await settle(client.listComposeDeployments(composeId));
-  if (!baseline.ok) {
+  const merged = mergeManagedValuesBlock(current.env, values);
+  if (!merged.ok) {
+    const described = describeDokployPlainMergeProblem(merged.problem);
     return withWarnings(
-      fail(s1, { label: 'deployment.allByCompose', status: 'fail', detail: explainApiError(baseline.error, 'list', opts).reason }),
+      fail(s1, {
+        label: 'env merge',
+        status: 'fail',
+        detail: described.reason,
+        ...(described.code ? { code: described.code as ErrorCode } : {}),
+      }),
     );
   }
+  const nextEnv = merged.env;
 
-  // 3. Write.
+  // 2. Write.
   const saved = await settle(
     client.saveComposeEnvironment({ composeId: current.composeId, env: nextEnv, createEnvFile: current.createEnvFile }),
   );
@@ -561,10 +648,10 @@ async function deployComposeFlow(
     );
   }
 
-  // 4. Verify.
+  // 3. Verify: byte-exact AND every delivered value reads back exactly.
   const reread = await settle(client.getCompose(composeId));
-  const intact = reread.ok && reread.value.env === nextEnv && reread.value.createEnvFile === current.createEnvFile;
-  if (!intact) {
+  const byteIntact = reread.ok && reread.value.env === nextEnv && reread.value.createEnvFile === current.createEnvFile;
+  if (!byteIntact) {
     return withWarnings(
       fail(s1, {
         label: 'compose.saveEnvironment',
@@ -575,30 +662,45 @@ async function deployComposeFlow(
       }),
     );
   }
+  const mismatched = mismatchedDeliveredValues(nextEnv, values);
+  if (mismatched.length > 0) {
+    return withWarnings(
+      fail(s1, {
+        label: 'compose.saveEnvironment',
+        status: 'fail',
+        detail: `the stored environment does not read back as written for: ${mismatched.join(', ')}. Check the Environment tab in Dokploy, then re-run.`,
+      }),
+    );
+  }
+  const nextSplit = splitManagedBlock(nextEnv);
+  const otherVarsCount = 'code' in nextSplit ? 0 : envKeys(outsideLines(nextSplit)).length;
   const s2: readonly DeployStep[] = [
     ...s1,
-    {
-      label: 'compose.saveEnvironment',
-      status: 'ok',
-      detail:
-        `${RUNTIME_PAIR[0]} + ${RUNTIME_PAIR[1]} ${split.hadBlock ? 'replaced' : 'added'}; ` +
-        `${envKeys(outsideLines(split)).length} other var(s) kept`,
-    },
+    { label: 'compose.saveEnvironment', status: 'ok', detail: `${values.length} var(s) written plaintext; ${otherVarsCount} other var(s) kept` },
   ];
 
   if (ctx.secretsOnly) {
     return withWarnings({
       ok: true,
-      steps: [...s2, { label: 'compose.redeploy', status: 'skip', detail: 'CI mode — deploy runs on PR merge' }],
-      epilogue: runtimeEpilogue(ctx.deployToken.deployId),
+      steps: [...s2, { label: 'compose.redeploy', status: 'skip', detail: 'CI mode — merging the deploy PR triggers Dokploy’s own auto-deploy' }],
+      epilogue: plainDeliveryEpilogue(config.name),
     });
   }
   if (ctx.noDeploy) {
     return withWarnings({
       ok: true,
       steps: [...s2, { label: 'compose.redeploy', status: 'skip', detail: '--no-deploy' }],
-      epilogue: runtimeEpilogue(ctx.deployToken.deployId),
+      epilogue: plainDeliveryEpilogue(config.name),
     });
+  }
+
+  // 4. Baseline — remembered right before the trigger, since Dokploy's
+  //    redeploy call returns no id.
+  const baseline = await settle(client.listComposeDeployments(composeId));
+  if (!baseline.ok) {
+    return withWarnings(
+      fail(s2, { label: 'deployment.allByCompose', status: 'fail', detail: explainApiError(baseline.error, 'list', opts).reason }),
+    );
   }
 
   // 5. Redeploy — never `compose.deploy` (re-clones the branch head), never `freshVolumes`.
@@ -631,7 +733,7 @@ async function deployComposeFlow(
       return withWarnings({
         ok: true,
         steps: [...s3, { label: 'deployment', status: 'ok', detail: `succeeded (${outcome.deployment.deploymentId})` }],
-        epilogue: runtimeEpilogue(ctx.deployToken.deployId),
+        epilogue: plainDeliveryEpilogue(config.name),
       });
     case 'failed': {
       const logs = await settle(client.readLogs(outcome.deployment.deploymentId));
@@ -714,7 +816,20 @@ async function onRemoveCompose(
   if (!confirmed) {
     return { ok: false, code: 'declined', detail: 'Dokploy environment left untouched.', manualHint: manualStripHint(opts) };
   }
-  const strippedEnv = stripManagedBlock(split);
+  // CAP-682: also un-comments every line Capy marked — a byte-exact restore,
+  // not just a block strip.
+  const removed = removeManagedValuesBlock(compose.env);
+  if (!removed.ok) {
+    return {
+      ok: false,
+      code: 'malformed_block',
+      detail:
+        'Dokploy environment left untouched — the Capy block looks edited or duplicated; ' +
+        'Capy will not guess which lines are its own.',
+      manualHint: manualStripHint(opts),
+    };
+  }
+  const strippedEnv = removed.env;
   const saved = await settle(
     client.saveComposeEnvironment({ composeId: compose.composeId, env: strippedEnv, createEnvFile: compose.createEnvFile }),
   );
@@ -792,10 +907,17 @@ export function createDokployAdapter(deps: DokployAdapterDeps = {}): DeployAdapt
   return {
     id: 'dokploy',
     label: 'Dokploy',
-    description: 'Application env gets the capy run pair; capy triggers and watches the deploy',
+    description: 'Writes plain values into the managed env block; CI mode by default, direct mode still available',
     varKind: 'runtime',
-    defaultMode: 'direct',
-    needsDeployToken: true,
+    // CAP-682: CI (a keep.lock PR; merging it triggers Dokploy's own
+    // auto-deploy) is the default — direct mode is still a picker choice,
+    // so this is NOT `ciOnly`.
+    defaultMode: 'ci',
+    // CAP-682: Dokploy no longer ships `_SECRETS_BLOB`/`_PROJECT_KEY` — it
+    // writes each delivered var as its own plaintext line, so no deploy
+    // token is minted for it. The blob/token machinery itself is untouched
+    // for adapters that still use it, and for `capy run`.
+    needsDeployToken: false,
     requires: { binaries: [] },
 
     async detect(): Promise<DetectedDefaults> {
@@ -804,7 +926,7 @@ export function createDokployAdapter(deps: DokployAdapterDeps = {}): DeployAdapt
       return {};
     },
 
-    async preflight(config: TargetConfig, ctx: AdapterCallContext): Promise<PreflightResult> {
+    async preflight(config: TargetConfig, ctx: { cwd: string } & AdapterCallContext): Promise<PreflightResult> {
       const shape = optionsProblem(config);
       if (shape) return shape;
       const opts = config.options as unknown as DokployOptions;
@@ -822,20 +944,22 @@ export function createDokployAdapter(deps: DokployAdapterDeps = {}): DeployAdapt
         }
         const problem = envProblems(compose.value.env);
         if (problem) return { ok: false, ...describeEnvProblem(problem) };
-        const envWarning = envWarnings(compose.value.env, config.vars);
+        // CAP-682: DOKPLOY_SHADOWED_VAR no longer applies here — a pre-existing
+        // active line for a delivered var gets COMMENTED OUT at deploy time
+        // (see `mergeManagedValuesBlock`), not silently shadowed, so warning
+        // about it here would be actively misleading.
+        const ciProblem = dokployCiPreflightProblem(config, ctx.cwd, compose.value);
+        if (ciProblem) return ciProblem;
         const stackWarning = await composeStackVersionWarning(client, compose.value);
-        const warnings: readonly DeployWarning[] = [
-          envWarning ? toDeployWarning(envWarning) : null,
-          stackWarning,
-        ].filter((w): w is DeployWarning => !!w);
-        return { ok: true, ...(warnings.length ? { warnings } : {}) };
+        return { ok: true, ...(stackWarning ? { warnings: [stackWarning] } : {}) };
       }
       const app = await settle(client.getApplication(opts.applicationId!));
       if (!app.ok) return { ok: false, ...explainApiError(app.error, 'application.one', opts) };
       const problem = envProblems(app.value.env);
       if (problem) return { ok: false, ...describeEnvProblem(problem) };
-      const warning = envWarnings(app.value.env, config.vars);
-      return { ok: true, ...(warning ? { warnings: [toDeployWarning(warning)] } : {}) };
+      const ciProblem = dokployCiPreflightProblem(config, ctx.cwd, app.value);
+      if (ciProblem) return ciProblem;
+      return { ok: true };
     },
 
     async deploy(config: TargetConfig, ctx: DeployContext): Promise<DeployResult> {
@@ -845,11 +969,10 @@ export function createDokployAdapter(deps: DokployAdapterDeps = {}): DeployAdapt
           ok: true,
           steps: [
             {
-              label: 'runtime pair',
+              label: opts.composeId ? 'compose.saveEnvironment' : 'application.saveEnvironment',
               status: 'ok',
-              detail: `${config.vars.length} var(s) would ship inside ${RUNTIME_PAIR[0]} + ${RUNTIME_PAIR[1]}`,
+              detail: `${config.vars.length} var(s) would be written plaintext into the Capy block`,
             },
-            { label: opts.composeId ? 'compose.saveEnvironment' : 'application.saveEnvironment', status: 'skip', detail: 'dry-run' },
             { label: opts.composeId ? 'compose.redeploy' : 'application.deploy', status: 'skip', detail: 'dry-run' },
           ],
         };
@@ -863,8 +986,13 @@ export function createDokployAdapter(deps: DokployAdapterDeps = {}): DeployAdapt
         steps: [...steps, step],
         ...(epilogue ? { epilogue } : {}),
       });
-      if (!ctx.deployToken) {
-        return fail([], { label: 'runtime pair', status: 'fail', detail: 'no deploy token was minted' });
+      const delivered = deliveredValuesFor(config, ctx.env);
+      if (!delivered.ok) {
+        return fail([], {
+          label: opts.composeId ? 'compose.saveEnvironment' : 'application.saveEnvironment',
+          status: 'fail',
+          detail: `missing in branch ${config.branch}: ${delivered.missing.join(', ')}`,
+        });
       }
       const resolved = await resolveApiKeyFor(opts, ctx);
       if (!resolved.ok) {
@@ -897,23 +1025,23 @@ export function createDokployAdapter(deps: DokployAdapterDeps = {}): DeployAdapt
       const s1: readonly DeployStep[] = [
         { label: 'dokploy application', status: 'ok', detail: current.name ?? current.applicationId },
       ];
-      const split = splitManagedBlock(current.env);
-      const problem = 'code' in split ? split : envProblems(current.env);
-      if (problem || 'code' in split) {
+      const problem = envProblems(current.env);
+      if (problem) {
+        return fail(s1, { label: 'env merge', status: 'fail', detail: describeEnvProblem(problem).reason });
+      }
+      // CAP-682: DOKPLOY_SHADOWED_VAR no longer applies — see the identical
+      // note in `deployComposeFlow`.
+      const merged = mergeManagedValuesBlock(current.env, delivered.values);
+      if (!merged.ok) {
+        const described = describeDokployPlainMergeProblem(merged.problem);
         return fail(s1, {
           label: 'env merge',
           status: 'fail',
-          detail: problem ? describeEnvProblem(problem).reason : 'unreadable environment',
+          detail: described.reason,
+          ...(described.code ? { code: described.code as ErrorCode } : {}),
         });
       }
-      const warning = envWarnings(current.env, config.vars);
-      const warnings: readonly DeployWarning[] | undefined = warning ? [toDeployWarning(warning)] : undefined;
-      const withWarnings = (r: DeployResult): DeployResult => (warnings ? { ...r, warnings } : r);
-      // Not printed here: `preflight()` (above, in `deployCommand.ts`'s flow)
-      // already surfaced this same warning to the terminal once. `warnings`
-      // still rides on the `DeployResult` below for any caller reading it
-      // structurally — this just isn't a second (or third) console line.
-      const nextEnv = mergeManagedBlock(split, ctx.deployToken);
+      const nextEnv = merged.env;
 
       // 2. Whole-object write: buildArgs / buildSecrets / createEnvFile ride
       //    through exactly as read.
@@ -927,85 +1055,86 @@ export function createDokployAdapter(deps: DokployAdapterDeps = {}): DeployAdapt
         }),
       );
       if (!saved.ok) {
-        return withWarnings(
-          fail(s1, {
-            label: 'application.saveEnvironment',
-            status: 'fail',
-            detail: explainApiError(saved.error, 'write', opts).reason,
-          }),
-        );
+        return fail(s1, {
+          label: 'application.saveEnvironment',
+          status: 'fail',
+          detail: explainApiError(saved.error, 'write', opts).reason,
+        });
       }
 
       // 3. Dokploy has no conditional write, so a concurrent dashboard edit can
-      //    only be detected, not prevented: re-read and compare.
+      //    only be detected, not prevented: re-read and compare — byte-exact,
+      //    AND every delivered value reads back exactly via `dotenv.parse`.
       const reread = await settle(client.getApplication(applicationId));
-      const intact =
+      const byteIntact =
         reread.ok &&
         reread.value.env === nextEnv &&
         reread.value.buildArgs === current.buildArgs &&
         reread.value.buildSecrets === current.buildSecrets &&
         reread.value.createEnvFile === current.createEnvFile;
-      if (!intact) {
-        return withWarnings(
-          fail(s1, {
-            label: 'application.saveEnvironment',
-            status: 'fail',
-            detail:
-              'the stored environment is not what Capy wrote — another edit may have landed at the ' +
-              'same moment. Check the Environment tab in Dokploy, then re-run.',
-          }),
-        );
+      if (!byteIntact) {
+        return fail(s1, {
+          label: 'application.saveEnvironment',
+          status: 'fail',
+          detail:
+            'the stored environment is not what Capy wrote — another edit may have landed at the ' +
+            'same moment. Check the Environment tab in Dokploy, then re-run.',
+        });
       }
+      const mismatched = mismatchedDeliveredValues(nextEnv, delivered.values);
+      if (mismatched.length > 0) {
+        return fail(s1, {
+          label: 'application.saveEnvironment',
+          status: 'fail',
+          detail: `the stored environment does not read back as written for: ${mismatched.join(', ')}. Check the Environment tab in Dokploy, then re-run.`,
+        });
+      }
+      const nextSplit = splitManagedBlock(nextEnv);
+      const otherVarsCount = 'code' in nextSplit ? 0 : envKeys(outsideLines(nextSplit)).length;
       const s2: readonly DeployStep[] = [
         ...s1,
         {
           label: 'application.saveEnvironment',
           status: 'ok',
-          detail:
-            `${RUNTIME_PAIR[0]} + ${RUNTIME_PAIR[1]} ${split.hadBlock ? 'replaced' : 'added'}; ` +
-            `${envKeys(outsideLines(split)).length} other var(s), build args and build secrets kept`,
+          detail: `${delivered.values.length} var(s) written plaintext; ${otherVarsCount} other var(s), build args and build secrets kept`,
         },
       ];
 
       if (ctx.secretsOnly) {
-        return withWarnings({
+        return {
           ok: true,
           steps: [
             ...s2,
-            { label: 'application.deploy', status: 'skip', detail: 'CI mode — deploy runs on PR merge' },
+            { label: 'application.deploy', status: 'skip', detail: "CI mode — merging the deploy PR triggers Dokploy's own auto-deploy" },
           ],
-          epilogue: runtimeEpilogue(ctx.deployToken.deployId),
-        });
+          epilogue: plainDeliveryEpilogue(config.name),
+        };
       }
       if (ctx.noDeploy) {
-        return withWarnings({
+        return {
           ok: true,
           steps: [...s2, { label: 'application.deploy', status: 'skip', detail: '--no-deploy' }],
-          epilogue: runtimeEpilogue(ctx.deployToken.deployId),
-        });
+          epilogue: plainDeliveryEpilogue(config.name),
+        };
       }
 
       // 4. Trigger, remembering which deployments already existed — Dokploy's
       //    deploy call does not say which deployment it created.
       const before = await settle(client.listDeployments(applicationId));
       if (!before.ok) {
-        return withWarnings(
-          fail(s2, {
-            label: 'deployment.all',
-            status: 'fail',
-            detail: explainApiError(before.error, 'list', opts).reason,
-          }),
-        );
+        return fail(s2, {
+          label: 'deployment.all',
+          status: 'fail',
+          detail: explainApiError(before.error, 'list', opts).reason,
+        });
       }
       const triggered = await settle(client.deploy(applicationId, `capy deploy ${config.name}`));
       if (!triggered.ok) {
-        return withWarnings(
-          fail(s2, {
-            label: 'application.deploy',
-            status: 'fail',
-            detail: explainApiError(triggered.error, 'trigger', opts).reason,
-          }),
-        );
+        return fail(s2, {
+          label: 'application.deploy',
+          status: 'fail',
+          detail: explainApiError(triggered.error, 'trigger', opts).reason,
+        });
       }
       const s3: readonly DeployStep[] = [
         ...s2,
@@ -1025,55 +1154,49 @@ export function createDokployAdapter(deps: DokployAdapterDeps = {}): DeployAdapt
         ),
       );
       if (!polled.ok) {
-        return withWarnings(
-          fail(s3, {
-            label: 'deployment',
-            status: 'fail',
-            detail: explainApiError(polled.error, 'status', opts).reason,
-          }),
-        );
+        return fail(s3, {
+          label: 'deployment',
+          status: 'fail',
+          detail: explainApiError(polled.error, 'status', opts).reason,
+        });
       }
       const outcome = polled.value;
       switch (outcome.kind) {
         case 'succeeded':
-          return withWarnings({
+          return {
             ok: true,
             steps: [
               ...s3,
               { label: 'deployment', status: 'ok', detail: `succeeded (${outcome.deployment.deploymentId})` },
             ],
-            epilogue: runtimeEpilogue(ctx.deployToken.deployId),
-          });
+            epilogue: plainDeliveryEpilogue(config.name),
+          };
         case 'failed': {
           const logs = await settle(client.readLogs(outcome.deployment.deploymentId));
           const logText = logs.ok ? logs.value.trim() : '';
-          return withWarnings(
-            fail(
-              s3,
-              {
-                label: 'deployment',
-                status: 'fail',
-                detail:
-                  `${outcome.deployment.status} (${outcome.deployment.deploymentId})` +
-                  (outcome.deployment.errorMessage ? ` — ${outcome.deployment.errorMessage}` : ''),
-              },
-              logText
-                ? `  Last lines of the Dokploy deployment log:\n\n${lastLogLines(logText)}`
-                : '  Dokploy returned no deployment log — open the deployment in the Dokploy dashboard.',
-            ),
+          return fail(
+            s3,
+            {
+              label: 'deployment',
+              status: 'fail',
+              detail:
+                `${outcome.deployment.status} (${outcome.deployment.deploymentId})` +
+                (outcome.deployment.errorMessage ? ` — ${outcome.deployment.errorMessage}` : ''),
+            },
+            logText
+              ? `  Last lines of the Dokploy deployment log:\n\n${lastLogLines(logText)}`
+              : '  Dokploy returned no deployment log — open the deployment in the Dokploy dashboard.',
           );
         }
         case 'timed_out':
-          return withWarnings(
-            fail(s3, {
-              label: 'deployment',
-              status: 'fail',
-              detail: outcome.deployment
-                ? `still running after ${timeoutMs / 1000}s (${outcome.deployment.deploymentId}) — ` +
-                  'check the Dokploy dashboard'
-                : `Dokploy recorded no new deployment within ${timeoutMs / 1000}s — check the Dokploy dashboard`,
-            }),
-          );
+          return fail(s3, {
+            label: 'deployment',
+            status: 'fail',
+            detail: outcome.deployment
+              ? `still running after ${timeoutMs / 1000}s (${outcome.deployment.deploymentId}) — ` +
+                'check the Dokploy dashboard'
+              : `Dokploy recorded no new deployment within ${timeoutMs / 1000}s — check the Dokploy dashboard`,
+          });
       }
     },
 
@@ -1140,7 +1263,20 @@ export function createDokployAdapter(deps: DokployAdapterDeps = {}): DeployAdapt
           manualHint: manualStripHint(opts),
         };
       }
-      const strippedEnv = stripManagedBlock(split);
+      // CAP-682: also un-comments every line Capy marked — a byte-exact
+      // restore, not just a block strip.
+      const removed = removeManagedValuesBlock(app.env);
+      if (!removed.ok) {
+        return {
+          ok: false,
+          code: 'malformed_block',
+          detail:
+            'Dokploy environment left untouched — the Capy block looks edited or duplicated; ' +
+            'Capy will not guess which lines are its own.',
+          manualHint: manualStripHint(opts),
+        };
+      }
+      const strippedEnv = removed.env;
       const saved = await settle(
         client.saveEnvironment({
           applicationId: app.applicationId,
