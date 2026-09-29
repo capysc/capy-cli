@@ -48,6 +48,9 @@ import {
   describeBranchProblem,
   recordTargetDeliveries,
   stripTargetsForProviderTarget,
+  supersededDeployIdsForTarget,
+  clearSupersededDeployIds,
+  allDeployIdsForTarget,
   TargetDeliveryDescriptor,
 } from '../deploy/targetsGate';
 import { KeepFile, ERROR_CODES, AuthResult, ErrorCode } from '../types/index';
@@ -63,6 +66,7 @@ import {
   resolveDokployApiKey,
 } from '../deploy/adapters/dokploy';
 import type { ResolveDokployApiKeyResult } from '../deploy/adapters/dokploy';
+import { DOKPLOY_CONNECTOR_SECRET_NAME, DOKPLOY_TARGET_SECRET_NAME, DokploySystemStoreCallOptions } from '../deploy/dokployApi';
 import { classify, isBuildTime } from '../deploy/classify';
 import type { WebDeployAdapterContext } from '../ui/deployScreens';
 import { deployPlan, unansweredDeployStops, type DeployStopId } from '../core/deployPlan';
@@ -185,13 +189,23 @@ async function resolveDokployApiKeyOnce(
 ): Promise<ResolveDokployApiKeyResult | undefined> {
   if (adapter.id !== 'dokploy') return undefined;
   if (dokployConnectionProblem(target)) return undefined;
-  const { getConnectorSecret } = await import('../system/systemStore');
+  const { getDirectionalConnectorSecret } = await import('../system/systemStore');
+  // CAP-679 follow-up: deploy asks for `_TARGET_DOKPLOY_API_KEY` first, and
+  // — only when that's missing — offers to reuse (or shadow-refuse without a
+  // TTY) `_CONNECTOR_DOKPLOY_API_KEY`, the import-side key. See
+  // `system/systemStore.ts#getDirectionalConnectorSecret`'s own doc.
+  const getConnectorSecret = (name: string, opts: DokploySystemStoreCallOptions) =>
+    getDirectionalConnectorSecret(name, DOKPLOY_CONNECTOR_SECRET_NAME, {
+      ...opts,
+      missingWithFallbackCode: ERROR_CODES.DOKPLOY_TARGET_KEY_MISSING,
+    });
   return resolveDokployApiKey({
     tokenEnv: (target.options as { tokenEnv?: string }).tokenEnv,
     env: process.env,
     interactive,
     orgId,
     devMode,
+    storeName: DOKPLOY_TARGET_SECRET_NAME,
     deps: { getConnectorSecret },
   });
 }
@@ -481,8 +495,15 @@ async function pushKeepTransform(
 }
 
 /**
- * Direct-mode-only: after a verified successful deploy, record this target's
- * delivery into every (var, branch) entry it actually shipped.
+ * Direct-mode-only: after a verified successful deploy (or, when `noDeploy`,
+ * after the config write `--no-deploy` still performs), record this
+ * target's delivery into every (var, branch) entry it actually shipped.
+ *
+ * `noDeploy` marks the fresh element `deployed: false` (CAP-679 follow-up,
+ * "pending") — the config landed but the platform deploy itself never ran.
+ * Absent/false means a real deploy, which OMITS the field (see
+ * `targetsGate.ts#upsertTargetElement`'s doc for why, and how this also
+ * clears a PRIOR pending element once a real deploy follows it).
  *
  * Best-effort: the platform write already succeeded by the time this runs,
  * so a failure here is reported but does not flip the command's exit code —
@@ -495,6 +516,7 @@ async function recordDeployTargets(
   valueHashes: Record<string, string>,
   deployId: string | undefined,
   devMode: boolean | undefined,
+  noDeploy: boolean = false,
 ): Promise<void> {
   const deliveredAt = new Date().toISOString();
   const delivery: TargetDeliveryDescriptor = {
@@ -502,6 +524,7 @@ async function recordDeployTargets(
     target: target.name,
     ref: targetRefFor(target),
     deployId,
+    ...(noDeploy ? { deployed: false } : {}),
   };
   const values = target.vars
     .filter((v) => valueHashes[v] !== undefined)
@@ -517,20 +540,70 @@ async function recordDeployTargets(
 }
 
 /**
- * Every distinct `deploy_id` a (provider, target) pair has ever delivered
- * with, read straight off keep.lock — used by `deployRemove` to know which
- * deploy tokens to revoke before stripping the record of them.
+ * Direct-mode-only, real deploys only (never `--no-deploy`, never a dry
+ * run): after `recordDeployTargets` above has folded this delivery in — which
+ * is what moves a superseded token's id into `superseded_deploy_ids`, see
+ * `targetsGate.ts#upsertTargetElement`'s "no untracked tokens" note — revoke
+ * every id that call just recorded as superseded, then strip them from
+ * keep.lock so a later run never tries again.
+ *
+ * Called ONLY after `result.ok` (the deploy adapter itself considers the
+ * redeploy done and successful — see `dokploy.ts`'s Compose sequence doc:
+ * write → verify → poll deployment to a real outcome) — a failed deploy
+ * never reaches this function at all, so it never revokes anything a failed
+ * run might still need. Best-effort, same as `recordDeployTargets`: the
+ * deploy already succeeded, so a failure here is reported but never flips
+ * the exit code.
+ */
+async function revokeSupersededDeployTokens(
+  cwd: string,
+  target: TargetConfig,
+  adapter: DeployAdapter,
+  devMode: boolean | undefined,
+): Promise<void> {
+  try {
+    const pm = new ProjectManager(cwd);
+    const keep = pm.readKeepFile();
+    if (!keep) return;
+    const supersededIds = supersededDeployIdsForTarget(keep, adapter.id, target.name);
+    if (supersededIds.length === 0) return;
+
+    const { AuthService } = await import('../auth/authService');
+    const { ServiceClient } = await import('../service/serviceClient');
+    const projectState = await pm.detectProjectState();
+    if (!projectState.organizationId) return;
+    const authService = new AuthService(undefined, devMode, projectState.userId);
+    const serviceClient = new ServiceClient(undefined, devMode);
+    serviceClient.setTokenProvider(() => authService.getValidToken());
+    const authResult = await authenticateSilentWithFallback(authService, projectState.organizationId);
+    if (!authResult.success) return;
+
+    await Promise.all(supersededIds.map((id) => serviceClient.revokeDeployToken(id).catch(() => {})));
+    console.log(`  ${GREEN('✓')} revoked ${supersededIds.length} superseded deploy token(s) for "${target.name}".`);
+
+    await pushKeepTransform(
+      cwd,
+      target.branch,
+      (k) => clearSupersededDeployIds(k, adapter.id, target.name, new Set(supersededIds)),
+      devMode,
+      'clear superseded deploy tokens',
+    );
+  } catch (err: any) {
+    console.error(`  ${YELLOW('!')} could not revoke superseded deploy token(s) for "${target.name}": ${err?.message ?? err}`);
+  }
+}
+
+/**
+ * Every deploy token id a (provider, target) pair might still need revoking
+ * — its CURRENT `deploy_id` plus every `superseded_deploy_ids` entry it has
+ * accumulated (CAP-679 follow-up: "no untracked tokens" — see
+ * `targetsGate.ts#allDeployIdsForTarget`), read straight off keep.lock.
+ * `deployRemove` revokes ALL of these before stripping the record — removal
+ * is the one place that's safe to revoke everything at once, since the
+ * target itself is going away.
  */
 function deployIdsForTarget(keep: KeepFile, provider: string, target: string): readonly string[] {
-  const ids = new Set<string>();
-  for (const entries of Object.values(keep.variables)) {
-    for (const entry of entries) {
-      for (const t of (entry as { targets?: ReadonlyArray<{ provider: string; target: string; deploy_id?: string }> }).targets ?? []) {
-        if (t.provider === provider && t.target === target && t.deploy_id) ids.add(t.deploy_id);
-      }
-    }
-  }
-  return Array.from(ids);
+  return allDeployIdsForTarget(keep, provider, target);
 }
 
 // ── Picker (interactive setup) ─────────────────────────────────────────────
@@ -989,11 +1062,28 @@ export async function resolveAdapterOptions(
   }
   if (adapter.id === 'dokploy') {
     // The API token itself is never asked for or saved here. CAP-664: the
-    // org system store's _CONNECTOR_DOKPLOY_API_KEY entry is the default
-    // source now — no tokenEnv question for a NEW target. An EXISTING
-    // target's own tokenEnv (saved before the system store existed, or set
-    // via `--token-env`) is carried through untouched: re-entering this
-    // picker must never silently drop it.
+    // org system store's _TARGET_DOKPLOY_API_KEY entry (CAP-679 follow-up:
+    // deploy's OWN direction — see `dokployApi.ts#DOKPLOY_TARGET_SECRET_NAME`)
+    // is the default source now — no tokenEnv question for a NEW target. An
+    // EXISTING target's own tokenEnv (saved before the system store existed,
+    // or set via `--token-env`) is carried through untouched: re-entering
+    // this picker must never silently drop it.
+    //
+    // CAP-679 follow-up (item 6): a target configures EXACTLY ONE of
+    // `composeId` / `applicationId` (see `DokployOptions`'s own doc) — ask
+    // which kind up front so a Compose target (what Capy's Dokploy customer
+    // actually runs) is reachable from this picker at all, not just via
+    // hand-edited `.capy/deploy.json`. Compose listed first, and also the
+    // default for a brand-new target (no existing options at all); re-editing
+    // an existing target defaults to whichever kind it already has
+    // (`composeId` present → Compose, `applicationId` present → Application).
+    const existingKind: 'compose' | 'application' = existingOpts.applicationId && !existingOpts.composeId
+      ? 'application'
+      : 'compose';
+    // `as any[]`: inquirer's own overload resolution chokes on a mixed
+    // input/list array with a `when` clause (same reason `runPicker`'s own
+    // adapter-choice array above is typed `any[]`) — every question here is
+    // still a plain, correctly-shaped inquirer question.
     const ans = await inquirer.prompt([
       {
         type: 'input',
@@ -1004,15 +1094,43 @@ export async function resolveAdapterOptions(
         filter: (v: string) => v.trim(),
       },
       {
+        type: 'list',
+        name: 'kind',
+        message: 'Dokploy service kind:',
+        theme: LIST_THEME,
+        choices: [
+          { name: 'Compose', value: 'compose' },
+          { name: 'Application', value: 'application' },
+        ],
+        default: existingKind,
+      },
+      {
+        type: 'input',
+        name: 'composeId',
+        message: 'Dokploy compose ID:',
+        when: (a: { kind: string }) => a.kind === 'compose',
+        default: existingOpts.composeId,
+        validate: (v: string) => (v.trim() ? true : 'required'),
+        filter: (v: string) => v.trim(),
+      },
+      {
         type: 'input',
         name: 'applicationId',
         message: 'Dokploy application ID:',
+        when: (a: { kind: string }) => a.kind !== 'compose',
         default: existingOpts.applicationId,
         validate: (v: string) => (v.trim() ? true : 'required'),
         filter: (v: string) => v.trim(),
       },
-    ]);
-    return existingOpts.tokenEnv ? { ...ans, tokenEnv: existingOpts.tokenEnv } : ans;
+    ] as any[]);
+    // Exactly one of composeId/applicationId survives — switching kind on a
+    // re-edit drops whichever one no longer applies, never carrying a stale
+    // `applicationId` alongside a freshly-picked `composeId` or vice versa.
+    const result: Record<string, unknown> =
+      ans.kind === 'compose'
+        ? { baseUrl: ans.baseUrl, composeId: ans.composeId }
+        : { baseUrl: ans.baseUrl, applicationId: ans.applicationId };
+    return existingOpts.tokenEnv ? { ...result, tokenEnv: existingOpts.tokenEnv } : result;
   }
   return {};
 }
@@ -2073,7 +2191,13 @@ async function computeCiChangeGate(
 
   // CAP-679: fold this target's delivery in alongside the value_hash bump —
   // the PR's keep.lock IS what gets committed if the deploy below succeeds.
-  const delivery: TargetDeliveryDescriptor = { provider: adapter.id, target: target.name, ref: targetRefFor(target), deployId };
+  const delivery: TargetDeliveryDescriptor = {
+    provider: adapter.id,
+    target: target.name,
+    ref: targetRefFor(target),
+    deployId,
+    ...(options.noDeploy ? { deployed: false } : {}),
+  };
   const built = buildDeployKeep(baseKeep, env, target.vars, target.branch, delivery);
   if (built.changed) {
     return { ok: true, keepLockChanged: true, deployKeepContent: built.content };
@@ -2693,7 +2817,15 @@ export async function deployCommand(
   // AGAIN here, against the user's own branch, would be wrong: CI mode never
   // touches the user's tree.
   if (mode === 'direct' && !options.dryRun) {
-    await recordDeployTargets(cwd, target, adapter, valueHashes, deployToken?.deployId, options.devMode);
+    await recordDeployTargets(cwd, target, adapter, valueHashes, deployToken?.deployId, options.devMode, !!options.noDeploy);
+    // "No untracked tokens" (CAP-679 follow-up): only once THIS deploy is a
+    // REAL one (never `--no-deploy` — that config is pending, and its
+    // predecessor may still be the one actually running) does it become safe
+    // to revoke whatever `recordDeployTargets` just moved to
+    // `superseded_deploy_ids` — see `revokeSupersededDeployTokens`'s own doc.
+    if (!options.noDeploy) {
+      await revokeSupersededDeployTokens(cwd, target, adapter, options.devMode);
+    }
   }
 
   // The pull request this run opened, for the result page. Held rather than

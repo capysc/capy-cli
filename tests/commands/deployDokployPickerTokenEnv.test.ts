@@ -56,9 +56,121 @@ describe('capy deploy picker — dokploy tokenEnv (CAP-664)', () => {
     });
   });
 
-  test('the tokenEnv question itself is never asked — the prompt only ever receives baseUrl + applicationId', async () => {
+  test('the tokenEnv question itself is never asked', async () => {
     await resolveAdapterOptions(adapter, '/tmp', [], {}, { tokenEnv: 'WHATEVER' });
     const lastCallQuestions = promptMock.mock.calls[promptMock.mock.calls.length - 1][0] as ReadonlyArray<{ name: string }>;
-    expect(lastCallQuestions.map((q) => q.name)).toEqual(['baseUrl', 'applicationId']);
+    expect(lastCallQuestions.map((q) => q.name)).not.toContain('tokenEnv');
+  });
+
+  // ── CAP-679 follow-up (item 6): a target configures exactly one of
+  // composeId/applicationId, and the picker now asks which kind up front —
+  // see `resolveAdapterOptions`'s Dokploy branch in deployCommand.ts. ──
+  describe('Compose vs Application kind', () => {
+    test('the picker asks baseUrl, kind, and then EITHER composeId OR applicationId (never both)', async () => {
+      await resolveAdapterOptions(adapter, '/tmp', [], {}, {});
+      const lastCallQuestions = promptMock.mock.calls[promptMock.mock.calls.length - 1][0] as ReadonlyArray<{ name: string }>;
+      expect(lastCallQuestions.map((q) => q.name)).toEqual(['baseUrl', 'kind', 'composeId', 'applicationId']);
+    });
+
+    test('picking Compose returns composeId, never applicationId', async () => {
+      promptMock.mockImplementationOnce(async () => ({
+        baseUrl: 'https://dokploy.example.com',
+        kind: 'compose',
+        composeId: 'compose_1',
+      }));
+      const options = await resolveAdapterOptions(adapter, '/tmp', [], {}, {});
+      expect(options).toEqual({ baseUrl: 'https://dokploy.example.com', composeId: 'compose_1' });
+      expect(Object.prototype.hasOwnProperty.call(options, 'applicationId')).toBe(false);
+    });
+
+    test('picking Application returns applicationId, never composeId', async () => {
+      promptMock.mockImplementationOnce(async () => ({
+        baseUrl: 'https://dokploy.example.com',
+        kind: 'application',
+        applicationId: 'app_1',
+      }));
+      const options = await resolveAdapterOptions(adapter, '/tmp', [], {}, {});
+      expect(options).toEqual({ baseUrl: 'https://dokploy.example.com', applicationId: 'app_1' });
+      expect(Object.prototype.hasOwnProperty.call(options, 'composeId')).toBe(false);
+    });
+
+    test('re-editing a Compose target defaults the kind question to Compose', async () => {
+      await resolveAdapterOptions(adapter, '/tmp', [], {}, { baseUrl: 'https://x', composeId: 'compose_old' });
+      const lastCallQuestions = promptMock.mock.calls[promptMock.mock.calls.length - 1][0] as ReadonlyArray<{
+        name: string;
+        default?: unknown;
+      }>;
+      expect(lastCallQuestions.find((q) => q.name === 'kind')?.default).toBe('compose');
+      expect(lastCallQuestions.find((q) => q.name === 'composeId')?.default).toBe('compose_old');
+    });
+
+    test('re-editing an Application target defaults the kind question to Application', async () => {
+      await resolveAdapterOptions(adapter, '/tmp', [], {}, { baseUrl: 'https://x', applicationId: 'app_old' });
+      const lastCallQuestions = promptMock.mock.calls[promptMock.mock.calls.length - 1][0] as ReadonlyArray<{
+        name: string;
+        default?: unknown;
+      }>;
+      expect(lastCallQuestions.find((q) => q.name === 'kind')?.default).toBe('application');
+      expect(lastCallQuestions.find((q) => q.name === 'applicationId')?.default).toBe('app_old');
+    });
+
+    test('a brand-new target defaults the kind question to Compose', async () => {
+      await resolveAdapterOptions(adapter, '/tmp', [], {}, {});
+      const lastCallQuestions = promptMock.mock.calls[promptMock.mock.calls.length - 1][0] as ReadonlyArray<{
+        name: string;
+        default?: unknown;
+      }>;
+      expect(lastCallQuestions.find((q) => q.name === 'kind')?.default).toBe('compose');
+    });
+
+    test('switching kind on re-edit drops the OTHER id — an Application target re-edited to Compose loses applicationId', async () => {
+      promptMock.mockImplementationOnce(async () => ({
+        baseUrl: 'https://dokploy.example.com',
+        kind: 'compose',
+        composeId: 'compose_new',
+      }));
+      const options = await resolveAdapterOptions(
+        adapter,
+        '/tmp',
+        [],
+        {},
+        { baseUrl: 'https://old', applicationId: 'app_old' },
+      );
+      expect(options).toEqual({ baseUrl: 'https://dokploy.example.com', composeId: 'compose_new' });
+      expect(Object.prototype.hasOwnProperty.call(options, 'applicationId')).toBe(false);
+    });
+
+    test('switching kind the other way (Compose → Application) loses composeId', async () => {
+      promptMock.mockImplementationOnce(async () => ({
+        baseUrl: 'https://dokploy.example.com',
+        kind: 'application',
+        applicationId: 'app_new',
+      }));
+      const options = await resolveAdapterOptions(
+        adapter,
+        '/tmp',
+        [],
+        {},
+        { baseUrl: 'https://old', composeId: 'compose_old' },
+      );
+      expect(options).toEqual({ baseUrl: 'https://dokploy.example.com', applicationId: 'app_new' });
+      expect(Object.prototype.hasOwnProperty.call(options, 'composeId')).toBe(false);
+    });
+
+    test('tokenEnv still survives a Compose re-edit, byte for byte', async () => {
+      promptMock.mockImplementationOnce(async () => ({
+        baseUrl: 'https://dokploy.example.com',
+        kind: 'compose',
+        composeId: 'compose_1',
+      }));
+      const options = await resolveAdapterOptions(
+        adapter,
+        '/tmp',
+        [],
+        {},
+        { composeId: 'compose_old', tokenEnv: 'MY_TOKEN' },
+      );
+      expect(options).toEqual({ baseUrl: 'https://dokploy.example.com', composeId: 'compose_1', tokenEnv: 'MY_TOKEN' });
+    });
   });
 });
