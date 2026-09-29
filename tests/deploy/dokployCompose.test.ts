@@ -1,11 +1,10 @@
 /**
- * Dokploy Compose target (CAP-679).
+ * Dokploy Compose target (CAP-679; plaintext delivery per CAP-682).
  *
  * Mirrors `dokploy.test.ts`'s scripted-request style, but for
  * `compose.one`/`compose.saveEnvironment`/`compose.redeploy`/
  * `deployment.allByCompose` instead of the Application endpoints. The
- * Application path itself is untouched — see `dokploy.test.ts` for its
- * coverage, unchanged.
+ * Application path itself is covered separately in `dokploy.test.ts`.
  */
 import { describe, test, expect } from 'bun:test';
 import {
@@ -13,12 +12,11 @@ import {
   createDokployClient,
   dokployVersionAtLeast,
   envKeys,
-  mergeManagedBlock,
+  mergeManagedValuesBlock,
   optionsProblem,
-  splitManagedBlock,
+  CAPY_OFF_MARKER,
   DokployDeployment,
   FetchLike,
-  RUNTIME_PAIR,
 } from '../../src/deploy/adapters/dokploy';
 import { DeployContext, RemoveOfferContext, TargetConfig } from '../../src/deploy/adapter';
 import { ERROR_CODES } from '../../src/types/index';
@@ -42,7 +40,8 @@ interface Step {
 const BASE = 'https://dokploy.example.com';
 const TOKEN = 'dk_test_token';
 const COMPOSE_ID = 'compose_abc';
-const PAIR = { secretsBlob: 'Q09NUE9TRQ==', projectKey: 'cd'.repeat(32), deployId: 'ef'.repeat(32) };
+/** Fake, non-secret test values only. */
+const VALUES = { DATABASE_URL: 'postgres://example-not-real/db', STRIPE_KEY: 'sk_test_not_real_456' };
 const RAW_ENV = 'NODE_ENV=production\n# a comment\nAPI_URL=${{project.API_URL}}\nPORT=3000';
 
 /**
@@ -81,6 +80,10 @@ const compose = (overrides: Record<string, unknown> = {}) => ({
   composeType: 'docker-compose',
   ...overrides,
 });
+
+/** A "clean CI preflight" compose: auto-deploy on, tracking the PR base, no watch-path filter. */
+const ciReadyCompose = (overrides: Record<string, unknown> = {}) =>
+  compose({ autoDeploy: true, branch: 'main', ...overrides });
 
 const get = (path: string, query: Record<string, string>) => (r: Req) => {
   expect(r.method).toBe('GET');
@@ -125,8 +128,7 @@ const composeTarget = (overrides: Partial<TargetConfig> = {}): TargetConfig => (
 });
 
 const ctx = (overrides: Partial<DeployContext> = {}): DeployContext => ({
-  env: {},
-  deployToken: PAIR,
+  env: VALUES,
   dryRun: false,
   cwd: '/tmp',
   ...overrides,
@@ -145,11 +147,14 @@ function adapterWith(fetchImpl: FetchLike, env: Record<string, string> = { DOKPL
   return createDokployAdapter({ fetch: fetchImpl, env, sleep: async () => {}, now: ticking(1), log });
 }
 
-/** `splitManagedBlock` + `mergeManagedBlock` in one step — the production merge. */
-function mergedEnv(env: string, pair: { secretsBlob: string; projectKey: string }): string {
-  const split = splitManagedBlock(env);
-  if ('code' in split) throw new Error('unexpected problem');
-  return mergeManagedBlock(split, pair);
+/** `mergeManagedValuesBlock`, unwrapped — the production merge, for test fixtures. */
+function mergedEnv(env: string, values: ReadonlyArray<{ name: string; value: string }> = [
+  { name: 'DATABASE_URL', value: VALUES.DATABASE_URL },
+  { name: 'STRIPE_KEY', value: VALUES.STRIPE_KEY },
+]): string {
+  const merged = mergeManagedValuesBlock(env, values);
+  if (!merged.ok) throw new Error('unexpected merge problem in test fixture');
+  return merged.env;
 }
 
 // ── Config shape ─────────────────────────────────────────────────────────────
@@ -203,20 +208,19 @@ describe('dokploy compose — preflight', () => {
     expect(r.reason).toContain('Capy block');
   });
 
-  test('composeType stack on an old Dokploy version warns, never refuses', async () => {
+  test('composeType stack on an old Dokploy version warns, never refuses (CAP-682: reworded for plain values)', async () => {
     const s = scripted([
       readCompose(compose({ composeType: 'stack' })),
       { expect: get('settings.getDokployVersion', {}), json: '0.30.1' },
     ]);
     const r = await adapterWith(s.fetch).preflight(composeTarget(), { cwd: '/tmp' });
     expect(r.ok).toBe(true);
-    // CAP-679 follow-up: renamed from DOKPLOY_STACK_ENV_FILE_QUOTING to the
-    // ERROR_CODES-backed DOKPLOY_STACK_QUOTES, and the message now also
-    // names the fix (capy run's quote-stripping) rather than only "until
-    // Dokploy is upgraded".
     expect(r.warnings?.[0]).toMatchObject({ code: 'DOKPLOY_STACK_QUOTES' });
     expect(r.warnings?.[0].message).toContain('0.30.1');
-    expect(r.warnings?.[0].message).toContain('capy run');
+    // CAP-682: no more "capy run strips a quote layer" mitigation promise —
+    // Capy's own values are plain now and hit the same bug as everything else.
+    expect(r.warnings?.[0].message).toContain('plain values');
+    expect(r.warnings?.[0].message).not.toContain('_SECRETS_BLOB');
   });
 
   test('composeType stack on a fixed Dokploy version — no warning', async () => {
@@ -238,7 +242,8 @@ describe('dokploy compose — preflight', () => {
 
   // CAP-679 follow-up: an unreadable version used to be silently treated as
   // "not old" (no warning at all) — that was guessing. It now warns with its
-  // OWN distinct code instead, so the risk is never hidden.
+  // OWN distinct code instead, so the risk is never hidden. DOKPLOY_VERSION_UNKNOWN's
+  // own wording is UNCHANGED by CAP-682 (spec: "DOKPLOY_VERSION_UNKNOWN unchanged").
   test('an unknown/unparseable version warns with DOKPLOY_VERSION_UNKNOWN, never treated as old', async () => {
     const s = scripted([
       readCompose(compose({ composeType: 'stack' })),
@@ -258,12 +263,58 @@ describe('dokploy compose — preflight', () => {
     expect(r.ok).toBe(true);
     expect(r.warnings?.[0]).toMatchObject({ code: 'DOKPLOY_VERSION_UNKNOWN' });
   });
+
+  // ── CI preflight (CAP-682) — same checks as the Application path ───────
+  describe('CI mode', () => {
+    const ciComposeTarget = (overrides: Partial<TargetConfig> = {}) =>
+      composeTarget({ mode: 'ci', gitBaseBranch: 'main', ...overrides });
+
+    test('direct-mode compose targets skip these checks entirely', async () => {
+      const s = scripted([readCompose(compose({ autoDeploy: false }))]);
+      const r = await adapterWith(s.fetch).preflight(composeTarget(), { cwd: '/tmp' });
+      expect(r.ok).toBe(true);
+    });
+
+    test('a clean CI-ready compose passes', async () => {
+      const s = scripted([readCompose(ciReadyCompose())]);
+      const r = await adapterWith(s.fetch).preflight(ciComposeTarget(), { cwd: '/tmp' });
+      expect(r.ok).toBe(true);
+      expect(s.done()).toBe(true);
+    });
+
+    test('auto-deploy off refuses with DOKPLOY_AUTODEPLOY_OFF', async () => {
+      const s = scripted([readCompose(ciReadyCompose({ autoDeploy: false }))]);
+      const r = await adapterWith(s.fetch).preflight(ciComposeTarget(), { cwd: '/tmp' });
+      expect(r.ok).toBe(false);
+      expect(r.code).toBe('DOKPLOY_AUTODEPLOY_OFF');
+    });
+
+    test('a tracked branch that differs from the PR base refuses with DOKPLOY_BRANCH_MISMATCH', async () => {
+      const s = scripted([readCompose(ciReadyCompose({ branch: 'staging' }))]);
+      const r = await adapterWith(s.fetch).preflight(ciComposeTarget({ gitBaseBranch: 'main' }), { cwd: '/tmp' });
+      expect(r.ok).toBe(false);
+      expect(r.code).toBe('DOKPLOY_BRANCH_MISMATCH');
+    });
+
+    test('watch paths that exclude keep.lock refuse with DOKPLOY_WATCH_PATHS_EXCLUDE_KEEP', async () => {
+      const s = scripted([readCompose(ciReadyCompose({ watchPaths: ['docker/**'] }))]);
+      const r = await adapterWith(s.fetch).preflight(ciComposeTarget(), { cwd: '/tmp' });
+      expect(r.ok).toBe(false);
+      expect(r.code).toBe('DOKPLOY_WATCH_PATHS_EXCLUDE_KEEP');
+    });
+
+    test('watch paths that DO cover keep.lock pass', async () => {
+      const s = scripted([readCompose(ciReadyCompose({ watchPaths: ['keep.lock'] }))]);
+      const r = await adapterWith(s.fetch).preflight(ciComposeTarget(), { cwd: '/tmp' });
+      expect(r.ok).toBe(true);
+    });
+  });
 });
 
 // ── Deploy: happy path, byte-exact merge, --no-deploy, CI secretsOnly ───────
 
 describe('dokploy compose — deploy', () => {
-  const expectedEnv = mergedEnv(RAW_ENV, PAIR);
+  const expectedEnv = mergedEnv(RAW_ENV);
 
   const saveWith = (env: string): Step => ({
     expect: post('compose.saveEnvironment', (body) =>
@@ -279,18 +330,18 @@ describe('dokploy compose — deploy', () => {
     json: true,
   };
 
-  test('read → baseline → write → verify → redeploy → poll to success', async () => {
+  test('read → merge → write → verify → (direct mode) baseline → redeploy → poll to success', async () => {
     const s = scripted([
       readCompose(),
-      listComposeDeployments([OLD]),
       saveWith(expectedEnv),
       readCompose(compose({ env: expectedEnv })),
+      listComposeDeployments([OLD]),
       redeployTrigger,
       listComposeDeployments([OLD]), // not yet recorded
       listComposeDeployments([deployment('dep_new', 'running', '2026-09-22T00:00:00.000Z'), OLD]),
       listComposeDeployments([deployment('dep_new', 'done', '2026-09-22T00:00:00.000Z'), OLD]),
     ]);
-    const r = await adapterWith(s.fetch).deploy(composeTarget(), ctx());
+    const r = await adapterWith(s.fetch).deploy(composeTarget({ mode: 'direct' }), ctx());
     expect(s.done()).toBe(true);
     expect(r.ok).toBe(true);
     expect(r.steps.map((st) => [st.label, st.status])).toEqual([
@@ -299,19 +350,22 @@ describe('dokploy compose — deploy', () => {
       ['compose.redeploy', 'ok'],
       ['deployment', 'ok'],
     ]);
-    expect(r.epilogue).toContain(`capy deploy revoke ${PAIR.deployId}`);
+    // No more capy-run/revoke language — no deploy token was minted.
+    expect(r.epilogue).toContain('No `capy run` step needed');
+    expect(r.epilogue).toContain('capy deploy targets-remove backend-preview');
+    expect(r.epilogue).not.toContain('revoke');
   });
 
   test('never sends compose.deploy or freshVolumes — only compose.redeploy', async () => {
     const s = scripted([
       readCompose(),
-      listComposeDeployments([]),
       saveWith(expectedEnv),
       readCompose(compose({ env: expectedEnv })),
+      listComposeDeployments([]),
       redeployTrigger,
       listComposeDeployments([deployment('dep_new', 'done', '2026-09-22T00:00:00.000Z')]),
     ]);
-    const r = await adapterWith(s.fetch).deploy(composeTarget(), ctx());
+    const r = await adapterWith(s.fetch).deploy(composeTarget({ mode: 'direct' }), ctx());
     expect(r.ok).toBe(true);
     // `s.done()` proves every request matched a SCRIPTED step in order — a
     // `compose.deploy` call, or `freshVolumes` in the redeploy body, would
@@ -320,19 +374,21 @@ describe('dokploy compose — deploy', () => {
     expect(s.done()).toBe(true);
   });
 
-  test('byte-exact preservation: comments and ${{project.X}} refs, and only Capy names change', async () => {
+  test('byte-exact preservation: comments and ${{project.X}} refs untouched, only Capy names change', async () => {
     const s = scripted([
       readCompose(),
-      listComposeDeployments([]),
       saveWith(expectedEnv),
       readCompose(compose({ env: expectedEnv })),
+      listComposeDeployments([]),
       redeployTrigger,
       listComposeDeployments([deployment('dep_new', 'done', '2026-09-22T00:00:00.000Z')]),
     ]);
-    await adapterWith(s.fetch).deploy(composeTarget(), ctx());
+    await adapterWith(s.fetch).deploy(composeTarget({ mode: 'direct' }), ctx());
     expect(expectedEnv).toContain('# a comment');
     expect(expectedEnv).toContain('API_URL=${{project.API_URL}}');
-    expect(envKeys(expectedEnv.split('\n'))).toEqual(['NODE_ENV', 'API_URL', 'PORT', ...RUNTIME_PAIR]);
+    expect(envKeys(expectedEnv.split('\n'))).toEqual(['NODE_ENV', 'API_URL', 'PORT', 'DATABASE_URL', 'STRIPE_KEY']);
+    expect(expectedEnv).toContain(VALUES.DATABASE_URL);
+    expect(expectedEnv).toContain(VALUES.STRIPE_KEY);
   });
 
   test('createEnvFile: false at deploy time refuses before any write', async () => {
@@ -344,38 +400,36 @@ describe('dokploy compose — deploy', () => {
     expect(r.steps[r.steps.length - 1].code).toBe('DOKPLOY_ENV_FILE_DISABLED');
   });
 
-  test('--no-deploy writes and verifies, but never calls compose.redeploy', async () => {
-    const s = scripted([
-      readCompose(),
-      listComposeDeployments([OLD]),
-      saveWith(expectedEnv),
-      readCompose(compose({ env: expectedEnv })),
-    ]);
-    const r = await adapterWith(s.fetch).deploy(composeTarget(), ctx({ noDeploy: true }));
+  test('a var missing from the decrypted branch fails before any request', async () => {
+    const s = scripted([]);
+    const r = await adapterWith(s.fetch).deploy(composeTarget(), ctx({ env: { DATABASE_URL: VALUES.DATABASE_URL } }));
+    expect(s.done()).toBe(true);
+    expect(r.ok).toBe(false);
+    expect(r.steps[r.steps.length - 1].detail).toContain('missing in branch preview: STRIPE_KEY');
+  });
+
+  test('--no-deploy writes and verifies, but never calls compose.redeploy or lists deployments', async () => {
+    const s = scripted([readCompose(), saveWith(expectedEnv), readCompose(compose({ env: expectedEnv }))]);
+    const r = await adapterWith(s.fetch).deploy(composeTarget({ mode: 'direct' }), ctx({ noDeploy: true }));
     expect(s.done()).toBe(true);
     expect(r.ok).toBe(true);
     expect(r.steps.map((st) => st.label)).toEqual(['dokploy compose', 'compose.saveEnvironment', 'compose.redeploy']);
     expect(r.steps[r.steps.length - 1]).toMatchObject({ status: 'skip', detail: '--no-deploy' });
   });
 
-  test('CI mode (secretsOnly) writes and verifies, but never calls compose.redeploy', async () => {
-    const s = scripted([
-      readCompose(),
-      listComposeDeployments([OLD]),
-      saveWith(expectedEnv),
-      readCompose(compose({ env: expectedEnv })),
-    ]);
-    const r = await adapterWith(s.fetch).deploy(composeTarget(), ctx({ secretsOnly: true }));
+  test('CI mode (secretsOnly) writes and verifies, but NEVER calls compose.redeploy or lists deployments', async () => {
+    const s = scripted([readCompose(), saveWith(expectedEnv), readCompose(compose({ env: expectedEnv }))]);
+    const r = await adapterWith(s.fetch).deploy(composeTarget({ mode: 'ci', gitBaseBranch: 'main' }), ctx({ secretsOnly: true }));
     expect(s.done()).toBe(true);
     expect(r.ok).toBe(true);
     expect(r.steps[r.steps.length - 1]).toMatchObject({ status: 'skip' });
     expect(r.steps[r.steps.length - 1].detail).toContain('CI mode');
+    expect(r.steps[r.steps.length - 1].detail).toContain("Dokploy’s own auto-deploy");
   });
 
   test('write verify mismatch fails loudly rather than trusting the write', async () => {
     const s = scripted([
       readCompose(),
-      listComposeDeployments([OLD]),
       saveWith(expectedEnv),
       readCompose(compose({ env: 'SOMETHING=else' })), // a concurrent dashboard edit landed
     ]);
@@ -387,9 +441,9 @@ describe('dokploy compose — deploy', () => {
   test('a failed redeploy is reported with its log', async () => {
     const s = scripted([
       readCompose(),
-      listComposeDeployments([OLD]),
       saveWith(expectedEnv),
       readCompose(compose({ env: expectedEnv })),
+      listComposeDeployments([OLD]),
       redeployTrigger,
       listComposeDeployments([
         deployment('dep_new', 'error', '2026-09-22T00:00:00.000Z', { errorMessage: 'compose up failed' }),
@@ -397,7 +451,7 @@ describe('dokploy compose — deploy', () => {
       ]),
       { expect: get('deployment.readLogs', { deploymentId: 'dep_new' }), json: 'pulling image\nERROR: service failed' },
     ]);
-    const r = await adapterWith(s.fetch).deploy(composeTarget(), ctx());
+    const r = await adapterWith(s.fetch).deploy(composeTarget({ mode: 'direct' }), ctx());
     expect(s.done()).toBe(true);
     expect(r.ok).toBe(false);
     const last = r.steps[r.steps.length - 1];
@@ -406,12 +460,12 @@ describe('dokploy compose — deploy', () => {
     expect(r.epilogue).toContain('ERROR: service failed');
   });
 
-  test('never logs the compose env body, even on failure', async () => {
+  test('never logs the compose env body or a delivered value, even on failure', async () => {
     const s = scripted([
       readCompose(),
-      listComposeDeployments([OLD]),
       saveWith(expectedEnv),
       readCompose(compose({ env: expectedEnv })),
+      listComposeDeployments([OLD]),
       redeployTrigger,
       listComposeDeployments([
         deployment('dep_new', 'error', '2026-09-22T00:00:00.000Z', { errorMessage: 'boom' }),
@@ -422,16 +476,17 @@ describe('dokploy compose — deploy', () => {
     // Asserted AS each line is emitted (no accumulator array needed) — a
     // violation fails the exact call that produced it.
     await adapterWith(s.fetch, { DOKPLOY_API_KEY: TOKEN }, (l) => {
-      expect(l).not.toContain(PAIR.secretsBlob);
+      expect(l).not.toContain(VALUES.DATABASE_URL);
+      expect(l).not.toContain(VALUES.STRIPE_KEY);
       expect(l).not.toContain(RAW_ENV);
-    }).deploy(composeTarget(), ctx());
+    }).deploy(composeTarget({ mode: 'direct' }), ctx());
   });
 });
 
 // ── Remove: strip + redeploy ────────────────────────────────────────────────
 
 describe('dokploy compose — remove', () => {
-  const managedEnv = mergedEnv(RAW_ENV, PAIR);
+  const managedEnv = mergedEnv(RAW_ENV);
 
   const removeCtx = (interactive: boolean, answer: boolean, noDeploy = false): RemoveOfferContext => ({
     cwd: '/tmp',
@@ -501,6 +556,24 @@ describe('dokploy compose — remove', () => {
     expect(r?.ok).toBe(false);
     expect(r?.code).toBe('non_interactive');
   });
+
+  test('also un-comments a shadowed line, restoring it byte-exact', async () => {
+    const shadowedRaw = 'STRIPE_KEY=stale\n' + RAW_ENV;
+    const shadowedMerged = mergedEnv(shadowedRaw);
+    expect(shadowedMerged.split('\n')).toContain(`${CAPY_OFF_MARKER}STRIPE_KEY=stale`);
+    const s = scripted([
+      readCompose(compose({ env: shadowedMerged })),
+      {
+        expect: post('compose.saveEnvironment', (body) => expect(body).toEqual({ composeId: COMPOSE_ID, env: shadowedRaw, createEnvFile: true })),
+        json: true,
+      },
+      readCompose(compose({ env: shadowedRaw })),
+      { expect: post('compose.redeploy', () => {}), json: true },
+    ]);
+    const r = await adapterWith(s.fetch).onRemove?.(composeTarget(), removeCtx(true, true));
+    expect(s.done()).toBe(true);
+    expect(r?.ok).toBe(true);
+  });
 });
 
 // ── Version comparison ──────────────────────────────────────────────────────
@@ -526,4 +599,22 @@ describe('dokployVersionAtLeast', () => {
 // Sanity: DOKPLOY_ENV_FILE_DISABLED is a real coded error, not a bespoke string.
 test('DOKPLOY_ENV_FILE_DISABLED is registered in ERROR_CODES', () => {
   expect(ERROR_CODES.DOKPLOY_ENV_FILE_DISABLED).toBe('DOKPLOY_ENV_FILE_DISABLED');
+});
+
+// Sanity: the three new CAP-682 CI-preflight codes and the value-shape code
+// are real, registered ERROR_CODES — never bespoke strings.
+test('CAP-682 error codes are registered in ERROR_CODES', () => {
+  expect(ERROR_CODES.DOKPLOY_AUTODEPLOY_OFF).toBe('DOKPLOY_AUTODEPLOY_OFF');
+  expect(ERROR_CODES.DOKPLOY_BRANCH_MISMATCH).toBe('DOKPLOY_BRANCH_MISMATCH');
+  expect(ERROR_CODES.DOKPLOY_WATCH_PATHS_EXCLUDE_KEEP).toBe('DOKPLOY_WATCH_PATHS_EXCLUDE_KEEP');
+  expect(ERROR_CODES.DOKPLOY_VALUE_UNREPRESENTABLE).toBe('DOKPLOY_VALUE_UNREPRESENTABLE');
+});
+
+/** `createDokployClient` used directly, unscripted-adapter, to prove the raw client also reads the new fields. */
+test('createDokployClient.getCompose reads the CAP-682 CI preflight fields', async () => {
+  const s = scripted([readCompose(compose({ autoDeploy: true, customGitBranch: 'main', watchPaths: ['keep.lock'] }))]);
+  const got = await createDokployClient(BASE, TOKEN, s.fetch).getCompose(COMPOSE_ID);
+  expect(got.autoDeploy).toBe(true);
+  expect(got.customGitBranch).toBe('main');
+  expect(got.watchPaths).toEqual(['keep.lock']);
 });
