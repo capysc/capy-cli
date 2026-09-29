@@ -529,7 +529,7 @@ program
     }
 
     // Authenticate and resolve key (requires server co-decrypt for KMS unwrap)
-    let encryptionKey: string;
+    const resolveKey = async (): Promise<string | null> => {
     try {
       const syncState = pm.readSyncState();
       const authService = new AuthService(undefined, true, syncState?.user_id);
@@ -544,8 +544,13 @@ program
         coDecrypt: (oid: string, ct: string) => serviceClient.coDecrypt(oid, ct).then(r => r.plaintext),
         wrapOuterLayer: (oid: string, pt: string) => serviceClient.wrapOuterLayer(oid, pt).then(r => r.ciphertext),
       };
-      encryptionKey = await resolveProjectKey(keep.org_id, keep.project_id, authResult.user_id!, keyOps);
+      return await resolveProjectKey(keep.org_id, keep.project_id, authResult.user_id!, keyOps);
     } catch {
+      return null;
+    }
+    };
+    const encryptionKey = await resolveKey();
+    if (encryptionKey === null) {
       console.error(`Cannot decrypt — server co-sign required. Run ${B('capy-dev')} first to sync.`);
       process.exit(1);
     }
@@ -560,14 +565,15 @@ program
         process.exit(0);
       }
 
-      const { writeFileSync } = await import('fs');
+      const { writeFileSync, readFileSync } = await import('fs');
       const { dotenvEscape } = await import('./commands/exportCommand');
-      // Escape so multi-line secrets survive being re-read by dotenv.
-      const content = Object.entries(decrypted)
-        .map(([key, value]) => `${key}=${dotenvEscape(value as string)}`)
-        .join('\n');
+      const { upsertEnvText } = await import('./files/envUpsert');
+      // Escape so multi-line secrets survive being re-read by dotenv. Values are
+      // upserted in place so the file's comments, dividers and order survive.
+      const entries = Object.entries(decrypted).map(([key, value]) => [key, dotenvEscape(value as string)] as const);
+      const content = upsertEnvText(readFileSync(envPath, 'utf-8'), {}, entries);
 
-      writeFileSync(envPath, content + '\n', 'utf-8');
+      writeFileSync(envPath, content, 'utf-8');
       console.log(`Decrypted ${Object.keys(decrypted).length} variable(s) in ${envPath}`);
     } catch (error: any) {
       const { displayErrorAndExit } = await import('./ui/errorScreen');
