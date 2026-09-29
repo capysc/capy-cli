@@ -269,4 +269,45 @@ describe('dokployApi — listImportableEntries — dotenv.parse-accurate values'
     expect(entries).toEqual([{ name: 'REF', value: '${{project.X}}', skip: 'DOKPLOY_REFERENCE_VALUE' }]);
     expect(entries[0].warning).toBeUndefined();
   });
+
+  // ── CAP-679 follow-up: DOKPLOY_VALUE_QUOTED. dotenv already strips ONE
+  // layer of surrounding quotes (see the "one matching pair of double quotes
+  // is stripped" test above) — a value that STILL looks quote-wrapped after
+  // that means the raw line was double-quoted, and is flagged, never stripped
+  // further. ──
+  test('a double-quoted value (single quotes outside, double quotes surviving inside) is flagged DOKPLOY_VALUE_QUOTED, never stripped', () => {
+    const env = `Q='"real value"'`;
+    expect(listImportableEntries(env)).toEqual([
+      { name: 'Q', value: '"real value"', warning: 'DOKPLOY_VALUE_QUOTED' },
+    ]);
+  });
+
+  test('the reverse double-quoting (double outside, single surviving inside) is flagged the same way', () => {
+    const env = `Q="'real value'"`;
+    expect(listImportableEntries(env)).toEqual([
+      { name: 'Q', value: "'real value'", warning: 'DOKPLOY_VALUE_QUOTED' },
+    ]);
+  });
+
+  test('a normally single-quoted value (only one layer) is NOT flagged — dotenv already stripped it clean', () => {
+    const env = 'DATABASE_URL="postgres://u:p@h/db"';
+    expect(listImportableEntries(env)).toEqual([
+      { name: 'DATABASE_URL', value: 'postgres://u:p@h/db' },
+    ]);
+  });
+
+  test('quoting takes priority over the dollar warning when both would apply', () => {
+    const env = `H='"$2b$12$abc"'`;
+    const entries = listImportableEntries(env);
+    expect(entries).toEqual([{ name: 'H', value: '"$2b$12$abc"', warning: 'DOKPLOY_VALUE_QUOTED' }]);
+  });
+
+  test('a reference value is never ALSO flagged as quoted', () => {
+    const env = `REF='"${'${{project.X}}'}"'`;
+    const entries = listImportableEntries(env);
+    // The reference check (`${{`) runs first — this is still a reference,
+    // not a quoted value, even though its parsed form also looks wrapped.
+    expect(entries[0].skip).toBe('DOKPLOY_REFERENCE_VALUE');
+    expect(entries[0].warning).toBeUndefined();
+  });
 });

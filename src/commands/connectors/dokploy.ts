@@ -37,6 +37,8 @@ import { TargetConfig } from '../../deploy/adapter';
 import { baseUrlProblem } from '../../deploy/adapters/dokploy';
 import {
   DEFAULT_TOKEN_ENV,
+  DOKPLOY_CONNECTOR_SECRET_NAME,
+  DOKPLOY_TARGET_SECRET_NAME,
   DokployApiError,
   DokployClient,
   DokployImportSource,
@@ -49,7 +51,7 @@ import {
   listImportableEntries,
   resolveDokployApiKey,
 } from '../../deploy/dokployApi';
-import { ConnectorMetadata, KeepFile } from '../../types/index';
+import { ConnectorMetadata, ERROR_CODES, KeepFile } from '../../types/index';
 import { isInteractive } from '../../ui/interactive';
 import { ProjectManager } from '../../core/projectManager';
 import { FileManager } from '../../files/fileManager';
@@ -703,7 +705,11 @@ export function computeOverwritePlan(
 }
 
 // COPY-FLAG: new user-facing string, minimal/neutral wording.
-function overwriteConfirmMessage(plan: OverwritePlan, dollarWarnedNames: readonly string[]): string {
+function overwriteConfirmMessage(
+  plan: OverwritePlan,
+  dollarWarnedNames: readonly string[],
+  quotedNames: readonly string[] = [],
+): string {
   const lines = [
     'Overwrite local vars to match Dokploy exactly?',
     plan.toImport.length > 0 ? `  Import (${plan.toImport.length}): ${plan.toImport.map((e) => e.name).join(', ')}` : null,
@@ -711,6 +717,9 @@ function overwriteConfirmMessage(plan: OverwritePlan, dollarWarnedNames: readonl
     plan.toClear.length > 0 ? `  Clear (${plan.toClear.length}): ${plan.toClear.join(', ')}` : null,
     dollarWarnedNames.length > 0
       ? `  review these: Dokploy/Compose may treat \`$\` specially: ${dollarWarnedNames.join(', ')}`
+      : null,
+    quotedNames.length > 0
+      ? `  review these: the value is wrapped in quotes: ${quotedNames.join(', ')}`
       : null,
   ].filter((l): l is string => l !== null);
   return lines.join('\n');
@@ -774,6 +783,9 @@ async function runOverwriteImport(args: {
   const referenceNames = fullImportable.filter((e) => e.skip === 'DOKPLOY_REFERENCE_VALUE').map((e) => e.name);
   // Names only — never a value. Still imported; just worth a second look.
   const dollarWarnedNames = fullImportable.filter((e) => e.warning === 'DOKPLOY_VALUE_HAS_DOLLAR').map((e) => e.name);
+  // Names only — never a value (CAP-679 follow-up). Still imported, never
+  // stripped — see `classifyImportValue`'s doc.
+  const quotedNames = fullImportable.filter((e) => e.warning === 'DOKPLOY_VALUE_QUOTED').map((e) => e.name);
   const fullCandidates = fullImportable.filter((e) => !e.skip).map((e) => ({ name: e.name, value: e.value }));
   const plan = computeOverwritePlan(fullCandidates, referenceNames, ctx.localPlaintext);
 
@@ -782,7 +794,7 @@ async function runOverwriteImport(args: {
 
   if (!dryRun && hasWrite) {
     if (promptable && !opts.yes) {
-      const proceed = await confirm(overwriteConfirmMessage(plan, dollarWarnedNames), false);
+      const proceed = await confirm(overwriteConfirmMessage(plan, dollarWarnedNames, quotedNames), false);
       if (!proceed) {
         return {
           ok: true,
@@ -796,6 +808,7 @@ async function runOverwriteImport(args: {
           warnings: [
             ...(referenceNames.length > 0 ? [{ code: 'DOKPLOY_REFERENCE_VALUE', names: referenceNames }] : []),
             ...(dollarWarnedNames.length > 0 ? [{ code: 'DOKPLOY_VALUE_HAS_DOLLAR', names: dollarWarnedNames }] : []),
+            ...(quotedNames.length > 0 ? [{ code: 'DOKPLOY_VALUE_QUOTED', names: quotedNames }] : []),
           ],
           deployTargetSaved: false,
         };
@@ -841,6 +854,7 @@ async function runOverwriteImport(args: {
     warnings: [
       ...(referenceNames.length > 0 ? [{ code: 'DOKPLOY_REFERENCE_VALUE', names: referenceNames }] : []),
       ...(dollarWarnedNames.length > 0 ? [{ code: 'DOKPLOY_VALUE_HAS_DOLLAR', names: dollarWarnedNames }] : []),
+      ...(quotedNames.length > 0 ? [{ code: 'DOKPLOY_VALUE_QUOTED', names: quotedNames }] : []),
       ...(written.length > 0 && !dryRun ? [{ code: 'DOKPLOY_PLAINTEXT_REMAINS', names: written.map((w) => w.varName) }] : []),
     ],
     deployTargetSaved: false,
@@ -937,10 +951,11 @@ export function createDokployConnector(deps: DokployConnectorDeps = {}): Connect
         interactive: secretsInteractive,
         orgId: ctx.orgId,
         devMode: opts.devMode,
+        storeName: DOKPLOY_CONNECTOR_SECRET_NAME,
         deps: deps.getConnectorSecret ? { getConnectorSecret: deps.getConnectorSecret } : undefined,
       });
       if (!resolved.ok) {
-        const { reason } = describeDokployTokenProblem(resolved.code, tokenEnv);
+        const { reason } = describeDokployTokenProblem(resolved.code, tokenEnv, DOKPLOY_CONNECTOR_SECRET_NAME);
         return { ok: false, code: resolved.code, message: `${reason}.` };
       }
       const token = resolved.value;
@@ -970,6 +985,9 @@ export function createDokployConnector(deps: DokployConnectorDeps = {}): Connect
       // Names only — never a value. Still imported; just worth a second look
       // (bcrypt hashes written `$$escaped$$`, an unresolved `${VAR}`, …).
       const dollarWarned = importable.filter((e) => e.warning === 'DOKPLOY_VALUE_HAS_DOLLAR').map((e) => e.name);
+      // Names only — never a value (CAP-679 follow-up). Still imported, never
+      // stripped — see `classifyImportValue`'s doc.
+      const quotedWarned = importable.filter((e) => e.warning === 'DOKPLOY_VALUE_QUOTED').map((e) => e.name);
       const candidates = importable.filter((e) => !e.skip);
 
       if (opts.overwrite) {
@@ -1014,6 +1032,7 @@ export function createDokployConnector(deps: DokployConnectorDeps = {}): Connect
       const warnings: ImportWarning[] = [
         ...(referenceSkipped.length > 0 ? [{ code: 'DOKPLOY_REFERENCE_VALUE', names: referenceSkipped }] : []),
         ...(dollarWarned.length > 0 ? [{ code: 'DOKPLOY_VALUE_HAS_DOLLAR', names: dollarWarned }] : []),
+        ...(quotedWarned.length > 0 ? [{ code: 'DOKPLOY_VALUE_QUOTED', names: quotedWarned }] : []),
         // Reminder, names only: the plaintext stays in Dokploy — reversible by
         // design (see docs/dokploy-deploy-adapter.md) — and is ignored at
         // boot once `capy deploy` writes the runtime pair. Not under a dry
@@ -1096,10 +1115,11 @@ export function createDokployConnector(deps: DokployConnectorDeps = {}): Connect
         interactive: secretsInteractive,
         orgId: ctx.orgId,
         devMode: opts.devMode,
+        storeName: DOKPLOY_CONNECTOR_SECRET_NAME,
         deps: deps.getConnectorSecret ? { getConnectorSecret: deps.getConnectorSecret } : undefined,
       });
       if (!resolved.ok) {
-        const { reason } = describeDokployTokenProblem(resolved.code, tokenEnv);
+        const { reason } = describeDokployTokenProblem(resolved.code, tokenEnv, DOKPLOY_CONNECTOR_SECRET_NAME);
         return { ok: false, code: resolved.code, message: `${reason}.` };
       }
 
@@ -1963,7 +1983,14 @@ function buildRealDiscoverySequenceDeps(
  */
 export const dokployConnector: ConnectorModule = createDokployConnector({
   getConnectorSecret: async (name, opts) => {
-    const { getConnectorSecret } = await import('../../system/systemStore');
-    return getConnectorSecret(name, opts);
+    // CAP-679 follow-up: import's own direction — see
+    // `system/systemStore.ts#getDirectionalConnectorSecret`'s doc, and
+    // `deploy/adapters/dokploy.ts`'s `dokployAdapter` for the symmetric
+    // deploy-side wiring.
+    const { getDirectionalConnectorSecret } = await import('../../system/systemStore');
+    return getDirectionalConnectorSecret(name, DOKPLOY_TARGET_SECRET_NAME, {
+      ...opts,
+      missingWithFallbackCode: ERROR_CODES.DOKPLOY_CONNECTOR_KEY_MISSING,
+    });
   },
 });

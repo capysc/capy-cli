@@ -210,8 +210,13 @@ describe('dokploy compose — preflight', () => {
     ]);
     const r = await adapterWith(s.fetch).preflight(composeTarget(), { cwd: '/tmp' });
     expect(r.ok).toBe(true);
-    expect(r.warnings?.[0]).toMatchObject({ code: 'DOKPLOY_STACK_ENV_FILE_QUOTING' });
+    // CAP-679 follow-up: renamed from DOKPLOY_STACK_ENV_FILE_QUOTING to the
+    // ERROR_CODES-backed DOKPLOY_STACK_QUOTES, and the message now also
+    // names the fix (capy run's quote-stripping) rather than only "until
+    // Dokploy is upgraded".
+    expect(r.warnings?.[0]).toMatchObject({ code: 'DOKPLOY_STACK_QUOTES' });
     expect(r.warnings?.[0].message).toContain('0.30.1');
+    expect(r.warnings?.[0].message).toContain('capy run');
   });
 
   test('composeType stack on a fixed Dokploy version — no warning', async () => {
@@ -231,14 +236,27 @@ describe('dokploy compose — preflight', () => {
     expect(r.ok).toBe(true);
   });
 
-  test('an unknown/unparseable version is never treated as old', async () => {
+  // CAP-679 follow-up: an unreadable version used to be silently treated as
+  // "not old" (no warning at all) — that was guessing. It now warns with its
+  // OWN distinct code instead, so the risk is never hidden.
+  test('an unknown/unparseable version warns with DOKPLOY_VERSION_UNKNOWN, never treated as old', async () => {
     const s = scripted([
       readCompose(compose({ composeType: 'stack' })),
       { expect: get('settings.getDokployVersion', {}), json: { nonsense: true } },
     ]);
     const r = await adapterWith(s.fetch).preflight(composeTarget(), { cwd: '/tmp' });
     expect(r.ok).toBe(true);
-    expect(r.warnings ?? []).toEqual([]);
+    expect(r.warnings?.[0]).toMatchObject({ code: 'DOKPLOY_VERSION_UNKNOWN' });
+  });
+
+  test('a network/API failure reading the version also warns with DOKPLOY_VERSION_UNKNOWN', async () => {
+    const s = scripted([
+      readCompose(compose({ composeType: 'stack' })),
+      { expect: get('settings.getDokployVersion', {}), status: 500, json: { message: 'boom' } },
+    ]);
+    const r = await adapterWith(s.fetch).preflight(composeTarget(), { cwd: '/tmp' });
+    expect(r.ok).toBe(true);
+    expect(r.warnings?.[0]).toMatchObject({ code: 'DOKPLOY_VERSION_UNKNOWN' });
   });
 });
 
