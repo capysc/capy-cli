@@ -45,6 +45,8 @@
     "clean": "rm -rf dist build bin-pkg",
     "notices": "node scripts/gen-third-party-notices.mjs",
     "notices:check": "node scripts/gen-third-party-notices.mjs --check",
+    "docs:cli": "node scripts/gen-cli-reference.mjs",
+    "docs:cli:check": "node scripts/gen-cli-reference.mjs --check",
     "bundle": "node build.esbuild.mjs",
     "build:binary": "node scripts/build-binary.mjs"
   },

@@ -479,6 +479,16 @@ export const ERROR_CODES = {
    * write is about to key off it.
    */
   DEPLOY_BRANCH_UNKNOWN: 'DEPLOY_BRANCH_UNKNOWN',
+  // --- Agent onboarding (CAP-681) ---
+  /** `capy agents` needs a terminal to confirm a write, and neither --print nor --remove was passed. */
+  AGENTS_SETUP_NEEDS_TTY: 'AGENTS_SETUP_NEEDS_TTY',
+  /**
+   * AGENTS.md or CLAUDE.md has exactly one of the `capy:agents:begin`/`end`
+   * markers, or more than one of either — the file was hand-edited into a
+   * state the idempotent replace can't safely resolve. Refused rather than
+   * guessed at, so no byte outside the markers is ever put at risk.
+   */
+  AGENTS_BLOCK_MALFORMED: 'AGENTS_BLOCK_MALFORMED',
 } as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES];
