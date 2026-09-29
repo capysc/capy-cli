@@ -82,6 +82,23 @@ export function listAllBranches(cwd: string): string[] {
   return [...seen];
 }
 
+/**
+ * The repo's default branch, resolved from the local `origin/HEAD` symbolic
+ * ref (set by `git clone`, refreshable via `git remote set-head origin
+ * --auto`). Returns null when it can't be resolved — never fetched, no
+ * `origin` remote, or the ref is just missing — so callers fall back to
+ * other heuristics (current branch, then main/master).
+ */
+export function resolveDefaultBranch(cwd: string): string | null {
+  const r = git(['symbolic-ref', 'refs/remotes/origin/HEAD'], cwd);
+  if (r.code !== 0) return null;
+  const ref = r.stdout.trim();
+  const prefix = 'refs/remotes/origin/';
+  if (!ref.startsWith(prefix)) return null;
+  const name = ref.slice(prefix.length);
+  return name || null;
+}
+
 export function getStatus(cwd: string): GitStatusEntry[] {
   const r = git(['status', '--porcelain'], cwd);
   if (r.code !== 0) return [];

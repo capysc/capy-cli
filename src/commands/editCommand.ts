@@ -12,7 +12,9 @@ import { EditScreen, EditRow, EditState, classifyLocalRow } from '../ui/editScre
 import { formatRelativeTime } from '../ui/relativeTime';
 import { Encryptor } from '../crypto/encryptor';
 import { deriveResourceId } from '../crypto/resourceId';
-import { setSyncKeepHash } from '../types/index';
+import { setSyncKeepHash, KeepFile } from '../types/index';
+import { EditSaveRecord } from '../deploy/keepGate';
+import { concludeEditSession } from './editExitFlow';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -259,9 +261,20 @@ export class EditCommand {
       const { printExpiryWarnings } = await import('./connectors/shared');
       printExpiryWarnings();
     };
-    // Set when a save rewrote keep.lock. The auto-commit runs after the TUI
-    // exits — committing (and printing) mid-screen would corrupt the display.
-    let keepDirty = false;
+    // Immutable, append-only log of what happened this session, used only to
+    // build the exit-time PR (editExitFlow.ts) — never to decide what gets
+    // written to disk during the session itself.
+    //
+    // The screen API's `saveLocalEdits` callback (below) is called once per
+    // save and returns only that save's changed_at map — it has no channel
+    // back into this function's scope to thread accumulated state through
+    // return values across repeated calls. That forces exactly one mutable
+    // cell, confined to this single object and touched nowhere else:
+    // `sessionSaves.current` is reassigned to a brand-new (readonly) array on
+    // every save, never mutated in place. Everything the array holds, and
+    // everything built from it afterwards, is immutable.
+    const sessionSaves: { current: readonly EditSaveRecord[] } = { current: [] };
+
     const editContext = {
       saveLocalEdits: async (edits: Record<string, string>) => {
         // Same flow as the conflict-resolution "commit local" action and
@@ -269,35 +282,44 @@ export class EditCommand {
         // to the server, then cache + write keep.lock + .env + sync state.
         const finalEnv: Record<string, string> = { ...localPlaintext, ...edits };
 
-        const encrypted: Record<string, string> = {};
-        for (const [key, value] of Object.entries(finalEnv)) {
-          const resourceId = deriveResourceId(branch, key);
-          const enc = Encryptor.encrypt(value, projectKey);
-          encrypted[key] = `capy:${resourceId}:${enc}`;
-        }
+        const encrypted = Object.fromEntries(
+          Object.entries(finalEnv).map(([key, value]) => {
+            const resourceId = deriveResourceId(branch, key);
+            const enc = Encryptor.encrypt(value, projectKey);
+            return [key, `capy:${resourceId}:${enc}`];
+          }),
+        );
         const envBlob = Object.entries(encrypted)
           .map(([k, v]) => `${k}=${v}`)
           .join('\n');
 
-        const pushedVars: Record<string, { resource_id: string; value_hash: string }> = {};
-        for (const [key, value] of Object.entries(finalEnv)) {
-          pushedVars[key] = {
-            resource_id: deriveResourceId(branch, key),
-            value_hash: createHash('sha256').update(value).digest('hex').slice(0, 16),
-          };
-        }
+        const pushedVars = Object.fromEntries(
+          Object.entries(finalEnv).map(([key, value]) => [
+            key,
+            {
+              resource_id: deriveResourceId(branch, key),
+              value_hash: createHash('sha256').update(value).digest('hex').slice(0, 16),
+            },
+          ]),
+        );
 
         const syncEngine = new SyncEngine();
-        const finalKeep = syncEngine.mergeWithKeep(keep, pushedVars, branch);
+        const mergedKeep = syncEngine.mergeWithKeep(keep, pushedVars, branch);
 
-        // Drop branch entries for variables no longer in finalEnv.
-        for (const varName of Object.keys(finalKeep.variables)) {
-          if (!(varName in finalEnv)) {
-            const entries = finalKeep.variables[varName].filter((e) => e.branch !== branch);
-            if (entries.length > 0) finalKeep.variables[varName] = entries;
-            else delete finalKeep.variables[varName];
-          }
-        }
+        // Drop branch entries for variables no longer in finalEnv — built as
+        // a new object rather than mutated in place (was a `for` loop doing
+        // `finalKeep.variables[varName] = entries` / `delete
+        // finalKeep.variables[varName]` on the value mergeWithKeep returned).
+        const finalKeep: KeepFile = {
+          ...mergedKeep,
+          variables: Object.fromEntries(
+            Object.entries(mergedKeep.variables).flatMap(([varName, entries]) => {
+              if (varName in finalEnv) return [[varName, entries]];
+              const kept = entries.filter((e) => e.branch !== branch);
+              return kept.length > 0 ? [[varName, kept]] : [];
+            }),
+          ),
+        };
 
         // keep_hash is computed locally; the server returns the same value on
         // push. In local-only mode there is no push — the local writes below
@@ -317,7 +339,6 @@ export class EditCommand {
         // Prefer the server's copy — it carries server-assigned changed_at
         const adoptedKeep = SyncEngine.adoptServerKeep(pushResult?.keep_file, finalKeep, branch);
         fileManager.writeKeepFile(adoptedKeep);
-        keepDirty = true;
         fileManager.writeEncryptedEnvFile(finalEnv, projectKey, undefined, finalKeep, branch);
 
         const existingSyncState = pm.readSyncState();
@@ -329,22 +350,30 @@ export class EditCommand {
           keep_hash: setSyncKeepHash(existingSyncState, branch, localKeepHash),
         });
 
+        // Record this save for the exit-time PR: the resulting (or deleted)
+        // entry, for THIS branch only, of every variable this save touched.
+        const touchedEntries = Object.keys(edits).map((variable) => ({
+          variable,
+          entry: adoptedKeep.variables[variable]?.find((e) => e.branch === branch) ?? null,
+        }));
+        sessionSaves.current = [...sessionSaves.current, { branch, entries: touchedEntries }];
+
         // Hand the server-assigned changed_at back to the TUI so the UPDATED
         // column reflects the authoritative stamp for this commit, not a
         // client-side guess.
-        const changedAtByKey: Record<string, string> = {};
-        for (const [varName, entries] of Object.entries(adoptedKeep.variables)) {
-          const stamp = entries.find((e) => e.branch === branch)?.changed_at;
-          if (stamp) changedAtByKey[varName] = stamp;
-        }
+        const changedAtByKey = Object.fromEntries(
+          Object.entries(adoptedKeep.variables)
+            .map(([varName, entries]) => [varName, entries.find((e) => e.branch === branch)?.changed_at] as const)
+            .filter((pair): pair is [string, string] => pair[1] !== undefined),
+        );
         return changedAtByKey;
       },
     };
 
     // `--web` changes only where the questions are ASKED. The commit callback
-    // above is the same object either way, so the crypto, the push, the keep
-    // rewrite and the auto-commit are one code path with one browser-shaped
-    // front end and one terminal-shaped one.
+    // above is the same object either way, so the crypto, the push, and the
+    // keep rewrite are one code path with one browser-shaped front end and
+    // one terminal-shaped one.
     if (opts.web) {
       const { runSecretEditorInBrowser } = await import('../ui/secretTableScreen');
       await runSecretEditorInBrowser(
@@ -366,10 +395,9 @@ export class EditCommand {
     } else {
       await screen.run(state, editContext);
     }
-    if (keepDirty) {
-      const { autoCommitKeep } = await import('../git/autoCommitKeep');
-      autoCommitKeep(branch);
-    }
+    // Same exit behavior in both modes: asked in the terminal, even after a
+    // --web session's browser tab has closed. See editExitFlow.ts.
+    await concludeEditSession(process.cwd(), sessionSaves.current, keep);
     await printExpiryAfter();
   }
 }
