@@ -43,6 +43,17 @@ const NOT_COMMITTED_MESSAGE = 'Saved to Keep — not committed to git (no PR ope
 const NO_DIFF_MESSAGE = 'no keep.lock changes to commit';
 
 /**
+ * Last-resort guess when neither `origin/HEAD` nor the current branch
+ * resolves: 'main' if it exists locally, else 'master' if IT exists, else
+ * just 'main' anyway (the field is editable — this is only a default).
+ */
+function guessFallbackBranch(localBranches: readonly string[]): string {
+  if (localBranches.includes('main')) return 'main';
+  if (localBranches.includes('master')) return 'master';
+  return 'main';
+}
+
+/**
  * Ask which branch to open the edit-session PR against. Same text-entry
  * shape as deploy's "open the deploy PR against which target branch?"
  * prompt (deployCommand.ts) — a repo can have far too many branches for a
@@ -53,11 +64,7 @@ const NO_DIFF_MESSAGE = 'no keep.lock changes to commit';
  * like "not a TTY": nothing gets committed anywhere.
  */
 export async function pickEditPrTargetBranch(cwd: string): Promise<string | null> {
-  const local = listLocalBranches(cwd);
-  const fallback =
-    resolveDefaultBranch(cwd) ??
-    currentBranch(cwd) ??
-    (local.includes('main') ? 'main' : local.includes('master') ? 'master' : 'main');
+  const fallback = resolveDefaultBranch(cwd) ?? currentBranch(cwd) ?? guessFallbackBranch(listLocalBranches(cwd));
   try {
     const answer = await inquirer.prompt([
       {
