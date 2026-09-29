@@ -25,6 +25,7 @@ import {
   setSyncKeepHash,
 } from '../types/index';
 import { validateSeedPhrase } from '../crypto/keyManager';
+import { offerAgentsSetupAfterInit } from './agentsCommand';
 import {
   resolveBranchFromLocalState,
   selectBranchWithServer,
@@ -346,6 +347,11 @@ export class CapyCommand {
 
     const projectState = await this.projectManager.detectProjectState();
     await this.syncProject(projectState);
+
+    // One additional TTY-only prompt at the very end of a successful init —
+    // skipped under --web (that flow is browser-driven, not terminal
+    // prompts) and a no-op if AGENTS.md/CLAUDE.md already has the section.
+    if (!this.options.web) await offerAgentsSetupAfterInit();
   }
 
   /**
@@ -371,6 +377,8 @@ export class CapyCommand {
     try {
       await this.runInitialization(wizard);
       await wizard?.finish();
+      // Same one-time, TTY-only offer as the local-only init path above.
+      if (!this.options.web) await offerAgentsSetupAfterInit();
     } catch (err) {
       // The browser is holding a submit at this point, and it must not be told
       // that submit worked. `abort` replaces the question with what stopped

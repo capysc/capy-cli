@@ -82,6 +82,10 @@ program
   .option('-f, --force', 're-encrypt existing variables')
   .option('-d, --dry-run', 'preview changes without applying')
   .option('--web', 'render interactive steps (first-run setup / sync conflicts) in a local browser instead of TTY prompts')
+  // Root help only (Commander scopes addHelpText to the command it's called
+  // on) — points an agent at `capy help --json` for the full, drift-proof
+  // command reference (CAP-681).
+  .addHelpText('after', '\nAgents: run `capy help --json` for a machine-readable command reference.')
   // Record `--web` once, before any handler runs, for the code that has no way
   // to ask. `displayErrorAndExit` is reached from eighteen catch blocks — a key
   // resolver, a service client, a crypto path — none of which is handed the
@@ -478,6 +482,30 @@ systemCmd
   .action(async (name: string, options: any) => {
     const { systemRmCommand } = await import('./commands/systemCommand');
     await systemRmCommand(name, { org: options.org, json: options.json, yes: options.yes, apiUrl: process.env.CAPY_API_URL, devMode: true });
+  });
+
+program
+  .command('help')
+  .description('Show help information')
+  .option('--json', 'emit a machine-readable command reference instead of human help')
+  .action(async (options) => {
+    if (options.json) {
+      const { buildCliHelpDoc } = await import('./core/cliHelpDoc');
+      console.log(JSON.stringify(buildCliHelpDoc(program), null, 2));
+      return;
+    }
+    program.outputHelp();
+  });
+
+program
+  .command('agents')
+  .description('Tell AI coding agents in this repo how to use Capy (writes AGENTS.md / CLAUDE.md)')
+  .option('--print', 'print the block to stdout without writing anything')
+  .option('--remove', 'remove the block from AGENTS.md / CLAUDE.md')
+  .option('--json', 'emit machine-readable JSON instead of the human UI')
+  .action(async (options) => {
+    const { agentsCommand } = await import('./commands/agentsCommand');
+    await agentsCommand({ print: options.print, remove: options.remove, json: options.json });
   });
 
 program

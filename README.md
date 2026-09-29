@@ -169,6 +169,7 @@ Good when you want to see drift across the whole branch, edit one variable witho
 | [`capy profile`](https://docs.capy.sc/cli/profile) | Manage CLI profiles. |
 | [`capy byoc [url]`](https://docs.capy.sc/cli/byoc) | Connect to a self-hosted Capy instance. |
 | [`capy info`](https://docs.capy.sc/cli/info) | Show current session info. |
+| [`capy agents`](https://docs.capy.sc/cli/agents) | Tell AI coding agents in this repo how to use Capy (writes AGENTS.md / CLAUDE.md). |
 | [`capy logout`](https://docs.capy.sc/cli/logout) | Clear local session. |
 | [`capy cleanup`](https://docs.capy.sc/cli/cleanup) | Remove git hooks and local state. |
 
