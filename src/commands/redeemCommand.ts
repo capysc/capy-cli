@@ -176,15 +176,21 @@ export class RedeemCommand {
     console.log(`  Sync state updated → ${B(orgName)}`);
 
     const keepPath = join(process.cwd(), 'keep.lock');
+    // capy's own untracked working copy (see FileManager.writeKeepFile) — a
+    // stale copy left behind here would make readKeepFile() keep preferring
+    // it over the freshly re-initialized tracked file.
+    const workingKeepPath = join(process.cwd(), '.capy', 'keep.lock');
     if (existsSync(keepPath)) {
       try {
         const keepContent = JSON.parse(readFileSync(keepPath, 'utf-8'));
         if (keepContent.org_id !== orgId) {
           unlinkSync(keepPath);
+          if (existsSync(workingKeepPath)) unlinkSync(workingKeepPath);
           console.log('  Removed stale keep.lock (different org)');
         }
       } catch {
         unlinkSync(keepPath);
+        if (existsSync(workingKeepPath)) unlinkSync(workingKeepPath);
         console.log('  Removed invalid keep.lock');
       }
     }

@@ -99,7 +99,7 @@ describe('ProjectManager', () => {
       expect(result).toBeNull();
     });
 
-    test('should read and validate keep.lock file successfully', () => {
+    test('should read and validate keep.lock file successfully (no .capy/ working copy)', () => {
       const mockKeep = {
         version: '3.0',
         org_id: 'org_123',
@@ -113,7 +113,49 @@ describe('ProjectManager', () => {
         }
       };
 
+      // Only the tracked file exists — the common case for a project that
+      // predates the .capy/keep.lock working copy, or a fresh git worktree.
+      mockExistsSync.mockImplementation((path) => path === join(testRoot, 'keep.lock'));
+      mockReadFileSync.mockReturnValue(JSON.stringify(mockKeep));
+
+      const result = projectManager.readKeepFile();
+
+      expect(result).toEqual(mockKeep);
+      expect(mockReadFileSync).toHaveBeenCalledWith(join(testRoot, 'keep.lock'), 'utf-8');
+    });
+
+    test('prefers .capy/keep.lock over the tracked file when both exist (CAP-667)', () => {
+      const workingKeep = {
+        version: '3.0',
+        org_id: 'org_123',
+        project_id: 'proj_456',
+        project_name: 'test-project',
+        variables: {},
+      };
+
       mockExistsSync.mockReturnValue(true);
+      mockReadFileSync.mockImplementation((path: string) =>
+        path === join(testRoot, '.capy', 'keep.lock')
+          ? JSON.stringify(workingKeep)
+          : JSON.stringify({ ...workingKeep, project_name: 'stale-tracked-copy' }),
+      );
+
+      const result = projectManager.readKeepFile();
+
+      expect(result).toEqual(workingKeep);
+      expect(mockReadFileSync).toHaveBeenCalledWith(join(testRoot, '.capy', 'keep.lock'), 'utf-8');
+    });
+
+    test('falls back to the tracked file when .capy/keep.lock is absent', () => {
+      const mockKeep = {
+        version: '3.0',
+        org_id: 'org_123',
+        project_id: 'proj_456',
+        project_name: 'test-project',
+        variables: {},
+      };
+
+      mockExistsSync.mockImplementation((path) => path === join(testRoot, 'keep.lock'));
       mockReadFileSync.mockReturnValue(JSON.stringify(mockKeep));
 
       const result = projectManager.readKeepFile();
