@@ -58,8 +58,16 @@ mock.module('../../src/config/globalConfig', () => ({
 
 import { pairCommand } from '../../src/commands/pairCommand';
 
-/** Seals `payload` to `recipientPublicKeyRaw` the way Keep's browser JS does — mirrors tests/crypto/pairCrypto.test.ts's helper. */
-async function sealAsBrowser(payload: PairingPayload, recipientPublicKeyRaw: Buffer): Promise<PairEnvelope> {
+/**
+ * Seals `payload` to `recipientPublicKeyRaw` the way Keep's browser JS does
+ * — mirrors tests/crypto/pairCrypto.test.ts's helper — and returns it
+ * JSON-stringified, matching the real wire contract: `POST
+ * /device-pairings/pickup`'s `sealed` field is a JSON STRING (the
+ * `JSON.stringify` of the `{v:1,epk,iv,ct}` envelope), never an
+ * already-parsed object. Every test that calls this therefore exercises
+ * `pairCommand`'s `JSON.parse` + validate step for real, not a mock of it.
+ */
+async function sealAsBrowser(payload: PairingPayload, recipientPublicKeyRaw: Buffer): Promise<string> {
   const recipientKey = await webcrypto.subtle.importKey('raw', recipientPublicKeyRaw, { name: 'ECDH', namedCurve: 'P-256' }, false, []);
   const ephemeral = await webcrypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits']);
   const epkRaw = Buffer.from(await webcrypto.subtle.exportKey('raw', ephemeral.publicKey));
@@ -79,7 +87,8 @@ async function sealAsBrowser(payload: PairingPayload, recipientPublicKeyRaw: Buf
     aesKey,
     plaintextBytes,
   ));
-  return { v: 1, epk: epkRaw.toString('base64url'), iv: Buffer.from(iv).toString('base64url'), ct: ctBuf.toString('base64url') };
+  const envelope: PairEnvelope = { v: 1, epk: epkRaw.toString('base64url'), iv: Buffer.from(iv).toString('base64url'), ct: ctBuf.toString('base64url') };
+  return JSON.stringify(envelope);
 }
 
 /** The public key `pairCommand` sent to `authorizeDevice` on its (only) call this test — read from the mock's own call log, never a variable this file reassigns. */
@@ -269,5 +278,45 @@ describe('pairCommand', () => {
     });
     const parsed = JSON.parse(stdout);
     expect(parsed.code).toBe('PAIRING_NOT_READY');
+  });
+
+  test('pickup\'s `sealed` field is a JSON string end to end — parsed and opened, never handled as a pre-parsed object', async () => {
+    // The default `beforeEach` mock already builds `sealed` via
+    // `sealAsBrowser`, matching the real wire contract (a JSON string, not
+    // an object). Run the whole command, confirm it succeeds (proving
+    // `pairCommand` actually parsed and opened that string), then inspect
+    // what the mock handed back to prove it really was a string and not an
+    // object a future regression quietly reverted to.
+    const { stdout } = await withCapturedIo(() => pairCommand({ json: true }));
+    const parsed = JSON.parse(stdout);
+    expect(parsed.ok).toBe(true);
+
+    expect(mockPickupDevicePairing).toHaveBeenCalledTimes(1);
+    const result = await mockPickupDevicePairing.mock.results[0].value;
+    expect(typeof result.sealed).toBe('string');
+    const parsedEnvelope = JSON.parse(result.sealed);
+    expect(parsedEnvelope).toMatchObject({ v: 1 });
+    expect(typeof parsedEnvelope.epk).toBe('string');
+    expect(typeof parsedEnvelope.iv).toBe('string');
+    expect(typeof parsedEnvelope.ct).toBe('string');
+  });
+
+  test('a malformed `sealed` string refuses with a coded INVALID_FORMAT, not a crash', async () => {
+    mockPickupDevicePairing.mockResolvedValue({ sealed: 'not json at all' });
+    const { stdout } = await withCapturedIo(async () => {
+      await expect(pairCommand({ json: true })).rejects.toThrow();
+    });
+    const parsed = JSON.parse(stdout);
+    expect(parsed.code).toBe('INVALID_FORMAT');
+    expect(mockSaveLocalRoot).not.toHaveBeenCalled();
+  });
+
+  test('a `sealed` string that parses but has the wrong shape also refuses with INVALID_FORMAT', async () => {
+    mockPickupDevicePairing.mockResolvedValue({ sealed: JSON.stringify({ v: 1, epk: 'x' }) }); // missing iv/ct
+    const { stdout } = await withCapturedIo(async () => {
+      await expect(pairCommand({ json: true })).rejects.toThrow();
+    });
+    const parsed = JSON.parse(stdout);
+    expect(parsed.code).toBe('INVALID_FORMAT');
   });
 });

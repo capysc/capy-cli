@@ -56,6 +56,39 @@ export function generatePairKeyPair(): PairKeyPair {
   return { ecdh, publicKey: ecdh.getPublicKey().toString('base64url') };
 }
 
+/**
+ * Parses and validates `POST /device-pairings/pickup`'s `sealed` field.
+ *
+ * The wire contract is that `sealed` is a JSON STRING — the
+ * `JSON.stringify` of the `{v:1, epk, iv, ct}` envelope, the same
+ * convention `capy transport`'s `ciphertext` argument uses — never an
+ * already-parsed object. A malformed value (not JSON, wrong shape, wrong
+ * field types) is refused here with a coded `INVALID_FORMAT`, before any
+ * attempt to open it.
+ */
+export function parsePairEnvelope(sealed: string): PairEnvelope {
+  const parsed: unknown = (() => {
+    try {
+      return JSON.parse(sealed);
+    } catch {
+      throw new CapyError('Pair envelope is not valid JSON', ERROR_CODES.INVALID_FORMAT);
+    }
+  })();
+
+  const isEnvelopeShaped = (v: unknown): v is PairEnvelope =>
+    typeof v === 'object' &&
+    v !== null &&
+    (v as Record<string, unknown>).v === 1 &&
+    typeof (v as Record<string, unknown>).epk === 'string' &&
+    typeof (v as Record<string, unknown>).iv === 'string' &&
+    typeof (v as Record<string, unknown>).ct === 'string';
+
+  if (!isEnvelopeShaped(parsed)) {
+    throw new CapyError('Pair envelope has the wrong shape', ERROR_CODES.INVALID_FORMAT);
+  }
+  return parsed;
+}
+
 /** HKDF-SHA256(sharedSecret, salt="", info="capy:pair:v1") → 32-byte AES key. Exported for the known-answer test. */
 export function deriveHkdfKey(sharedSecret: Buffer): Buffer {
   return Buffer.from(hkdfSync('sha256', sharedSecret, HKDF_SALT, HKDF_INFO, 32));

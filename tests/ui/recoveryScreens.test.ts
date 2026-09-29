@@ -1,5 +1,5 @@
 /**
- * The three recovery flows, served as compiled screens.
+ * The recovery flows, served as compiled screens.
  *
  * These commands handle material equivalent to a recovery phrase, and each one
  * moves it in a different direction. The tests are grouped by that direction,
@@ -10,18 +10,20 @@
  *               back in a payload the page was served with.
  *   end-recover the payload names files that ARE plaintext; not a byte of
  *               their contents may travel with the names.
- *   transport   the redeem code goes OUT to the page and can never come back.
+ *
+ * `transport` used to have a third section here (the old invite-shaped
+ * redeem-code page) — removed for CAP-684's basic pairing, which replaced
+ * that flow with Keep's own `/transport` page. See recoveryScreens.ts's
+ * file header for where the `transport-machine` screen asset itself lives
+ * now (orphaned but harmless — its removal is a monorepo-side change).
  */
 import { describe, test, expect } from 'bun:test';
 import {
   buildEndRecoverData,
   buildRecoverData,
-  buildTransportData,
   endRecoverInBrowser,
-  formatDuration,
   recoverInBrowser,
   recoverScreenView,
-  showTransportInBrowser,
   type PhraseVerdict,
   type RecoverOps,
   type WriteOutcome,
@@ -649,135 +651,5 @@ describe('endRecoverInBrowser', () => {
     const nonce = u.searchParams.get('n') ?? '';
     await submit(u, nonce, { __action: 'cancel' });
     expect(await done).toEqual({ endSession: false, remove: [], cancelled: true });
-  });
-});
-
-// ---------------------------------------------------------------------------
-// transport-machine
-// ---------------------------------------------------------------------------
-
-const CODE = 'capy redeem AgQxMjM0NTY3ODkwYWJjZGVmLXRoaXMtaXMtdGhlLWtleQ';
-const NOW = new Date('2026-07-30T12:00:00.000Z');
-
-const TRANSPORT = {
-  orgName: 'Demos',
-  boundEmail: 'vince@capy.sc',
-  expiresAtIso: '2026-08-06T12:00:00.000Z',
-  redeemCommand: CODE,
-  now: NOW,
-  open: false,
-};
-
-describe('formatDuration', () => {
-  test('is a bare duration, because the screen writes the preposition', () => {
-    expect(formatDuration(30_000)).toBe('30 seconds');
-    expect(formatDuration(60_000)).toBe('1 minute');
-    expect(formatDuration(28 * 60_000)).toBe('28 minutes');
-    expect(formatDuration(2 * 3_600_000)).toBe('2 hours');
-    expect(formatDuration(7 * 24 * 3_600_000)).toBe('7 days');
-    expect(formatDuration(-5)).toBe('0 seconds');
-  });
-});
-
-describe('buildTransportData', () => {
-  test('carries the code, and everything that makes a forwarded one useless', () => {
-    const d = buildTransportData(TRANSPORT, 'n');
-    expect(d.view).toBe('code');
-    expect(d.redeemCommand).toBe(CODE);
-    expect(d.boundEmail).toBe('vince@capy.sc');
-    expect(d.orgName).toBe('Demos');
-    expect(d.expiresAtIso).toBe('2026-08-06T12:00:00.000Z');
-    expect(d.expiresIn).toBe('7 days');
-    expect(d.expiryState).toBe('ok');
-  });
-
-  test('how much window is left is a state, never a string to be parsed', () => {
-    // The screen colours this row, and "28 minutes" versus "7 days" is not a
-    // distinction a renderer should be inferring from prose.
-    const soon = buildTransportData(
-      { ...TRANSPORT, expiresAtIso: '2026-07-30T12:28:00.000Z' },
-      'n',
-    );
-    expect(soon.expiryState).toBe('soon');
-    expect(soon.expiresIn).toBe('28 minutes');
-
-    const gone = buildTransportData(
-      { ...TRANSPORT, expiresAtIso: '2026-07-30T11:00:00.000Z' },
-      'n',
-    );
-    expect(gone.expiryState).toBe('expired');
-    // Nothing will redeem it, so there is no window to name.
-    expect(gone.expiresIn).toBeUndefined();
-  });
-
-  test('an unreadable expiry does not become a fake countdown', () => {
-    const d = buildTransportData({ ...TRANSPORT, expiresAtIso: 'not a date' }, 'n');
-    expect(d.expiresIn).toBeUndefined();
-    expect(d.expiryState).toBe('ok');
-  });
-
-  test('the escape hatch is a refusal, because there is no safe non-browser form', () => {
-    const d = buildTransportData(TRANSPORT, 'n');
-    expect(d.nonTty!.command).toBe('capy transport');
-    expect(d.nonTty!.why).toContain('stdout');
-  });
-});
-
-describe('showTransportInBrowser', () => {
-  test('closing it out is the only success, and the code never comes back', async () => {
-    let url = '';
-    const seen: Array<Record<string, unknown>> = [];
-    const done = showTransportInBrowser({ ...TRANSPORT, onListen: (u) => (url = u) });
-    const u = new URL(await waitForUrl(() => url));
-    const nonce = u.searchParams.get('n') ?? '';
-
-    // The code is on the page the CLI serves — that is the whole point.
-    const page = await (await fetch(u.href)).text();
-    expect(page).toContain('AgQxMjM0NTY3ODkw');
-
-    seen.push((await submit(u, nonce, { __action: 'done' })).body);
-    expect(await done).toEqual({ acknowledged: true });
-  });
-
-  test('a submit carrying anything but an action is refused before it is read', async () => {
-    // This is what makes it structurally impossible for the code on the page
-    // to travel back over the loopback.
-    let url = '';
-    const done = showTransportInBrowser({ ...TRANSPORT, onListen: (u) => (url = u) });
-    const u = new URL(await waitForUrl(() => url));
-    const nonce = u.searchParams.get('n') ?? '';
-
-    const withCode = await submit(u, nonce, { __action: 'done', redeemCommand: CODE });
-    expect(withCode.status).toBe(200);
-    expect(withCode.body.error).toContain('an action and nothing else');
-    expect(withCode.body.done).toBeUndefined();
-
-    const bare = await submit(u, nonce, { copied: true });
-    expect(bare.body.error).toContain('an action and nothing else');
-
-    await submit(u, nonce, { __action: 'done' });
-    expect(await done).toEqual({ acknowledged: true });
-  });
-
-  test('an action this screen does not offer is refused', async () => {
-    let url = '';
-    const done = showTransportInBrowser({ ...TRANSPORT, onListen: (u) => (url = u) });
-    const u = new URL(await waitForUrl(() => url));
-    const nonce = u.searchParams.get('n') ?? '';
-
-    const res = await submit(u, nonce, { __action: 'revoke' });
-    expect(res.body.error).toContain('not an action this screen offers');
-
-    await submit(u, nonce, { __action: 'cancel' });
-    await done;
-  });
-
-  test('cancelling ends the run without pretending the code was un-minted', async () => {
-    let url = '';
-    const done = showTransportInBrowser({ ...TRANSPORT, onListen: (u) => (url = u) });
-    const u = new URL(await waitForUrl(() => url));
-    const nonce = u.searchParams.get('n') ?? '';
-    await submit(u, nonce, { __action: 'cancel' });
-    expect(await done).toEqual({ acknowledged: false });
   });
 });

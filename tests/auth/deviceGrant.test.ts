@@ -1,10 +1,20 @@
 /**
  * `capy pair`'s RFC 8628 device-grant polling (CAP-684) — branches ONLY on
- * the RFC's own wire codes (`authorization_pending`, `slow_down`,
- * `expired_token`, `access_denied`), never on prose. `fetch` is mocked
- * directly (not via `mock.module`) since this file exercises pure request
- * logic, not a module boundary — same non-isolated pattern other pure-logic
- * test files in this repo use.
+ * `/auth/device/token`'s `status` plus `code` fields (never HTTP status
+ * alone, never message text), matching the service as built
+ * (service/src/routes/auth.ts + service/src/middleware/rateLimit.ts):
+ *
+ *   - pending      HTTP 200 `{status:'pending', code:'authorization_pending'}`
+ *   - slow_down    HTTP 200 `{status:'pending', code:'slow_down'}` (the rate
+ *                  limiter tripping sends this too, same shape)
+ *   - expired      HTTP 400 `{status:'denied', code:'expired_token'}`
+ *   - denied       HTTP 400 `{status:'denied', code:'access_denied'}`
+ *   - success      HTTP 200, NO `status` field at all — exactly
+ *                  `/auth/exchange`'s `{token, user, organizations}` shape
+ *
+ * `fetch` is mocked directly (not via `mock.module`) since this file
+ * exercises pure request logic, not a module boundary — same non-isolated
+ * pattern other pure-logic test files in this repo use.
  */
 import { describe, test, expect, jest, afterEach } from 'bun:test';
 import { authorizeDevice, pollDeviceTokenOnce, pollDeviceToken } from '../../src/auth/deviceGrant';
@@ -38,6 +48,12 @@ afterEach(() => {
   globalThis.fetch = originalFetch;
 });
 
+const SUCCESS_BODY = {
+  token: { access_token: 'jwt', refresh_token: 'rt', expires_in: 600 },
+  user: { id: 'user_1', email: 'a@b.com', first_name: null, last_name: null },
+  organizations: [{ id: 'org_1', workos_org_id: 'wo_1', name: 'Acme' }],
+};
+
 describe('authorizeDevice', () => {
   test('returns the authorize response on success', async () => {
     mockFetchSequence([{ status: 200, body: { device_code: 'dc', user_code: 'ABCD-EFGH', verification_uri: 'https://x/verify', expires_in: 600, interval: 5 } }]);
@@ -46,8 +62,30 @@ describe('authorizeDevice', () => {
     expect(result.user_code).toBe('ABCD-EFGH');
   });
 
-  test('throws a coded CapyError on failure', async () => {
-    mockFetchSequence([{ status: 500, body: { error: 'boom' } }]);
+  test('surfaces the service INVALID_FORMAT code rather than a generic one', async () => {
+    mockFetchSequence([{ status: 400, body: { error: 'public_key must be a base64url-encoded raw uncompressed P-256 point', code: 'INVALID_FORMAT' } }]);
+    try {
+      await authorizeDevice('https://api.example', 'not-a-key');
+      throw new Error('should have thrown');
+    } catch (err: any) {
+      expect(err).toBeInstanceOf(CapyError);
+      expect(err.code).toBe('INVALID_FORMAT');
+    }
+  });
+
+  test('falls back to AUTH_FAILED for a code outside the known set', async () => {
+    mockFetchSequence([{ status: 502, body: { error: 'Failed to start device authorization', code: 'SOME_UNKNOWN_CODE' } }]);
+    try {
+      await authorizeDevice('https://api.example', 'pubkey');
+      throw new Error('should have thrown');
+    } catch (err: any) {
+      expect(err).toBeInstanceOf(CapyError);
+      expect(err.code).toBe('AUTH_FAILED');
+    }
+  });
+
+  test('falls back to AUTH_FAILED with no code at all', async () => {
+    mockFetchSequence([{ status: 502, body: { error: 'boom' } }]);
     try {
       await authorizeDevice('https://api.example', 'pubkey');
       throw new Error('should have thrown');
@@ -59,39 +97,32 @@ describe('authorizeDevice', () => {
 });
 
 describe('pollDeviceTokenOnce', () => {
-  test('maps authorization_pending', async () => {
-    mockFetchSequence([{ status: 400, body: { error: 'authorization_pending' } }]);
+  test('maps {status:"pending", code:"authorization_pending"} (HTTP 200)', async () => {
+    mockFetchSequence([{ status: 200, body: { status: 'pending', code: 'authorization_pending' } }]);
     const result = await pollDeviceTokenOnce('https://api.example', 'dc');
     expect(result.status).toBe('pending');
   });
 
-  test('maps slow_down', async () => {
-    mockFetchSequence([{ status: 400, body: { error: 'slow_down' } }]);
+  test('maps {status:"pending", code:"slow_down"} (HTTP 200 — WorkOS or the rate limiter tripping, same shape)', async () => {
+    mockFetchSequence([{ status: 200, body: { status: 'pending', code: 'slow_down' } }]);
     const result = await pollDeviceTokenOnce('https://api.example', 'dc');
     expect(result.status).toBe('slow_down');
   });
 
-  test('maps expired_token', async () => {
-    mockFetchSequence([{ status: 400, body: { error: 'expired_token' } }]);
+  test('maps {status:"denied", code:"expired_token"} (HTTP 400)', async () => {
+    mockFetchSequence([{ status: 400, body: { status: 'denied', code: 'expired_token' } }]);
     const result = await pollDeviceTokenOnce('https://api.example', 'dc');
     expect(result.status).toBe('expired');
   });
 
-  test('maps access_denied', async () => {
-    mockFetchSequence([{ status: 400, body: { error: 'access_denied' } }]);
+  test('maps {status:"denied", code:"access_denied"} (HTTP 400)', async () => {
+    mockFetchSequence([{ status: 400, body: { status: 'denied', code: 'access_denied' } }]);
     const result = await pollDeviceTokenOnce('https://api.example', 'dc');
     expect(result.status).toBe('denied');
   });
 
-  test('maps success with token/user/organizations', async () => {
-    mockFetchSequence([{
-      status: 200,
-      body: {
-        token: { access_token: 'jwt', refresh_token: 'rt', expires_in: 600 },
-        user: { id: 'user_1', email: 'a@b.com', first_name: null, last_name: null },
-        organizations: [{ id: 'org_1', workos_org_id: 'wo_1', name: 'Acme' }],
-      },
-    }]);
+  test('maps success (HTTP 200, no `status` field, a token present) to the /auth/exchange shape', async () => {
+    mockFetchSequence([{ status: 200, body: SUCCESS_BODY }]);
     const result = await pollDeviceTokenOnce('https://api.example', 'dc');
     expect(result.status).toBe('success');
     if (result.status === 'success') {
@@ -100,8 +131,27 @@ describe('pollDeviceTokenOnce', () => {
     }
   });
 
-  test('an unrecognized error code throws rather than being treated as a poll state', async () => {
-    mockFetchSequence([{ status: 400, body: { error: 'some_other_error' } }]);
+  test('a 200 with `status` set is NEVER treated as success even though the HTTP status is ok', async () => {
+    // Regression guard for the exact bug this endpoint's shape invites: HTTP
+    // 200 is not itself the success signal, `status` field absence is.
+    mockFetchSequence([{ status: 200, body: { status: 'pending', code: 'authorization_pending', ...SUCCESS_BODY } }]);
+    const result = await pollDeviceTokenOnce('https://api.example', 'dc');
+    expect(result.status).toBe('pending');
+  });
+
+  test('surfaces the service INVALID_FORMAT code for a malformed request', async () => {
+    mockFetchSequence([{ status: 400, body: { error: 'device_code is required', code: 'INVALID_FORMAT' } }]);
+    try {
+      await pollDeviceTokenOnce('https://api.example', '');
+      throw new Error('should have thrown');
+    } catch (err: any) {
+      expect(err).toBeInstanceOf(CapyError);
+      expect(err.code).toBe('INVALID_FORMAT');
+    }
+  });
+
+  test('an unrecognized shape throws AUTH_FAILED rather than being treated as a poll state', async () => {
+    mockFetchSequence([{ status: 400, body: { status: 'denied', code: 'some_other_code' } }]);
     try {
       await pollDeviceTokenOnce('https://api.example', 'dc');
       throw new Error('should have thrown');
@@ -115,16 +165,9 @@ describe('pollDeviceTokenOnce', () => {
 describe('pollDeviceToken', () => {
   test('retries through pending and slow_down, then returns success', async () => {
     mockFetchSequence([
-      { status: 400, body: { error: 'authorization_pending' } },
-      { status: 400, body: { error: 'slow_down' } },
-      {
-        status: 200,
-        body: {
-          token: { access_token: 'jwt', refresh_token: 'rt', expires_in: 600 },
-          user: { id: 'user_1', email: 'a@b.com', first_name: null, last_name: null },
-          organizations: [],
-        },
-      },
+      { status: 200, body: { status: 'pending', code: 'authorization_pending' } },
+      { status: 200, body: { status: 'pending', code: 'slow_down' } },
+      { status: 200, body: SUCCESS_BODY },
     ]);
     // `jest.fn()` does its own call-recording — reading `.mock.calls` back
     // afterward needs no accumulator of our own to mutate.
@@ -141,7 +184,7 @@ describe('pollDeviceToken', () => {
   });
 
   test('throws on expired_token', async () => {
-    mockFetchSequence([{ status: 400, body: { error: 'expired_token' } }]);
+    mockFetchSequence([{ status: 400, body: { status: 'denied', code: 'expired_token' } }]);
     try {
       await pollDeviceToken('https://api.example', 'dc', { intervalMs: 1000, timeoutMs: 60000, sleep: async () => {}, now: () => 0 });
       throw new Error('should have thrown');
@@ -152,7 +195,7 @@ describe('pollDeviceToken', () => {
   });
 
   test('throws on access_denied', async () => {
-    mockFetchSequence([{ status: 400, body: { error: 'access_denied' } }]);
+    mockFetchSequence([{ status: 400, body: { status: 'denied', code: 'access_denied' } }]);
     try {
       await pollDeviceToken('https://api.example', 'dc', { intervalMs: 1000, timeoutMs: 60000, sleep: async () => {}, now: () => 0 });
       throw new Error('should have thrown');
@@ -163,7 +206,7 @@ describe('pollDeviceToken', () => {
   });
 
   test('gives up as expired once the wall-clock budget is exceeded', async () => {
-    mockFetchSequence([{ status: 400, body: { error: 'authorization_pending' } }]);
+    mockFetchSequence([{ status: 200, body: { status: 'pending', code: 'authorization_pending' } }]);
     // First call establishes the deadline (small); every check after is past
     // it. `jest.fn()`'s own call count stands in for a counter this test
     // would otherwise have to mutate itself.

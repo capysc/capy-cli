@@ -11,12 +11,22 @@
  * result — so this stays a sibling of `postJson`, not a `ServiceClient`
  * method.
  *
- * Server side: `service/src/auth/deviceGrant.ts`, a proxy to WorkOS's own
- * RFC 8628 device authorization grant. The codes branched on below —
- * `authorization_pending`, `slow_down`, `expired_token`, `access_denied` —
- * are that RFC's own wire vocabulary, not prose: cardinal Rule 5 (never
- * branch on human-readable strings) is satisfied by them being a fixed,
- * versioned protocol enum, the same way an HTTP status code is.
+ * Server side: `service/src/routes/auth.ts` (`/device/authorize`,
+ * `/device/token`) and `service/src/middleware/rateLimit.ts`
+ * (`deviceGrantLimiter`), a proxy to WorkOS's own RFC 8628 device
+ * authorization grant. `/auth/device/token`'s response is NOT distinguished
+ * by HTTP status alone — a still-polling outcome (`authorization_pending`,
+ * and `slow_down` from either WorkOS or the rate limiter tripping) is HTTP
+ * 200 with `{status:'pending', code}`, matching the route's own convention
+ * that polling is not an HTTP error; only a terminal outcome
+ * (`expired_token`/`access_denied`) is HTTP 400 with `{status:'denied',
+ * code}`. Success carries no `status` field at all — it is exactly
+ * `/auth/exchange`'s response shape, structurally distinguishable from
+ * "pending" by that field's absence. Every branch below keys off `status`
+ * plus `code`, never off HTTP status or message text (cardinal Rule 5) —
+ * `authorization_pending`/`slow_down`/`expired_token`/`access_denied` are
+ * RFC 8628's own wire vocabulary, a fixed versioned protocol enum, the same
+ * way an HTTP status code is.
  */
 import type { Organization } from '../types/index';
 import { CapyError, ERROR_CODES } from '../types/index';
@@ -30,14 +40,30 @@ export interface DeviceAuthorizeResult {
   interval: number;
 }
 
-async function postJson<T>(url: string, body: Record<string, unknown>): Promise<{ ok: boolean; status: number; data: T & { error?: string } }> {
+async function postJson<T>(url: string, body: Record<string, unknown>): Promise<{ ok: boolean; status: number; data: T & { error?: string; code?: string } }> {
   const res = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
-  const data = (await res.json().catch(() => ({}))) as T & { error?: string };
+  const data = (await res.json().catch(() => ({}))) as T & { error?: string; code?: string };
   return { ok: res.ok, status: res.status, data };
+}
+
+/**
+ * Codes this module will surface as-is on a thrown `CapyError`, rather than
+ * collapsing to the generic `AUTH_FAILED` — the real set `/device/authorize`
+ * and the non-polling branch of `/device/token` can send (`sendError`'s
+ * `{error, code}` shape): a malformed request is `INVALID_FORMAT`, anything
+ * else server-side is `AUTH_FAILED` itself. Anything outside this set is
+ * either the RFC 8628 polling vocabulary (handled separately, never thrown)
+ * or unrecognized, and falls back to `AUTH_FAILED` rather than trusting an
+ * arbitrary server-supplied string as one of ours.
+ */
+const KNOWN_DEVICE_GRANT_CODES = new Set<string>([ERROR_CODES.INVALID_FORMAT, ERROR_CODES.AUTH_FAILED]);
+
+function codeOrFallback(data: { code?: unknown }, fallback: string): string {
+  return typeof data.code === 'string' && KNOWN_DEVICE_GRANT_CODES.has(data.code) ? data.code : fallback;
 }
 
 /** `POST /auth/device/authorize {public_key}` — step 1 of `capy pair`. */
@@ -46,8 +72,8 @@ export async function authorizeDevice(apiUrl: string, publicKey: string): Promis
   if (!ok) {
     throw new CapyError(
       typeof data.error === 'string' ? data.error : 'Failed to start device pairing',
-      ERROR_CODES.AUTH_FAILED,
-      { status },
+      codeOrFallback(data, ERROR_CODES.AUTH_FAILED),
+      { status, code: data.code },
     );
   }
   return data;
@@ -74,28 +100,41 @@ const RFC8628_ERROR = {
   DENIED: 'access_denied',
 } as const;
 
+/**
+ * The shapes `/auth/device/token` actually answers with — see file header.
+ * `status`/`code` cover the pending/denied polling shapes; `token`/`user`/
+ * `organizations` cover the success shape (which carries no `status`).
+ * Loosely typed on purpose: this is raw, unvalidated JSON off the wire.
+ */
+interface DeviceTokenResponseBody {
+  status?: 'pending' | 'denied';
+  code?: string;
+  error?: string;
+  token?: DeviceTokenExchange['token'];
+  user?: DeviceTokenExchange['user'];
+  organizations?: Organization[];
+}
+
 /** One `POST /auth/device/token` attempt. Never throws for the four expected polling states. */
 export async function pollDeviceTokenOnce(apiUrl: string, deviceCode: string): Promise<DeviceTokenPoll> {
-  const { ok, status, data } = await postJson<DeviceTokenExchange>(`${apiUrl}/auth/device/token`, { device_code: deviceCode });
-  if (ok) {
-    return { status: 'success', token: data.token, user: data.user, organizations: data.organizations || [] };
+  const { status: httpStatus, data } = await postJson<DeviceTokenResponseBody>(`${apiUrl}/auth/device/token`, { device_code: deviceCode });
+
+  // Success is a STRUCTURAL fact, never inferred from the HTTP status alone
+  // (pending is ALSO 200): no `status` field, and a token actually arrived.
+  if (data.status === undefined && data.token && data.user) {
+    return { status: 'success', token: data.token, user: data.user, organizations: data.organizations ?? [] };
   }
-  switch (data.error) {
-    case RFC8628_ERROR.PENDING:
-      return { status: 'pending' };
-    case RFC8628_ERROR.SLOW_DOWN:
-      return { status: 'slow_down' };
-    case RFC8628_ERROR.EXPIRED:
-      return { status: 'expired' };
-    case RFC8628_ERROR.DENIED:
-      return { status: 'denied' };
-    default:
-      throw new CapyError(
-        typeof data.error === 'string' ? data.error : 'Device token exchange failed',
-        ERROR_CODES.AUTH_FAILED,
-        { status },
-      );
-  }
+
+  if (data.status === 'pending' && data.code === RFC8628_ERROR.PENDING) return { status: 'pending' };
+  if (data.status === 'pending' && data.code === RFC8628_ERROR.SLOW_DOWN) return { status: 'slow_down' };
+  if (data.status === 'denied' && data.code === RFC8628_ERROR.EXPIRED) return { status: 'expired' };
+  if (data.status === 'denied' && data.code === RFC8628_ERROR.DENIED) return { status: 'denied' };
+
+  throw new CapyError(
+    typeof data.error === 'string' ? data.error : 'Device token exchange failed',
+    codeOrFallback(data, ERROR_CODES.AUTH_FAILED),
+    { status: httpStatus, code: data.code },
+  );
 }
 
 export interface DevicePollOptions {

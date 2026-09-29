@@ -7,7 +7,7 @@
  */
 import { describe, test, expect } from 'bun:test';
 import { webcrypto } from 'crypto';
-import { generatePairKeyPair, openPairEnvelope, PAIR_AAD, type PairEnvelope } from '../../src/crypto/pairCrypto';
+import { generatePairKeyPair, openPairEnvelope, parsePairEnvelope, PAIR_AAD, type PairEnvelope } from '../../src/crypto/pairCrypto';
 import type { PairingPayload } from '../../src/crypto/pairingPayload';
 
 const PAYLOAD: PairingPayload = {
@@ -111,6 +111,55 @@ describe('openPairEnvelope', () => {
     const bogus = { v: 2 as any, epk: 'x', iv: 'x', ct: 'x' } as PairEnvelope;
     try {
       openPairEnvelope(bogus, keyPair);
+      throw new Error('should have thrown');
+    } catch (err: any) {
+      expect(err.code).toBe('INVALID_FORMAT');
+    }
+  });
+});
+
+describe('parsePairEnvelope', () => {
+  test('parses a JSON-stringified envelope and opens it — the real wire contract for /device-pairings/pickup\'s `sealed` field', async () => {
+    const keyPair = generatePairKeyPair();
+    const publicKeyRaw = Buffer.from(keyPair.publicKey, 'base64url');
+    const envelope = await sealAsBrowser(PAYLOAD, publicKeyRaw);
+    const sealed = JSON.stringify(envelope);
+
+    const parsed = parsePairEnvelope(sealed);
+    expect(parsed).toEqual(envelope);
+    expect(openPairEnvelope(parsed, keyPair)).toEqual(PAYLOAD);
+  });
+
+  test('refuses non-JSON with a coded INVALID_FORMAT', () => {
+    try {
+      parsePairEnvelope('not json at all');
+      throw new Error('should have thrown');
+    } catch (err: any) {
+      expect(err.code).toBe('INVALID_FORMAT');
+    }
+  });
+
+  test('refuses valid JSON with the wrong shape (missing fields)', () => {
+    try {
+      parsePairEnvelope(JSON.stringify({ v: 1, epk: 'x' }));
+      throw new Error('should have thrown');
+    } catch (err: any) {
+      expect(err.code).toBe('INVALID_FORMAT');
+    }
+  });
+
+  test('refuses valid JSON that is not an object at all', () => {
+    try {
+      parsePairEnvelope(JSON.stringify('just a string'));
+      throw new Error('should have thrown');
+    } catch (err: any) {
+      expect(err.code).toBe('INVALID_FORMAT');
+    }
+  });
+
+  test('refuses the wrong version number', () => {
+    try {
+      parsePairEnvelope(JSON.stringify({ v: 2, epk: 'x', iv: 'y', ct: 'z' }));
       throw new Error('should have thrown');
     } catch (err: any) {
       expect(err.code).toBe('INVALID_FORMAT');

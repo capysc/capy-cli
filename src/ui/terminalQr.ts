@@ -57,14 +57,39 @@ export interface RenderedQr {
  * Exported separately from {@link renderTerminalQr} so tests can assert on
  * the encoding without touching `process.stdout`/`process.env`.
  */
+/** Carries the callback's value out through the stack unwind below — never a reassigned binding. */
+class QrTextCaptured {
+  constructor(readonly text: string) {}
+}
+
+/**
+ * Bridges qrcode-terminal's callback shape into a return value, with no
+ * `let` anywhere, confined or otherwise.
+ *
+ * `generate` is synchronous despite the callback shape (see vendor/QRCode —
+ * no I/O, pure computation): the callback fires before `generate` returns.
+ * There is no non-callback form of this API, so rather than reassign a
+ * closure variable from inside the callback, the callback throws the value
+ * out as a {@link QrTextCaptured} and this function catches exactly that to
+ * return it — construction (the thrown instance), not mutation.
+ */
+function generateQrText(data: string): string {
+  try {
+    qrcodeTerminal.generate(data, { small: true }, (out: string) => {
+      throw new QrTextCaptured(out);
+    });
+  } catch (err) {
+    if (err instanceof QrTextCaptured) return err.text;
+    throw err;
+  }
+  // The library's callback is documented as always firing before `generate`
+  // returns (see above) — this is unreached in practice, and a thrown error
+  // here is far more honest than silently handing back an empty string.
+  throw new Error('qrcode-terminal did not call back synchronously');
+}
+
 export function buildTerminalQr(data: string): RenderedQr {
-  let text = '';
-  // qrcode-terminal's `generate` is synchronous despite the callback shape
-  // (see vendor/QRCode — no I/O, pure computation); the callback fires
-  // before `generate` returns, so capturing into a closure is safe here.
-  qrcodeTerminal.generate(data, { small: true }, (out: string) => {
-    text = out;
-  });
+  const text = generateQrText(data);
   const lines = text.split('\n').filter((l) => l.length > 0);
   const width = lines.reduce((max, l) => Math.max(max, [...l].length), 0);
   return { text, width, height: lines.length };

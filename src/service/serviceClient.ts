@@ -32,10 +32,14 @@ const SERVER_CODES = new Set<string>([
   ERROR_CODES.NO_SECRETS,
   ERROR_CODES.ORG_NOT_FOUND,
   ERROR_CODES.DEPLOY_TOKEN_NOT_FOUND,
-  // CAP-684 basic pairing — device-pairings pickup refusals.
+  // CAP-684 basic pairing — device-pairings pickup refusals. INVALID_FORMAT
+  // is real here too: pickup's own `sendError` 400 for a missing/empty
+  // `device_code` (service/src/routes/devicePairings.ts) — without it in
+  // this allowlist, that 400 would misclassify as the generic SERVICE_ERROR.
   ERROR_CODES.PAIRING_NOT_FOUND,
   ERROR_CODES.PAIRING_WRONG_USER,
   ERROR_CODES.PAIRING_NOT_READY,
+  ERROR_CODES.INVALID_FORMAT,
 ]);
 
 /**
@@ -664,8 +668,13 @@ export class ServiceClient {
    * `capy pair`'s last step: exchanges the now-authenticated device code for
    * whatever Keep sealed to the CLI's public key. The server returns this
    * only once — the row is deleted on pickup, same lifecycle as `/transports`.
+   *
+   * `sealed` is a JSON STRING (the `JSON.stringify` of the pair envelope
+   * `{v:1, epk, iv, ct}`, the same convention `createTransport`'s
+   * `ciphertext` argument uses) — the caller must `JSON.parse` and validate
+   * it before opening (see `crypto/pairCrypto.ts#parsePairEnvelope`).
    */
-  async pickupDevicePairing(deviceCode: string): Promise<{ sealed: { v: 1; epk: string; iv: string; ct: string } }> {
+  async pickupDevicePairing(deviceCode: string): Promise<{ sealed: string }> {
     return this.request('POST', '/device-pairings/pickup', { device_code: deviceCode });
   }
 

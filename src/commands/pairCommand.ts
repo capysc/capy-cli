@@ -13,7 +13,7 @@
  */
 import { resolveActiveUrl } from '../config/profileConfig';
 import { resolveKeepOrigin } from '../config/keepOrigin';
-import { generatePairKeyPair, openPairEnvelope } from '../crypto/pairCrypto';
+import { generatePairKeyPair, openPairEnvelope, parsePairEnvelope } from '../crypto/pairCrypto';
 import { authorizeDevice, pollDeviceToken } from '../auth/deviceGrant';
 import { AuthService } from '../auth/authService';
 import { ServiceClient } from '../service/serviceClient';
@@ -97,7 +97,8 @@ export async function pairCommand(options: PairOptions = {}): Promise<void> {
     serviceClient.setTokenProvider(() => authService.getValidToken());
 
     const { sealed } = await serviceClient.pickupDevicePairing(authorize.device_code);
-    const payload = openPairEnvelope(sealed, keyPair);
+    const envelope = parsePairEnvelope(sealed);
+    const payload = openPairEnvelope(envelope, keyPair);
 
     const matching = payload.entries.filter((e) => e.user_id === exchange.user.id);
     if (matching.length === 0) {

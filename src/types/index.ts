@@ -600,10 +600,8 @@ export const ERROR_CODES = {
   // --- Basic pairing (CAP-684, docs/basic-pair.md) ---
   /** `capy transport`: no `local.key`/`key.enc` on this machine for the project's org+user — nothing to transport. */
   TRANSPORT_NO_LOCAL_KEY: 'TRANSPORT_NO_LOCAL_KEY',
-  /** Keep `/transport`'s activate: the transport row is missing, already used, or expired — one code, so nobody can probe which. */
+  /** Keep `/transport`'s activate: the transport row is missing, already used, expired, or belongs to a different user — one code for all four, so nobody can probe which (the transport id travels in a plain link). */
   TRANSPORT_NOT_FOUND: 'TRANSPORT_NOT_FOUND',
-  /** Keep `/transport`'s activate: the caller is not the row's user. */
-  TRANSPORT_WRONG_USER: 'TRANSPORT_WRONG_USER',
   /** `capy pair`'s pickup: the `device_pairings` row is missing or already used. */
   PAIRING_NOT_FOUND: 'PAIRING_NOT_FOUND',
   /** `capy pair`'s pickup: the token's user doesn't match the row's user. */
