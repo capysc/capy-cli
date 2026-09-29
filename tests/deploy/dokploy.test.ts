@@ -868,6 +868,46 @@ describe('dokploy — remove', () => {
     expect(r).toEqual({ ok: true, code: 'nothing_to_remove', detail: expect.any(String) });
   });
 
+  test('a block deleted BY HAND, leaving stray "# capy:off " lines behind, is still offered for cleanup — never reported as nothing_to_remove', async () => {
+    // Simulates someone deleting just the begin/end markers + block content
+    // in the Dokploy dashboard, by hand, leaving the commented lines Capy
+    // added sitting there — ordinary comments to Dokploy, so nothing else
+    // would ever clean them up. `splitManagedBlock` sees `hadBlock: false`
+    // here (no markers at all), but there IS still work to do.
+    const strayEnv = `${CAPY_OFF_MARKER}STRIPE_KEY=stale\nNODE_ENV=production\n`;
+    const restoredEnv = 'STRIPE_KEY=stale\nNODE_ENV=production\n';
+    const s = scripted([
+      readApp(app({ env: strayEnv })),
+      {
+        expect: post('application.saveEnvironment', (body) =>
+          expect(body).toEqual({
+            applicationId: APP_ID,
+            env: restoredEnv,
+            buildArgs: 'NPM_TOKEN=build-only',
+            buildSecrets: 'SENTRY_AUTH=build-secret',
+            createEnvFile: false,
+          }),
+        ),
+        json: true,
+      },
+      readApp(app({ env: restoredEnv })),
+    ]);
+    const r = await adapterWith(s.fetch).onRemove?.(target(), confirmCtx(true, true));
+    expect(s.done()).toBe(true);
+    expect(r).toEqual({ ok: true, code: 'stripped', detail: expect.stringContaining('Un-commented') });
+  });
+
+  test('a block deleted by hand with NO stray marked lines left behind really is nothing to remove', async () => {
+    const s = scripted([readApp(app({ env: 'NODE_ENV=production\nSTRIPE_KEY=whatever\n' }))]);
+    const r = await adapterWith(s.fetch).onRemove?.(target(), {
+      cwd: '/tmp',
+      interactive: true,
+      confirm: neverAsked,
+    });
+    expect(s.done()).toBe(true);
+    expect(r).toEqual({ ok: true, code: 'nothing_to_remove', detail: expect.any(String) });
+  });
+
   test('a malformed block is refused rather than guessed at, with no prompt', async () => {
     const s = scripted([readApp(app({ env: `${MANAGED_BEGIN}\nA=1` }))]);
     const r = await adapterWith(s.fetch).onRemove?.(target(), {

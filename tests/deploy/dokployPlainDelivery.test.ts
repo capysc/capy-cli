@@ -23,6 +23,7 @@ import {
   CAPY_OFF_MARKER,
   MANAGED_BEGIN,
   MANAGED_END,
+  describeDokployPlainMergeProblem,
   formatDotenvValue,
   mergeManagedValuesBlock,
   mismatchedDeliveredValues,
@@ -87,6 +88,9 @@ const ADVERSARIAL_VALUES: readonly string[] = [
   // All three quote types but no newline and no literal escape sequence —
   // still representable (double-quote branch).
   "has ' and " + '`' + ' but no double quote',
+  // Literal ${{ — refused outright (Dokploy resolves this itself); covered
+  // by dedicated tests below, listed here too for round-trip-loop symmetry.
+  '${{project.OTHER_VAR}}',
 ];
 
 describe('formatDotenvValue — property: dotenv.parse(render(x)) === x', () => {
@@ -123,8 +127,28 @@ describe('formatDotenvValue — property: dotenv.parse(render(x)) === x', () => 
     if (!r.ok) expect(r.code).toBe('DOKPLOY_VALUE_UNREPRESENTABLE');
   });
 
-  test('a value using all three quote characters, with only a literal backslash-r (no double quote itself present is irrelevant once both other quotes are used up), refuses', () => {
+  test('a value using all three quote characters, with only a literal backslash-r, refuses', () => {
     const value = "' and " + '\u0060' + ' and " together, plus a literal \\r sequence';
+    const r = formatDotenvValue(value);
+    expect(r.ok).toBe(false);
+  });
+
+  // Regression: `formatDotenvValue` originally only guarded the double-quote
+  // branch against a literal \n (backslash + n), missing that `dotenv`
+  // ALSO decodes a literal \r (backslash + r) inside a double-quoted
+  // value. A value with ' and backtick but deliberately NO " is the one
+  // case that actually exercises the double-quote branch -- the sibling
+  // test above (which also has a literal ") would refuse either way and so
+  // passes vacuously regardless of whether the \r guard exists at all.
+  test('single + backtick quotes, no double quote, but a literal backslash-r: refuses rather than corrupting the value into a real CR', () => {
+    const value = "has ' and " + '\u0060' + ' but no double quote, plus a literal \\r sequence';
+    const r = formatDotenvValue(value);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.code).toBe('DOKPLOY_VALUE_UNREPRESENTABLE');
+  });
+
+  test('single + backtick quotes, no double quote, but a literal backslash-n: refuses (the backslash-n sibling of the case above)', () => {
+    const value = "has ' and " + '\u0060' + ' but no double quote, plus a literal \\n sequence';
     const r = formatDotenvValue(value);
     expect(r.ok).toBe(false);
   });
@@ -148,6 +172,26 @@ describe('formatDotenvValue — property: dotenv.parse(render(x)) === x', () => 
       const r = formatDotenvValue(value);
       expect(r.ok).toBe(false);
       if (!r.ok) expect(r.code).toBe('DOKPLOY_VALUE_UNREPRESENTABLE');
+    }
+  });
+
+  test('a value containing a literal ${{ refuses with DOKPLOY_VALUE_HAS_REFERENCE, regardless of quoting or how simple the rest of the value is', () => {
+    for (const value of [
+      '${{project.OTHER_VAR}}',
+      'prefix-${{environment.DB}}-suffix',
+      "has a ' quote and ${{project.X}} too",
+      '${{',
+    ]) {
+      const r = formatDotenvValue(value);
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.code).toBe('DOKPLOY_VALUE_HAS_REFERENCE');
+    }
+  });
+
+  test('a single closing brace or a single $ alone is NOT a reference — only the literal ${{ triggers the refusal', () => {
+    for (const value of ['just a } brace', 'a $ sign alone', '{{not-a-reference}}', '${notEither}']) {
+      const r = formatDotenvValue(value);
+      expect(r.ok).toBe(true);
     }
   });
 
@@ -367,6 +411,124 @@ describe('mergeManagedValuesBlock / removeManagedValuesBlock — round trip', ()
     const r = mergeManagedValuesBlock(`${MANAGED_BEGIN}\nA=1`, V);
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.problem.code).toBe('malformed_block');
+  });
+
+  test('a value containing a literal ${{ is refused before any write — never resolved by Dokploy on Capy’s behalf', () => {
+    const r = mergeManagedValuesBlock('NODE_ENV=production', [
+      { name: 'DATABASE_URL', value: 'postgres://real' },
+      { name: 'SNEAKY', value: '${{project.OTHER}}' },
+    ]);
+    expect(r.ok).toBe(false);
+    if (!r.ok && r.problem.code !== 'malformed_block') {
+      expect(r.problem.problems).toEqual([{ name: 'SNEAKY', code: 'DOKPLOY_VALUE_HAS_REFERENCE' }]);
+    }
+  });
+});
+
+// ── describeDokployPlainMergeProblem: mixed-problem grouping ───────────────
+
+describe('describeDokployPlainMergeProblem', () => {
+  test('groups a mix of DOKPLOY_VALUE_HAS_REFERENCE and DOKPLOY_VALUE_UNREPRESENTABLE, naming every variable, with no single misleading top-level code', () => {
+    const bad = "' and " + '`' + ' and " and a literal \\n';
+    const r = mergeManagedValuesBlock('NODE_ENV=production', [
+      { name: 'REF_VAR', value: '${{project.OTHER}}' },
+      { name: 'BAD_VAR', value: bad },
+    ]);
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    const described = describeDokployPlainMergeProblem(r.problem);
+    expect(described.reason).toContain('REF_VAR');
+    expect(described.reason).toContain('BAD_VAR');
+    expect(described.hint).toContain('REF_VAR');
+    expect(described.hint).toContain('BAD_VAR');
+    // Mixed problem set — no single ErrorCode correctly describes both, so
+    // none is reported (Rule 5: never a misleading/wrong code).
+    expect(described.code).toBeUndefined();
+  });
+
+  test('a single-reason refusal DOES carry the matching code', () => {
+    const r1 = mergeManagedValuesBlock('NODE_ENV=production', [{ name: 'REF_VAR', value: '${{project.OTHER}}' }]);
+    if (r1.ok) throw new Error('expected a refusal');
+    expect(describeDokployPlainMergeProblem(r1.problem).code).toBe('DOKPLOY_VALUE_HAS_REFERENCE');
+
+    const bad = "' and " + '`' + ' and " and a literal \\n';
+    const r2 = mergeManagedValuesBlock('NODE_ENV=production', [{ name: 'BAD_VAR', value: bad }]);
+    if (r2.ok) throw new Error('expected a refusal');
+    expect(describeDokployPlainMergeProblem(r2.problem).code).toBe('DOKPLOY_VALUE_UNREPRESENTABLE');
+  });
+});
+
+// ── Seeded fuzz test: never lossy, over a large random sample ──────────────
+//
+// A deterministic PRNG (mulberry32, fixed seed) generates several thousand
+// random strings from an alphabet chosen to hit every corner formatDotenvValue
+// cares about: all three quote characters, backslash, the letters n/r (for
+// literal backslash-n/backslash-r sequences), a real newline, space, #, $,
+// { and } (for ${{ references), =, a plain letter, and a tab. Every one of
+// them must EITHER round-trip exactly through dotenv.parse OR be refused —
+// never written lossy. Deterministic: a failure here always reproduces.
+//
+// Written functionally throughout (Rule 1: no `let`, no mutation) — one
+// pure step function threaded via `reduce`, never a closure over a
+// reassigned seed variable.
+
+/** One mulberry32 step: `state` in, `{value, next}` out — no mutation, the state itself is the only thing threaded forward. */
+function mulberry32Step(state: number): { value: number; next: number } {
+  const s = (state + 0x6d2b79f5) | 0;
+  const t1 = Math.imul(s ^ (s >>> 15), 1 | s);
+  const t2 = (t1 + Math.imul(t1 ^ (t1 >>> 7), 61 | t1)) ^ t1;
+  const value = ((t2 ^ (t2 >>> 14)) >>> 0) / 4294967296;
+  return { value, next: s };
+}
+
+/** `count` pseudo-random floats in [0, 1), deterministic from `seed` — built via `reduce`, each step a fresh array (spread), never `.push` onto an existing one. */
+function randomSequence(seed: number, count: number): readonly number[] {
+  return Array.from({ length: count }).reduce<{ values: readonly number[]; state: number }>(
+    (acc) => {
+      const { value, next } = mulberry32Step(acc.state);
+      return { values: [...acc.values, value], state: next };
+    },
+    { values: [], state: seed },
+  ).values;
+}
+
+const FUZZ_ALPHABET = ["'", '"', '`', '\\', 'n', 'r', '\n', ' ', '#', '$', '{', '}', '=', 'a', '\t'] as const;
+/** Random draws consumed per fuzz value: 1 to pick a length, the rest as candidate characters (unused tail draws are simply sliced off). */
+const FUZZ_MAX_LEN = 24;
+const FUZZ_STRIDE = FUZZ_MAX_LEN + 1;
+
+/** One fuzz value from its own fixed-size slice of the shared draw sequence — pure, no shared mutable index. */
+function fuzzValueFromDraws(draws: readonly number[]): string {
+  const len = Math.floor(draws[0] * FUZZ_MAX_LEN);
+  return draws
+    .slice(1, 1 + len)
+    .map((d) => FUZZ_ALPHABET[Math.floor(d * FUZZ_ALPHABET.length)])
+    .join('');
+}
+
+/** `count` deterministic fuzz values from one seed — each consumes its own fixed-stride slice of one flat draw sequence. */
+function fuzzCases(seed: number, count: number): readonly string[] {
+  const draws = randomSequence(seed, count * FUZZ_STRIDE);
+  return Array.from({ length: count }, (_, i) => fuzzValueFromDraws(draws.slice(i * FUZZ_STRIDE, (i + 1) * FUZZ_STRIDE)));
+}
+
+type FuzzOutcome = { kind: 'refused' } | { kind: 'roundtrip'; exact: boolean };
+
+describe('formatDotenvValue — seeded fuzz: never lossy', () => {
+  test('3000 deterministic random values each either round-trip exactly or are refused', () => {
+    const cases = fuzzCases(0xc0ffee, 3000);
+    const outcomes: readonly FuzzOutcome[] = cases.map((value) => {
+      const rendered = formatDotenvValue(value);
+      if (!rendered.ok) return { kind: 'refused' };
+      const parsed = parseDotenv(`V=${rendered.rendered}`);
+      return { kind: 'roundtrip', exact: parsed.V === value };
+    });
+    const lossy = outcomes.filter((o) => o.kind === 'roundtrip' && !o.exact);
+    expect(lossy).toEqual([]);
+    // Sanity: the alphabet is adversarial enough that BOTH outcomes actually
+    // happen — a fuzz test that only ever hits one branch isn't testing much.
+    expect(outcomes.some((o) => o.kind === 'roundtrip' && o.exact)).toBe(true);
+    expect(outcomes.some((o) => o.kind === 'refused')).toBe(true);
   });
 });
 

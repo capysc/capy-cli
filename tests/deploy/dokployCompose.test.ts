@@ -538,6 +538,28 @@ describe('dokploy compose — remove', () => {
     expect(r?.code).toBe('nothing_to_remove');
   });
 
+  test('a block deleted BY HAND, leaving stray "# capy:off " lines behind, is still offered for cleanup — never nothing_to_remove', async () => {
+    // No begin/end markers at all (hadBlock: false) — but a stray commented
+    // line from a prior deploy is still sitting there, an ordinary comment
+    // to Dokploy that nothing else would ever clean up.
+    const strayEnv = `${CAPY_OFF_MARKER}STRIPE_KEY=stale\n${RAW_ENV}`;
+    const restoredEnv = `STRIPE_KEY=stale\n${RAW_ENV}`;
+    const s = scripted([
+      readCompose(compose({ env: strayEnv })),
+      {
+        expect: post('compose.saveEnvironment', (body) => expect(body).toEqual({ composeId: COMPOSE_ID, env: restoredEnv, createEnvFile: true })),
+        json: true,
+      },
+      readCompose(compose({ env: restoredEnv })),
+      { expect: post('compose.redeploy', () => {}), json: true },
+    ]);
+    const r = await adapterWith(s.fetch).onRemove?.(composeTarget(), removeCtx(true, true));
+    expect(s.done()).toBe(true);
+    expect(r?.ok).toBe(true);
+    expect(r?.code).toBe('stripped');
+    expect(r?.detail).toContain('Un-commented');
+  });
+
   test('declined confirm leaves the environment untouched', async () => {
     const s = scripted([readCompose(compose({ env: managedEnv }))]);
     const r = await adapterWith(s.fetch).onRemove?.(composeTarget(), removeCtx(true, false));
