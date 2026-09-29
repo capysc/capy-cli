@@ -167,9 +167,11 @@ export function buildDeployDestinationData(
 
   const answers: Partial<Record<DeployStopId, string>> = {};
   if (row) answers.platform = row.name;
-  if (p.mode) answers.mode = p.mode === 'connector' ? 'Connector' : 'Deploy token';
+  // CAP-679 follow-up: display text says "Target" now — 'connector' stays
+  // the internal value (untouched: `WebDeployDestinationParams.mode` etc.).
+  if (p.mode) answers.mode = p.mode === 'connector' ? 'Target' : 'Deploy token';
 
-  // A platform with no connector never reaches the mode question — the
+  // A platform with no target adapter never reaches the mode question — the
   // terminal skips it in silence, and this is the line that says so.
   const skipped: DeployStopId[] = row && !row.hasConnector ? ['mode'] : [];
 
@@ -185,8 +187,11 @@ export function buildDeployDestinationData(
     platform: row,
     rejected: p.rejected,
     nonTty: {
-      command: 'capy deploy --platform <id> --mode connector',
-      why: 'The platform decides which connector runs and the mode decides whether Capy deploys at all, so neither is guessed: an unanswered run refuses rather than picking one.',
+      // `--mode target` is the new spelling; `--mode connector` still works
+      // as a hidden alias (see index.ts's normalization) — the example shown
+      // to a non-TTY caller uses the new one.
+      command: 'capy deploy --platform <id> --mode target',
+      why: 'The platform decides which target adapter runs and the mode decides whether Capy deploys at all, so neither is guessed: an unanswered run refuses rather than picking one.',
     },
   };
 }

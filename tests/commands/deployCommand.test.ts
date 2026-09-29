@@ -227,9 +227,11 @@ describe('capy deploy — coexistence: token+docs flow + connector flow', () => 
     expect((r2.stdout + r2.stderr)).toContain('List deploy tokens');
   });
 
-  test('connector subcommands are addressable as `targets` / `targets-remove`', () => {
+  test('target subcommands are addressable as `targets` / `targets-remove`', () => {
+    // CAP-679 follow-up: this help text says "target" now, not "connector"
+    // — that word moved to being the INBOUND half of "integrations" only.
     const r1 = capy(['deploy', 'targets', '--help']);
-    expect((r1.stdout + r1.stderr)).toContain('connector');
+    expect((r1.stdout + r1.stderr)).toContain('target');
 
     const r2 = capy(['deploy', 'targets-remove', '--help']);
     expect((r2.stdout + r2.stderr)).toContain('Remove');
