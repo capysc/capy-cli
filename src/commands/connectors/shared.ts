@@ -8,6 +8,7 @@ import { Encryptor } from '../../crypto/encryptor';
 import { deriveResourceId } from '../../crypto/resourceId';
 import { writeKeepCache } from '../../config/globalConfig';
 import { setSyncKeepHash, KeepFile, ConnectorMetadata } from '../../types/index';
+import type { ImportOutcome } from './registry';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -216,6 +217,155 @@ export async function writeAndSync(
     user_id: userId,
     keep_hash: setSyncKeepHash(existingSyncState, branch, SyncEngine.computeKeepHash(finalKeep, branch)),
   });
+}
+
+/**
+ * Write SEVERAL NEW variables at once — a `capy connect <import-connector>`
+ * import — and sync, in one push/commit rather than one per variable.
+ *
+ * Mirrors `writeAndSync`, but that function's `(varName, value)` pair is for
+ * ONE variable's value; an import adds N brand-new key/value pairs
+ * simultaneously. Chaining `writeAndSync` calls per variable would each read
+ * `ctx.localPlaintext`/`ctx.keep` as they stood BEFORE the run started, so a
+ * second call would push a snapshot missing the first call's write — this
+ * function builds the one final `env`/`keep.lock` state and writes it once.
+ *
+ * Every entry becomes a managed connector on its own (varName, branch) entry,
+ * same as `writeAndSync`'s `alsoConnect`.
+ */
+export async function writeImportedAndSync(
+  ctx: ResolvedContext,
+  entries: ReadonlyArray<{ varName: string; value: string; entry: ConnectorMetadata }>,
+  opts: {
+    push: boolean;
+    quiet?: boolean;
+    /** Dokploy DISCOVERY import only: skip the git auto-commit entirely — the discovery run commits nothing on the user's behalf (Vince's rule). Default false preserves every other caller's behavior. */
+    skipAutoCommit?: boolean;
+    /**
+     * `--overwrite` clear-only writes: proceed even when `entries` is empty.
+     * Clearing removes names from `ctx.localPlaintext` (the caller passes a
+     * PRUNED context — see `writeImportOutcome`) rather than adding an
+     * entry, so a clear-only run has nothing in `entries` at all; without
+     * this flag that would hit the early return below and write nothing.
+     * Default false preserves every other caller's "nothing to do" no-op.
+     */
+    forceWrite?: boolean;
+  },
+): Promise<void> {
+  if (entries.length === 0 && !opts.forceWrite) return;
+  const { pm, fileManager, serviceClient, orgId, projectId, branch, userId, projectKey, keep, localPlaintext } = ctx;
+
+  const finalEnv: Record<string, string> = {
+    ...localPlaintext,
+    ...Object.fromEntries(entries.map((e) => [e.varName, e.value])),
+  };
+  const also = entries.map((e) => ({ varName: e.varName, entry: e.entry }));
+  // `entries[0]?.varName ?? ''`: the positional `varName` argument below is
+  // only ever READ by `applyConnectors` when its own `connector` argument
+  // (always `undefined` here) is set — so on a clear-only call (`entries`
+  // empty, `forceWrite: true`) this placeholder is never actually consulted,
+  // but `entries[0].varName` would still throw evaluating it eagerly.
+  const attachAll = (k: KeepFile): KeepFile => applyConnectors(k, branch, entries[0]?.varName ?? '', undefined, also);
+
+  if (!opts.push) {
+    const merged = attachAll(keep);
+    if (merged !== keep) fileManager.writeKeepFile(merged);
+    fileManager.writeEncryptedEnvFile(finalEnv, projectKey, undefined, merged, branch);
+    return;
+  }
+
+  const encrypted: Record<string, string> = Object.fromEntries(
+    Object.entries(finalEnv).map(([k, v]) => [
+      k,
+      `capy:${deriveResourceId(branch, k)}:${Encryptor.encrypt(v, projectKey)}`,
+    ]),
+  );
+  const envBlob = Object.entries(encrypted)
+    .map(([k, v]) => `${k}=${v}`)
+    .join('\n');
+
+  const pushedVars: Record<string, { resource_id: string; value_hash: string }> = Object.fromEntries(
+    Object.entries(finalEnv).map(([k, v]) => [
+      k,
+      { resource_id: deriveResourceId(branch, k), value_hash: createHash('sha256').update(v).digest('hex').slice(0, 16) },
+    ]),
+  );
+
+  const syncEngine = new SyncEngine();
+  const merged = syncEngine.mergeWithKeep(keep, pushedVars, branch);
+  const pruned: KeepFile = {
+    ...merged,
+    variables: Object.fromEntries(
+      Object.entries(merged.variables).flatMap(([name, varEntries]) => {
+        if (name in finalEnv) return [[name, varEntries]] as const;
+        const filtered = varEntries.filter((e) => e.branch !== branch);
+        return filtered.length > 0 ? ([[name, filtered]] as const) : [];
+      }),
+    ),
+  };
+  const finalKeep = attachAll(pruned);
+
+  const result = await serviceClient.pushSecrets(projectId, JSON.stringify(finalKeep), envBlob, branch);
+
+  writeKeepCache(orgId, projectId, result.keep_hash, envBlob);
+  fileManager.writeKeepFile(SyncEngine.adoptServerKeep(result.keep_file, finalKeep, branch));
+  fileManager.writeEncryptedEnvFile(finalEnv, projectKey, undefined, finalKeep, branch);
+
+  const existingSyncState = pm.readSyncState();
+  fileManager.writeSyncState({
+    ...existingSyncState,
+    last_sync: new Date().toISOString(),
+    synced_variables: Object.keys(finalEnv),
+    user_id: userId,
+    keep_hash: setSyncKeepHash(existingSyncState, branch, SyncEngine.computeKeepHash(finalKeep, branch)),
+  });
+}
+
+/**
+ * Given a successful `ImportOutcome` (dokploy import, plain or
+ * `--overwrite`), performs the write `executeImport` used to do inline —
+ * factored out so discovery's own per-environment import step (which never
+ * goes through `ConnectCommand.executeImport`, see `dokploy.ts`) writes
+ * through the exact same path rather than a second copy of this logic.
+ *
+ * Vince's rule: a dry run changes nothing — `opts.dryRun` short-circuits
+ * before anything is read even from `outcome`. Otherwise writes when there
+ * is either something to import OR (an `--overwrite` run) something to
+ * clear; a clear-only overwrite (nothing new or changed, only removals) has
+ * an empty `entries` array, so `ctx.localPlaintext` is pruned of the
+ * cleared names and `forceWrite` is set so `writeImportedAndSync` does not
+ * take its normal "nothing to do" early return.
+ */
+export async function writeImportOutcome(
+  ctx: ResolvedContext,
+  outcome: Extract<ImportOutcome, { ok: true }>,
+  opts: { push: boolean; quiet?: boolean; skipAutoCommit?: boolean; dryRun: boolean },
+): Promise<{ wrote: boolean }> {
+  if (opts.dryRun) return { wrote: false };
+  const cleared = outcome.cleared ?? [];
+  // CAP-673: a dokploy import's same-value names still carry a FRESH
+  // connector entry (see `ImportOutcome.unchangedEntries`'s doc) — merged
+  // into the very same write as `imported` so keep.lock's connector
+  // metadata (service_name/dokploy_project/environment) gets backfilled
+  // even on a run that changes no value at all. Absent for every other
+  // caller (link-kind connectors don't set it; hand-built outcomes in
+  // existing tests don't either), so this is a strict no-op there.
+  const unchangedEntries = outcome.unchangedEntries ?? [];
+  const hasWrite = outcome.imported.length > 0 || cleared.length > 0 || unchangedEntries.length > 0;
+  if (!hasWrite) return { wrote: false };
+
+  const prunedCtx: ResolvedContext =
+    cleared.length > 0
+      ? { ...ctx, localPlaintext: Object.fromEntries(Object.entries(ctx.localPlaintext).filter(([k]) => !cleared.includes(k))) }
+      : ctx;
+
+  await writeImportedAndSync(prunedCtx, [...outcome.imported, ...unchangedEntries], {
+    push: opts.push,
+    quiet: opts.quiet,
+    skipAutoCommit: opts.skipAutoCommit,
+    forceWrite: cleared.length > 0 || unchangedEntries.length > 0,
+  });
+  return { wrote: true };
 }
 
 /**

@@ -5,6 +5,8 @@ import { FileManager } from '../files/fileManager';
 import { debug } from '../ui/debug';
 import { getShellPinnedEnv } from '../config/prodPins';
 import { resolveActiveUrl } from '../config/profileConfig';
+import type { ParsedSecretsBlob } from '../crypto/deployRuntime';
+import { ERROR_CODES } from '../types/index';
 
 /**
  * Writes `.capy/next-env.js`, a CommonJS module mapping each decrypted env var
@@ -37,27 +39,224 @@ function emitNextEnvModule(keys: string[]): void {
  * and resolves with its exit code. Shared between local and deployed modes.
  */
 function spawnChild(args: string[], env: Record<string, string | undefined>): Promise<number> {
-  let child: ChildProcess | null = null;
-  for (const sig of ['SIGTERM', 'SIGINT', 'SIGHUP'] as const) {
-    process.on(sig, () => child?.kill(sig));
-  }
-
   // On Windows, node_modules/.bin entries are .cmd shims that Node's spawn
   // won't execute without a shell — bare `cross-env`/`nodemon` fail with
   // ENOENT. shell:true delegates to cmd.exe so PATHEXT resolution kicks in.
-  child = spawn(args[0], args.slice(1), {
+  const child: ChildProcess = spawn(args[0], args.slice(1), {
     env: env as Record<string, string>,
     stdio: 'inherit',
     shell: process.platform === 'win32',
   });
 
+  for (const sig of ['SIGTERM', 'SIGINT', 'SIGHUP'] as const) {
+    process.on(sig, () => child.kill(sig));
+  }
+
   return new Promise((resolve) => {
-    child!.on('error', (err) => {
+    child.on('error', (err) => {
       console.error(`capy run: ${err.message}`);
       resolve(1);
     });
-    child!.on('close', (code) => resolve(code ?? 1));
+    child.on('close', (code) => resolve(code ?? 1));
   });
+}
+
+type Result<T> = { readonly ok: true; readonly value: T } | { readonly ok: false; readonly message: string };
+
+interface DeployRuntimeCrypto {
+  parseSecretsBlob: (blob: string) => ParsedSecretsBlob;
+  fetchServiceKey: (apiUrl: string, deployId: string, outerBlob: string) => Promise<string>;
+  decryptSecretsBlob: (
+    encryptedVars: Buffer,
+    projectKeyHex: string,
+    serviceKeyHex: string,
+    deployId: Buffer,
+  ) => Record<string, string>;
+}
+
+/**
+ * Parses + decrypts a deployed-mode SECRETS_BLOB into a plaintext env map.
+ * Returns a Result instead of throwing so the caller can report the failure
+ * as a clean `capy run:` line and exit 1, without a try/catch-assigned local.
+ */
+async function resolveDeployedEnvMap(
+  secretsBlob: string,
+  projectKey: string,
+  crypto: DeployRuntimeCrypto,
+): Promise<Result<Record<string, string>>> {
+  try {
+    const { deployId, outerBlob, encryptedVars } = crypto.parseSecretsBlob(secretsBlob);
+    // Deployed mode used to read CAPY_API_URL straight from the environment,
+    // which meant it ignored `capy byoc` profiles even before prod stopped
+    // honoring the variable. Route it through the same resolver as every
+    // other call so a BYOC deploy target resolves the way the rest of the CLI
+    // does — profile first, then the pinned cloud default.
+    const apiUrl = resolveActiveUrl();
+    debug('capy run: fetching deploy key...');
+    const serviceKey = await crypto.fetchServiceKey(
+      apiUrl,
+      deployId.toString('hex'),
+      outerBlob.toString('base64'),
+    );
+    const value = crypto.decryptSecretsBlob(encryptedVars, projectKey, serviceKey, deployId);
+    return { ok: true, value };
+  } catch (err: any) {
+    return { ok: false, message: err.message };
+  }
+}
+
+/** Reads + validates keep.lock, returning its org/project ids as a Result. */
+function resolveKeepIds(keepPath: string): Result<{ orgId: string; projectId: string }> {
+  const parsed = (() => {
+    try {
+      return { ok: true as const, keep: JSON.parse(readFileSync(keepPath, 'utf-8')) };
+    } catch {
+      return { ok: false as const };
+    }
+  })();
+
+  if (!parsed.ok) {
+    return { ok: false, message: 'capy run: keep.lock is malformed. Run `capy` to re-sync.' };
+  }
+
+  const orgId: string | undefined = parsed.keep?.org_id;
+  const projectId: string | undefined = parsed.keep?.project_id;
+  if (!orgId || !projectId) {
+    return {
+      ok: false,
+      message: 'capy run: keep.lock missing org_id/project_id. Run `capy` to re-sync.',
+    };
+  }
+
+  return { ok: true, value: { orgId, projectId } };
+}
+
+/**
+ * Resolves the hex project key for local mode: fully offline via the
+ * passphrase session when the profile is local-only, otherwise via the
+ * server's co-decrypt endpoint (silent auth + ServiceClient).
+ */
+async function resolveLocalModeProjectKey(
+  orgId: string,
+  projectId: string,
+  devMode: boolean,
+): Promise<Result<string>> {
+  try {
+    const { isLocalOnly } = await import('../config/profileConfig');
+
+    // Local-only mode: resolve the key entirely offline from the passphrase
+    // session — no auth, no ServiceClient, no co-decrypt. Prompts for the
+    // passphrase on demand if the session is locked, so `capy run` always
+    // works even after `capy lock`.
+    if (isLocalOnly()) {
+      const { resolveLocalProjectKey } = await import('../core/localUnlock');
+      return { ok: true, value: await resolveLocalProjectKey(projectId) };
+    }
+
+    const { AuthService, silentAuthFailureMessage } = await import('../auth/authService');
+    const { ServiceClient } = await import('../service/serviceClient');
+    const { resolveProjectKey } = await import('../crypto/keyResolver');
+
+    const auth = new AuthService(undefined, devMode);
+    const result = await auth.authenticateSilent(orgId);
+    if (!result.success || !result.user_id) {
+      return { ok: false, message: `capy run: ${silentAuthFailureMessage(result)}` };
+    }
+
+    const svc = new ServiceClient(undefined, devMode);
+    svc.setTokenProvider(() => auth.getValidToken());
+    const keyServiceOps = {
+      coDecrypt: (o: string, c: string) => svc.coDecrypt(o, c).then((r) => r.plaintext),
+      wrapOuterLayer: (o: string, p: string) => svc.wrapOuterLayer(o, p).then((r) => r.ciphertext),
+    };
+
+    const value = await resolveProjectKey(orgId, projectId, result.user_id, keyServiceOps);
+    return { ok: true, value };
+  } catch (err: any) {
+    return { ok: false, message: `capy run: failed to resolve project key: ${err.message}` };
+  }
+}
+
+// ── Quoted runtime-pair values (CAP-679 follow-up) ──────────────────────────
+//
+// A Dokploy "stack" (Swarm) compose below v0.30.3 ships `env_file` values —
+// every one in the file, not only Capy's — to the container with literal
+// quote characters still attached (see `deploy/adapters/dokploy.ts`'s
+// `DOKPLOY_STACK_QUOTES` warning). Stripping ONE layer of surrounding quotes
+// from `_SECRETS_BLOB`/`_PROJECT_KEY` — and ONLY those two, and ONLY one
+// layer — lets `capy run` still parse them correctly once the container's
+// own `capy` is new enough. Every other env var, and the OLD
+// `SECRETS_BLOB`/`PROJECT_KEY` pair, is left byte-for-byte as today: this is
+// new behavior for the new pair only, never a general env-parsing change.
+
+/**
+ * Strips exactly one surrounding pair of matching quotes (`"…"` or `'…'`)
+ * from `raw` — only when the SAME character opens and closes, and only ever
+ * one layer. Anything else (unquoted, mismatched quotes, an empty/1-char
+ * string) is returned unchanged.
+ */
+function stripOuterQuotePair(raw: string): string {
+  if (raw.length < 2) return raw;
+  const first = raw[0];
+  const last = raw[raw.length - 1];
+  if ((first === '"' || first === "'") && first === last) {
+    return raw.slice(1, -1);
+  }
+  return raw;
+}
+
+const BASE64_RE = /^[A-Za-z0-9+/]*={0,2}$/;
+
+/** Strict base64: the right alphabet, `=` padding only at the end, and a length that's actually a multiple of 4. */
+function isValidBase64(s: string): boolean {
+  return s.length > 0 && s.length % 4 === 0 && BASE64_RE.test(s);
+}
+
+const HEX64_RE = /^[0-9a-fA-F]{64}$/;
+
+type QuoteCheckedValue =
+  | { readonly ok: true; readonly value: string }
+  | { readonly ok: false; readonly code: string; readonly message: string };
+
+/** `_SECRETS_BLOB`: strip one quote layer, then validate as base64 — same shape the old pair is trusted to have, just checked explicitly here since stripping could otherwise turn a genuinely-bad value into something that merely LOOKS parseable. */
+function checkedNewSecretsBlob(raw: string): QuoteCheckedValue {
+  const stripped = stripOuterQuotePair(raw);
+  if (!isValidBase64(stripped)) {
+    return {
+      ok: false,
+      code: ERROR_CODES.RUN_SECRETS_BLOB_INVALID,
+      // COPY-FLAG: minimal neutral wording.
+      message: '_SECRETS_BLOB is not valid base64 (checked after removing one layer of surrounding quotes, if present).',
+    };
+  }
+  return { ok: true, value: stripped };
+}
+
+/** `_PROJECT_KEY`: strip one quote layer, then validate as exactly 64 hex characters. */
+function checkedNewProjectKey(raw: string): QuoteCheckedValue {
+  const stripped = stripOuterQuotePair(raw);
+  if (!HEX64_RE.test(stripped)) {
+    return {
+      ok: false,
+      code: ERROR_CODES.RUN_PROJECT_KEY_INVALID,
+      // COPY-FLAG: minimal neutral wording.
+      message: '_PROJECT_KEY is not 64 hex characters (checked after removing one layer of surrounding quotes, if present).',
+    };
+  }
+  return { ok: true, value: stripped };
+}
+
+type NewRuntimePairResult =
+  | { readonly ok: true; readonly secretsBlob: string; readonly projectKey: string }
+  | { readonly ok: false; readonly code: string; readonly message: string };
+
+/** Both new-pair values, stripped and validated together — short-circuits on the blob first, same order they're declared in. */
+function resolveNewRuntimePair(rawBlob: string, rawKey: string): NewRuntimePairResult {
+  const blob = checkedNewSecretsBlob(rawBlob);
+  if (!blob.ok) return blob;
+  const key = checkedNewProjectKey(rawKey);
+  if (!key.ok) return key;
+  return { ok: true, secretsBlob: blob.value, projectKey: key.value };
 }
 
 export async function runCommand(args: string[], devMode: boolean = false): Promise<number> {
@@ -66,12 +265,34 @@ export async function runCommand(args: string[], devMode: boolean = false): Prom
     return 1;
   }
 
-  const secretsBlob = process.env.SECRETS_BLOB;
-  const projectKey = process.env.PROJECT_KEY;
+  // Deployed mode reads a runtime pair from process.env. Two pairs are
+  // supported, additively:
+  //
+  //   _SECRETS_BLOB + _PROJECT_KEY  (new — decrypted values win, see below)
+  //   SECRETS_BLOB  + PROJECT_KEY   (old — unchanged behavior)
+  //
+  // `_PROJECT_KEY` holds exactly the value `PROJECT_KEY` holds today (the hex
+  // project key) — same secret, new name, new precedence.
+  const newSecretsBlob = process.env._SECRETS_BLOB;
+  const newProjectKey = process.env._PROJECT_KEY;
+  const oldSecretsBlob = process.env.SECRETS_BLOB;
+  const oldProjectKey = process.env.PROJECT_KEY;
 
-  // Guard: both or neither. Half-configured deploys fail loudly instead of
-  // silently falling back to local mode and picking up wrong secrets.
-  if ((secretsBlob && !projectKey) || (!secretsBlob && projectKey)) {
+  // Guard: both or neither, per pair, independently. Half-configured deploys
+  // fail loudly instead of silently falling back to local mode and picking
+  // up wrong secrets. Half of one pair refuses regardless of what the other
+  // pair holds.
+  const newPairHalfSet = Boolean(newSecretsBlob) !== Boolean(newProjectKey);
+  const oldPairHalfSet = Boolean(oldSecretsBlob) !== Boolean(oldProjectKey);
+
+  if (newPairHalfSet) {
+    console.error(
+      'capy run: _SECRETS_BLOB and _PROJECT_KEY must both be set, or neither. ' +
+        'Got only one — refusing to guess which mode you meant.',
+    );
+    return 1;
+  }
+  if (oldPairHalfSet) {
     console.error(
       'capy run: SECRETS_BLOB and PROJECT_KEY must both be set, or neither. ' +
         'Got only one — refusing to guess which mode you meant.',
@@ -79,32 +300,37 @@ export async function runCommand(args: string[], devMode: boolean = false): Prom
     return 1;
   }
 
-  // Deployed mode: CI, serverless, Vercel builds, etc.
-  if (secretsBlob && projectKey) {
+  const useNewPair = Boolean(newSecretsBlob && newProjectKey);
+  const useOldPair = Boolean(oldSecretsBlob && oldProjectKey);
+
+  // Deployed mode: CI, serverless, Vercel builds, Dokploy applications, etc.
+  if (useNewPair || useOldPair) {
+    // Strip + validate ONLY the new pair (see the "Quoted runtime-pair
+    // values" section above) — the old pair is untouched, exactly as today.
+    const newPairResolved = useNewPair
+      ? resolveNewRuntimePair(newSecretsBlob as string, newProjectKey as string)
+      : null;
+    if (newPairResolved && !newPairResolved.ok) {
+      console.error(`capy run: [${newPairResolved.code}] ${newPairResolved.message}`);
+      return 1;
+    }
+    const secretsBlob = newPairResolved ? newPairResolved.secretsBlob : (oldSecretsBlob as string);
+    const projectKey = newPairResolved ? newPairResolved.projectKey : (oldProjectKey as string);
+
     const { parseSecretsBlob, fetchServiceKey, decryptSecretsBlob } = await import(
       '../crypto/deployRuntime'
     );
 
-    let envMap: Record<string, string>;
-    try {
-      const { deployId, outerBlob, encryptedVars } = parseSecretsBlob(secretsBlob);
-      // Deployed mode used to read CAPY_API_URL straight from the environment,
-      // which meant it ignored `capy byoc` profiles even before prod stopped
-      // honoring the variable. Route it through the same resolver as every
-      // other call so a BYOC deploy target resolves the way the rest of the CLI
-      // does — profile first, then the pinned cloud default.
-      const apiUrl = resolveActiveUrl();
-      debug('capy run: fetching deploy key...');
-      const serviceKey = await fetchServiceKey(
-        apiUrl,
-        deployId.toString('hex'),
-        outerBlob.toString('base64'),
-      );
-      envMap = decryptSecretsBlob(encryptedVars, projectKey, serviceKey, deployId);
-    } catch (err: any) {
-      console.error(`capy run: ${err.message}`);
+    const envMapResult = await resolveDeployedEnvMap(secretsBlob, projectKey, {
+      parseSecretsBlob,
+      fetchServiceKey,
+      decryptSecretsBlob,
+    });
+    if (!envMapResult.ok) {
+      console.error(`capy run: ${envMapResult.message}`);
       return 1;
     }
+    const envMap = envMapResult.value;
 
     // Auto-emit .capy/next-env.js for Next.js build-time inlining. Best-effort
     // — failure to write is non-fatal (e.g., read-only FS in exotic envs).
@@ -114,15 +340,26 @@ export async function runCommand(args: string[], devMode: boolean = false): Prom
       // No-op. next-env.js is a convenience; the child still gets the env.
     }
 
-    // dotenv precedence: pre-existing process.env wins over the decrypted
-    // values. Shell overrides stay sovereign.
+    // Precedence differs by pair, on purpose:
+    //
+    // Old pair (SECRETS_BLOB/PROJECT_KEY): dotenv precedence — pre-existing
+    // process.env wins over the decrypted values. Shell overrides stay
+    // sovereign. Unchanged from prior behavior.
+    //
+    // New pair (_SECRETS_BLOB/_PROJECT_KEY): decrypted values win. Capy
+    // deploys are meant to be reversible — Capy adds its two runtime vars to
+    // a platform without deleting the user's old plaintext copies of the
+    // same-named vars, so those stale copies must not beat the blob at boot.
     //
     // getShellPinnedEnv() re-supplies the CAPY_* vars the prod entrypoint
     // stripped for itself (config/prodPins.ts), at exactly the precedence they
     // held when they were still in process.env. `capy` ignores them; the child
     // is a different program and may well want them — capy-mcp reads
-    // CAPY_API_URL by design.
-    const childEnv = { ...envMap, ...process.env, ...getShellPinnedEnv() };
+    // CAPY_API_URL by design. The runtime pair vars themselves stay in
+    // process.env either way, so they reach the child exactly as today.
+    const childEnv = useNewPair
+      ? { ...process.env, ...getShellPinnedEnv(), ...envMap }
+      : { ...envMap, ...process.env, ...getShellPinnedEnv() };
     return spawnChild(args, childEnv);
   }
 
@@ -136,12 +373,9 @@ export async function runCommand(args: string[], devMode: boolean = false): Prom
   // encrypted value represents a deliberate project secret, so it must not be
   // silently overridden by a stale value of the same name in process.env
   // (common when the user has an unrelated DATABASE_URL etc. in their shell).
-  const toDecrypt: Array<[string, string]> = [];
-  for (const [k, v] of Object.entries(envFromFile)) {
-    if (typeof v === 'string' && fm.isEncrypted(v)) {
-      toDecrypt.push([k, v]);
-    }
-  }
+  const toDecrypt: Array<[string, string]> = Object.entries(envFromFile).filter(
+    (entry): entry is [string, string] => typeof entry[1] === 'string' && fm.isEncrypted(entry[1]),
+  );
 
   // Merge plaintext keys with dotenv precedence (shell wins). Encrypted keys
   // are re-applied after decryption below, so they always win regardless of
@@ -165,69 +399,39 @@ export async function runCommand(args: string[], devMode: boolean = false): Prom
     return 1;
   }
 
-  let orgId: string | undefined;
-  let projectId: string | undefined;
-  try {
-    const keep = JSON.parse(readFileSync(keepPath, 'utf-8'));
-    orgId = keep?.org_id;
-    projectId = keep?.project_id;
-  } catch {
-    console.error('capy run: keep.lock is malformed. Run `capy` to re-sync.');
+  const keepIdsResult = resolveKeepIds(keepPath);
+  if (!keepIdsResult.ok) {
+    console.error(keepIdsResult.message);
     return 1;
   }
-  if (!orgId || !projectId) {
-    console.error('capy run: keep.lock missing org_id/project_id. Run `capy` to re-sync.');
+  const { orgId, projectId } = keepIdsResult.value;
+
+  const projectKeyResult = await resolveLocalModeProjectKey(orgId, projectId, devMode);
+  if (!projectKeyResult.ok) {
+    console.error(projectKeyResult.message);
     return 1;
   }
+  const projectKeyHex = projectKeyResult.value;
 
-  let projectKeyHex: string;
-  try {
-    const { isLocalOnly } = await import('../config/profileConfig');
-
-    // Local-only mode: resolve the key entirely offline from the passphrase
-    // session — no auth, no ServiceClient, no co-decrypt. Prompts for the
-    // passphrase on demand if the session is locked, so `capy run` always
-    // works even after `capy lock`.
-    if (isLocalOnly()) {
-      const { resolveLocalProjectKey } = await import('../core/localUnlock');
-      projectKeyHex = await resolveLocalProjectKey(projectId);
-    } else {
-      const { AuthService, silentAuthFailureMessage } = await import('../auth/authService');
-      const { ServiceClient } = await import('../service/serviceClient');
-      const { resolveProjectKey } = await import('../crypto/keyResolver');
-
-      const auth = new AuthService(undefined, devMode);
-      const result = await auth.authenticateSilent(orgId);
-      if (!result.success || !result.user_id) {
-        console.error(`capy run: ${silentAuthFailureMessage(result)}`);
-        return 1;
-      }
-
-      const svc = new ServiceClient(undefined, devMode);
-      svc.setTokenProvider(() => auth.getValidToken());
-      const keyServiceOps = {
-        coDecrypt: (o: string, c: string) => svc.coDecrypt(o, c).then(r => r.plaintext),
-        wrapOuterLayer: (o: string, p: string) => svc.wrapOuterLayer(o, p).then(r => r.ciphertext),
-      };
-
-      projectKeyHex = await resolveProjectKey(orgId, projectId, result.user_id, keyServiceOps);
-    }
-  } catch (err: any) {
-    console.error(`capy run: failed to resolve project key: ${err.message}`);
-    return 1;
-  }
-
-  // Decrypt into a buffer first so we never partially mutate env.
-  const decrypted: Array<[string, string]> = [];
-  for (const [k, v] of toDecrypt) {
+  // Decrypt into a buffer first so we never partially mutate env. Stops
+  // accumulating at the first failure — once `acc.ok` is false every later
+  // entry short-circuits back to the same failure rather than decrypting.
+  const decryptedResult: Result<ReadonlyArray<readonly [string, string]>> = toDecrypt.reduce<
+    Result<ReadonlyArray<readonly [string, string]>>
+  >((acc, [k, v]) => {
+    if (!acc.ok) return acc;
     try {
-      decrypted.push([k, fm.decryptValue(v, projectKeyHex)]);
+      return { ok: true, value: [...acc.value, [k, fm.decryptValue(v, projectKeyHex)] as const] };
     } catch (err: any) {
-      console.error(`capy run: failed to decrypt "${k}": ${err.message}`);
-      return 1;
+      return { ok: false, message: `capy run: failed to decrypt "${k}": ${err.message}` };
     }
+  }, { ok: true, value: [] });
+
+  if (!decryptedResult.ok) {
+    console.error(decryptedResult.message);
+    return 1;
   }
 
-  for (const [k, v] of decrypted) env[k] = v;
-  return spawnChild(args, env);
+  const decryptedEnv = Object.fromEntries(decryptedResult.value);
+  return spawnChild(args, { ...env, ...decryptedEnv });
 }

@@ -11,6 +11,7 @@ import { CapyCommand } from './commands/capyCommand';
 import { CliOptions } from './types/index';
 import { version as CLI_VERSION } from '../package.json';
 import { setWebMode } from './ui/webMode';
+import { ACCENT } from './ui/colors';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -81,6 +82,10 @@ program
   .option('-f, --force', 're-encrypt existing variables')
   .option('-d, --dry-run', 'preview changes without applying')
   .option('--web', 'render interactive steps (first-run setup / sync conflicts) in a local browser instead of TTY prompts')
+  // Root help only (Commander scopes addHelpText to the command it's called
+  // on) — points an agent at `capy help --json` for the full, drift-proof
+  // command reference (CAP-681).
+  .addHelpText('after', '\nAgents: run `capy help --json` for a machine-readable command reference.')
   // Record `--web` once, before any handler runs, for the code that has no way
   // to ask. `displayErrorAndExit` is reached from eighteen catch blocks — a key
   // resolver, a service client, a crypto path — none of which is handed the
@@ -224,7 +229,7 @@ program
       const name = b.name;
       const prot = b.is_protected ? '  \x1b[90m(protected)\x1b[0m' : '';
       const isCurrent = b.name === activeBranch;
-      const current = isCurrent ? '  \x1b[38;5;43m← current\x1b[0m' : '';
+      const current = isCurrent ? `  ${ACCENT}← current\x1b[0m` : '';
       console.log(`  ${connector} ${name}  ${prot}${current}`);
     });
     console.log('');
@@ -389,7 +394,9 @@ deploy
   .description('Remove a configured connector target')
   .action(async (name: string, _options, command) => {
     const { deployRemove } = await import('./commands/deployCommand');
-    process.exit(await deployRemove(name, process.cwd(), { web: command.optsWithGlobals().web === true }));
+    process.exit(
+      await deployRemove(name, process.cwd(), { web: command.optsWithGlobals().web === true, devMode: true }),
+    );
   });
 
 program
@@ -426,11 +433,22 @@ program
 
 program
   .command('transport')
-  .description('Generate a redeem code to move your account to another machine')
-  .action(async (_options, command) => {
+  .description('Move your local key to another device via Keep (prints a QR code + link)')
+  .option('--json', 'emit machine-readable JSON instead of the human UI')
+  .action(async (options) => {
     const { TransportCommand } = await import('./commands/transportCommand');
     const cmd = new TransportCommand(process.env.CAPY_API_URL, true);
-    await cmd.execute({ web: command.optsWithGlobals().web === true });
+    await cmd.execute({ json: options.json === true });
+  });
+
+program
+  .command('pair')
+  .description('Pair this device into an org via Keep (device-code login + key pickup)')
+  .option('--json', 'emit machine-readable JSON instead of the human UI')
+  .option('--force', 'overwrite a different local key already on this machine')
+  .action(async (options) => {
+    const { pairCommand } = await import('./commands/pairCommand');
+    await pairCommand({ json: options.json === true, force: options.force === true, apiUrl: process.env.CAPY_API_URL, devMode: true });
   });
 
 program
@@ -440,6 +458,65 @@ program
     const { KickCommand } = await import('./commands/kickCommand');
     const cmd = new KickCommand(process.env.CAPY_API_URL, true);
     await cmd.execute(email, { web: command.optsWithGlobals().web === true });
+  });
+
+const systemCmd = program
+  .command('system')
+  .description('Manage this org\'s system store (connector credentials, CAP-664)');
+
+systemCmd
+  .command('set <name>')
+  .description('Set a connector credential (hidden prompt; owners/admins only)')
+  .option('--org <id>', 'org id, if you belong to more than one')
+  .option('--json', 'emit machine-readable JSON instead of the human UI')
+  .action(async (name: string, options: any) => {
+    const { systemSetCommand } = await import('./commands/systemCommand');
+    await systemSetCommand(name, { org: options.org, json: options.json, apiUrl: process.env.CAPY_API_URL, devMode: true });
+  });
+
+systemCmd
+  .command('list')
+  .description('List connector credential names (never values; owners/admins only)')
+  .option('--org <id>', 'org id, if you belong to more than one')
+  .option('--json', 'emit machine-readable JSON instead of the human UI')
+  .action(async (options: any) => {
+    const { systemListCommand } = await import('./commands/systemCommand');
+    await systemListCommand({ org: options.org, json: options.json, apiUrl: process.env.CAPY_API_URL, devMode: true });
+  });
+
+systemCmd
+  .command('rm <name>')
+  .description('Remove a connector credential (asks for confirmation; owners/admins only)')
+  .option('--org <id>', 'org id, if you belong to more than one')
+  .option('--yes', 'skip the confirmation prompt')
+  .option('--json', 'emit machine-readable JSON instead of the human UI')
+  .action(async (name: string, options: any) => {
+    const { systemRmCommand } = await import('./commands/systemCommand');
+    await systemRmCommand(name, { org: options.org, json: options.json, yes: options.yes, apiUrl: process.env.CAPY_API_URL, devMode: true });
+  });
+
+program
+  .command('help')
+  .description('Show help information')
+  .option('--json', 'emit a machine-readable command reference instead of human help')
+  .action(async (options) => {
+    if (options.json) {
+      const { buildCliHelpDoc } = await import('./core/cliHelpDoc');
+      console.log(JSON.stringify(buildCliHelpDoc(program), null, 2));
+      return;
+    }
+    program.outputHelp();
+  });
+
+program
+  .command('agents')
+  .description('Tell AI coding agents in this repo how to use Capy (writes AGENTS.md / CLAUDE.md)')
+  .option('--print', 'print the block to stdout without writing anything')
+  .option('--remove', 'remove the block from AGENTS.md / CLAUDE.md')
+  .option('--json', 'emit machine-readable JSON instead of the human UI')
+  .action(async (options) => {
+    const { agentsCommand } = await import('./commands/agentsCommand');
+    await agentsCommand({ print: options.print, remove: options.remove, json: options.json });
   });
 
 program
@@ -463,7 +540,7 @@ program
     }
 
     // Authenticate and resolve key (requires server co-decrypt for KMS unwrap)
-    let encryptionKey: string;
+    const resolveKey = async (): Promise<string | null> => {
     try {
       const syncState = pm.readSyncState();
       const authService = new AuthService(undefined, true, syncState?.user_id);
@@ -478,8 +555,13 @@ program
         coDecrypt: (oid: string, ct: string) => serviceClient.coDecrypt(oid, ct).then(r => r.plaintext),
         wrapOuterLayer: (oid: string, pt: string) => serviceClient.wrapOuterLayer(oid, pt).then(r => r.ciphertext),
       };
-      encryptionKey = await resolveProjectKey(keep.org_id, keep.project_id, authResult.user_id!, keyOps);
+      return await resolveProjectKey(keep.org_id, keep.project_id, authResult.user_id!, keyOps);
     } catch {
+      return null;
+    }
+    };
+    const encryptionKey = await resolveKey();
+    if (encryptionKey === null) {
       console.error(`Cannot decrypt — server co-sign required. Run ${B('capy-dev')} first to sync.`);
       process.exit(1);
     }
@@ -494,14 +576,15 @@ program
         process.exit(0);
       }
 
-      const { writeFileSync } = await import('fs');
+      const { writeFileSync, readFileSync } = await import('fs');
       const { dotenvEscape } = await import('./commands/exportCommand');
-      // Escape so multi-line secrets survive being re-read by dotenv.
-      const content = Object.entries(decrypted)
-        .map(([key, value]) => `${key}=${dotenvEscape(value as string)}`)
-        .join('\n');
+      const { upsertEnvText } = await import('./files/envUpsert');
+      // Escape so multi-line secrets survive being re-read by dotenv. Values are
+      // upserted in place so the file's comments, dividers and order survive.
+      const entries = Object.entries(decrypted).map(([key, value]) => [key, dotenvEscape(value as string)] as const);
+      const content = upsertEnvText(readFileSync(envPath, 'utf-8'), {}, entries);
 
-      writeFileSync(envPath, content + '\n', 'utf-8');
+      writeFileSync(envPath, content, 'utf-8');
       console.log(`Decrypted ${Object.keys(decrypted).length} variable(s) in ${envPath}`);
     } catch (error: any) {
       const { displayErrorAndExit } = await import('./ui/errorScreen');
@@ -627,6 +710,28 @@ program
     const { UsersCommand } = await import('./commands/usersCommand');
     const cmd = new UsersCommand(process.env.CAPY_API_URL, true);
     await cmd.execute({ json: options.json });
+  });
+
+program
+  .command('projects')
+  .description('List projects in the active organization and their branches')
+  .option('--json', 'emit machine-readable JSON instead of the human UI')
+  .action(async (options) => {
+    const { ProjectsCommand } = await import('./commands/projectsCommand');
+    const cmd = new ProjectsCommand(process.env.CAPY_API_URL, true);
+    await cmd.execute({ json: options.json });
+  });
+
+program
+  .command('secrets')
+  .description('List every secret name across the active organization, grouped by value (read-only, never shows a value)')
+  .option('--json', 'emit machine-readable JSON instead of the human UI')
+  .option('--project <name>', 'only rows with a location in this project')
+  .option('--branch <name>', 'only rows with a location on this branch')
+  .action(async (options) => {
+    const { SecretsCommand } = await import('./commands/secretsCommand');
+    const cmd = new SecretsCommand(process.env.CAPY_API_URL, true);
+    await cmd.execute({ json: options.json, project: options.project, branch: options.branch });
   });
 
 program
@@ -822,6 +927,31 @@ program
   .option('--no-push', 'record the link locally; do not push it to Capy')
   .option('--non-tty', 'never prompt; resolve choices from flags or fail fast (agents/CI)')
   .option('--reauth', 'pair with the provider again even if a usable session exists')
+  .option('--base-url <url>', 'dokploy import: dashboard URL')
+  .option('--application <id>', 'dokploy import: Application id (mutually exclusive with --compose)')
+  .option('--compose <id>', 'dokploy import: Compose service id (mutually exclusive with --application)')
+  .option('--token-env <name>', 'dokploy import: env var holding the API token')
+  .option('--json', 'emit machine-readable JSON instead of the human UI (import connectors)')
+  .option(
+    '--dry-run',
+    'dokploy import/discover: preview the plan only — resolve settings + read Dokploy, write/push nothing',
+  )
+  .option(
+    '--discover',
+    'dokploy: find every Dokploy service matching a repo under cwd, instead of one named --application/--compose',
+  )
+  .option(
+    '-y, --yes',
+    'dokploy import/discover: skip the confirmation prompt (import: --overwrite\'s clear/replace/import ask; discover: the real-run "proceed?" ask) — required non-interactively',
+  )
+  .option(
+    '--overwrite',
+    'dokploy import: set the branch\'s vars to EXACTLY Dokploy\'s set — clear names not in Dokploy, replace differing values, import new ones',
+  )
+  .option(
+    '--environment <names>',
+    'dokploy discover: restrict the plan to these Dokploy environment names, comma-separated (e.g. staging,preview)',
+  )
   .action(async (provider, options, command) => {
     const { ConnectCommand } = await import('./commands/connectCommand');
     const cmd = new ConnectCommand(true); // devMode: hard-blocks live
@@ -845,6 +975,16 @@ program
       noPush: options.push === false,
       nonTty: options.nonTty,
       reauth: options.reauth === true,
+      baseUrl: options.baseUrl,
+      application: options.application,
+      compose: options.compose,
+      tokenEnv: options.tokenEnv,
+      json: options.json,
+      dryRun: options.dryRun ?? merged.dryRun,
+      discover: options.discover === true,
+      yes: options.yes === true,
+      overwrite: options.overwrite === true,
+      environment: options.environment,
     });
   });
 

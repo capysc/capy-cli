@@ -36,6 +36,12 @@ ISOLATED_FILES=(
   tests/crypto/keyStability.test.ts
   tests/crypto/zeroTrust.test.ts
   tests/commands/logoutCleanup.test.ts
+  tests/commands/mintDeployTokenScope.test.ts
+  tests/commands/deployDokployWarningOnce.test.ts
+  tests/commands/deployDokploySystemStoreToken.test.ts
+  tests/commands/deployCiChangeGate.test.ts
+  tests/commands/deployRevokeWiring.test.ts
+  tests/commands/deployDokployPickerTokenEnv.test.ts
   tests/files/fileManager.test.ts
   tests/ui/promptEngine.test.ts
   tests/commands/decryptCommand.test.ts
@@ -49,7 +55,18 @@ ISOLATED_FILES=(
   tests/commands/profileCommand.test.ts
   tests/commands/localOnlyFlow.test.ts
   tests/ui/deployDeadline.test.ts
+  tests/ui/secretsScreenSearchHashing.test.ts
   tests/commands/rotatePromotesThenRotates.test.ts
+  tests/system/systemStore.test.ts
+  tests/system/systemStoreFreshStore.test.ts
+  tests/commands/systemCommand.test.ts
+  tests/commands/projectsCommand.test.ts
+  tests/commands/secretsCommand.test.ts
+  tests/commands/runCommandSystemStore.test.ts
+  tests/commands/connectDiscoveryRouting.test.ts
+  tests/commands/agentsCommand.test.ts
+  tests/commands/transportCommand.test.ts
+  tests/commands/pairCommand.test.ts
 )
 
 # Build a grep pattern to exclude isolated files from the batch run

@@ -69,6 +69,73 @@ export function findUncommittedEnvChange(
   return null;
 }
 
+export interface DirtyBranchIssue {
+  code: 'UNCOMMITTED_CHANGES' | 'UNPUSHED_CHANGES';
+  branch: string;
+  /** `UNCOMMITTED_CHANGES` only — the offending variable name. */
+  varName?: string;
+}
+
+/**
+ * The two guards `capy checkout` enforces before switching away from the
+ * current branch — extracted (pure, no `process.exit`) so a caller that
+ * isn't this command can run the SAME checks and decide for itself how to
+ * report a dirty result, rather than a second copy of this logic. `capy
+ * connect dokploy --discover` is exactly that caller: before its first
+ * checkout in a folder, it needs to abort just THAT folder on a dirty
+ * result, never the whole process (CAP-657 follow-up).
+ *
+ * Skipped entirely by the caller for `-b` (branch creation) — nothing on a
+ * brand-new branch to lose yet.
+ */
+export function findDirtyBranchIssue(
+  pm: ProjectManager,
+  fm: FileManager,
+  encryptionKey: string,
+): DirtyBranchIssue | null {
+  const keep = pm.readKeepFile();
+  const currentBranch = pm.readActiveBranch();
+
+  // The decrypted .env belongs to the branch recorded in its own header,
+  // which can diverge from .capy/branch after an interrupted checkout
+  // (CAP-215). Diff the uncommitted-changes check against the branch the
+  // ciphertext was actually encrypted for — otherwise a value that simply
+  // differs across branches reads as a phantom "uncommitted change",
+  // deadlocking the very `capy checkout` the inconsistency error tells the
+  // user to run. Fall back to the active branch only when there is no
+  // header yet (first run); when the two agree, the header equals it anyway.
+  const envHeaderBranch = fm.readEnvMeta().branch;
+  const dirtyBranch = envHeaderBranch || currentBranch;
+  if (!keep || !dirtyBranch) return null;
+
+  // Check A: uncommitted changes (.env differs from keep.lock). An
+  // unreadable/missing .env means there is nothing to compare — no
+  // uncommitted change to worry about, same as the original inline guard.
+  const tryReadLocalPlaintext = (): Record<string, string> | null => {
+    try {
+      return fm.readEncryptedEnvFile(encryptionKey);
+    } catch {
+      return null;
+    }
+  };
+  const localPlaintext = tryReadLocalPlaintext();
+  if (localPlaintext) {
+    const uncommitted = findUncommittedEnvChange(localPlaintext, keep.variables, dirtyBranch);
+    if (uncommitted != null) {
+      return { code: 'UNCOMMITTED_CHANGES', branch: dirtyBranch, varName: uncommitted };
+    }
+  }
+
+  // Check B: unpushed changes (keep.lock differs from last sync).
+  const syncState = pm.readSyncState();
+  const savedHash = getSyncKeepHash(syncState, dirtyBranch);
+  const currentKeepHash = SyncEngine.computeKeepHash(keep, dirtyBranch);
+  if (savedHash != null && savedHash !== currentKeepHash) {
+    return { code: 'UNPUSHED_CHANGES', branch: dirtyBranch };
+  }
+  return null;
+}
+
 export interface CheckoutOptions {
   create?: boolean;
   /** Settled by `--protected` / `--no-protected`; undefined means ask. */
@@ -154,45 +221,16 @@ export class CheckoutCommand {
 
     // Guard: block checkout if working tree is dirty (skip for branch creation)
     if (!options.create) {
-      const keep = this.projectManager.readKeepFile();
-      const currentBranch = this.projectManager.readActiveBranch();
-
-      // The decrypted .env belongs to the branch recorded in its own header,
-      // which can diverge from .capy/branch after an interrupted checkout
-      // (CAP-215). Diff the uncommitted-changes check against the branch the
-      // ciphertext was actually encrypted for — otherwise a value that simply
-      // differs across branches reads as a phantom "uncommitted change",
-      // deadlocking the very `capy checkout` the inconsistency error tells the
-      // user to run. Fall back to the active branch only when there is no
-      // header yet (first run); when the two agree, the header equals it anyway.
-      const envHeaderBranch = this.fileManager.readEnvMeta().branch;
-      const dirtyBranch = envHeaderBranch || currentBranch;
-
-      if (keep && dirtyBranch) {
-        // Check A: uncommitted changes (.env differs from keep.lock)
-        try {
-          const localPlaintext = this.fileManager.readEncryptedEnvFile(encryptionKey);
-          const uncommitted = findUncommittedEnvChange(localPlaintext, keep.variables, dirtyBranch);
-
-          if (uncommitted != null) {
-            console.error(`You have uncommitted changes on "${dirtyBranch}" (${uncommitted}).`);
-            console.error(`Run ${B('capy')} to commit before switching branches.`);
-            process.exit(1);
-          }
-        } catch {
-          // If .env doesn't exist or can't be read, no uncommitted changes to worry about
-        }
-
-        // Check B: unpushed changes (keep.lock differs from last sync)
-        const syncState = this.projectManager.readSyncState();
-        const savedHash = getSyncKeepHash(syncState, dirtyBranch);
-        const currentKeepHash = SyncEngine.computeKeepHash(keep, dirtyBranch);
-
-        if (savedHash != null && savedHash !== currentKeepHash) {
-          console.error(`You have unpushed changes on "${dirtyBranch}".`);
-          console.error(`Run ${B('capy push')} before switching branches.`);
-          process.exit(1);
-        }
+      const issue = findDirtyBranchIssue(this.projectManager, this.fileManager, encryptionKey);
+      if (issue !== null && issue.code === 'UNCOMMITTED_CHANGES') {
+        console.error(`You have uncommitted changes on "${issue.branch}" (${issue.varName}).`);
+        console.error(`Run ${B('capy')} to commit before switching branches.`);
+        process.exit(1);
+      }
+      if (issue !== null && issue.code === 'UNPUSHED_CHANGES') {
+        console.error(`You have unpushed changes on "${issue.branch}".`);
+        console.error(`Run ${B('capy push')} before switching branches.`);
+        process.exit(1);
       }
     }
 

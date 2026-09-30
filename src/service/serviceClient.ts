@@ -32,6 +32,14 @@ const SERVER_CODES = new Set<string>([
   ERROR_CODES.NO_SECRETS,
   ERROR_CODES.ORG_NOT_FOUND,
   ERROR_CODES.DEPLOY_TOKEN_NOT_FOUND,
+  // CAP-684 basic pairing — device-pairings pickup refusals. INVALID_FORMAT
+  // is real here too: pickup's own `sendError` 400 for a missing/empty
+  // `device_code` (service/src/routes/devicePairings.ts) — without it in
+  // this allowlist, that 400 would misclassify as the generic SERVICE_ERROR.
+  ERROR_CODES.PAIRING_NOT_FOUND,
+  ERROR_CODES.PAIRING_WRONG_USER,
+  ERROR_CODES.PAIRING_NOT_READY,
+  ERROR_CODES.INVALID_FORMAT,
 ]);
 
 /**
@@ -109,6 +117,95 @@ export interface MemberDetail {
   projects: MemberProject[];
 }
 
+// ── `capy secrets` (CAP-673): GET /orgs/:orgId/secrets ──────────────────────
+//
+// Read-only, org-wide secret NAME index — never a value. One row per
+// (name, value_hash) pair; `capy secrets` (secretsCommand.ts) renders this
+// as a table and is the only consumer.
+
+/** A location's Dokploy connector info, when the value there was imported from Dokploy (CAP-673's `service_name`/`dokploy_project`/`environment`/`compose_id`). `null` when this location's value has no connector, or a non-dokploy one. */
+export interface SecretIndexService {
+  provider: string;
+  name?: string;
+  dokploy_project?: string;
+  environment?: string;
+  compose_id?: string;
+}
+
+/**
+ * CAP-676: the connector that brought this location's value IN. Distinct
+ * from (and additive alongside) the older `service` shape — `service` is
+ * Dokploy-specific and carries a name/project/compose_id; `connector` is
+ * provider-only and provider-agnostic. Optional because it may be absent on
+ * a server that predates CAP-676 — callers fall back to `service?.provider`.
+ */
+export interface SecretIndexConnector {
+  provider: string;
+}
+
+/**
+ * CAP-676: one deploy target this location's value was pushed OUT to.
+ * `stale` marks a target whose last push (`deployed_at`) predates the
+ * value's current `changed_at` — i.e. what's deployed there may not be
+ * what's set now. Optional/absent on a server that predates CAP-676.
+ */
+export interface SecretIndexTarget {
+  provider: string;
+  target: string;
+  deployed_at?: string;
+  stale: boolean;
+  /**
+   * CAP-679 follow-up: this target's config was written by `capy deploy
+   * --no-deploy` and has never actually been shipped — the platform deploy
+   * itself hasn't run yet. Absent (or `false`) means deployed, same
+   * additive-only convention as `TargetDelivery.deployed` in
+   * `types/index.ts`. The server currently drops unknown target fields, so
+   * this is only ever populated once the server passes it through — the CLI
+   * side is ready ahead of that.
+   */
+  pending?: boolean;
+}
+
+/** One (project, branch) this (name, value_hash) pair lives on. */
+export interface SecretIndexLocation {
+  project_id: string;
+  project_name: string;
+  branch: string;
+  protected: boolean;
+  changed_at?: string;
+  service: SecretIndexService | null;
+  /** CAP-676, additive: the inbound connector, when the server sends one (see `SecretIndexConnector`'s doc for the `service` fallback). */
+  connector?: SecretIndexConnector;
+  /** CAP-676, additive: every outbound deploy target for this location's value, or absent/`[]` on a server or location with none. */
+  targets?: SecretIndexTarget[];
+}
+
+export interface SecretIndexUser {
+  user_id: string;
+  email: string;
+}
+
+/** One row: a (name, value_hash) pair, every location that holds it, and every user who can read it. Two rows can share a `name` with a DIFFERENT `value_hash` — that's a real divergence, not a bug. */
+export interface SecretIndexRow {
+  name: string;
+  value_hash: string;
+  locations: SecretIndexLocation[];
+  users: SecretIndexUser[];
+}
+
+/** A project the index could not read (e.g. a permission gap) — named and coded, never silently dropped. */
+export interface SecretIndexSkipped {
+  project_id: string;
+  project_name: string;
+  code: string;
+}
+
+export interface SecretIndexResponse {
+  org_id: string;
+  rows: SecretIndexRow[];
+  skipped: SecretIndexSkipped[];
+}
+
 /**
  * Async callback that returns the current valid token, refreshing it if
  * needed. ServiceClient calls this before every request — no local token
@@ -158,28 +255,23 @@ export class ServiceClient {
     this.tokenProvider = provider;
   }
 
-  private async request<T>(method: string, path: string, body?: unknown, options?: { timeout?: number; _retried?: boolean }): Promise<T> {
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-    };
-    const token = this.tokenProvider ? await this.tokenProvider() : null;
-    if (token) {
-      headers['Authorization'] = `Bearer ${token.access_token}`;
-    }
-
+  /**
+   * The actual network round trip, isolated so `request()` never needs a
+   * `let`-then-try/catch-assignment binding for the response — this returns
+   * it (or throws the same `NETWORK_ERROR` it always did) instead of a
+   * caller having to declare `res` before the try block.
+   */
+  private async fetchOnce(method: string, path: string, headers: Record<string, string>, body: unknown, timeoutMs: number): Promise<Response> {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), options?.timeout ?? 30000);
-
-    let res: Response;
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      res = await fetch(`${this.apiUrl}${path}`, {
+      return await fetch(`${this.apiUrl}${path}`, {
         method,
         headers,
         body: body !== undefined ? JSON.stringify(body) : undefined,
         signal: controller.signal,
       });
     } catch (err: any) {
-      clearTimeout(timeout);
       if (err.name === 'AbortError') {
         throw new CapyError(
           `Failed to connect to ${B('Capy')} service. Please check your internet connection.`,
@@ -192,8 +284,21 @@ export class ServiceClient {
         ERROR_CODES.NETWORK_ERROR,
         { code: err.code || err.cause?.code }
       );
+    } finally {
+      clearTimeout(timeout);
     }
-    clearTimeout(timeout);
+  }
+
+  private async request<T>(method: string, path: string, body?: unknown, options?: { timeout?: number; _retried?: boolean }): Promise<T> {
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+    const token = this.tokenProvider ? await this.tokenProvider() : null;
+    if (token) {
+      headers['Authorization'] = `Bearer ${token.access_token}`;
+    }
+
+    const res = await this.fetchOnce(method, path, headers, body, options?.timeout ?? 30000);
 
     if (!res.ok) {
       const data = await res.json().catch(() => ({})) as Record<string, any>;
@@ -552,6 +657,34 @@ export class ServiceClient {
     return this.request('POST', `/orgs/${orgId}/co-decrypt`, { ciphertext, ...(notAfter !== undefined ? { not_after: notAfter } : {}) });
   }
 
+  // --- Basic pairing (CAP-684, docs/basic-pair.md) ---
+
+  /**
+   * `capy transport` "v2": `ciphertext` here is `base64url(S)` — the
+   * one-time 32-byte transport key itself, NOT the encrypted payload (that
+   * lives only in the printed link's fragment, which this call never sees).
+   * The service is unchanged and unaware of the swap: it still just stores
+   * whatever string it's given and hands it back unmodified from
+   * `activate`. The row is deleted on first activate or after 15 minutes,
+   * whichever comes first.
+   */
+  async createTransport(ciphertext: string): Promise<{ id: string; expires_at: string }> {
+    return this.request('POST', '/transports', { ciphertext });
+  }
+
+  /**
+   * `capy pair`'s last step: exchanges the now-authenticated device code for
+   * whatever Keep sealed to the CLI's public key. The server returns this
+   * only once — the row is deleted on pickup, same lifecycle as `/transports`.
+   *
+   * `sealed` is a JSON STRING (the `JSON.stringify` of the pair envelope
+   * `{v:1, epk, iv, ct}`) — the caller must `JSON.parse` and validate it
+   * before opening (see `crypto/pairCrypto.ts#parsePairEnvelope`).
+   */
+  async pickupDevicePairing(deviceCode: string): Promise<{ sealed: string }> {
+    return this.request('POST', '/device-pairings/pickup', { device_code: deviceCode });
+  }
+
 
   async listMembers(orgId: string): Promise<{ members: any[] }> {
     return this.request('GET', `/orgs/${orgId}/members`);
@@ -641,5 +774,24 @@ export class ServiceClient {
 
   async listDeployTokens(orgId: string, projectId: string): Promise<{ tokens: Array<{ deploy_id: string; label: string | null; created_by: string; created_at: string; revoked_at: string | null }> }> {
     return this.request('GET', `/orgs/${orgId}/projects/${encodeURIComponent(projectId)}/deploy-tokens`);
+  }
+
+  /**
+   * Create-or-get the org's system store (CAP-664): a hidden `system`-kind
+   * project, owner/admin only, idempotent. Every other read/write against it
+   * goes through the normal `/secrets/:projectId` routes — this is the only
+   * system-store-specific endpoint the client calls.
+   */
+  async getOrCreateSystemStore(orgId: string): Promise<{ project_id: string; branch: string }> {
+    return this.request('POST', `/orgs/${orgId}/system-store`, {});
+  }
+
+  /**
+   * `capy secrets` (CAP-673): every secret NAME across the org, grouped by
+   * (name, value_hash), with every location and every user who can read it.
+   * Read-only, never returns a value — see `SecretIndexResponse`'s own doc.
+   */
+  async getSecretIndex(orgId: string): Promise<SecretIndexResponse> {
+    return this.request('GET', `/orgs/${orgId}/secrets`);
   }
 }

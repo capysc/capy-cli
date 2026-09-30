@@ -1,9 +1,9 @@
-// The three recovery flows, served as compiled screens.
+// The recovery flows, served as compiled screens.
 //
-// `capy recover`, `capy end-recover` and `capy transport` all handle material
-// equivalent to a recovery phrase, and each one moves it in a different
-// direction. Getting that direction wrong is the whole risk in this file, so
-// each section states its own:
+// `capy recover` and `capy end-recover` both handle material equivalent to a
+// recovery phrase, and each one moves it in a different direction. Getting
+// that direction wrong is the whole risk in this file, so each section
+// states its own:
 //
 //   recover-master-key   INBOUND. The 24 words are TYPED. They cross the
 //                        loopback because the CLI has to check them — that is
@@ -15,11 +15,15 @@
 //   end-recover-cleanup  NEITHER. Every file it names IS plaintext secret
 //                        material. The payload carries FILENAMES; a preview of
 //                        what is inside them would undo the whole command.
-//   transport-machine    OUTBOUND, one way. The redeem code is a bearer
-//                        credential for the account. It is rendered into the
-//                        page and nowhere else — never printed, never logged,
-//                        and structurally unable to come back: the only thing
-//                        this screen's reducer accepts is an action.
+//
+// `capy transport` used to have a third section here (`transport-machine`,
+// the old invite-shaped redeem-code page) — removed for CAP-684's basic
+// pairing, which replaced that whole flow with Keep's own `/transport` page
+// and no longer needs a CLI-served browser screen for it. The `transport-
+// machine` compiled screen asset itself (src/ui/screens/contract.ts /
+// generated.ts) is generated from the monorepo's packages/ui + packages/
+// fixtures — deleting it from there is out of scope for a capy-cli-only
+// change, so it's dead but harmless until that pipeline drops it too.
 //
 // Everything else follows `syncConflictScreen.ts`: build the payload in an
 // exported `buildXData(params, nonce)` so a test can assert its shape without
@@ -37,7 +41,6 @@ import type {
   RecoverOrg,
   RecoverPhraseError,
   RecoverView,
-  TransportMachineData,
 } from './screens/contract';
 
 /**
@@ -509,119 +512,4 @@ export async function endRecoverInBrowser(p: WebEndRecoverParams): Promise<WebEn
     },
   );
   return out as WebEndRecoverResult;
-}
-
-// ---------------------------------------------------------------------------
-// transport-machine
-// ---------------------------------------------------------------------------
-
-export interface WebTransportParams {
-  /** The organization the key belongs to. */
-  orgName: string;
-  /** The address the inner key is bound to. Only this identity can redeem. */
-  boundEmail: string;
-  /** When the code stops working. */
-  expiresAtIso: string;
-  /**
-   * SECRET. `capy redeem <code>` — the whole command for the other machine.
-   * It goes into the page and nowhere else: not to stdout, not to a log, not
-   * into a URL, and it cannot come back (see the reducer).
-   */
-  redeemCommand: string;
-  open?: boolean;
-  onListen?: (url: string) => void;
-  timeoutMs?: number;
-  /** Test hook only: fixes `now` so the expiry row is deterministic. */
-  now?: Date;
-}
-
-/** What the browser said. `acknowledged` is false when the user cancelled. */
-export interface WebTransportResult {
-  acknowledged: boolean;
-}
-
-/**
- * A bare duration — "28 minutes", "7 days".
- *
- * The screen writes "in {x}" and "{x} from now" around it, so it must not
- * carry its own preposition. Display only: the state that decides colour is
- * `expiryState`, which is computed here rather than read back out of this
- * string.
- */
-export function formatDuration(ms: number): string {
-  const seconds = Math.max(0, Math.round(ms / 1000));
-  const unit = (n: number, word: string): string => `${n} ${word}${n === 1 ? '' : 's'}`;
-  if (seconds < 60) return unit(seconds, 'second');
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return unit(minutes, 'minute');
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return unit(hours, 'hour');
-  return unit(Math.floor(hours / 24), 'day');
-}
-
-/** Under an hour left is worth reading before you carry on. */
-const SOON_MS = 60 * 60 * 1000;
-
-export function buildTransportData(p: WebTransportParams, nonce: string): TransportMachineData {
-  const now = (p.now ?? new Date()).getTime();
-  const expiresAt = new Date(p.expiresAtIso).getTime();
-  const remaining = Number.isNaN(expiresAt) ? NaN : expiresAt - now;
-
-  const expiryState: TransportMachineData['expiryState'] = Number.isNaN(remaining)
-    ? 'ok'
-    : remaining <= 0
-      ? 'expired'
-      : remaining < SOON_MS
-        ? 'soon'
-        : 'ok';
-
-  return {
-    nonce,
-    orgName: stripAnsi(p.orgName),
-    boundEmail: stripAnsi(p.boundEmail),
-    expiresAtIso: p.expiresAtIso,
-    expiresIn: Number.isNaN(remaining) || remaining <= 0 ? undefined : formatDuration(remaining),
-    expiryState,
-    redeemCommand: p.redeemCommand,
-    view: 'code',
-    nonTty: {
-      command: 'capy transport',
-      why: 'There is no non-browser form of this step. The code is a wrapped copy of your encryption key, and the terminal form prints it to stdout — where anything reading this terminal, an AI assistant included, captures a credential that moves the whole account.',
-    },
-  };
-}
-
-/**
- * Show the transport code and wait for the user to close it out.
- *
- * The only thing this reducer accepts is an action. A payload carrying
- * anything else is refused before it is looked at, which is what makes it
- * structurally impossible for the code on the page to travel back over the
- * loopback — the one direction it must never move.
- */
-export async function showTransportInBrowser(p: WebTransportParams): Promise<WebTransportResult> {
-  const out = await runBrowserWizard(
-    {
-      title: 'Move to another machine',
-      firstScreen: { html: '', standalone: true },
-      open: p.open ?? true,
-      onListen: p.onListen,
-      timeoutMs: p.timeoutMs,
-      doneMessage: 'Done — back to your terminal.',
-      renderFirst: (nonce) => renderScreen('transport-machine', buildTransportData(p, nonce)),
-    },
-    async (_step, payload) => {
-      const keys = Object.keys(payload);
-      if (keys.length !== 1 || keys[0] !== '__action') {
-        return { error: 'This page answers with an action and nothing else.' };
-      }
-      // `done` is the screen's "Close this out"; `cancel` is its quiet exit.
-      // Neither changes what was minted — the code exists either way, and the
-      // page says so — so both end the run rather than one of them retrying.
-      if (payload.__action === 'done') return { done: true, result: { acknowledged: true } };
-      if (payload.__action === 'cancel') return { done: true, result: { acknowledged: false } };
-      return { error: 'That is not an action this screen offers.' };
-    },
-  );
-  return out as WebTransportResult;
 }

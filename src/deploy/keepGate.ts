@@ -15,6 +15,7 @@ import { createHash } from 'crypto';
 import { serializeKeep } from '../files/fileManager';
 import { deriveResourceId } from '../crypto/resourceId';
 import { KeepFile, KeepVariableEntry } from '../types/index';
+import { TargetDeliveryDescriptor, isDeliveryDescriptor, upsertTargetElement } from './targetsGate';
 
 /** keep.lock records this 16-hex-char hash per (var, branch) — never the value. */
 export function hashValue(value: string): string {
@@ -30,10 +31,8 @@ export interface DeployKeep {
 
 type Entry = { resource_id: string; branch?: string; value_hash: string; [k: string]: unknown };
 
-function entryFor(keep: KeepFile, name: string, branch: string): Entry | undefined {
-  return (keep.variables[name] as Entry[] | undefined)?.find(
-    (e) => (e.branch ?? '') === branch,
-  );
+function entryFor(entries: readonly Entry[], branch: string): Entry | undefined {
+  return entries.find((e) => (e.branch ?? '') === branch);
 }
 
 /**
@@ -47,33 +46,53 @@ function entryFor(keep: KeepFile, name: string, branch: string): Entry | undefin
  * authority over, and they collided with server-assigned ones on merge. A new
  * entry is written without the field; the next push through the service fills
  * it in.
+ *
+ * `delivery` (CAP-679, optional): when the caller is folding in a `capy
+ * deploy` target's delivery (CI mode — see `deployCommand.ts`), every var in
+ * `vars` that has a value also gets its `targets` element for
+ * (`delivery.provider`, `delivery.target`) replaced, keyed to that var's own
+ * freshly-computed hash. Guarded with `isDeliveryDescriptor` rather than a
+ * bare truthiness check so a malformed or stray 5th argument (this parameter
+ * used to sit where an ad-hoc `changedAt` override was passed in some older
+ * call sites) is silently ignored instead of corrupting `targets`.
  */
 export function buildDeployKeep(
   baseKeep: KeepFile,
   envValues: Record<string, string>,
   vars: string[],
   branch: string,
+  delivery?: TargetDeliveryDescriptor,
+  deliveredAt: string = new Date().toISOString(),
 ): DeployKeep {
-  const keep: KeepFile = JSON.parse(JSON.stringify(baseKeep));
-  if (!keep.variables) keep.variables = {};
+  const validDelivery = isDeliveryDescriptor(delivery) ? delivery : undefined;
 
-  for (const name of vars) {
+  const nextVariables = vars.reduce<Record<string, Entry[]>>((acc, name) => {
     const value = envValues[name];
-    if (value === undefined) continue; // missing var — var-set reconcile handles it
+    if (value === undefined) return acc; // missing var — var-set reconcile handles it
     const hash = hashValue(value);
-    const entries = (keep.variables[name] ??= []) as Entry[];
-    const entry = entryFor(keep, name, branch);
-    if (!entry) {
-      entries.push({
-        resource_id: deriveResourceId(branch, name),
-        branch,
-        value_hash: hash,
-      });
-    } else if (entry.value_hash !== hash) {
-      entry.value_hash = hash;
-    }
-  }
+    const existingEntries = acc[name] ?? (baseKeep.variables[name] as Entry[] | undefined) ?? [];
+    const entry = entryFor(existingEntries, branch);
+    const withHash: Entry = entry
+      ? { ...entry, value_hash: hash }
+      : { resource_id: deriveResourceId(branch, name), branch, value_hash: hash };
+    const updatedEntry: Entry = validDelivery
+      ? {
+          ...withHash,
+          targets: upsertTargetElement(
+            withHash.targets as any,
+            validDelivery,
+            hash,
+            deliveredAt,
+          ),
+        }
+      : withHash;
+    const nextEntries = entry
+      ? existingEntries.map((e) => (e === entry ? updatedEntry : e))
+      : [...existingEntries, updatedEntry];
+    return { ...acc, [name]: nextEntries };
+  }, { ...baseKeep.variables } as Record<string, Entry[]>);
 
+  const keep: KeepFile = { ...baseKeep, variables: nextVariables };
   const content = serializeKeep(keep);
   return { content, changed: content !== serializeKeep(baseKeep) };
 }

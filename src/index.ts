@@ -8,6 +8,7 @@ import { CliOptions } from './types/index';
 import { assertNotLocalOnly } from './core/localGate';
 import { version as CLI_VERSION } from '../package.json';
 import { setWebMode } from './ui/webMode';
+import { ACCENT } from './ui/colors';
 
 // Prod talks to api.capy.sc and ~/.capy, full stop. Strip the environment's
 // attempts to move it before anything can read them — see config/prodPins.ts
@@ -66,6 +67,10 @@ program
   .option('-f, --force', 're-encrypt existing variables')
   .option('-d, --dry-run', 'preview changes without applying')
   .option('--web', 'render interactive steps (first-run setup / sync conflicts) in a local browser instead of TTY prompts')
+  // Root help only (Commander scopes addHelpText to the command it's called
+  // on) — points an agent at `capy help --json` for the full, drift-proof
+  // command reference (CAP-681).
+  .addHelpText('after', '\nAgents: run `capy help --json` for a machine-readable command reference.')
   // Record `--web` once, before any handler runs, for the code that has no way
   // to ask. `displayErrorAndExit` is reached from eighteen catch blocks — a key
   // resolver, a service client, a crypto path — none of which is handed the
@@ -244,7 +249,7 @@ program
       const name = b.name;
       const prot = b.is_protected ? '  \x1b[90m(protected)\x1b[0m' : '';
       const isCurrent = b.name === activeBranch;
-      const current = isCurrent ? '  \x1b[38;5;43m← current\x1b[0m' : '';
+      const current = isCurrent ? `  ${ACCENT}← current\x1b[0m` : '';
       console.log(`  ${connector} ${name}  ${prot}${current}`);
     });
     console.log('');
@@ -329,29 +334,40 @@ program
 
 // `capy deploy` is a single picker that surfaces both:
 //   • existing flow: deploy-token + docs page (works for any platform)
-//   • new connector flow: real deploy via adapter (cf-worker, …)
-// When the user picks a platform with a connector available, an extra prompt
-// asks which mode they want; otherwise the existing token+docs flow runs.
+//   • new target flow: real deploy via adapter (cf-worker, …)
+// When the user picks a platform with a target adapter available, an extra
+// prompt asks which mode they want; otherwise the existing token+docs flow
+// runs.
+//
+// CAP-679 follow-up wording pass: this picker's user-facing text stopped
+// calling the outbound adapter path "connector" (that word is now the
+// INBOUND half of "integrations" — `capy connect`) in favor of "target". The
+// OLD spelling is kept working as a HIDDEN alias so existing scripts never
+// break: `--connect` itself is untouched (its own name was always "connect",
+// never "connector"), and `--mode connector` still resolves exactly like
+// `--mode target` — see the `--mode` normalization below.
 const deploy = program
   .command('deploy [target]')
-  .description('Set up secret delivery — token + docs (existing) or connector deploy')
+  .description('Set up secret delivery — token + docs (existing) or target deploy')
   .option('--target <id>', 'adapter id; requires --yes (CI mode)')
   .option('--yes', 'skip all prompts (CI)')
-  .option('--dry-run', 'preflight + show plan, push nothing (connector mode)')
+  .option('--dry-run', 'preflight + show plan, push nothing (target mode)')
   .option('--force', 'redeploy even when keep.lock is unchanged — bumps keep.lock to trigger CI')
-  .option('--edit', 're-enter the picker for an existing connector target')
-  .option('--connect', 'force connector mode (skip the token+docs path)')
+  .option('--edit', 're-enter the picker for an existing target')
+  .option('--connect', 'force target mode (skip the token+docs path)')
   .option('--platform <id>', 'skip platform picker (token+docs flow; e.g. github-actions, vercel)')
-  .option('--mode <mode>', 'skip mode picker: "connector" or "token"')
+  .option('--mode <mode>', 'skip mode picker: "target" or "token" (also accepts the old "connector" spelling)')
   .option('--scope <scope>', 'gh-actions: "repo" or "env"')
   .option('--env-name <name>', 'gh-actions: env name when --scope env')
+  .option('--no-deploy', 'write and verify the target, but skip the platform deploy/redeploy (target mode)')
+  .option('--json', 'describe the route (unanswered stops + any known branch problem) as JSON instead of travelling it')
   .action(async (target: string | undefined, options: any, cmd: any) => {
     assertNotLocalOnly('deploy');
     // Top-level program also defines --dry-run; merge globals so either
     // `capy --dry-run deploy ...` or `capy deploy ... --dry-run` works.
     const merged = cmd.optsWithGlobals ? cmd.optsWithGlobals() : options;
 
-    // CI/explicit connector path — go straight to the adapter flow.
+    // CI/explicit target path — go straight to the adapter flow.
     if (options.target || options.connect || target) {
       const { deployCommand } = await import('./commands/deployCommand');
       const code = await deployCommand(target, {
@@ -365,16 +381,24 @@ const deploy = program
         // Deploy-level flag only — the global `-f/--force` means "re-encrypt",
         // a different thing, so it must NOT be merged in here.
         force: options.force,
+        // commander negates `--no-deploy` onto the positive `deploy` property.
+        noDeploy: options.deploy === false,
+        json: !!options.json,
       });
       process.exit(code);
     }
 
     // Default path: existing token+docs picker. It auto-routes to the
-    // connector flow when the user picks a connector-enabled platform.
+    // target flow when the user picks a target-enabled platform.
     const { DeployCommand } = await import('./commands/deployTokenCommand');
     const c = new DeployCommand(undefined, false, {
       platform: options.platform,
-      mode: options.mode,
+      // `--mode target` (new) and `--mode connector` (old, hidden alias) both
+      // resolve to the same internal 'connector' value DeployCommand already
+      // understands — see DeployCommand's own doc for why that internal name
+      // is untouched. Any other value (undefined, 'token', a typo) passes
+      // through unchanged.
+      mode: options.mode === 'target' ? 'connector' : options.mode,
       scope: options.scope,
       envName: options.envName,
       yes: !!options.yes,
@@ -405,7 +429,7 @@ deploy
 
 deploy
   .command('targets')
-  .description('List configured connector targets (connector mode)')
+  .description('List configured targets (target mode)')
   .action(async (_options, command) => {
     assertNotLocalOnly('deploy targets');
     const { deployList } = await import('./commands/deployCommand');
@@ -414,11 +438,18 @@ deploy
 
 deploy
   .command('targets-remove <name>')
-  .description('Remove a configured connector target')
-  .action(async (name: string, _options, command) => {
+  .description('Remove a configured target')
+  .option('--no-deploy', 'strip the config but skip the redeploy that would apply the revert')
+  .action(async (name: string, options: any, command) => {
     assertNotLocalOnly('deploy targets-remove');
     const { deployRemove } = await import('./commands/deployCommand');
-    process.exit(await deployRemove(name, process.cwd(), { web: command.optsWithGlobals().web === true }));
+    process.exit(
+      await deployRemove(name, process.cwd(), {
+        web: command.optsWithGlobals().web === true,
+        // commander negates `--no-deploy` onto the positive `deploy` property.
+        noDeploy: options.deploy === false,
+      }),
+    );
   });
 
 program
@@ -543,8 +574,25 @@ program
 program
   .command('help')
   .description('Show help information')
-  .action(() => {
+  .option('--json', 'emit a machine-readable command reference instead of human help')
+  .action(async (options) => {
+    if (options.json) {
+      const { buildCliHelpDoc } = await import('./core/cliHelpDoc');
+      console.log(JSON.stringify(buildCliHelpDoc(program), null, 2));
+      return;
+    }
     program.outputHelp();
+  });
+
+program
+  .command('agents')
+  .description('Tell AI coding agents in this repo how to use Capy (writes AGENTS.md / CLAUDE.md)')
+  .option('--print', 'print the block to stdout without writing anything')
+  .option('--remove', 'remove the block from AGENTS.md / CLAUDE.md')
+  .option('--json', 'emit machine-readable JSON instead of the human UI')
+  .action(async (options) => {
+    const { agentsCommand } = await import('./commands/agentsCommand');
+    await agentsCommand({ print: options.print, remove: options.remove, json: options.json });
   });
 
 program
@@ -583,12 +631,24 @@ program
 
 program
   .command('transport')
-  .description('Generate a redeem code to move your account to another machine')
-  .action(async (_options, command) => {
+  .description('Move your local key to another device via Keep (prints a QR code + link)')
+  .option('--json', 'emit machine-readable JSON instead of the human UI')
+  .action(async (options) => {
     assertNotLocalOnly('transport');
     const { TransportCommand } = await import('./commands/transportCommand');
     const cmd = new TransportCommand();
-    await cmd.execute({ web: command.optsWithGlobals().web === true });
+    await cmd.execute({ json: options.json === true });
+  });
+
+program
+  .command('pair')
+  .description('Pair this device into an org via Keep (device-code login + key pickup)')
+  .option('--json', 'emit machine-readable JSON instead of the human UI')
+  .option('--force', 'overwrite a different local key already on this machine')
+  .action(async (options) => {
+    assertNotLocalOnly('pair');
+    const { pairCommand } = await import('./commands/pairCommand');
+    await pairCommand({ json: options.json === true, force: options.force === true });
   });
 
 program
@@ -599,6 +659,44 @@ program
     const { KickCommand } = await import('./commands/kickCommand');
     const cmd = new KickCommand();
     await cmd.execute(email, { web: command.optsWithGlobals().web === true });
+  });
+
+const systemCmd = program
+  .command('system')
+  .description('Manage this org\'s system store (connector credentials, CAP-664)');
+
+systemCmd
+  .command('set <name>')
+  .description('Set a connector credential (hidden prompt; owners/admins only)')
+  .option('--org <id>', 'org id, if you belong to more than one')
+  .option('--json', 'emit machine-readable JSON instead of the human UI')
+  .action(async (name: string, options: any) => {
+    assertNotLocalOnly('system set');
+    const { systemSetCommand } = await import('./commands/systemCommand');
+    await systemSetCommand(name, { org: options.org, json: options.json });
+  });
+
+systemCmd
+  .command('list')
+  .description('List connector credential names (never values; owners/admins only)')
+  .option('--org <id>', 'org id, if you belong to more than one')
+  .option('--json', 'emit machine-readable JSON instead of the human UI')
+  .action(async (options: any) => {
+    assertNotLocalOnly('system list');
+    const { systemListCommand } = await import('./commands/systemCommand');
+    await systemListCommand({ org: options.org, json: options.json });
+  });
+
+systemCmd
+  .command('rm <name>')
+  .description('Remove a connector credential (asks for confirmation; owners/admins only)')
+  .option('--org <id>', 'org id, if you belong to more than one')
+  .option('--yes', 'skip the confirmation prompt')
+  .option('--json', 'emit machine-readable JSON instead of the human UI')
+  .action(async (name: string, options: any) => {
+    assertNotLocalOnly('system rm');
+    const { systemRmCommand } = await import('./commands/systemCommand');
+    await systemRmCommand(name, { org: options.org, json: options.json, yes: options.yes });
   });
 
 program
@@ -644,6 +742,34 @@ program
     const { UsersCommand } = await import('./commands/usersCommand');
     const cmd = new UsersCommand();
     await cmd.execute({ json: options.json });
+  });
+
+program
+  .command('projects')
+  .description('List projects in the active organization and their branches')
+  .option('--json', 'emit machine-readable JSON instead of the human UI')
+  .action(async (options) => {
+    assertNotLocalOnly('projects');
+    const { ProjectsCommand } = await import('./commands/projectsCommand');
+    const cmd = new ProjectsCommand();
+    await cmd.execute({ json: options.json });
+  });
+
+program
+  .command('secrets')
+  .description('List every secret name across the active organization, grouped by value (read-only, never shows a value)')
+  .option('--json', 'emit machine-readable JSON instead of the human UI')
+  .option('--project <name>', 'only rows with a location in this project')
+  .option('--branch <name>', 'only rows with a location on this branch')
+  .action(async (options) => {
+    assertNotLocalOnly('secrets');
+    const { SecretsCommand } = await import('./commands/secretsCommand');
+    const cmd = new SecretsCommand();
+    await cmd.execute({
+      json: options.json,
+      project: options.project,
+      branch: options.branch,
+    });
   });
 
 program
@@ -743,6 +869,31 @@ program
   .option('--no-push', 'record the link locally; do not push it to Capy')
   .option('--non-tty', 'never prompt; resolve choices from flags or fail fast (agents/CI)')
   .option('--reauth', 'pair with the provider again even if a usable session exists')
+  .option('--base-url <url>', 'dokploy import: dashboard URL')
+  .option('--application <id>', 'dokploy import: Application id (mutually exclusive with --compose)')
+  .option('--compose <id>', 'dokploy import: Compose service id (mutually exclusive with --application)')
+  .option('--token-env <name>', 'dokploy import: env var holding the API token')
+  .option('--json', 'emit machine-readable JSON instead of the human UI (import connectors)')
+  .option(
+    '--dry-run',
+    'dokploy import/discover: preview the plan only — resolve settings + read Dokploy, write/push nothing',
+  )
+  .option(
+    '--discover',
+    'dokploy: find every Dokploy service matching a repo under cwd, instead of one named --application/--compose',
+  )
+  .option(
+    '-y, --yes',
+    'dokploy import/discover: skip the confirmation prompt (import: --overwrite\'s clear/replace/import ask; discover: the real-run "proceed?" ask) — required non-interactively',
+  )
+  .option(
+    '--overwrite',
+    'dokploy import: set the branch\'s vars to EXACTLY Dokploy\'s set — clear names not in Dokploy, replace differing values, import new ones',
+  )
+  .option(
+    '--environment <names>',
+    'dokploy discover: restrict the plan to these Dokploy environment names, comma-separated (e.g. staging,preview)',
+  )
   .action(async (provider, options, command) => {
     assertNotLocalOnly('connect');
     const { ConnectCommand } = await import('./commands/connectCommand');
@@ -755,14 +906,28 @@ program
     // it here is not a no-op: `ConnectCommand` reads `opts.web` to choose
     // between the browser route and the TTY prompts, so an unpassed flag makes
     // `capy connect stripe --web` answer in a terminal nobody is watching.
+    // `--dry-run` is also declared once on the root program (like `--web`) —
+    // merge globals so `capy --dry-run connect dokploy` and
+    // `capy connect dokploy --dry-run` both work, same pattern as `deploy`.
+    const merged = command.optsWithGlobals();
     await cmd.execute(provider, {
-      web: command.optsWithGlobals().web === true,
+      web: merged.web === true,
       live: options.live,
       var: options.var,
       account: options.account,
       noPush: options.push === false,
       nonTty: options.nonTty,
       reauth: options.reauth === true,
+      baseUrl: options.baseUrl,
+      application: options.application,
+      compose: options.compose,
+      tokenEnv: options.tokenEnv,
+      json: options.json,
+      dryRun: options.dryRun ?? merged.dryRun,
+      discover: options.discover === true,
+      yes: options.yes === true,
+      overwrite: options.overwrite === true,
+      environment: options.environment,
     });
   });
 

@@ -8,6 +8,7 @@ import {
   EnvVariable,
   UserDecisions
 } from '../types/index';
+import { isReservedProjectName, PROJECT_NAME_RESERVED_MESSAGE } from '../system/reservedProjectName';
 
 export class PromptEngine {
   async promptForProjectName(defaultName: string): Promise<string> {
@@ -23,6 +24,9 @@ export class PromptEngine {
           }
           if (!/^[a-zA-Z0-9-_]+$/.test(input)) {
             return 'Project name can only contain letters, numbers, hyphens, and underscores';
+          }
+          if (isReservedProjectName(input)) {
+            return PROJECT_NAME_RESERVED_MESSAGE;
           }
           return true;
         }
