@@ -919,6 +919,22 @@ program
   });
 
 program
+  .command('remove <vars...>')
+  .description('Delete one or more secret values from the active branch (encrypts + syncs)')
+  .option('-y, --yes', 'skip the confirmation prompt (required non-interactively)')
+  .option('--json', 'emit machine-readable JSON instead of the human UI')
+  .option('--non-tty', 'never prompt; resolve from flags or fail fast (agents/CI)')
+  .action(async (varNames, options) => {
+    const { RemoveCommand } = await import('./commands/removeCommand');
+    const cmd = new RemoveCommand(true); // devMode: dev backend + ~/.capy-dev
+    await cmd.execute(varNames, {
+      yes: options.yes,
+      json: options.json,
+      nonTty: options.nonTty,
+    });
+  });
+
+program
   .command('connect [provider]')
   .description('Link an existing .env variable to a third-party provider')
   .option('--live', 'use live mode (default: test)')

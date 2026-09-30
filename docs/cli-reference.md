@@ -582,6 +582,22 @@ capy add <vars...> [options]
 
 JSON support: no
 
+## `capy remove`
+
+Delete one or more secret values from the active branch (encrypts + syncs)
+
+```
+capy remove <vars...> [options]
+```
+
+| Option | Description | Default |
+|---|---|---|
+| `-y, --yes` | skip the confirmation prompt (required non-interactively) |  |
+| `--json` | emit machine-readable JSON instead of the human UI |  |
+| `--non-tty` | never prompt; resolve from flags or fail fast (agents/CI) |  |
+
+JSON support: yes (`--json`)
+
 ## `capy connect`
 
 Link an existing .env variable to a third-party provider
@@ -706,6 +722,9 @@ Every refusal carries a stable `code` — branch on it, never on message text.
 - `PAIRING_NOT_READY`
 - `PAIR_NO_KEYS`
 - `PAIR_LOCAL_KEY_CONFLICT`
+- `VAR_NOT_FOUND`
+- `REMOVE_LOCAL_DRIFT`
+- `REMOVE_NEEDS_TTY`
 
 ## Conventions
 

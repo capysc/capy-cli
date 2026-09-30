@@ -612,6 +612,19 @@ export const ERROR_CODES = {
   PAIR_NO_KEYS: 'PAIR_NO_KEYS',
   /** `capy pair`: an entry's `local.key` already exists on this machine with a DIFFERENT value — refused unless `--force`. */
   PAIR_LOCAL_KEY_CONFLICT: 'PAIR_LOCAL_KEY_CONFLICT',
+  // --- capy remove (CAP-686) ---
+  /** `capy remove NAME...`: one or more names given are not on the active branch. */
+  VAR_NOT_FOUND: 'VAR_NOT_FOUND',
+  /**
+   * `capy remove` refused: the working `.env` has unpushed differences (new,
+   * changed, or locally-missing values) for variables OTHER than the ones
+   * being removed. Removing would push that full remaining set — including
+   * those unrelated edits — as a side effect, so it's refused instead of
+   * carrying someone else's in-progress change along for the ride.
+   */
+  REMOVE_LOCAL_DRIFT: 'REMOVE_LOCAL_DRIFT',
+  /** `capy remove` needs a human (confirmation) and there is no TTY, and `--yes` wasn't passed. */
+  REMOVE_NEEDS_TTY: 'REMOVE_NEEDS_TTY',
 } as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES];
