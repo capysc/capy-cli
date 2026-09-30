@@ -155,6 +155,7 @@ Good when you want to see drift across the whole branch, edit one variable witho
 | [`capy transport`](https://docs.capy.sc/cli/transport) | Move your account to another machine. |
 | [`capy kick <email>`](https://docs.capy.sc/cli/kick) | Remove a teammate. |
 | [`capy users`](https://docs.capy.sc/cli/users) | Interactive member management. |
+| `capy audit [--org <id>]` | Search and sort organization audit records in a terminal UI (owner/admin only). |
 | [`capy projects`](https://docs.capy.sc/cli/projects) | List projects in the org and their branches. |
 | [`capy secrets`](https://docs.capy.sc/cli/secrets) | List every secret name in the org, grouped by value (never shows a value). |
 | [`capy org`](https://docs.capy.sc/cli/org) | List or switch organizations. |
