@@ -980,32 +980,47 @@ export class CapyCommand {
         error: unknown;
       }
   > {
-    const { createHash } = await import('crypto');
-    const { deriveResourceId } = await import('../crypto/resourceId');
-    const { Encryptor } = await import('../crypto/encryptor');
+    // Build the encrypted blob + folded keep — wrapped in its own tryStep so
+    // a throw here (a bad encryption key, a malformed local keep, etc.)
+    // reports the SAME "nothing reached Keep yet" progress the original
+    // single try/catch did, instead of rejecting this whole function and
+    // skipping past the caller's failure handling entirely.
+    const prep = await tryStep(async () => {
+      const { createHash } = await import('crypto');
+      const { deriveResourceId } = await import('../crypto/resourceId');
+      const { Encryptor } = await import('../crypto/encryptor');
 
-    const encrypted = Object.fromEntries(
-      Object.entries(localEnv).map(([key, value]) => {
-        const resourceId = deriveResourceId(initBranch, key);
-        const enc = Encryptor.encrypt(value, encryptionKey);
-        return [key, `capy:${resourceId}:${enc}`];
-      }),
-    );
-    const pushedVars = Object.fromEntries(
-      Object.entries(localEnv).map(([key, value]) => [
-        key,
-        {
-          resource_id: deriveResourceId(initBranch, key),
-          value_hash: createHash('sha256').update(value).digest('hex').slice(0, 16),
-        },
-      ]),
-    );
-    const envBlob = Object.entries(encrypted)
-      .map(([k, v]) => `${k}=${v}`)
-      .join('\n');
+      const encrypted = Object.fromEntries(
+        Object.entries(localEnv).map(([key, value]) => {
+          const resourceId = deriveResourceId(initBranch, key);
+          const enc = Encryptor.encrypt(value, encryptionKey);
+          return [key, `capy:${resourceId}:${enc}`];
+        }),
+      );
+      const pushedVars = Object.fromEntries(
+        Object.entries(localEnv).map(([key, value]) => [
+          key,
+          {
+            resource_id: deriveResourceId(initBranch, key),
+            value_hash: createHash('sha256').update(value).digest('hex').slice(0, 16),
+          },
+        ]),
+      );
+      const envBlob = Object.entries(encrypted)
+        .map(([k, v]) => `${k}=${v}`)
+        .join('\n');
 
-    const updatedKeep = this.syncEngine.mergeWithKeep(keep, pushedVars, initBranch);
-    const keepJson = JSON.stringify(updatedKeep);
+      const updatedKeep = this.syncEngine.mergeWithKeep(keep, pushedVars, initBranch);
+      return { envBlob, updatedKeep, keepJson: JSON.stringify(updatedKeep) };
+    });
+    if (!prep.ok) {
+      return {
+        ok: false,
+        progress: { pushedToKeep: false, backupWritten: false, envRewritten: false },
+        error: prep.error,
+      };
+    }
+    const { envBlob, updatedKeep, keepJson } = prep.value;
 
     const pushResult = await tryStep(() =>
       this.serviceClient.pushSecrets(projectResult.project_id, keepJson, envBlob, initBranch),
@@ -1380,7 +1395,6 @@ export class CapyCommand {
     const { authResult, branch } = await (async (): Promise<{ authResult: AuthResult; branch: string }> => {
       if (localMode) {
         const localBranch = await this.resolveActiveBranch(projectState, true);
-        projectState.activeBranch = localBranch;
         this.displayHeader(
           projectState.projectName || 'local project',
           'local (this machine only)',
@@ -1450,7 +1464,6 @@ export class CapyCommand {
       // Branch resolution needs a token (server-assisted steps: branch list,
       // conflict validation, fresh-clone prompt) — so it runs post-auth.
       const resolvedBranch = await this.resolveActiveBranch(projectState, false);
-      projectState.activeBranch = resolvedBranch;
 
       const orgName = result.organization_name
         || result.organizations?.find(o => o.id === result.organization_id)?.name
@@ -1522,24 +1535,35 @@ export class CapyCommand {
     const pinned = rebuildPinned(initialKeep);
     this.debug('pinned', pinned);
 
-    // Read local .env and compute hashes
-    const localPlaintext: Record<string, string> = {};
-    const localHashes: Record<string, string> = {};
-    try {
-      const rawLocal = this.fileManager.readEnvFile(this.options.envPath);
-      this.debug('.env keys', Object.keys(rawLocal));
-      for (const [key, value] of Object.entries(rawLocal)) {
-        const plaintext = value.startsWith('capy:')
-          ? this.decryptLocalEnvValueForSync(key, value, encryptionKey)
-          : value;
-        localPlaintext[key] = plaintext;
-        localHashes[key] = hashValue(plaintext);
+    // Read local .env and compute hashes. A read/decrypt failure that isn't a
+    // typed CapyError is swallowed (debug-logged only) exactly as before —
+    // in every case that can actually happen, nothing had been accumulated
+    // yet when it's thrown, so falling back to empty objects is the same
+    // partial state the old `for` loop's mutation would have left behind.
+    const { localPlaintext, localHashes } = ((): {
+      localPlaintext: Record<string, string>;
+      localHashes: Record<string, string>;
+    } => {
+      try {
+        const rawLocal = this.fileManager.readEnvFile(this.options.envPath);
+        this.debug('.env keys', Object.keys(rawLocal));
+        const plaintext = Object.fromEntries(
+          Object.entries(rawLocal).map(([key, value]) => [
+            key,
+            value.startsWith('capy:') ? this.decryptLocalEnvValueForSync(key, value, encryptionKey) : value,
+          ]),
+        );
+        const hashes = Object.fromEntries(
+          Object.entries(plaintext).map(([key, value]) => [key, hashValue(value)]),
+        );
+        this.debug('local hashes', hashes);
+        return { localPlaintext: plaintext, localHashes: hashes };
+      } catch (error: any) {
+        if (error instanceof CapyError) throw error;
+        this.debugError('.env read failed', error);
+        return { localPlaintext: {}, localHashes: {} };
       }
-      this.debug('local hashes', localHashes);
-    } catch (error: any) {
-      if (error instanceof CapyError) throw error;
-      this.debugError('.env read failed', error);
-    }
+    })();
 
     // Fetch remote secrets. In local-only mode there is no remote — skip the
     // fetch entirely and reuse the existing offline path (networkAvailable
