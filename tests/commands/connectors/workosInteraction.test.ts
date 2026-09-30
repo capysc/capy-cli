@@ -39,8 +39,8 @@ const run = (scenario: 'success' | 'expiry-fails' | 'client-id' | 'ambiguous') =
     const interaction = {output,progress:output,goal:output,prompt:async question=> {
       const view = question.view;
       call('prompt',view);
-      const selected = view.input.choices.find(choice=>choice.label.includes('app_other')) ?? view.input.choices[0];
-      const answer = question.decide({value:selected.value});
+      const selected = view.input.choices?.find(choice=>choice.label.includes('app_other')) ?? view.input.choices?.[0];
+      const answer = question.decide({value:view.input.kind === 'confirm' ? true : selected.value});
       if ('error' in answer) throw new Error(answer.error);
       return answer.value;
     }};
@@ -65,7 +65,7 @@ const run = (scenario: 'success' | 'expiry-fails' | 'client-id' | 'ambiguous') =
 describe('real WorkOS connector through Interaction with isolated fake I/O', () => {
   test('creates replacement then schedules one-hour overlap without revealing keys', () => {
     const result = run('success');
-    expect(result.names).toEqual(['teamProjectsV2', 'keys', 'createKey', 'expireKey']);
+    expect(result.names).toEqual(['teamProjectsV2', 'keys', 'prompt', 'createKey', 'expireKey']);
     expect(result.result).toEqual({ok:true,mode:'sandbox',valueMatches:true});
     expect(result.expiry.id).toBe('key_old'); expect(result.expiry.delay).toBeGreaterThanOrEqual(3600000);
     expect(result.expiry.delay).toBeLessThan(3605000); expect(result.leaked).toBe(false);
@@ -81,7 +81,7 @@ describe('real WorkOS connector through Interaction with isolated fake I/O', () 
   });
   test('ambiguous application uses the common typed question and selected application', () => {
     const result = run('ambiguous');
-    expect(result.names).toEqual(['teamProjectsV2', 'keys', 'prompt', 'createKey']);
+    expect(result.names).toEqual(['teamProjectsV2', 'keys', 'prompt', 'prompt', 'createKey']);
     expect(result.create.applicationId).toBe('app_other'); expect(result.result.ok).toBe(true);
   });
 });

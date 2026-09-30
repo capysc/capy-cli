@@ -224,7 +224,7 @@ describe('CapyCommand hosted terminal verification', () => {
     });
   });
 
-  test('free completion requires exact runtime metadata, remote hash and ciphertext without keep.lock', async () => {
+  test('legacy free metadata cannot verify a repository without keep.lock', async () => {
     const freeTarget = { ...target, projectName: 'default', syncMode: 'free' } as const;
     const freeKeep = { ...keep, project_name: 'default' };
     const sync: SyncState = {
@@ -234,19 +234,19 @@ describe('CapyCommand hosted terminal verification', () => {
     };
     const freeSubject = (input: Readonly<{ state?: SyncState; localKeep?: KeepFile; values?: Readonly<Record<string, string>> }> = {}) => ({
       options: {},
-      projectManager: { readKeepFile: () => input.localKeep ?? null, readActiveBranch: () => target.branch,
+      projectManager: { readKeepFile: () => input.localKeep ?? null, deriveActiveBranch: () => target.branch, readActiveBranch: () => target.branch,
         readSyncState: () => input.state ?? sync },
       fileManager: { readEnvFile: () => input.values ?? { SENTINEL: 'capy:development:SENTINEL:sealed' },
         readEnvMeta: () => ({ org_id: target.orgId, project_id: target.projectId, branch: target.branch }) },
     });
     const remote = context({ free: true, projectName: 'default', remoteKeep: freeKeep });
     expect(await verifyHostedInitialization.call(freeSubject(), remote, freeTarget))
-      .toEqual({ repositoryVerified: true, custodyVerified: true });
+      .toEqual({ repositoryVerified: false, custodyVerified: true });
     for (const invalid of [
       { state: { ...sync, project_id: 'other' } },
       { state: { ...sync, keep_hash: { development: 'stale' } } },
       { state: { ...sync, synced_variables: [] } },
-      { localKeep: freeKeep }, { values: { SENTINEL: 'plaintext' } },
+      { values: { SENTINEL: 'plaintext' } },
     ]) expect((await verifyHostedInitialization.call(freeSubject(invalid), remote, freeTarget)).repositoryVerified).toBe(false);
     expect((await verifyHostedInitialization.call(freeSubject(),
       context({ free: false, projectName: 'default', remoteKeep: freeKeep }), freeTarget)).repositoryVerified).toBe(false);

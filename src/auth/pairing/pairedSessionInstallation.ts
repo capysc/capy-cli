@@ -57,6 +57,7 @@ export function capturePairedSessionInstallationBaseline(
         return { userId, refreshAuthoritySha256: null, unavailable: true as const };
       }
     });
+    if (subject !== null && authorities.some(authority => authority.userId === subject && authority.unavailable)) return refuse();
     return { expectedUserId: subject, authorities };
   } catch { return refuse(); }
 }

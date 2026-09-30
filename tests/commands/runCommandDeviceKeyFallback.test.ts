@@ -24,6 +24,7 @@ const PROJECT_ID = 'proj-run-fallback';
 
 mock.module('../../src/config/profileConfig', () => ({
   isLocalOnly: () => false,
+  resolveActiveUrl: () => 'https://service.test',
 }));
 
 let silentAuthResult: unknown = {

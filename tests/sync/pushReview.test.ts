@@ -17,7 +17,7 @@ const keep = (variables: KeepFile["variables"]): KeepFile => ({
 const base: PushReviewInput = {
   repository: "/fictional/repository",
   serviceOrigin: "https://service.example.invalid",
-  mode: "free_snapshot",
+  mode: "paid_merge",
   userId: "user_fixture",
   organizationId: "org_fixture",
   projectId: "project_fixture",
@@ -85,7 +85,7 @@ describe("push review", () => {
 
     expect(buildPushReview(base)).toMatchObject({
       variable_names: ["ALPHA", "ZULU"],
-      removed_remote_names: ["BRAVO"],
+      removed_remote_names: [],
     });
     expect(buildPushReview(reversed).plan_hash).toBe(
       buildPushReview(base).plan_hash,
@@ -101,7 +101,7 @@ describe("push review", () => {
       { ...base, organizationId: "org_other" },
       { ...base, projectId: "project_other" },
       { ...base, branch: "release" },
-      { ...base, mode: "paid_merge" },
+      { ...base, mode: "local_only" },
       { ...base, projectKey: "other-project-key-plaintext" },
       {
         ...base,
@@ -131,7 +131,7 @@ describe("push review", () => {
     ).toEqual([]);
   });
 
-  test("requires the exact plan hash for one or more free snapshot removals", () => {
+  test("ordinary Keep merges do not remove omitted remote names", () => {
     const review = buildPushReview({
       ...base,
       localRaw: { ALPHA: "local-alpha-plaintext" },
@@ -161,19 +161,16 @@ describe("push review", () => {
     });
 
     expect(review).toMatchObject({
-      removed_remote_names: ["BRAVO", "CHARLIE"],
-      requires_confirmation: true,
+      removed_remote_names: [],
+      requires_confirmation: false,
     });
-    expect(pushReviewDecision(review, {})).toMatchObject({
-      ok: false,
-      code: "PUSH_CONFIRM_REQUIRED",
-    });
+    expect(pushReviewDecision(review, {})).toBeNull();
     expect(
       pushReviewDecision(review, { confirm: review.plan_hash }),
     ).toBeNull();
   });
 
-  test("never attributes free snapshot removals to paid merges", () => {
+  test("never reports remote removals for Keep merges", () => {
     const review = buildPushReview({
       ...base,
       mode: "paid_merge",
@@ -220,7 +217,7 @@ describe("push review", () => {
     const frozenInput = Object.freeze({
       repository: "/fictional/repository",
       serviceOrigin: "https://service.example.invalid",
-      mode: "free_snapshot" as const,
+      mode: "paid_merge" as const,
       userId: "user_fixture",
       organizationId: "org_fixture",
       projectId: "project_fixture",
@@ -241,7 +238,7 @@ describe("push review", () => {
     expect(Object.isFrozen(frozenLocal)).toBe(true);
     expect(review).toMatchObject({
       variable_names: ["LOCAL_ONLY"],
-      removed_remote_names: ["REMOTE_ONLY"],
+      removed_remote_names: [],
     });
     for (const privateValue of [
       "local-super-secret-plaintext",

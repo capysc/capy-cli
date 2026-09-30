@@ -156,7 +156,7 @@ export async function unlockHostedOrganization(input: Readonly<{
     // before the CLI continues with its existing service client and session.
     const restored = await guarded(() => input.authService.authenticateSilent(input.organizationId));
     if (!restored.success || restored.user_id !== userId || restored.organization_id !== input.organizationId) {
-      throw new CapyError('Could not restore the selected organization session.', ERROR_CODES.AUTH_FAILED);
+      throw new CapyError(restored.success ? 'Could not restore the selected organization session.' : restored.error ?? 'Could not restore the selected organization session.', ERROR_CODES.AUTH_FAILED);
     }
     return {
       cancelled: false,

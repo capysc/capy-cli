@@ -53,9 +53,9 @@ export interface SetupExecutorDependencies {
 }
 type SetupFailureStage = 'resolve_project' | 'resolve_key' | 'push';
 class SetupFlowError extends Error {
-  constructor(readonly code: string, readonly failureStage?: SetupFailureStage) { super(code); }
+  constructor(readonly code: string, readonly failureStage?: SetupFailureStage, authReason?: string) { super(code, { cause: authReason }); }
 }
-const reject = (code: string): never => { throw new SetupFlowError(code); };
+const reject = (code: string, authReason?: string): never => { throw new SetupFlowError(code, undefined, authReason); };
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const output = (view: RepositoryView) => ({ ok: true, flow_id: view.flow_id,
   stage: view.next_action === 'done' ? 'done' : 'repository_pending',
@@ -160,7 +160,7 @@ export async function runFlowSetupCommand(flowId: string, options: FlowSetupOpti
     if (!restored || restored.credentialId !== paired.credentialId) return reject('SETUP_PAIRING_REQUIRED');
     const auth = new AuthService(options.serviceOrigin, devMode, options.expectedUserId);
     const identity = await auth.authenticateSilent(paired.custodyOrgId);
-    if (!identity.success || identity.user_id !== options.expectedUserId) return reject('SETUP_SIGN_IN_REQUIRED');
+    if (!identity.success || identity.user_id !== options.expectedUserId) return reject('SETUP_SIGN_IN_REQUIRED', identity.error_code);
     const request = async (body?: JsonResult): Promise<RepositoryView> => {
       const token = await auth.getValidToken();
       if (!token?.access_token) return reject('SETUP_SIGN_IN_REQUIRED');
@@ -223,7 +223,7 @@ export async function runFlowSetupCommand(flowId: string, options: FlowSetupOpti
             || Object.values(values).some((value) => !value.startsWith('capy:'))) return reject('SETUP_LOCAL_TARGET_MISMATCH');
         }
         const scoped = await auth.authenticateSilent(target.org_id);
-        if (!scoped.success || scoped.user_id !== options.expectedUserId) return reject('SETUP_SIGN_IN_REQUIRED');
+        if (!scoped.success || scoped.user_id !== options.expectedUserId) return reject('SETUP_SIGN_IN_REQUIRED', scoped.error_code);
         const service = new ServiceClient(options.serviceOrigin, devMode);
         service.setTokenProvider(() => auth.getValidToken());
         const remote = await service.getDecryptData(target.project_id, target.branch, undefined, true);

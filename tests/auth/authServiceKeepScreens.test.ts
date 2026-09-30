@@ -68,9 +68,9 @@ async function serviceFetch(url: string, init?: RequestInit): Promise<Response> 
   const body = init?.body ? JSON.parse(String(init.body)) : null;
   const path = url.slice(SVC.length);
 
-  if (path === '/auth/initiate') {
+  if (path === '/auth/loopback/initiate') {
     captureInitiate({ state: body.state, redirect_uri: body.redirect_uri });
-    return Response.json({ auth_url: 'https://authkit.example.test/authorize' });
+    return Response.json({ auth_url: 'https://authkit.example.test/authorize', loopback_binding: 'service-signed-loopback-binding' });
   }
   if (path === '/auth/exchange') {
     const status = exchangeStatus();

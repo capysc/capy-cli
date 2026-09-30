@@ -56,8 +56,8 @@ export interface IntakeDependencies {
   readonly send: (connection: BrokerConnection, pageKey: string, payload: string) => Promise<{ readonly kind: string }>;
   readonly apply: (pairs: readonly SecretPair[], baseHash: string | null, localDigest: string) => Promise<{ readonly remoteKeepHash: string; readonly localDigest: string }>;
 }
-class IntakeError extends Error { constructor(readonly code: string) { super(code); } }
-const fail = (code: string): never => { throw new IntakeError(code); };
+class IntakeError extends Error { constructor(readonly code: string, authReason?: string) { super(code, { cause: authReason }); } }
+const fail = (code: string, authReason?: string): never => { throw new IntakeError(code, authReason); };
 const sha = (value: string) => createHash('sha256').update(value).digest('hex');
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const intentDigest = (view: IntakeView) => sha(JSON.stringify({ parent: view.onboarding_flow_id,
@@ -194,7 +194,7 @@ export async function runFlowAddCommand(flowId: string, options: FlowAddOptions,
     if (!restored) return fail('INTAKE_PAIRING_REQUIRED');
     const auth = new AuthService(options.serviceOrigin, devMode, options.expectedUserId);
     const identity = await auth.authenticateSilent(restored.filesystemCustody?.orgId);
-    if (!identity.success || identity.user_id !== options.expectedUserId) return fail('INTAKE_SIGN_IN_REQUIRED');
+    if (!identity.success || identity.user_id !== options.expectedUserId) return fail('INTAKE_SIGN_IN_REQUIRED', identity.error_code);
     const token = async () => (await auth.getValidToken())?.access_token ?? fail('INTAKE_SIGN_IN_REQUIRED');
     const request = async (body?: Json): Promise<IntakeView> => {
       const response = await fetch(`${options.serviceOrigin}/flows/${flowId}/secret-intake`, {

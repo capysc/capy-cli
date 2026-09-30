@@ -1,3 +1,4 @@
+import { configureCliFixture } from '../helpers/cliProfileFixture';
 import { describe, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -15,6 +16,7 @@ function invoke(
 ) {
   const globalDirectory = mkdtempSync(join(tmpdir(), 'capy-expected-user-entrypoint-'));
   const cwd = mkdtempSync(join(tmpdir(), 'capy-expected-user-project-'));
+  configureCliFixture(globalDirectory, SERVICE_ORIGIN);
   try {
     const result = spawnSync(process.execPath, [resolve(import.meta.dir, '../../src', entrypoint), ...args], {
       cwd,
@@ -22,10 +24,10 @@ function invoke(
       timeout: 15_000,
       env: {
         PATH: process.env.PATH,
-        HOME: homedir(),
-        CAPY_GLOBAL_DIR_NAME: relative(homedir(), globalDirectory),
-        CAPY_API_URL: SERVICE_ORIGIN,
-        CAPY_KEEP_ORIGIN: 'http://127.0.0.1:8',
+        HOME: globalDirectory,
+        CAPY_GLOBAL_DIR_NAME: entrypoint === 'index-dev.ts' ? '.capy' : undefined,
+        CAPY_API_URL: entrypoint === 'index-dev.ts' ? SERVICE_ORIGIN : undefined,
+        CAPY_KEEP_ORIGIN: undefined,
         CAPY_WEB_NO_OPEN: '1',
         NO_COLOR: '1',
         ...extraEnv,

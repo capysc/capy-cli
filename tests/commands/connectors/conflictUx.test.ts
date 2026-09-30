@@ -1,5 +1,5 @@
 /**
- * Conflict/overwrite UX polish on top of single-user lock-less mode:
+ * Conflict and overwrite UX with an explicit repository manifest:
  *
  *  1. `conflictContextLines` — connector metadata + relative "last written"
  *     time rendered ABOVE the existing overwrite/CAS confirm questions,
@@ -8,12 +8,7 @@
  *  2. `editCommand`'s save path and `pushCommand` now offer the same TTY
  *     inquirer confirm `addCommand` already used for a same-key CAS
  *     conflict, instead of refusing unconditionally.
- *  3. `maybeWarnPersonalEnv` — a one-line, non-blocking heads-up on the
- *     FIRST lock-less write in a directory that git recognizes as a team
- *     project (a repo with a remote) but whose `.env` has no capy identity
- *     header yet.
- *
- * Same harness convention as `locklessContext.test.ts`: AuthService,
+ *\n * Fixture dependencies: AuthService,
  * ServiceClient and keyResolver.resolveProjectKey are mocked (no network/
  * crypto in a unit test); ProjectManager, FileManager, SyncEngine and the
  * real AES-GCM Encryptor are the real thing against real temp directories.
@@ -21,7 +16,7 @@
  * the interactive confirm paths directly.
  */
 import { mock, spyOn, describe, test, expect, beforeEach, afterEach, afterAll } from 'bun:test';
-import { mkdtempSync, rmSync, existsSync, writeFileSync, mkdirSync } from 'fs';
+import { mkdtempSync, rmSync, existsSync, appendFileSync, writeFileSync, mkdirSync } from 'fs';
 import { execFileSync } from 'child_process';
 import { tmpdir } from 'os';
 import { join } from 'path';
@@ -154,8 +149,6 @@ import {
   conflictContextLines,
   describeConnector,
   conflictOverwriteQuestion,
-  initialPersonalEnvWarningState,
-  maybeWarnPersonalEnv,
   keepEntryFor,
 } from '../../../src/commands/connectors/shared';
 import { CapyError, ERROR_CODES, KeepFile, ConnectorMetadata } from '../../../src/types/index';
@@ -197,6 +190,14 @@ afterEach(() => {
 
 function writeEnvHeader(): void {
   writeFileSync(join(TEST_DIR, '.env'), '# capy:org_id=org-header\n# capy:project_id=proj-header\n\n');
+}
+
+function prepareLocalContext(): void {
+  const keep = JSON.parse(getDecryptDataResult.keep_file);
+  writeFileSync(join(TEST_DIR, 'keep.lock'), JSON.stringify(keep));
+  mkdirSync(join(TEST_DIR, '.capy'), { recursive: true });
+  writeFileSync(join(TEST_DIR, '.capy', 'branch'), 'development');
+  writeFileSync(join(TEST_DIR, '.env'), '# capy:org_id=' + keep.org_id + '\n# capy:project_id=' + keep.project_id + '\n# capy:branch=development\n' + getDecryptDataResult.env_content);
 }
 
 async function withTTY<T>(fn: () => Promise<T>): Promise<T> {
@@ -315,6 +316,8 @@ describe('conflictContextLines / describeConnector / conflictOverwriteQuestion',
 describe('addCommand — enriched overwrite/conflict gates', () => {
   test('local "already exists" gate: context lines print above the confirm; decline aborts without a second push', async () => {
     writeEnvHeader();
+    mkdirSync(join(TEST_DIR, '.capy'), { recursive: true });
+    writeFileSync(join(TEST_DIR, '.capy', 'branch'), 'development');
     authResultQueue = [{ success: true, user_id: 'user-1', organization_id: 'org-header' }];
     const changedAt = new Date(Date.now() - 60 * 60 * 1000).toISOString(); // 1 hour ago
     const serverKeep: KeepFile = {
@@ -342,6 +345,9 @@ describe('addCommand — enriched overwrite/conflict gates', () => {
       keep_file: JSON.stringify(serverKeep),
     };
 
+    writeFileSync(join(TEST_DIR, 'keep.lock'), JSON.stringify({ version: '3.0', org_id: 'org-header', project_id: 'proj-header', project_name: 'default', variables: {} }));
+    writeFileSync(join(TEST_DIR, 'keep.lock'), JSON.stringify(serverKeep));
+    appendFileSync(join(TEST_DIR, '.env'), '\n' + cipherLine('development', 'STRIPE_KEY', 'existing-value') + '\n');
     promptAnswers = { ok: false };
     const { lines: logs, restore } = captureLogs();
     try {
@@ -363,6 +369,8 @@ describe('addCommand — enriched overwrite/conflict gates', () => {
 
   test('CAS gate: same-key server conflict shows context lines from the server\'s copy; decline refuses coded', async () => {
     writeEnvHeader();
+    mkdirSync(join(TEST_DIR, '.capy'), { recursive: true });
+    writeFileSync(join(TEST_DIR, '.capy', 'branch'), 'development');
     authResultQueue = [{ success: true, user_id: 'user-1', organization_id: 'org-header' }];
     const changedAt = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString(); // 2 days ago
     const serverKeep: KeepFile = {
@@ -391,6 +399,7 @@ describe('addCommand — enriched overwrite/conflict gates', () => {
         });
       },
     ];
+    writeFileSync(join(TEST_DIR, 'keep.lock'), JSON.stringify({ version: '3.0', org_id: 'org-header', project_id: 'proj-header', project_name: 'default', variables: {} }));
     promptAnswers = { value: 'super-secret-value', ok: false };
 
     const { lines: logs, restore } = captureLogs();
@@ -418,6 +427,8 @@ describe('addCommand — enriched overwrite/conflict gates', () => {
 
   test('CAS gate: accepting the confirm lets the retried push land', async () => {
     writeEnvHeader();
+    mkdirSync(join(TEST_DIR, '.capy'), { recursive: true });
+    writeFileSync(join(TEST_DIR, '.capy', 'branch'), 'development');
     authResultQueue = [{ success: true, user_id: 'user-1', organization_id: 'org-header' }];
     const serverKeep: KeepFile = {
       version: '3.0',
@@ -438,6 +449,7 @@ describe('addCommand — enriched overwrite/conflict gates', () => {
       },
       async (_projectId, keepFileJson) => ({ keep_hash: 'final-hash', keep_file: keepFileJson }),
     ];
+    writeFileSync(join(TEST_DIR, 'keep.lock'), JSON.stringify({ version: '3.0', org_id: 'org-header', project_id: 'proj-header', project_name: 'default', variables: {} }));
     promptAnswers = { value: 'super-secret-value', ok: true };
 
     const { lines: logs, restore } = captureLogs();
@@ -508,6 +520,7 @@ describe('editCommand — same-key CAS conflict now offers the addCommand-style 
     let thrown: any;
     await withTTY(async () => {
       try {
+        prepareLocalContext();
         const { EditCommand } = await import('../../../src/commands/editCommand');
         await new EditCommand(undefined, true).execute({});
       } catch (err) {
@@ -568,7 +581,8 @@ describe('editCommand — same-key CAS conflict now offers the addCommand-style 
     promptAnswers = { ok: true };
 
     await withTTY(async () => {
-      const { EditCommand } = await import('../../../src/commands/editCommand');
+      prepareLocalContext();
+        const { EditCommand } = await import('../../../src/commands/editCommand');
       await new EditCommand(undefined, true).execute({});
     });
 
@@ -616,7 +630,8 @@ describe('editCommand — same-key CAS conflict now offers the addCommand-style 
     Object.defineProperty(process.stdin, 'isTTY', { value: false, configurable: true });
     let thrown: any;
     try {
-      const { EditCommand } = await import('../../../src/commands/editCommand');
+      prepareLocalContext();
+        const { EditCommand } = await import('../../../src/commands/editCommand');
       await new EditCommand(undefined, true).execute({});
     } catch (err) {
       thrown = err;
@@ -797,112 +812,5 @@ describe('pushCommand — same-key CAS conflict now offers the addCommand-style 
       push.mockRestore();
       auth.mockRestore();
     }
-  });
-});
-
-describe('maybeWarnPersonalEnv — soft, non-blocking personal-env-in-a-team-project note', () => {
-  function gitInit(withRemote: boolean): void {
-    execFileSync('git', ['init', '-q'], { cwd: TEST_DIR });
-    if (withRemote) {
-      execFileSync('git', ['remote', 'add', 'origin', 'https://example.com/team/repo.git'], { cwd: TEST_DIR });
-    }
-  }
-
-  test('fires once for a lock-less write whose identity came from the server, in a repo with a remote', async () => {
-    gitInit(true);
-    authResultQueue = [{ success: true, user_id: 'user-1', organization_id: 'org-1' }];
-    listProjectsResult = [{ id: 'proj-1', name: 'default', organization_id: 'org-1' }];
-
-    const ctx = await resolveContext({ devMode: true });
-    expect(ctx.identitySource).toBe('server');
-
-    const { lines: errs, restore } = captureErrors();
-    try {
-      const warningState = maybeWarnPersonalEnv(ctx, initialPersonalEnvWarningState(), TEST_DIR);
-      maybeWarnPersonalEnv(ctx, warningState, TEST_DIR); // same state threaded through — no second line
-    } finally {
-      restore();
-    }
-
-    expect(errs).toEqual(['Heads up: this saves to your personal env, not a team project.']);
-  });
-
-  test('stays silent when the .env identity header already exists (not the first write)', async () => {
-    gitInit(true);
-    writeEnvHeader();
-    authResultQueue = [{ success: true, user_id: 'user-1', organization_id: 'org-header' }];
-
-    const ctx = await resolveContext({ devMode: true });
-    expect(ctx.identitySource).toBe('header');
-
-    const { lines: errs, restore } = captureErrors();
-    try {
-      maybeWarnPersonalEnv(ctx, initialPersonalEnvWarningState(), TEST_DIR);
-    } finally {
-      restore();
-    }
-    expect(errs).toEqual([]);
-  });
-
-  test('stays silent in a git repo with no remote configured', async () => {
-    gitInit(false);
-    authResultQueue = [{ success: true, user_id: 'user-1', organization_id: 'org-1' }];
-    listProjectsResult = [{ id: 'proj-1', name: 'default', organization_id: 'org-1' }];
-
-    const ctx = await resolveContext({ devMode: true });
-    const { lines: errs, restore } = captureErrors();
-    try {
-      maybeWarnPersonalEnv(ctx, initialPersonalEnvWarningState(), TEST_DIR);
-    } finally {
-      restore();
-    }
-    expect(errs).toEqual([]);
-  });
-
-  test('stays silent outside a git repo entirely', async () => {
-    authResultQueue = [{ success: true, user_id: 'user-1', organization_id: 'org-1' }];
-    listProjectsResult = [{ id: 'proj-1', name: 'default', organization_id: 'org-1' }];
-
-    const ctx = await resolveContext({ devMode: true });
-    const { lines: errs, restore } = captureErrors();
-    try {
-      maybeWarnPersonalEnv(ctx, initialPersonalEnvWarningState(), TEST_DIR);
-    } finally {
-      restore();
-    }
-    expect(errs).toEqual([]);
-  });
-
-  test('stays silent for lock-full contexts (keep.lock present) regardless of git state', () => {
-    gitInit(true);
-    const fauxLockFullCtx = { lockless: false, identitySource: undefined } as any;
-    const { lines: errs, restore } = captureErrors();
-    try {
-      maybeWarnPersonalEnv(fauxLockFullCtx, initialPersonalEnvWarningState(), TEST_DIR);
-    } finally {
-      restore();
-    }
-    expect(errs).toEqual([]);
-  });
-
-  test('writeAndSync wires the warning in automatically on a real lock-less write', async () => {
-    gitInit(true);
-    authResultQueue = [{ success: true, user_id: 'user-1', organization_id: 'org-1' }];
-    listProjectsResult = [{ id: 'proj-1', name: 'default', organization_id: 'org-1' }];
-    pushSecretsQueue = [async () => ({ keep_hash: 'h'.repeat(64) })];
-
-    const ctx = await resolveContext({ devMode: true });
-    const { lines: errs, restore } = captureErrors();
-    try {
-      await writeAndSync(ctx, 'NEW_VAR', 'value', { push: true });
-    } finally {
-      restore();
-    }
-
-    expect(errs).toEqual(['Heads up: this saves to your personal env, not a team project.']);
-    // The write itself left the identity header behind — the on-disk proof
-    // that the next command in this directory would see identitySource
-    // 'header' and stay silent.
-    expect(existsSync(join(TEST_DIR, '.env'))).toBe(true);
   });
 });

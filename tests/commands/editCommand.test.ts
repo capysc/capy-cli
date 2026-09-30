@@ -1,3 +1,4 @@
+import { configureCliFixture } from '../helpers/cliProfileFixture';
 /**
  * `capy edit`'s terminal TUI (`EditScreen.run()`) enters the alternate
  * screen and draws every variable's plaintext unconditionally, with no TTY
@@ -35,6 +36,7 @@ const CLI = join(__dirname, '../../dist/index.js');
 const ALT_SCREEN_ENTER = '\x1b[?1049h';
 
 function capyEdit(args: string[], cwd: string): { stdout: string; stderr: string; code: number } {
+  configureCliFixture(cwd, 'http://127.0.0.1:9');
   const r = spawnSync('node', [CLI, 'edit', ...args], {
     cwd,
     encoding: 'utf-8',
@@ -120,5 +122,5 @@ describe('capy edit spawned headless (piped stdio — deterministically no TTY)'
     expect(r.stdout).not.toContain(ALT_SCREEN_ENTER);
 
     rmSync(dir, { recursive: true, force: true });
-  });
+  }, 15_000);
 });

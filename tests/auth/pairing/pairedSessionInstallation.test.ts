@@ -86,9 +86,12 @@ test('per-subject snapshots preserve unrelated accounts without selecting one', 
   expect(backend.load('user_2')).toEqual(session('B1', 'user_2'));
 });
 
-test('fence-only subject refuses capture before device authorization', () => {
+test('fenced account blocks its own pairing but permits unrelated accounts', async () => {
   fence();
-  expect(() => capture()).toThrow('AUTH_REFRESH_AUTHORITY_INDETERMINATE');
+  const baseline = capture();
+  await expect(install(session('R1'), baseline)).rejects.toThrow('AUTH_REFRESH_AUTHORITY_INDETERMINATE');
+  await install(session('B1', 'user_2'), baseline);
+  expect(backend.load('user_2')).toEqual(session('B1', 'user_2'));
   expect(() => capture('user_1')).toThrow('AUTH_REFRESH_AUTHORITY_INDETERMINATE');
 });
 
@@ -102,11 +105,13 @@ test('a fence arriving after capture prevents installation without clearing it',
   expect(JSON.parse(readFileSync(path(), 'utf8'))).toEqual(session('R0'));
 });
 
-test('malformed or scope-mismatched existing state refuses capture', () => {
+test('malformed or scope-mismatched existing state blocks only its account', async () => {
   backend.save(session('R0', 'user_2'), 'user_1');
-  expect(() => capture()).toThrow('AUTH_REFRESH_AUTHORITY_INDETERMINATE');
+  await expect(install(session('R1'), capture())).rejects.toThrow('AUTH_REFRESH_AUTHORITY_INDETERMINATE');
+  expect(() => capture('user_1')).toThrow('AUTH_REFRESH_AUTHORITY_INDETERMINATE');
   writeFileSync(path(), 'not-json', { mode: 0o600 });
-  expect(() => capture()).toThrow('AUTH_REFRESH_AUTHORITY_INDETERMINATE');
+  await expect(install(session('R1'), capture())).rejects.toThrow('AUTH_REFRESH_AUTHORITY_INDETERMINATE');
+  expect(() => capture('user_1')).toThrow('AUTH_REFRESH_AUTHORITY_INDETERMINATE');
 });
 
 test('legacy identity constrains the subject but never substitutes its token for target authority', async () => {

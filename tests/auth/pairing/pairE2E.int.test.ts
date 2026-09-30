@@ -1,3 +1,4 @@
+import { configureCliFixture } from '../../helpers/cliProfileFixture';
 /**
  * CAP-409 — THE acceptance-criterion proof for `capy pair`, repointed at the
  * CAP-566 device-grant seam (#328): `capy pair` no longer installs a session
@@ -93,6 +94,7 @@ function spawnCli(
   serviceUrl: string,
   extraEnv: Record<string, string | undefined> = {},
 ): { stdoutSoFar: () => string; done: Promise<SpawnResult> } {
+  configureCliFixture(home, serviceUrl);
   const captureDirectory = mkdtempSync(join(tmpdir(), 'capy-pair-e2e-capture-'));
   const stdoutPath = join(captureDirectory, 'stdout');
   const stderrPath = join(captureDirectory, 'stderr');
@@ -462,7 +464,7 @@ async function withPairE2EFixture<T>(run: (fixture: PairE2EFixture) => Promise<T
 }
 
 describe('CAP-409 pair E2E: real session + no durable key material, over real subprocesses', () => {
-  it('pair -> pair no-op -> capy run resolves the real secret without an exported socket or durable key material', async () => {
+  it('pair -> pair no-op -> capy run uses the explicit protected filesystem custody binding', async () => {
     const masterKey = randomBytes(32);
     const projectDir = projectDirWithSecret(masterKey, 'shh-pair-e2e-secret');
     try {
@@ -521,6 +523,9 @@ describe('CAP-409 pair E2E: real session + no durable key material, over real su
     });
     const pairResult = await pair.done;
 
+    if (pairResult.exitCode !== 0) {
+      throw new Error('Pair failed with codes: ' + [...pairResult.stdout.matchAll(/"code":\s*"([A-Z0-9_]+)"/g)].map(match => match[1]).join(','));
+    }
     expect(pairResult.exitCode).toBe(0);
     const jsonStart = pairResult.stdout.lastIndexOf('{');
     const announced = JSON.parse(pairResult.stdout.slice(jsonStart));
@@ -568,9 +573,12 @@ describe('CAP-409 pair E2E: real session + no durable key material, over real su
     expect(runResult.exitCode).toBe(0);
     expect(runResult.stdout.trim()).toBe('shh-pair-e2e-secret');
 
-    // THE PROOF: walk the entire HOME tree, find zero durable key files —
-    // pairing a headless machine must never write local.key/key.enc.
-    expect(findFilesNamed(home, 'local.key')).toEqual([]);
+    // The supported filesystem custody path is explicit and permission protected.
+    const localRoot = join(home, '.capy', 'orgs', ORG_ID, 'users', USER_ID, 'local.key');
+    expect(findFilesNamed(home, 'local.key')).toEqual([localRoot]);
+    expect(statSync(localRoot).mode & 0o777).toBe(0o600);
+    const runtime = JSON.parse(readFileSync(join(home, '.capy', 'auth', 'runtime-pair.json'), 'utf8'));
+    expect(runtime.filesystemCustody).toMatchObject({ orgId: ORG_ID, path: localRoot, environment: 'production' });
     expect(findFilesNamed(home, 'key.enc')).toEqual([]);
       });
     } finally {

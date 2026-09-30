@@ -154,45 +154,6 @@ function parsedOutput(log: ReturnType<typeof mock>): any {
 }
 
 describe('SyncCommand — capy sync --json', () => {
-  test('free sync rejects ambiguous default projects before fetching secrets', async () => {
-    const { log, mockServiceClient, mockFileManager } = setupMocks({
-      projectManager: { detectProjectState: mock(async () => ({ initialized: false })) },
-      serviceClient: { listProjects: mock(async () => [
-        { id: 'first', name: 'default', organization_id: 'org_1' },
-        { id: 'second', name: 'default', organization_id: 'org_1' },
-      ]) },
-    });
-    await new SyncCommand().execute();
-    expect(parsedOutput(log).code).toBe(ERROR_CODES.PERMISSION_DENIED);
-    expect(mockServiceClient.getDecryptData).not.toHaveBeenCalled();
-    expect(mockFileManager.writeEncryptedEnvFile).not.toHaveBeenCalled();
-  });
-
-  for (const failure of ['identity', 'decryption'] as const) {
-    test(`free sync ${failure} failure refuses before every repository write`, async () => {
-      const { log, mockProjectManager, mockFileManager } = setupMocks({
-        projectManager: { detectProjectState: mock(async () => ({ initialized: false })) },
-        serviceClient: { getDecryptData: mock(async () => ({
-          keep_file: JSON.stringify({ org_id: 'org_1', project_id: failure === 'identity' ? 'wrong' : 'proj_default', variables: {} }),
-          env_content: 'private fixture ciphertext',
-        })) },
-        fileManager: {
-          parseEnvContent: mock(() => ({ FIRST: 'valid', SECOND: 'invalid' })),
-          decryptValue: mock((value: string) => { if (value === 'invalid') throw new Error('PRIVATE_SENTINEL'); return value; }),
-        },
-      });
-      await new SyncCommand().execute();
-      const output = parsedOutput(log);
-      expect(output.code).toBe(failure === 'identity' ? ERROR_CODES.PERMISSION_DENIED : ERROR_CODES.DECRYPT_KEY_MISMATCH);
-      expect(JSON.stringify(output)).not.toContain('PRIVATE_SENTINEL');
-      expect(mockProjectManager.writeActiveBranch).not.toHaveBeenCalled();
-      expect(mockFileManager.ensureCapyGitignore).not.toHaveBeenCalled();
-      expect(mockFileManager.writeKeepFile).not.toHaveBeenCalled();
-      expect(mockFileManager.writeEncryptedEnvFile).not.toHaveBeenCalled();
-      expect(mockFileManager.writeSyncState).not.toHaveBeenCalled();
-    });
-  }
-
   test('plan is read-only and matching consent retains the existing sync path', async () => {
     const { log, mockProjectManager, mockFileManager } = setupMocks();
     await new SyncCommand().execute({ plan: true });
@@ -248,214 +209,21 @@ describe('SyncCommand — capy sync --json', () => {
     expect(mockServiceClient.listProjects).not.toHaveBeenCalled();
   });
 
-  test('no keep.lock + free billing: pulls the authoritative default-project snapshot without writing keep.lock', async () => {
-    const { log, mockFileManager } = setupMocks({
-      projectManager: {
-        detectProjectState: mock(async () => ({ initialized: false, hasKeepFile: false, hasEnvFile: true })),
-        getEnvPath: mock(() => __filename),
-        readSyncState: mock(() => ({
-          last_sync: '2026-08-30T00:00:00.000Z',
-          synced_variables: ['LOCAL_ONLY'],
-          user_id: 'user_1',
-          org_id: 'org_1',
-          project_id: 'proj_default',
-          project_name: 'default',
-          sync_mode: 'free',
-        })),
-      },
-      fileManager: {
-        readEnvMeta: mock(() => ({ org_id: 'org_1', project_id: 'proj_default', branch: 'development' })),
-        readEnvFile: mock(() => ({ LOCAL_ONLY: 'stale-local-value' })),
-        parseEnvContent: mock(() => ({ REMOTE_ONLY: 'capy:rid:ciphertext' })),
-        decryptValue: mock(() => 'authoritative-remote-value'),
-      },
-      serviceClient: {
-        getDecryptData: mock(async () => ({
-          env_content: 'REMOTE_ONLY=capy:rid:ciphertext\n',
-          decrypt_key: '',
-          expires_at: new Date().toISOString(),
-          keep_file: JSON.stringify({
-            version: '3.0',
-            org_id: 'org_1',
-            project_id: 'proj_default',
-            project_name: 'default',
-            variables: { REMOTE_ONLY: [{ resource_id: 'rid', value_hash: 'hash', branch: 'development' }] },
-          }),
-        })),
-      },
+  for (const hasEnvFile of [false, true]) {
+    test(`free billing cannot substitute for keep.lock with environment ${hasEnvFile}`, async () => {
+      const { log, mockServiceClient, mockFileManager } = setupMocks({
+        projectManager: { detectProjectState: mock(async () => ({ initialized: false, hasKeepFile: false, hasEnvFile })) },
+        serviceClient: { getBillingStatus: mock(async () => ({ tier: 'free', grandfathered: false })), pushSecrets: mock(async () => undefined) },
+      });
+      await new SyncCommand().execute();
+      expect(parsedOutput(log).code).toBe(ERROR_CODES.SYNC_NOT_INITIALIZED);
+      expect(mockServiceClient.getDecryptData).not.toHaveBeenCalled();
+      expect(mockServiceClient.pushSecrets).not.toHaveBeenCalled();
+      expect(mockFileManager.writeKeepFile).not.toHaveBeenCalled();
+      expect(mockFileManager.writeEncryptedEnvFile).not.toHaveBeenCalled();
+      expect(mockFileManager.writeSyncState).not.toHaveBeenCalled();
     });
-
-    await new SyncCommand().execute();
-
-    const out = parsedOutput(log);
-    expect(out).toMatchObject({
-      ok: true,
-      action: 'sync',
-      sync_mode: 'free',
-      sync_action: 'fetch_remote',
-      branch: 'development',
-      keep_lock_path: null,
-      pulled_variables: 1,
-    });
-    expect(mockFileManager.writeKeepFile).not.toHaveBeenCalled();
-    expect(MockResolveFreeSyncProjectKey).toHaveBeenCalledWith(
-      'org_1',
-      'proj_default',
-      'user_1',
-      expect.objectContaining({ coDecrypt: expect.any(Function), wrapOuterLayer: expect.any(Function) }),
-      expect.objectContaining({ fetchKeyEnc: expect.any(Function), coDecrypt: expect.any(Function) }),
-    );
-    expect(mockFileManager.writeEncryptedEnvFile).toHaveBeenCalledWith(
-      { REMOTE_ONLY: 'authoritative-remote-value' },
-      'mock-project-key',
-      undefined,
-      expect.objectContaining({ project_id: 'proj_default', project_name: 'default' }),
-      'development',
-    );
-    expect(mockFileManager.writeSyncState).toHaveBeenCalledWith(expect.objectContaining({
-      org_id: 'org_1',
-      project_id: 'proj_default',
-      project_name: 'default',
-      sync_mode: 'free',
-      synced_variables: ['REMOTE_ONLY'],
-    }));
-  });
-
-  test('no keep.lock + free billing + absent .env + empty remote marker: leaves .env absent but updates sync metadata', async () => {
-    const { log, mockProjectManager, mockFileManager } = setupMocks({
-      projectManager: {
-        detectProjectState: mock(async () => ({ initialized: false, hasKeepFile: false, hasEnvFile: false })),
-        readSyncState: mock(() => ({
-          last_sync: '2026-08-30T00:00:00.000Z',
-          synced_variables: [],
-          user_id: 'user_1',
-          org_id: 'org_1',
-          project_id: 'proj_default',
-          project_name: 'default',
-          sync_mode: 'free',
-        })),
-      },
-      fileManager: {
-        readEnvMeta: mock(() => ({ org_id: 'org_1', project_id: 'proj_default', branch: 'development' })),
-        parseEnvContent: mock(() => ({})),
-      },
-      serviceClient: {
-        getDecryptData: mock(async () => ({
-          env_content: '',
-          decrypt_key: '',
-          expires_at: new Date().toISOString(),
-          keep_file: JSON.stringify({
-            version: '3.0',
-            org_id: 'org_1',
-            project_id: 'proj_default',
-            project_name: 'default',
-            variables: {},
-          }),
-        })),
-      },
-    });
-
-    await new SyncCommand().execute();
-
-    const out = parsedOutput(log);
-    expect(out).toMatchObject({
-      ok: true,
-      action: 'sync',
-      sync_mode: 'free',
-      sync_action: 'fetch_remote',
-      pulled_variables: 0,
-      keep_lock_path: null,
-    });
-    expect(mockFileManager.writeKeepFile).not.toHaveBeenCalled();
-    expect(mockFileManager.writeEncryptedEnvFile).not.toHaveBeenCalled();
-    expect(mockProjectManager.writeActiveBranch).toHaveBeenCalledWith('development');
-    expect(mockFileManager.ensureCapyGitignore).toHaveBeenCalledTimes(1);
-    expect(mockFileManager.writeSyncState).toHaveBeenCalledWith(expect.objectContaining({
-      org_id: 'org_1',
-      project_id: 'proj_default',
-      project_name: 'default',
-      sync_mode: 'free',
-      synced_variables: [],
-    }));
-    expect(MockWriteKeepCache).toHaveBeenCalledWith('org_1', 'proj_default', 'a'.repeat(64), '');
-    expect(MockInstallGitHooks).toHaveBeenCalledWith(false);
-  });
-
-  test('no keep.lock + free billing + existing .env + empty remote marker: replaces local file with authoritative empty remote', async () => {
-    const { log, mockFileManager } = setupMocks({
-      projectManager: {
-        detectProjectState: mock(async () => ({ initialized: false, hasKeepFile: false, hasEnvFile: true })),
-        getEnvPath: mock(() => __filename),
-        readSyncState: mock(() => ({
-          last_sync: '2026-08-30T00:00:00.000Z',
-          synced_variables: ['LOCAL_ONLY'],
-          user_id: 'user_1',
-          org_id: 'org_1',
-          project_id: 'proj_default',
-          project_name: 'default',
-          sync_mode: 'free',
-        })),
-      },
-      fileManager: {
-        readEnvMeta: mock(() => ({ org_id: 'org_1', project_id: 'proj_default', branch: 'development' })),
-        parseEnvContent: mock(() => ({})),
-      },
-      serviceClient: {
-        getDecryptData: mock(async () => ({
-          env_content: '',
-          decrypt_key: '',
-          expires_at: new Date().toISOString(),
-          keep_file: JSON.stringify({
-            version: '3.0',
-            org_id: 'org_1',
-            project_id: 'proj_default',
-            project_name: 'default',
-            variables: {},
-          }),
-        })),
-      },
-    });
-
-    await new SyncCommand().execute();
-
-    expect(parsedOutput(log)).toMatchObject({ ok: true, pulled_variables: 0 });
-    expect(mockFileManager.writeEncryptedEnvFile).toHaveBeenCalledWith(
-      {},
-      'mock-project-key',
-      undefined,
-      expect.objectContaining({ project_id: 'proj_default', project_name: 'default' }),
-      'development',
-    );
-    expect(mockFileManager.writeSyncState).toHaveBeenCalledWith(expect.objectContaining({
-      synced_variables: [],
-      sync_mode: 'free',
-    }));
-  });
-
-  test('no keep.lock + free billing but no remote marker: refuses because first sync is incomplete', async () => {
-    const { log, mockFileManager } = setupMocks({
-      projectManager: {
-        detectProjectState: mock(async () => ({ initialized: false, hasKeepFile: false, hasEnvFile: false })),
-        readSyncState: mock(() => ({
-          last_sync: '',
-          synced_variables: [],
-          user_id: 'user_1',
-          org_id: 'org_1',
-          sync_mode: 'free',
-        })),
-      },
-    });
-
-    await new SyncCommand().execute();
-
-    expect(parsedOutput(log)).toEqual({
-      ok: false,
-      code: ERROR_CODES.SYNC_NOT_INITIALIZED,
-      detail: 'the default project has not completed its first sync',
-      remedy: 'capy setup --json',
-    });
-    expect(mockFileManager.writeEncryptedEnvFile).not.toHaveBeenCalled();
-  });
+  }
 
   test('clean pull, no local .env: succeeds, reports pulled_variables and zero drift', async () => {
     const { log, mockFileManager } = setupMocks({

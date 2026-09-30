@@ -161,8 +161,8 @@ const defaultTransport: InitRunBootstrapTransport = {
   sleep: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
 };
 
-function initRunFailure(code: string): CapyError {
-  return new CapyError('Hosted init authentication failed', code);
+function initRunFailure(code: string, authReason?: string): CapyError {
+  return new CapyError('Hosted init authentication failed', code, authReason ? { auth_reason: authReason } : undefined);
 }
 
 function exactJson(value: string): unknown {
@@ -640,7 +640,7 @@ export async function continueInitRunFromDeviceGrant(
   const auth = await authService.authenticateSilent();
   const token = await authService.getValidToken();
   if (!auth.success || !token || auth.user_id !== continuation.userId || token.user_id !== continuation.userId)
-    throw initRunFailure('INIT_BINDING_MISMATCH');
+    throw initRunFailure('INIT_BINDING_MISMATCH', auth.error_code);
   const status = parseInitRunContinueResponse(await post(defaultTransport,
     `${bootstrap.request.serviceOrigin}/init-runs/${bootstrap.response.run_id}/device-grant`,
     { run_secret: bootstrap.response.run_secret, authentication_flow_id: continuation.flowId }, token.access_token));

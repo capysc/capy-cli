@@ -1,3 +1,4 @@
+import { configureCliFixture } from './cliProfileFixture';
 /**
  * CAP-383 — spawn the REAL built CLI (`dist/index.js run`) against a given
  * `~/.capy` tree, exactly the way `tests/commands/runCommand.test.ts`'s own
@@ -15,6 +16,7 @@ export function capyRun(
   serviceUrl: string,
   args: string[],
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  configureCliFixture(home, serviceUrl);
   const cliPath = join(__dirname, '../../dist/index.js');
   return new Promise((resolve) => {
     const child = spawn('node', [cliPath, 'run', ...args], {

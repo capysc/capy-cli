@@ -85,7 +85,7 @@ export async function runWithFlowInteraction(operation: () => Promise<void>, dev
   })();
   const identity = await auth.authenticateSilent();
   if (!identity.success || !identity.user_id || !identity.organization_id
-    || !readLocalRoot(identity.organization_id, identity.user_id)) throw new Error('PAIR_REQUIRED');
+    || !readLocalRoot(identity.organization_id, identity.user_id)) throw new Error('PAIR_REQUIRED', { cause: identity.error_code });
   if (descriptor.expectedUserId && identity.user_id !== descriptor.expectedUserId) throw new Error('AUTH_ACCOUNT_MISMATCH');
   const binding = resolveInitRunIdentity();
   const runtimeId = randomUUID();

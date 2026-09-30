@@ -1,3 +1,4 @@
+import { configureCliFixture } from '../../helpers/cliProfileFixture';
 /**
  * CAP-384 — THE invariant-2 proof.
  *
@@ -82,6 +83,7 @@ function spawnCli(
   serviceUrl: string,
   extraEnv: Record<string, string | undefined> = {},
 ): { child: ReturnType<typeof spawn>; stdoutSoFar: () => string; done: Promise<SpawnResult> } {
+  configureCliFixture(home, serviceUrl);
   const outputId = randomBytes(8).toString('hex');
   const stdoutPath = join(home, `.grant-child-${outputId}.stdout`);
   const stderrPath = join(home, `.grant-child-${outputId}.stderr`);

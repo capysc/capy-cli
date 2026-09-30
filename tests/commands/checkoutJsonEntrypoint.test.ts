@@ -11,8 +11,7 @@ for (const entrypoint of ['index.ts', 'index-dev.ts'] as const) {
     const configRoot = mkdtempSync(join(tmpdir(), 'capy-checkout-home-'));
     const result = spawnSync(process.execPath, [entry, 'checkout', 'preview', ...args], {
       cwd, encoding: 'utf8', timeout: 10_000,
-      env: { PATH: process.env.PATH, HOME: configRoot, CAPY_GLOBAL_DIR_NAME: '.capy-checkout-fixture',
-        CAPY_API_URL: 'http://127.0.0.1:9', CAPY_KEEP_ORIGIN: 'http://127.0.0.1:9', NO_COLOR: '1' },
+      env: { PATH: process.env.PATH, HOME: configRoot, NO_COLOR: '1' },
     });
     expect(result.error).toBeUndefined();
     expect(readdirSync(cwd)).toEqual([]);

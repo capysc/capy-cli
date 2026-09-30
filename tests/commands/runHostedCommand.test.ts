@@ -38,7 +38,7 @@ test('invalid identity, attached evaluation flags, malformed ciphertext, stale b
 
 test('reserved-only configuration does not trigger a project-key requirement', async () => {
   expect(await executeHostedRun(['node', 'server.js'], 'user_one', dependencies({
-    keep: () => null, env: () => ({ [CURRENT_DEPLOY_KEY_VAR]: 'capy:malformed' }),
+    env: () => ({ [CURRENT_DEPLOY_KEY_VAR]: 'capy:malformed' }),
     key: async () => { throw new Error('SHOULD_NOT_UNLOCK'); }, spawn: async (_args, env) => { expect(env).toEqual({}); return 0; },
   }), {})).toBe(0);
 });
@@ -63,11 +63,12 @@ test('hosted run preserves encrypted precedence, shell plaintext precedence, str
   expect(exit).toBe(7);
 });
 
-test('free mode resolves default authoritatively; paid missing-lock mode stops before reading env', async () => {
-  expect(await executeHostedRun(['node', 'server.js'], 'user_one', dependencies({ keep: () => null, spawn: async () => 0 }), {})).toBe(0);
-  await expect(executeHostedRun(['node', 'server.js'], 'user_one', dependencies({
-    keep: () => null, billing: async () => ({ tier: 'business' }), env: () => { throw new Error('SHOULD_NOT_READ'); },
-  }), {})).rejects.toMatchObject({ code: 'PROJECT_NOT_FOUND' });
+test('every billing tier requires a manifest before reading the environment', async () => {
+  for (const tier of ['free', 'business']) {
+    await expect(executeHostedRun(['node', 'server.js'], 'user_one', dependencies({
+      keep: () => null, billing: async () => ({ tier }), env: () => { throw new Error('SHOULD_NOT_READ'); },
+    }), {})).rejects.toMatchObject({ code: 'SYNC_NOT_INITIALIZED' });
+  }
 });
 
 test('free plaintext-only state is not reported as onboarded; unavailable grant never spawns', async () => {

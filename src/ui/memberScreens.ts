@@ -307,6 +307,8 @@ export function buildInviteData(
       defaultTtl: p.plan.defaultTtl,
       ...(p.plan.envTtl ? { envOverrideTtl: p.plan.envTtl } : {}),
       maxTtlHours: MAX_TTL_HOURS,
+      // The embedded legacy screen still reads its ceiling in days.
+      ...{ serverCapDays: MAX_TTL_HOURS / 24 },
     },
     // What each control opens on. Only answers this run actually holds — never
     // a default dressed up as one, which is how a rail ends up reporting `Role

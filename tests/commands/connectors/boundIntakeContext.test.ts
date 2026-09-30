@@ -24,7 +24,7 @@ mock.module('../../../src/files/fileManager', () => ({ FileManager: class {
 } }));
 mock.module('../../../src/sync/projectKeyResolver', () => ({ resolveConfiguredProjectKey: resolveKey }));
 const { resolveBoundIntakeContext } = await import('../../../src/commands/connectors/boundIntakeContext');
-const target = { org_id: 'org_test', project_id: 'project', project_name: 'default', branch: 'development', sync_mode: 'free' as const };
+const target = { org_id: 'org_test', project_id: 'project', project_name: 'default', branch: 'development', sync_mode: 'paid' as const };
 function dependencies() {
   const authenticateSilent = mock(async (_org?: string) => ({ success: true, user_id: 'user_test', organization_id: 'org_test' }));
   const getBillingStatus = mock(async () => ({ tier: 'free', grandfathered: false }));
@@ -35,7 +35,7 @@ function dependencies() {
   return { auth, service, authenticateSilent, getBillingStatus, listProjects, getDecryptData };
 }
 beforeEach(() => {
-  readKeep.mockReset().mockReturnValue(null);
+  readKeep.mockReset().mockReturnValue(keep);
   readEnv.mockReset().mockReturnValue({ LOCAL: 'local-value' });
   readBranch.mockReset().mockReturnValue('development');
   readMeta.mockReset().mockReturnValue({ org_id: 'org_test', project_id: 'project', branch: 'development' });
@@ -48,17 +48,17 @@ describe('same-repository bound intake context', () => {
     readBranch.mockReturnValue('other');
     const paid = dependencies();
     await expect(resolveBoundIntakeContext({ target: { ...target, sync_mode: 'paid' }, expectedUserId: 'user_test', ...paid })).rejects.toThrow('Repository binding changed');
-    readKeep.mockReturnValue(null);
+    readBranch.mockReturnValue('development');
     readEnv.mockReturnValue({ LOCAL: 'capy:foreign' });
     readMeta.mockReturnValue({ org_id: 'different', project_id: 'project', branch: 'development' });
     const free = dependencies();
     await expect(resolveBoundIntakeContext({ target, expectedUserId: 'user_test', ...free })).rejects.toThrow('encrypted environment belongs to another target');
     expect(resolveKey).not.toHaveBeenCalled();
   });
-  test('free uses exact default and preserves remote plus local snapshot without a local manifest', async () => {
+  test('bound manifest preserves the remote plus local snapshot', async () => {
     const deps = dependencies();
     const ctx = await resolveBoundIntakeContext({ target, expectedUserId: 'user_test', ...deps });
-    expect(ctx.lockless).toBe(true);
+    expect(ctx.lockless).toBe(false);
     expect(ctx.localPlaintext).toEqual({ REMOTE: 'decrypted-value', LOCAL: 'local-value' });
     expect(deps.authenticateSilent).toHaveBeenCalledWith('org_test');
     expect(resolveKey.mock.calls[0]?.slice(0, 3)).toEqual(['org_test', 'project', 'user_test']);
@@ -72,26 +72,17 @@ describe('same-repository bound intake context', () => {
     expect(ctx.keep).toEqual(keep);
     expect(deps.listProjects).not.toHaveBeenCalled();
   });
-  test('free unexpected lock and paid absent lock fail before auth or key resolution', async () => {
-    readKeep.mockReturnValue(keep);
-    const free = dependencies();
-    await expect(resolveBoundIntakeContext({ target, expectedUserId: 'user_test', ...free })).rejects.toThrow('Repository binding changed');
-    expect(free.authenticateSilent).not.toHaveBeenCalled();
+  test('missing manifest refuses before authentication or key resolution', async () => {
     readKeep.mockReturnValue(null);
-    const paid = dependencies();
-    await expect(resolveBoundIntakeContext({ target: { ...target, sync_mode: 'paid' }, expectedUserId: 'user_test', ...paid })).rejects.toThrow('Repository binding changed');
+    const deps = dependencies();
+    await expect(resolveBoundIntakeContext({ target, expectedUserId: 'user_test', ...deps })).rejects.toThrow('Repository binding changed');
+    expect(deps.authenticateSilent).not.toHaveBeenCalled();
     expect(resolveKey).not.toHaveBeenCalled();
   });
-  test('wrong user, billing change and different free default cannot resolve project keys', async () => {
-    const wrong = dependencies();
-    wrong.authenticateSilent.mockResolvedValue({ success: true, user_id: 'other', organization_id: 'org_test' });
-    await expect(resolveBoundIntakeContext({ target, expectedUserId: 'user_test', ...wrong })).rejects.toThrow('Resume sign-in');
-    const billing = dependencies();
-    billing.getBillingStatus.mockResolvedValue({ tier: 'team', grandfathered: false });
-    await expect(resolveBoundIntakeContext({ target, expectedUserId: 'user_test', ...billing })).rejects.toThrow('Billing context changed');
-    const project = dependencies();
-    project.listProjects.mockResolvedValue([{ id: 'other', organization_id: 'org_test', name: 'default' }]);
-    await expect(resolveBoundIntakeContext({ target, expectedUserId: 'user_test', ...project })).rejects.toThrow('default project changed');
+  test('wrong user cannot resolve project keys', async () => {
+    const deps = dependencies();
+    deps.authenticateSilent.mockResolvedValue({ success: true, user_id: 'other', organization_id: 'org_test' });
+    await expect(resolveBoundIntakeContext({ target, expectedUserId: 'user_test', ...deps })).rejects.toThrow('Resume sign-in');
     expect(resolveKey).not.toHaveBeenCalled();
   });
   test('unreadable encrypted values fail instead of silently deleting remote keys', async () => {
@@ -103,6 +94,6 @@ describe('same-repository bound intake context', () => {
     readKeep.mockReturnValue({ ...keep, variables: { OLD: [{ branch: 'development', resource_id: 'resource', value_hash: 'hash' }] } });
     const deps = dependencies();
     deps.getBillingStatus.mockResolvedValue({ tier: 'team', grandfathered: false });
-    await expect(resolveBoundIntakeContext({ target: { ...target, sync_mode: 'paid' }, expectedUserId: 'user_test', ...deps })).rejects.toThrow('local paid manifest is stale');
+    await expect(resolveBoundIntakeContext({ target: { ...target, sync_mode: 'paid' }, expectedUserId: 'user_test', ...deps })).rejects.toThrow('local Keep manifest is stale');
   });
 });

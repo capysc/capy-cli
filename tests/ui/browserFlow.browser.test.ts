@@ -1,3 +1,4 @@
+import { InitWizardDriver } from '../helpers/initWizardDriver';
 /**
  * The browser end-to-end tests: a real headless browser loads the page the CLI
  * serves, clicks the controls a person would click, and the CLI's own reducer
@@ -1737,9 +1738,8 @@ describeBrowser('the first run, driven by a real browser', () => {
     // this same address, and what comes back is the step the CLI actually
     // reached after doing the work that answer unlocked. Three inventions this
     // session died on exactly this.
-    const { InitWizardSession } = await import('../../src/ui/initWizardScreen');
     let url = '';
-    const session = new InitWizardSession({ open: false, onListen: (u) => (url = u) });
+    const session = new InitWizardDriver({ open: false, onListen: (u) => (url = u) });
 
     const done = (async () => {
       session.record({ signedInAs: 'mike@market.example', orgCount: 2 });
@@ -1825,10 +1825,9 @@ describeBrowser('the first run, driven by a real browser', () => {
     // moment, and the compiled screen draws its ending from the button that
     // was pressed — so ending the flow with `{ done }` renders a green check
     // and "Done. You can close this tab." over a run that just died.
-    const { InitWizardSession } = await import('../../src/ui/initWizardScreen');
     const { CapyError, ERROR_CODES } = await import('../../src/types');
     let url = '';
-    const session = new InitWizardSession({
+    const session = new InitWizardDriver({
       open: false,
       finalGraceMs: 8_000,
       onListen: (u) => (url = u),
@@ -1880,9 +1879,8 @@ describeBrowser('the first run, driven by a real browser', () => {
     // the clock was made to stop for it, the wizard died mid-work and the next
     // question threw "The setup window has already closed." — with the
     // organization already created and its recovery phrase already shown once.
-    const { InitWizardSession } = await import('../../src/ui/initWizardScreen');
     let url = '';
-    const session = new InitWizardSession({ open: false, timeoutMs: 6_000, onListen: (u) => (url = u) });
+    const session = new InitWizardDriver({ open: false, timeoutMs: 6_000, onListen: (u) => (url = u) });
 
     const done = (async () => {
       session.record({ signedInAs: 'mike@market.example', orgCount: 2 });
@@ -1916,9 +1914,8 @@ describeBrowser('the first run, driven by a real browser', () => {
     // swallows it, prints "You can run capy again", and carries on — so under
     // --web the run reached `finish()` and the page drew a green check over a
     // push that never happened, on a directory whose .env is still plaintext.
-    const { InitWizardSession } = await import('../../src/ui/initWizardScreen');
     let url = '';
-    const session = new InitWizardSession({
+    const session = new InitWizardDriver({
       open: false,
       finalGraceMs: 8_000,
       onListen: (u) => (url = u),
@@ -2027,9 +2024,8 @@ describeBrowser('the first run, driven by a real browser', () => {
     // `confirmEncrypt = chosen === 'yes'` already meant this. After this step
     // the .env in the directory is ciphertext, so the refusal has to come back
     // as a refusal rather than as an error the caller might treat as a retry.
-    const { InitWizardSession } = await import('../../src/ui/initWizardScreen');
     let url = '';
-    const session = new InitWizardSession({ open: false, onListen: (u) => (url = u) });
+    const session = new InitWizardDriver({ open: false, onListen: (u) => (url = u) });
     const done = (async () => {
       session.record({ signedInAs: 'mike@market.example', orgCount: 0, localEnvCount: 2 });
       return session.askEncrypt(LOCAL_ENV, TARGET);
@@ -2046,10 +2042,9 @@ describeBrowser('the first run, driven by a real browser', () => {
   test('closing the window on the consent gate encrypts nothing', async () => {
     // An unanswered gate has not been agreed to. Leaving must not resolve as
     // consent, and it must not resolve at all.
-    const { InitWizardSession } = await import('../../src/ui/initWizardScreen');
     let url = '';
     let settled = false;
-    const session = new InitWizardSession({ open: false, timeoutMs: 1_500, onListen: (u) => (url = u) });
+    const session = new InitWizardDriver({ open: false, timeoutMs: 1_500, onListen: (u) => (url = u) });
     const done = session.askEncrypt(LOCAL_ENV, TARGET);
     void done.then(() => (settled = true)).catch(() => undefined);
 
@@ -2829,7 +2824,7 @@ describeBrowser('capy invite, driven by a real browser', () => {
 
     await untilSettled(page, says('How long should it last?'), 'the expiry stop');
     // The service's silent ceiling, said out loud.
-    expect(await evaluate<boolean>(page, says('caps invites at 12 hours'))).toBe(true);
+    expect(await evaluate<boolean>(page, says('caps invites at 0.5 days'))).toBe(true);
     expect(await evaluate<boolean>(page, hasCancel)).toBe(true);
 
     await chooseOption(page, '2h');

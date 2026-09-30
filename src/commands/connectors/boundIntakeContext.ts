@@ -30,7 +30,7 @@ export async function resolveBoundIntakeContext(input: {
   }
   const identity = await auth.authenticateSilent(target.org_id);
   if (!identity.success || identity.user_id !== input.expectedUserId || identity.organization_id !== target.org_id) {
-    throw new CapyError('Resume sign-in for this account.', ERROR_CODES.AUTH_FAILED);
+    throw new CapyError(identity.success ? 'Resume sign-in for this account.' : identity.error ?? 'Resume sign-in for this account.', ERROR_CODES.AUTH_FAILED);
   }
   const projectKey = await resolveConfiguredProjectKey(target.org_id, target.project_id, input.expectedUserId, {
     coDecrypt: (org, ciphertext) => service.coDecrypt(org, ciphertext).then((result) => result.plaintext),

@@ -1,3 +1,4 @@
+import { configureCliFixture } from '../../helpers/cliProfileFixture';
 /**
  * CAP-383 — THE CENTERPIECE regression: CAP-372's own acceptance test for
  * "is portability actually done."
@@ -137,6 +138,7 @@ function capyRun(
   serviceUrl: string,
   args: string[],
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  configureCliFixture(home, serviceUrl);
   const cliPath = join(__dirname, '../../../dist/index.js');
   return new Promise((resolve) => {
     const child = spawn('node', [cliPath, 'run', ...args], {

@@ -372,87 +372,13 @@ describe('CapyCommand', () => {
       exitSpy.mockRestore();
     });
 
-    test('does not treat a failed remote first-sync read as an absent marker', async () => {
-      mockProjectManager.readKeepFile.mockReturnValue({ version: '3.0', org_id: 'org_1', project_id: 'project_default', project_name: 'default', variables: {} });
-      mockAuthService.authenticateSilent.mockResolvedValue({ success: true, user_id: 'user_1' });
-      mockServiceClient.getBillingStatus.mockImplementation(async () => ({ tier: 'free', grandfathered: false }));
-      mockServiceClient.listProjects.mockResolvedValue([{ id: 'project_default', name: 'default', organization_id: 'org_1' }]);
-      mockServiceClient.getDecryptData.mockRejectedValue(new CapyError('unavailable', ERROR_CODES.NETWORK_ERROR));
-      await expect((capyCommand as any).recoverFreeFirstSync({
-        initialized: true, hasKeepFile: true, hasEnvFile: true, projectName: 'default', organizationId: 'org_1', projectId: 'project_default', activeBranch: 'development', userId: 'user_1',
-      })).rejects.toMatchObject({ code: ERROR_CODES.NETWORK_ERROR });
-    });
-
-    test('keeps an initialized free checkout on its existing path when the remote marker exists', async () => {
-      mockProjectManager.readKeepFile.mockReturnValue({ version: '3.0', org_id: 'org_1', project_id: 'project_default', project_name: 'default', variables: {} });
-      mockAuthService.authenticateSilent.mockResolvedValue({ success: true, user_id: 'user_1' });
-      mockServiceClient.getBillingStatus.mockImplementation(async () => ({ tier: 'free', grandfathered: false }));
-      mockServiceClient.listProjects.mockResolvedValue([{ id: 'project_default', name: 'default', organization_id: 'org_1' }]);
-      mockServiceClient.getDecryptData.mockResolvedValue({ keep_file: '{}' });
-      const plan = spyOn(capyCommand as any, 'planFreeSetup');
-      await expect((capyCommand as any).recoverFreeFirstSync({ initialized: true, hasKeepFile: true, hasEnvFile: true, projectName: 'default', organizationId: 'org_1', projectId: 'project_default', activeBranch: 'development', userId: 'user_1' })).resolves.toBe(false);
-      expect(plan).not.toHaveBeenCalled();
-    });
-
-    test('a matching empty free stub with no remote marker reaches the setup executor', async () => {
-      mockProjectManager.readKeepFile.mockReturnValue({ version: '3.0', org_id: 'org_1', project_id: 'project_default', project_name: 'default', variables: {} });
-      mockAuthService.authenticateSilent.mockResolvedValue({ success: true, user_id: 'user_1' });
-      mockServiceClient.getBillingStatus.mockImplementation(async () => ({ tier: 'free', grandfathered: false }));
-      mockServiceClient.listProjects.mockResolvedValue([{ id: 'project_default', name: 'default', organization_id: 'org_1' }]);
-      mockServiceClient.getDecryptData.mockResolvedValue({});
-      spyOn(capyCommand as any, 'planFreeSetup').mockResolvedValue({ hash: 'sha256:test', names: [], syncAction: 'create_empty_remote_marker' });
-      const apply = spyOn(capyCommand as any, 'applyFreeSetup').mockResolvedValue(undefined);
-      await expect((capyCommand as any).recoverFreeFirstSync({ initialized: true, hasKeepFile: true, hasEnvFile: true, projectName: 'default', organizationId: 'org_1', projectId: 'project_default', activeBranch: 'development', userId: 'user_1' })).resolves.toBe(true);
-      expect(apply).toHaveBeenCalledWith('org_1', 'project_default', 'user_1', 'sha256:test');
-    });
-
-    test('declining first-sync encryption never applies the prepared plan', async () => {
-      mockProjectManager.readKeepFile.mockReturnValue({ version: '3.0', org_id: 'org_1', project_id: 'project_default', project_name: 'default', variables: {} });
-      mockFileManager.readEnvFile.mockReturnValue({ SECRET: 'plain' });
-      mockAuthService.authenticateSilent.mockResolvedValue({ success: true, user_id: 'user_1' });
-      mockServiceClient.getBillingStatus.mockImplementation(async () => ({ tier: 'free', grandfathered: false }));
-      mockServiceClient.listProjects.mockResolvedValue([{ id: 'project_default', name: 'default', organization_id: 'org_1' }]);
-      mockServiceClient.getDecryptData.mockResolvedValue({});
-      spyOn(capyCommand as any, 'planFreeSetup').mockResolvedValue({ hash: 'sha256:test', names: ['SECRET'], syncAction: 'push_root_env' });
-      const apply = spyOn(capyCommand as any, 'applyFreeSetup').mockResolvedValue(undefined);
-      await runWithInteraction({ output: () => undefined, progress: () => undefined, goal: () => undefined,
-        prompt: async question => {
-          expect(question.presentation).toEqual({ title: 'Review repository setup', component: 'repository-review' });
-          return { answer: false };
-        } }, async () => {
-        await expect((capyCommand as any).recoverFreeFirstSync({ initialized: true, hasKeepFile: true, hasEnvFile: true, projectName: 'default', organizationId: 'org_1', projectId: 'project_default', activeBranch: 'development', userId: 'user_1' })).rejects.toMatchObject({ message: 'The initial secret sync was skipped.' });
-      });
-      expect(apply).not.toHaveBeenCalled();
-    });
-  });
-
-  describe('initialization authentication', () => {
-    test('uses a remembered organization only for silent authentication', async () => {
-      const hintedAuth = { success: false, error: 'No matching session' };
-      const freshAuth = { success: true, organizations: [] };
-      mockAuthService.authenticateSilent.mockResolvedValue(hintedAuth);
-      mockAuthService.authenticate.mockResolvedValue(freshAuth);
-
-      const result = await (capyCommand as any).authenticateInitialization({
-        authService: mockAuthService,
-      }, 'former-org');
-
-      expect(mockAuthService.authenticateSilent).toHaveBeenCalledWith('former-org');
-      expect(mockAuthService.authenticate).toHaveBeenCalledWith();
-      expect(result).toEqual(freshAuth);
-    });
-
-    test('keeps a silently authenticated organization without opening a browser flow', async () => {
-      const hintedAuth = { success: true, organization_id: 'current-org' };
-      mockAuthService.authenticateSilent.mockResolvedValue(hintedAuth);
-
-      const result = await (capyCommand as any).authenticateInitialization({
-        authService: mockAuthService,
-      }, 'current-org');
-
-      expect(mockAuthService.authenticateSilent).toHaveBeenCalledWith('current-org');
-      expect(mockAuthService.authenticate).not.toHaveBeenCalled();
-      expect(result).toEqual(hintedAuth);
+    test('an initialized free checkout follows the manifest sync path', async () => {
+      const state = { initialized: true, hasKeepFile: true, hasEnvFile: true, organizationId: 'org_1', projectId: 'project_default' };
+      mockProjectManager.detectProjectState.mockResolvedValue(state);
+      const sync = spyOn(capyCommand as any, 'syncProject').mockResolvedValue(undefined);
+      await capyCommand.execute();
+      expect(sync).toHaveBeenCalledWith(state);
+      expect(mockServiceClient.getBillingStatus).not.toHaveBeenCalled();
     });
   });
 
@@ -1754,60 +1680,20 @@ describe('CapyCommand', () => {
       Object.defineProperty(process.stdin, 'isTTY', { value: savedIsTTY, configurable: true });
     });
 
-    test('picking "Create new organization +" syncs the NEW org onto any already-enrolled device key, not the old one', async () => {
-      const inquirer = (await import('inquirer')).default;
-      const origPrompt = inquirer.prompt;
-      (inquirer as any).prompt = async (questions: any) => {
-        const q = Array.isArray(questions) ? questions[0] : questions;
-        if (q.name === 'orgId') return { orgId: '__create_new__' };
-        if (q.name === 'orgName') return { orgName: 'Second Org' };
-        if (q.name === 'confirmed') return { confirmed: true };
-        if (q.name === 'initChoice') return { initChoice: 'development' };
-        return {};
-      };
-
-      const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
-      try {
-        await (capyCommand as any).initializeProject();
-      } finally {
-        (inquirer as any).prompt = origPrompt;
-        consoleSpy.mockRestore();
-      }
-
-      expect(mockAuthService.createOrganization).toHaveBeenCalledWith('Second Org', 'refresh-token', 'user-456');
-      expect(deviceKeyWiringCalls.syncOrgOntoDeviceKeyIfEnrolled).toHaveLength(1);
-      expect(deviceKeyWiringCalls.syncOrgOntoDeviceKeyIfEnrolled[0].orgId).toBe('org-second');
-      // The pre-existing org must never be the sync target here — this call
-      // is specifically about the org that was JUST created.
-      expect(deviceKeyWiringCalls.syncOrgOntoDeviceKeyIfEnrolled[0].orgId).not.toBe('org-existing');
-    });
-
-    test('rail always on: the sync fires even with the legacy env flag unset', async () => {
-      // Permanently ON as of onboarding v2 — the env var is no longer
-      // consulted (src/auth/deviceKey/flag.ts).
-      delete process.env.CAPY_DEVICE_KEYS;
-      const inquirer = (await import('inquirer')).default;
-      const origPrompt = inquirer.prompt;
-      (inquirer as any).prompt = async (questions: any) => {
-        const q = Array.isArray(questions) ? questions[0] : questions;
-        if (q.name === 'orgId') return { orgId: '__create_new__' };
-        if (q.name === 'orgName') return { orgName: 'Second Org' };
-        if (q.name === 'confirmed') return { confirmed: true };
-        if (q.name === 'initChoice') return { initChoice: 'development' };
-        return {};
-      };
-
-      const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
-      try {
-        await (capyCommand as any).initializeProject();
-      } finally {
-        (inquirer as any).prompt = origPrompt;
-        consoleSpy.mockRestore();
-      }
-
-      expect(deviceKeyWiringCalls.syncOrgOntoDeviceKeyIfEnrolled).toHaveLength(1);
-      expect(deviceKeyWiringCalls.syncOrgOntoDeviceKeyIfEnrolled[0].orgId).toBe('org-second');
-    });
+    for (const enabled of [false, true]) {
+      test(`additional organization creation directs to Keep with device-key flag ${enabled}`, async () => {
+        if (!enabled) delete process.env.CAPY_DEVICE_KEYS;
+        const inquirer = (await import('inquirer')).default;
+        const prompt = spyOn(inquirer, 'prompt').mockResolvedValue({ orgId: '__create_new__' } as never);
+        const output = spyOn(console, 'log').mockImplementation(() => {});
+        try {
+          await expect((capyCommand as any).initializeProject()).rejects.toMatchObject({ code: 'KEEP_ONBOARDING_REQUIRED' });
+          expect(mockAuthService.createOrganization).not.toHaveBeenCalled();
+          expect(deviceKeyWiringCalls.syncOrgOntoDeviceKeyIfEnrolled).toHaveLength(0);
+          expect(mockServiceClient.initializeProject).not.toHaveBeenCalled();
+        } finally { prompt.mockRestore(); output.mockRestore(); }
+      });
+    }
 
     test('the ordinary-flow enrollment nudge also fires once a project exists (MAJOR-5 wiring)', async () => {
       const inquirer = (await import('inquirer')).default;

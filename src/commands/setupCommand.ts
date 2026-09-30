@@ -177,7 +177,7 @@ async function resolveIdentity(authService: AuthService, selectedOrg?: string): 
     if (!selected) return { ok: false, code: ERROR_CODES.PERMISSION_DENIED, detail: 'The selected organization is not available to this account.' };
     const scoped = await authService.authenticateSilent(selectedOrg);
     if (!scoped.success || scoped.user_id !== first.user_id || scoped.organization_id !== selectedOrg) {
-      return { ok: false, code: ERROR_CODES.AUTH_FAILED, detail: 'Could not authenticate this account in the selected organization.' };
+      return { ok: false, code: ERROR_CODES.AUTH_FAILED, detail: scoped.success ? 'Could not authenticate this account in the selected organization.' : scoped.error ?? 'Could not authenticate this account in the selected organization.' };
     }
     return { ok: true, authResult: scoped, org: { id: selected.id, name: selected.name } };
   }
