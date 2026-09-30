@@ -481,12 +481,14 @@ describe('capy deploy — superseded deploy-token revocation wiring (validator f
 
     const code = await withEnv({ MY_REVOKE_TEST_TOKEN: 'dk_token' }, () => runScriptedRemove(fetchMock, errorMock));
 
-    // The target config itself is still removed locally (that's
-    // `removeTarget`, unrelated to the keep.lock strip/revoke pairing this
-    // guards) — only the strip+revoke pairing is refused.
-    expect(code).toBe(0);
+    // Refused as a whole: nothing stripped, nothing revoked, and the target
+    // stays in .capy/deploy.json — removing it would orphan its keep.lock
+    // records, since the strip path needs the target to find them.
+    expect(code).toBe(1);
     expect(revokeDeployTokenMock).not.toHaveBeenCalled();
     expect(pushSecretsMock).not.toHaveBeenCalled();
+    const deployJson = JSON.parse(readFileSync(join(ROOT, '.capy', 'deploy.json'), 'utf-8'));
+    expect(Object.keys(deployJson.targets)).toContain('dokploy-direct');
 
     const warnings = errorMock.mock.calls.map((c) => c.join(' ')).join('\n');
     expect(warnings).toContain('DEPLOY_STALE_KEEP');

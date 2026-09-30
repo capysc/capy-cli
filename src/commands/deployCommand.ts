@@ -2146,7 +2146,11 @@ export async function deployRemove(
       } else {
         const fresh = await resolveFreshSnapshot(cwd, target.branch, opts.devMode, 'strip deploy targets', ERROR_CODES.DEPLOY_STALE_KEEP);
         if (!fresh) {
-          console.error(`${RED('✗')} refusing to strip targets or revoke deploy token(s) for "${name}" — see the warning above.`);
+          // Keep the target in .capy/deploy.json: removing it here would orphan
+          // its keep.lock records (the strip path needs the target to find them).
+          // COPY-FLAG
+          console.error(`${RED('✗')} refusing to strip targets or revoke deploy token(s) for "${name}" — see the warning above. The target was kept; run \`capy\` to sync, then remove it again.`);
+          return 1;
         } else {
           const stripResult = await pushKeepTransform(
             cwd,
@@ -2158,8 +2162,11 @@ export async function deployRemove(
           if (!stripResult.ok) {
             console.error(
               `  ${YELLOW('!')} kept ${deployIds.length} deploy token(s) for "${name}" live — the keep.lock strip ` +
-                `did not complete (see the warning above), so revoking them now would leave a stale record.`,
+                `did not complete (see the warning above), so revoking them now would leave a stale record. ` +
+                // COPY-FLAG
+                `The target was kept; run \`capy\` to sync, then remove it again.`,
             );
+            return 1;
           } else {
             try {
               const { AuthService } = await import('../auth/authService');
