@@ -71,8 +71,6 @@ function commandsIn(source: string): Set<string> {
  * adding to this list should feel like a decision, because it is one.
  */
 const PROD_ONLY = new Set([
-  // Commander's built-in, declared explicitly on the production program only.
-  'help',
   // Local-only vault lock. Dev runs against a dev service, never a local vault.
   'lock',
 ]);

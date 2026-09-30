@@ -23,6 +23,14 @@ function git(projectRoot: string, args: string[]): string {
   });
 }
 
+function tryIsInsideWorkTree(projectRoot: string): boolean {
+  try {
+    return git(projectRoot, ['rev-parse', '--is-inside-work-tree']).trim() === 'true';
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Commit keep.lock after a sync/push changed it (CAP-303).
  *
@@ -39,18 +47,22 @@ function git(projectRoot: string, args: string[]): string {
  * commit error), a loud warning tells the user their team's pins are behind.
  *
  * Opt out with CAPY_NO_AUTOCOMMIT=1.
+ *
+ * `options.quiet` sends the "keep.lock committed" line to stderr instead of
+ * stdout — for a caller like `capy connect dokploy --json`, whose stdout
+ * must be exactly one JSON object. Every other caller omits it and keeps
+ * today's exact behavior (stdout).
  */
-export function autoCommitKeep(branch: string, projectRoot: string = process.cwd()): AutoCommitResult {
+export function autoCommitKeep(
+  branch: string,
+  projectRoot: string = process.cwd(),
+  options: { quiet?: boolean } = {},
+): AutoCommitResult {
   if (process.env.CAPY_NO_AUTOCOMMIT === '1') {
     return { committed: false, reason: 'disabled' };
   }
 
-  let inRepo = false;
-  try {
-    inRepo = git(projectRoot, ['rev-parse', '--is-inside-work-tree']).trim() === 'true';
-  } catch {
-    inRepo = false;
-  }
+  const inRepo = tryIsInsideWorkTree(projectRoot);
   if (!inRepo) {
     warnUncommitted('not in a git repository');
     return { committed: false, reason: 'not_a_repo' };
@@ -75,7 +87,9 @@ export function autoCommitKeep(branch: string, projectRoot: string = process.cwd
 
     git(projectRoot, ['add', '--', 'keep.lock']);
     git(projectRoot, ['commit', '-m', `chore(capy): pin ${branch} secrets`, '--', 'keep.lock']);
-    console.log(`> keep.lock committed ${'\x1b[90m'}(chore(capy): pin ${branch} secrets)\x1b[0m`);
+    const line = `> keep.lock committed ${'\x1b[90m'}(chore(capy): pin ${branch} secrets)\x1b[0m`;
+    if (options.quiet) console.error(line);
+    else console.log(line);
     return { committed: true };
   } catch {
     warnUncommitted('git commit failed');

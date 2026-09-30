@@ -155,6 +155,8 @@ Good when you want to see drift across the whole branch, edit one variable witho
 | [`capy transport`](https://docs.capy.sc/cli/transport) | Move your account to another machine. |
 | [`capy kick <email>`](https://docs.capy.sc/cli/kick) | Remove a teammate. |
 | [`capy users`](https://docs.capy.sc/cli/users) | Interactive member management. |
+| [`capy projects`](https://docs.capy.sc/cli/projects) | List projects in the org and their branches. |
+| [`capy secrets`](https://docs.capy.sc/cli/secrets) | List every secret name in the org, grouped by value (never shows a value). |
 | [`capy org`](https://docs.capy.sc/cli/org) | List or switch organizations. |
 | [`capy branch`](https://docs.capy.sc/cli/branch) | List or switch branches. |
 | [`capy checkout <branch>`](https://docs.capy.sc/cli/checkout) | Switch branches. `-b` to create. |
@@ -167,6 +169,7 @@ Good when you want to see drift across the whole branch, edit one variable witho
 | [`capy profile`](https://docs.capy.sc/cli/profile) | Manage CLI profiles. |
 | [`capy byoc [url]`](https://docs.capy.sc/cli/byoc) | Connect to a self-hosted Capy instance. |
 | [`capy info`](https://docs.capy.sc/cli/info) | Show current session info. |
+| [`capy agents`](https://docs.capy.sc/cli/agents) | Tell AI coding agents in this repo how to use Capy (writes AGENTS.md / CLAUDE.md). |
 | [`capy logout`](https://docs.capy.sc/cli/logout) | Clear local session. |
 | [`capy cleanup`](https://docs.capy.sc/cli/cleanup) | Remove git hooks and local state. |
 

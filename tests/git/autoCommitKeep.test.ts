@@ -1,4 +1,4 @@
-import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
+import { describe, test, expect, beforeEach, afterEach, spyOn } from 'bun:test';
 import { execFileSync } from 'child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
@@ -120,5 +120,53 @@ describe('autoCommitKeep', () => {
     const result = autoCommitKeep('development', dir);
 
     expect(result).toEqual({ committed: false, reason: 'disabled' });
+  });
+
+  test('quiet: true sends the committed line to stderr, never stdout', () => {
+    initRepo(dir);
+    writeFileSync(join(dir, 'keep.lock'), '{"v":1}\n');
+    git(dir, ['add', '.']);
+    git(dir, ['commit', '-q', '-m', 'init']);
+    writeFileSync(join(dir, 'keep.lock'), '{"v":2}\n');
+
+    const outLines: string[] = [];
+    const errLines: string[] = [];
+    const logSpy = spyOn(console, 'log').mockImplementation((...args: unknown[]) => {
+      outLines.push(args.map(String).join(' '));
+    });
+    const errSpy = spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
+      errLines.push(args.map(String).join(' '));
+    });
+    try {
+      const result = autoCommitKeep('development', dir, { quiet: true });
+      expect(result.committed).toBe(true);
+    } finally {
+      logSpy.mockRestore();
+      errSpy.mockRestore();
+    }
+
+    expect(outLines).toEqual([]);
+    expect(errLines.some((l) => l.includes('keep.lock committed'))).toBe(true);
+  });
+
+  test('quiet omitted (default): the committed line still goes to stdout, unchanged', () => {
+    initRepo(dir);
+    writeFileSync(join(dir, 'keep.lock'), '{"v":1}\n');
+    git(dir, ['add', '.']);
+    git(dir, ['commit', '-q', '-m', 'init']);
+    writeFileSync(join(dir, 'keep.lock'), '{"v":2}\n');
+
+    const outLines: string[] = [];
+    const logSpy = spyOn(console, 'log').mockImplementation((...args: unknown[]) => {
+      outLines.push(args.map(String).join(' '));
+    });
+    try {
+      const result = autoCommitKeep('development', dir);
+      expect(result.committed).toBe(true);
+    } finally {
+      logSpy.mockRestore();
+    }
+
+    expect(outLines.some((l) => l.includes('keep.lock committed'))).toBe(true);
   });
 });

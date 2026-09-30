@@ -12,6 +12,7 @@ import {
   seedPhraseToMasterKey,
   CURRENT_KDF_VERSION,
 } from '../crypto/keyManager';
+import { excludeSystemProject } from '../system/reservedProjectName';
 
 /** A piece of this org's ciphertext, and a way to test a key against it. */
 interface CiphertextOracle {
@@ -43,17 +44,25 @@ export type OracleGapCode = 'no-secrets' | 'list-failed' | 'fetch-failed' | 'oth
  * projects for any genuinely-encrypted value and returns a verifier bound to
  * that project. Returns a `gap` code when there is nothing to verify against.
  */
+/** `null` on failure — kept out of `findOrgCiphertextOracle`'s body so that function needs no `let`. */
+async function tryListProjects(serviceClient: ServiceClient): Promise<Array<{ id: string; organization_id: string; name: string }> | null> {
+  try {
+    return await serviceClient.listProjects();
+  } catch {
+    return null;
+  }
+}
+
 async function findOrgCiphertextOracle(
   serviceClient: ServiceClient,
   orgId: string,
   fm: FileManager,
 ): Promise<{ oracle: CiphertextOracle } | { gap: OracleGapCode }> {
-  let projects: Array<{ id: string; organization_id: string }>;
-  try {
-    projects = await serviceClient.listProjects();
-  } catch {
-    return { gap: 'list-failed' };
-  }
+  const rawProjects = await tryListProjects(serviceClient);
+  if (rawProjects === null) return { gap: 'list-failed' };
+  // Belt-and-braces (CAP-664): the service already hides the org's `_system`
+  // project from this listing. Recovery must never scan it as an oracle.
+  const projects = excludeSystemProject(rawProjects);
 
   const mine = projects.filter(p => p.organization_id === orgId);
   if (mine.length === 0) return { gap: 'no-secrets' };

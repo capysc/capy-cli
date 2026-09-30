@@ -1,8 +1,10 @@
 import { AuthService } from '../auth/authService';
-import { ServiceClient } from '../service/serviceClient';
+import { ServiceClient, MemberDetail } from '../service/serviceClient';
 import { ProjectManager } from '../core/projectManager';
 import { InteractiveTable } from '../ui/interactiveTable';
 import { Spinner } from '../ui/spinner';
+import { excludeSystemProject } from '../system/reservedProjectName';
+import { AuthResult } from '../types/index';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -71,10 +73,11 @@ export class UsersCommand {
     projectName: string,
     branchName: string,
   ): Promise<{ projectId: string; branchId: string; userId: string }> {
-    const [projects, memberDetails] = await Promise.all([
+    const [rawProjects, memberDetails] = await Promise.all([
       serviceClient.listProjects(),
       serviceClient.listMemberDetails(orgId),
     ]);
+    const projects = excludeSystemProject(rawProjects);
     const project = projects.find((p) => p.name === projectName);
     if (!project) {
       console.error(`Project "${projectName}" not found in this organization.`);
@@ -92,6 +95,38 @@ export class UsersCommand {
       process.exit(1);
     }
     return { projectId: project.id, branchId: (branch as any).id, userId: member.userId };
+  }
+
+  /** Silent (this org, then any cached session) before falling back to interactive OAuth. Exits on failure. */
+  private async authenticateForUsersOrExit(authService: AuthService, orgId: string): Promise<AuthResult> {
+    const forThisOrg = await authService.authenticateSilent(orgId);
+    if (forThisOrg.success) return forThisOrg;
+    const anyCached = await authService.authenticateSilent();
+    if (anyCached.success) return anyCached;
+    const interactive = await authService.authenticate(orgId);
+    if (interactive.success) return interactive;
+    console.error('Authentication failed');
+    process.exit(1);
+  }
+
+  /** Loads the member list + the caller's own role, reporting spinner success/failure. Exits on failure. */
+  private async loadMembersOrExit(
+    serviceClient: ServiceClient,
+    orgId: string,
+    spinner: Spinner | null,
+  ): Promise<{ members: MemberDetail[]; callerRole: string; currentUserId: string }> {
+    try {
+      const [result, me] = await Promise.all([
+        serviceClient.listMemberDetails(orgId),
+        serviceClient.getOrgMe(orgId),
+      ]);
+      spinner?.succeed(`${result.members.length} member${result.members.length !== 1 ? 's' : ''}`);
+      return { members: result.members, callerRole: me.role, currentUserId: me.user_id };
+    } catch (err: any) {
+      spinner?.fail('Failed to load members');
+      console.error(`  ${err.message}`);
+      process.exit(1);
+    }
   }
 
   async execute(opts: { json?: boolean } = {}): Promise<void> {
@@ -112,36 +147,14 @@ export class UsersCommand {
     const authService = new AuthService(this.apiUrl, this.devMode, projectState.userId);
     const serviceClient = new ServiceClient(this.apiUrl, this.devMode);
     serviceClient.setTokenProvider(() => authService.getValidToken());
-    let authResult = await authService.authenticateSilent(orgId);
-    if (!authResult.success) authResult = await authService.authenticateSilent();
-    if (!authResult.success) authResult = await authService.authenticate(orgId);
-    if (!authResult.success) {
-      console.error('Authentication failed');
-      process.exit(1);
-    }
+    await this.authenticateForUsersOrExit(authService, orgId);
 
     // Fetch member details. In --json mode emit NO progress at all so stdout stays
     // pure JSON even on a TTY (the Spinner already routes to stderr when piped; this
     // also covers an interactive run). CAP-273.
     const spinner = opts.json ? null : new Spinner('Loading members...');
     spinner?.start();
-    let members;
-    let callerRole = '';
-    let currentUserId = '';
-    try {
-      const [result, me] = await Promise.all([
-        serviceClient.listMemberDetails(orgId),
-        serviceClient.getOrgMe(orgId),
-      ]);
-      members = result.members;
-      callerRole = me.role;
-      currentUserId = me.user_id;
-      spinner?.succeed(`${members.length} member${members.length !== 1 ? 's' : ''}`);
-    } catch (err: any) {
-      spinner?.fail('Failed to load members');
-      console.error(`  ${err.message}`);
-      process.exit(1);
-    }
+    const { members, callerRole, currentUserId } = await this.loadMembersOrExit(serviceClient, orgId, spinner);
 
     if (opts.json) {
       console.log(
@@ -186,7 +199,7 @@ export class UsersCommand {
         callerRole,
         currentUserId,
         listProjects: async () => {
-          const projects = await serviceClient.listProjects();
+          const projects = excludeSystemProject(await serviceClient.listProjects());
           return projects.map((p) => ({ id: p.id, name: p.name }));
         },
         changeRole: async (userId, newRole, projectId) => {

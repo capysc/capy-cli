@@ -7,9 +7,27 @@ import { ServiceClient } from '../service/serviceClient';
 import { AuthResult, Organization, KeepFile, CapyError, ERROR_CODES } from '../types/index';
 import { hasOrgKey, resolveProjectKey, KeyServiceOps } from '../crypto/keyResolver';
 import { createNewOrganization } from './orgCreation';
+import { excludeSystemProject, assertProjectNameAllowed, isReservedProjectName, PROJECT_NAME_RESERVED_MESSAGE } from '../system/reservedProjectName';
 import { execSync } from 'child_process';
+import { ACCENT } from '../ui/colors';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
+
+/**
+ * `_execute()`'s auth fallback chain: try the org-scoped silent session
+ * first, then a plain silent session, then a full interactive
+ * authentication — returning the first successful result, or the last
+ * attempt's failure if none succeed. Pulled out into its own function
+ * (rather than a reassigned `let`) so each attempt is a `return`, not a
+ * mutation the reader has to track across three lines.
+ */
+async function resolveAuthResultWithFallback(authService: AuthService, currentOrgId: string | undefined): Promise<AuthResult> {
+  const scopedSilent = await authService.authenticateSilent(currentOrgId);
+  if (scopedSilent.success) return scopedSilent;
+  const plainSilent = await authService.authenticateSilent();
+  if (plainSilent.success) return plainSilent;
+  return authService.authenticate(currentOrgId);
+}
 
 /**
  * The branch a first project is bootstrapped with.
@@ -76,9 +94,7 @@ export class OrgCommand {
     if (projectState.userId) {
       this.authService.setSessionUserId(projectState.userId);
     }
-    let authResult = await this.authService.authenticateSilent(currentOrgId);
-    if (!authResult.success) authResult = await this.authService.authenticateSilent();
-    if (!authResult.success) authResult = await this.authService.authenticate(currentOrgId);
+    const authResult = await resolveAuthResultWithFallback(this.authService, currentOrgId);
     if (!authResult.success) {
       console.error('Authentication failed. Run `capy` to re-authenticate.');
       process.exit(1);
@@ -103,7 +119,7 @@ export class OrgCommand {
       message: 'Switch organization:',
       choices: [
         ...orgs.map(o => ({
-          name: o.id === currentOrgId ? `${o.name}  \x1b[38;5;43m← current\x1b[0m` : o.name,
+          name: o.id === currentOrgId ? `${o.name}  ${ACCENT}← current\x1b[0m` : o.name,
           value: o.id,
         })),
         { name: 'Create new organization +', value: CREATE_NEW_ORG },
@@ -122,18 +138,21 @@ export class OrgCommand {
       process.exit(1);
     }
 
-    let selectedOrg: Organization;
-    if (orgId === CREATE_NEW_ORG) {
-      selectedOrg = await createNewOrganization(
+    // Two ways to land on the org this run switches into — creating a brand
+    // new one, or re-scoping auth onto one already picked from the list —
+    // each its own closure (rather than two `if`/`else` branches assigning
+    // into one `let`) so the value IS the result of whichever path ran,
+    // never a variable patched after the fact.
+    const createSelectedOrg = async (): Promise<Organization> => {
+      const org = await createNewOrganization(
         this.authService,
         this.serviceClient,
         refreshToken,
         authResult.user_id!,
       );
-
       const scopedAuth = await this.authService.refreshWithCredentials(
         refreshToken,
-        selectedOrg.id,
+        org.id,
         authResult.user_id,
       );
       if (!scopedAuth.success) {
@@ -142,16 +161,17 @@ export class OrgCommand {
           ERROR_CODES.AUTH_FAILED,
         );
       }
-    } else {
-      selectedOrg = orgs.find(o => o.id === orgId)!;
+      return org;
+    };
 
+    const switchToSelectedOrg = async (): Promise<Organization> => {
+      const org = orgs.find(o => o.id === orgId)!;
       const orgSpinner = ora('Switching organization...').start();
       const scopedAuth = await this.authService.refreshWithCredentials(
         refreshToken,
-        selectedOrg.id,
+        org.id,
         authResult.user_id,
       );
-
       if (!scopedAuth.success) {
         orgSpinner.fail('Failed to switch organization');
         throw new CapyError(
@@ -159,8 +179,11 @@ export class OrgCommand {
           ERROR_CODES.AUTH_FAILED,
         );
       }
-      orgSpinner.succeed(`Organization: ${selectedOrg.name}`);
-    }
+      orgSpinner.succeed(`Organization: ${org.name}`);
+      return org;
+    };
+
+    const selectedOrg: Organization = orgId === CREATE_NEW_ORG ? await createSelectedOrg() : await switchToSelectedOrg();
 
     // Check for org master key
     if (!hasOrgKey(selectedOrg.id, authResult.user_id!)) {
@@ -173,8 +196,9 @@ export class OrgCommand {
       );
     }
 
-    // List projects in the new org
-    const projects = await this.serviceClient.listProjects();
+    // List projects in the new org. Belt-and-braces filter (CAP-664): the
+    // service already hides the org's `_system` project from this listing.
+    const projects = excludeSystemProject(await this.serviceClient.listProjects());
     const orgProjects = projects.filter(p => p.organization_id === selectedOrg.id);
 
     if (orgProjects.length === 0) {
@@ -269,7 +293,6 @@ export class OrgCommand {
       firstBranchName: FIRST_BRANCH,
     };
 
-    let switchedTo: Organization | undefined;
     const picked = await switchOrganizationInBrowser({
       ...facts,
       onOrgChosen: async (orgId: string) => {
@@ -282,8 +305,7 @@ export class OrgCommand {
         if (!scopedAuth.success) {
           return { ok: false as const, reason: scopedAuth.error || 'Organization switch failed' };
         }
-        switchedTo = org;
-        const projects = await this.serviceClient.listProjects();
+        const projects = excludeSystemProject(await this.serviceClient.listProjects());
         const orgProjects = projects.filter(p => p.organization_id === org.id);
         if (orgProjects.length === 0) {
           const refusal = this.firstProjectRefusal(org, hasProject);
@@ -340,7 +362,10 @@ export class OrgCommand {
       return;
     }
 
-    const selectedOrg = switchedTo!;
+    // `picked` here is 'select-project' or 'create-project' (the 'cancel' and
+    // 'create' actions already returned above), and both carry the id of
+    // whichever org `onOrgChosen` last switched into successfully.
+    const selectedOrg = orgs.find(o => o.id === picked.orgId)!;
     if (!hasOrgKey(selectedOrg.id, userId)) {
       // Unreachable through the screen, which disables a row with no key —
       // and still checked, because the throw is what stops a switch this
@@ -359,7 +384,7 @@ export class OrgCommand {
       return;
     }
 
-    const projects = await this.serviceClient.listProjects();
+    const projects = excludeSystemProject(await this.serviceClient.listProjects());
     const selectedProject = projects.find(p => p.id === picked.projectId)!;
     this.bindToProject(selectedOrg, selectedProject, userId, hasProject);
   }
@@ -406,7 +431,12 @@ export class OrgCommand {
       name: 'projectName',
       message: 'Project name:',
       default: defaultName,
-      validate: (input: string) => input.trim().length > 0 || 'Project name cannot be empty',
+      validate: (input: string) => {
+        if (input.trim().length === 0) return 'Project name cannot be empty';
+        // `_system` is reserved for the org's system store (CAP-664).
+        if (isReservedProjectName(input)) return PROJECT_NAME_RESERVED_MESSAGE;
+        return true;
+      },
     }]);
 
     await this.bootstrapFirstProject(selectedOrg, userId, projectName);
@@ -441,6 +471,11 @@ export class OrgCommand {
     userId: string,
     projectName: string,
   ): Promise<void> {
+    // Choke point for both callers (terminal prompt above and the browser
+    // wizard's create-project path, which has no synchronous validate hook of
+    // its own) — the reserved name must never reach the service either way.
+    assertProjectNameAllowed(projectName.trim());
+
     const initSpinner = ora('Creating project...').start();
     const projectResult = await this.serviceClient.initializeProject(
       projectName.trim(),

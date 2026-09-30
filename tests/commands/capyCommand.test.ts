@@ -82,7 +82,7 @@ mock.module('../../src/ui/spinner', () => ({
 
 afterAll(() => { mock.restore(); });
 
-import { CapyCommand } from '../../src/commands/capyCommand';
+import { CapyCommand, listOrgProjectsOrUnavailable } from '../../src/commands/capyCommand';
 import { ProjectManager } from '../../src/core/projectManager';
 import { FileManager } from '../../src/files/fileManager';
 import { AuthService } from '../../src/auth/authService';
@@ -98,6 +98,52 @@ const MockAuthService = AuthService as any;
 const MockServiceClient = ServiceClient as any;
 const MockSyncEngine = SyncEngine as any;
 const MockPromptEngine = PromptEngine as any;
+
+// ── listOrgProjectsOrUnavailable: the extracted core of the bootstrap-or- ──
+// create project listing — "lookup failed" and "this org has none" must
+// stay distinguishable (a network/auth error is not "you have no projects
+// yet"). Extracted (CAP-657 follow-up defect fix) so `dokploy.ts`'s
+// discovery reuses this SAME function rather than a second copy that
+// silently collapsed a failure to `[]` and risked offering "create new"
+// blind (a duplicate-project risk).
+
+describe('listOrgProjectsOrUnavailable', () => {
+  test('a successful listing returns the projects, excluding _system, with projectsUnavailable: false', async () => {
+    const serviceClient = {
+      listProjects: async () => [
+        { id: 'p1', name: 'widgets', organization_id: 'o' },
+        { id: 'sys', name: '_system', organization_id: 'o' },
+      ],
+    } as unknown as ServiceClient;
+    const result = await listOrgProjectsOrUnavailable(serviceClient);
+    expect(result.projectsUnavailable).toBe(false);
+    expect(result.existingProjects.map((p) => p.id)).toEqual(['p1']);
+  });
+
+  test('a failed listing returns [] with projectsUnavailable: true, and calls onError with the real error', async () => {
+    const boom = new Error('network down');
+    const serviceClient = {
+      listProjects: async () => {
+        throw boom;
+      },
+    } as unknown as ServiceClient;
+    const errors: unknown[] = [];
+    const result = await listOrgProjectsOrUnavailable(serviceClient, (err) => errors.push(err));
+    expect(result.projectsUnavailable).toBe(true);
+    expect(result.existingProjects).toEqual([]);
+    expect(errors).toEqual([boom]);
+  });
+
+  test('onError is optional — a failure never throws even with no callback', async () => {
+    const serviceClient = {
+      listProjects: async () => {
+        throw new Error('x');
+      },
+    } as unknown as ServiceClient;
+    const result = await listOrgProjectsOrUnavailable(serviceClient);
+    expect(result.projectsUnavailable).toBe(true);
+  });
+});
 
 describe('CapyCommand', () => {
   let capyCommand: CapyCommand;

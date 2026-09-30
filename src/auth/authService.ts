@@ -89,6 +89,39 @@ function resolveExpiresAt(expiresInSeconds: number): number {
   return Date.now() + ttl * 1000;
 }
 
+/** The `org_id` claim out of an unverified JWT access token, or undefined if it's missing/unparseable. Decode-only — the server has already validated the signature. */
+function decodeJwtOrgClaim(accessToken: string): string | undefined {
+  try {
+    const payload = JSON.parse(Buffer.from(accessToken.split('.')[1], 'base64').toString());
+    return typeof payload.org_id === 'string' ? payload.org_id : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Which org a freshly-issued JWT is scoped to. The JWT's own `org_id` claim
+ * is the source of truth; `organizationId` (the caller's request) and "the
+ * user has exactly one org" are fallbacks for when the JWT doesn't resolve
+ * to a known org. Returns `''` when none of the three apply — same
+ * "no org yet" signal `processExchangeResponse` always used.
+ *
+ * Extracted so `processExchangeResponse` doesn't need a `let resolvedOrgId`
+ * reassigned across three independent conditionals — each branch here is a
+ * plain early return instead.
+ */
+function resolveSessionOrgId(accessToken: string, organizations: Organization[] | undefined, organizationId: string | undefined): string {
+  const claimOrgId = decodeJwtOrgClaim(accessToken);
+  const claimMatch = claimOrgId ? organizations?.find(o => o.workos_org_id === claimOrgId) : undefined;
+  if (claimMatch) return claimMatch.id;
+
+  if (organizationId && organizations?.some(o => o.id === organizationId)) return organizationId;
+
+  if (organizations?.length === 1) return organizations[0].id;
+
+  return '';
+}
+
 async function postJson<T>(url: string, body: Record<string, unknown>): Promise<T> {
   const res = await fetch(url, {
     method: 'POST',
@@ -339,29 +372,7 @@ export class AuthService {
     // The JWT's org_id claim is the source of truth — always decode it to
     // resolve the org. The client-provided organizationId is only a fallback.
     if (token.access_token) {
-      let resolvedOrgId = '';
-
-      // Decode JWT to find which org the token is scoped to
-      try {
-        const payload = JSON.parse(
-          Buffer.from(token.access_token.split('.')[1], 'base64').toString()
-        );
-        if (payload.org_id) {
-          const match = organizations?.find(o => o.workos_org_id === payload.org_id);
-          if (match) resolvedOrgId = match.id;
-        }
-      } catch {
-        // JWT decode failed — fall through
-      }
-
-      // Fallbacks: explicit organizationId if in the org list, then single-org
-      if (!resolvedOrgId && organizationId) {
-        const orgExists = organizations?.find(o => o.id === organizationId);
-        if (orgExists) resolvedOrgId = organizationId;
-      }
-      if (!resolvedOrgId && organizations?.length === 1) {
-        resolvedOrgId = organizations[0].id;
-      }
+      const resolvedOrgId = resolveSessionOrgId(token.access_token, organizations, organizationId);
 
       if (resolvedOrgId) {
         this.session.sessions[resolvedOrgId] = {
@@ -408,6 +419,25 @@ export class AuthService {
       organizations: organizations || [],
       _refresh_token: token.refresh_token,
     };
+  }
+
+  /**
+   * Installs a token/user/org triple as the current session, the same way a
+   * successful `capy` OAuth or password login does — this just exposes
+   * {@link processExchangeResponse} publicly rather than duplicating its
+   * session-storage logic.
+   *
+   * Used by `capy pair` (CAP-684): the WorkOS device grant's
+   * `/auth/device/token` success response carries the same
+   * token/user/organizations shape `/auth/exchange` does, so the session gets
+   * installed through the one shared path both flows already use.
+   */
+  async installDeviceGrantSession(
+    token: { access_token: string | null; refresh_token: string; expires_in: number },
+    user: { id: string; email: string; first_name: string | null; last_name: string | null },
+    organizations: Organization[],
+  ): Promise<AuthResult> {
+    return this.processExchangeResponse(token, user, organizations);
   }
 
   async refreshToken(): Promise<boolean> {
