@@ -15,6 +15,7 @@ describe('local-only command gating', () => {
       'users',
       'projects',
       'secrets',
+      'audit',
       'grant-branch',
       'revoke-branch',
       'org',
