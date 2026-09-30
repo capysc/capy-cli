@@ -1,6 +1,6 @@
 import type { Command } from 'commander';
 import inquirer from 'inquirer';
-import { AuthService } from '../auth/authService';
+import { AuthService, silentAuthFailureMessage } from '../auth/authService';
 import { ProjectManager } from '../core/projectManager';
 import { assertNotLocalOnly } from '../core/localGate';
 import { resolveActiveUrl } from '../config/profileConfig';
@@ -33,7 +33,7 @@ export function auditSearchOptions(options: AuditOptions): AuditSearch {
 export async function auditCommand(options: AuditOptions, devMode = false): Promise<void> {
   assertNotLocalOnly('audit');
   const interactive = !!process.stdin.isTTY && !!process.stdout.isTTY;
-  const terminalPageSize = Math.min(20, Math.max(3, Math.floor(((process.stdout.rows ?? 32) - 16) / ((process.stdout.columns ?? 80) < 100 ? 2 : 1))));
+  const terminalPageSize = Math.min(200, Math.max(3, (process.stdout.rows ?? 24) - 12));
   const search = auditSearchOptions({ ...options, limit: options.limit ?? String(options.json ? 50 : terminalPageSize) });
   if (!options.json && !interactive) throw new Error('Use --json to search audit logs without a terminal.');
   const project = await new ProjectManager().detectProjectState();
@@ -41,7 +41,7 @@ export async function auditCommand(options: AuditOptions, devMode = false): Prom
   const requestedOrg = options.org ?? project.organizationId;
   const silent = await auth.authenticateSilent(requestedOrg);
   const session = silent.success || !interactive || options.json ? silent : await auth.authenticate(requestedOrg);
-  if (!session.success) throw new CapyError('Sign in with capy before viewing audit logs.', ERROR_CODES.AUTH_FAILED);
+  if (!session.success) throw new CapyError(silentAuthFailureMessage(session), ERROR_CODES.AUTH_FAILED);
   const orgId = requestedOrg || session.organization_id || (interactive && !options.json
     ? (await inquirer.prompt<{ org: string }>([{
       type: 'list', name: 'org', message: 'Organization',
@@ -50,7 +50,7 @@ export async function auditCommand(options: AuditOptions, devMode = false): Prom
   if (!orgId) throw new Error('Choose an organization with --org <id>.');
   const scoped = session.organization_id === orgId ? session : await auth.authenticateSilent(orgId);
   if (!scoped.success || scoped.organization_id !== orgId) {
-    throw new CapyError('Could not authenticate for the requested organization.', ERROR_CODES.PERMISSION_DENIED);
+    throw new CapyError(scoped.success ? 'Could not authenticate for the requested organization.' : silentAuthFailureMessage(scoped), ERROR_CODES.PERMISSION_DENIED);
   }
   const query = createAuditClient(orgId, () => auth.getValidToken(), resolveActiveUrl(devMode));
   if (options.json) {
