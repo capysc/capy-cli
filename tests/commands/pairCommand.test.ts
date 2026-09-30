@@ -56,6 +56,13 @@ mock.module('../../src/config/globalConfig', () => ({
   writeOrgKeyFileRaw: mockWriteOrgKeyFileRaw,
 }));
 
+// Masked-link work (CAP-684 follow-up): `renderTerminalQr` is mocked so
+// tests can assert on exactly what url it was called with (the QR must
+// always encode the FULL url — with the real `?code=...` — never the
+// masked text, Vince's explicit addendum) without depending on a real TTY.
+const mockRenderTerminalQr = jest.fn();
+mock.module('../../src/ui/terminalQr', () => ({ renderTerminalQr: mockRenderTerminalQr }));
+
 import { pairCommand } from '../../src/commands/pairCommand';
 
 /**
@@ -160,6 +167,7 @@ describe('pairCommand', () => {
     mockInstallDeviceGrantSession.mockResolvedValue({ success: true, organization_id: 'org-123', user_id: EXCHANGE_USER.id });
     mockPickupDevicePairing.mockImplementation(async () => ({ sealed: await sealAsBrowser(buildPayload(), capturedPairPublicKey()) }));
     mockReadLocalRoot.mockReturnValue(null);
+    mockRenderTerminalQr.mockReturnValue(null);
   });
 
   test('writes local.key + key.enc for every entry matching the logged-in user, and reports it under --json', async () => {
@@ -187,10 +195,35 @@ describe('pairCommand', () => {
     expect(stderr).toContain('ABCD-EFGH');
   });
 
-  test('human mode prints the code and link to stdout', async () => {
+  // CAP-684 follow-up: `bun test`'s stdin is never a real TTY, so this
+  // exercises the non-interactive human path (masked link + a `--json`
+  // hint) — the TTY/interactive OSC 8 + key-prompt path (and the
+  // concurrent-with-polling property) is exercised at the mechanism level
+  // in tests/ui/maskedLinkPrompt.test.ts, since driving a REAL raw-mode
+  // stdin through a faked `isTTY` throws (not a real TTY-backed stream) —
+  // the same constraint documented in
+  // tests/commands/deployDokploySystemStoreToken.test.ts.
+  test('human mode (non-TTY) prints the code and the MASKED link, plus a --json hint — never the query string', async () => {
     const { stdout } = await withCapturedIo(() => pairCommand({}));
     expect(stdout).toContain('ABCD-EFGH');
-    expect(stdout).toContain('/device?code=ABCD-EFGH');
+    expect(stdout).toContain('https://keep.capy.sc/device?…');
+    expect(stdout).toContain('Run with --json to print the full link.');
+    // The device code as a query param (the sensitive redeemable value)
+    // must never appear in plain text.
+    expect(stdout).not.toContain('code=ABCD-EFGH');
+  });
+
+  test('the QR always encodes the FULL device link (?code=... and all), never the masked text', async () => {
+    await withCapturedIo(() => pairCommand({}));
+    expect(mockRenderTerminalQr).toHaveBeenCalledTimes(1);
+    const [qrArg] = mockRenderTerminalQr.mock.calls[0] as [string];
+    expect(qrArg).toBe('https://keep.capy.sc/device?code=ABCD-EFGH');
+    expect(qrArg).not.toBe('https://keep.capy.sc/device?…');
+  });
+
+  test('--json is untouched: the progress line on stderr still carries the FULL link, exactly as before', async () => {
+    const { stderr } = await withCapturedIo(() => pairCommand({ json: true }));
+    expect(stderr).toContain('/device?code=ABCD-EFGH');
   });
 
   test('only writes entries whose user_id matches the logged-in user', async () => {

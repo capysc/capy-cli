@@ -48,6 +48,13 @@ mock.module('../../src/config/globalConfig', () => ({
   readOrgKeyFileRaw: mockReadOrgKeyFileRaw,
 }));
 
+// Masked-link work (CAP-684 follow-up): `renderTerminalQr` is mocked so
+// tests can assert on exactly what url it was called with (the QR must
+// always encode the FULL url, never the masked text — Vince's explicit
+// addendum) without depending on a real TTY to make it render anything.
+const mockRenderTerminalQr = jest.fn();
+mock.module('../../src/ui/terminalQr', () => ({ renderTerminalQr: mockRenderTerminalQr }));
+
 import { TransportCommand } from '../../src/commands/transportCommand';
 
 const K_LOCAL = Buffer.alloc(32, 5);
@@ -102,6 +109,7 @@ describe('TransportCommand', () => {
     mockReadLocalRoot.mockReturnValue(K_LOCAL);
     mockReadOrgKeyFileRaw.mockReturnValue(KEY_ENC);
     mockCreateTransport.mockResolvedValue({ id: 'transport-1', expires_at: '2026-09-29T00:15:00.000Z' });
+    mockRenderTerminalQr.mockReturnValue(null);
   });
 
   test('--json prints pure JSON with {url, expires_at} and no QR', async () => {
@@ -152,10 +160,36 @@ describe('TransportCommand', () => {
     expect(() => openTransportFragment({ iv: fragment.iv, ct: fragment.ct }, key, 'transport-someone-elses')).toThrow();
   });
 
-  test('human mode prints the link and expiry', async () => {
+  // CAP-684 follow-up: `bun test`'s stdin is never a real TTY, so this
+  // exercises the non-interactive human path (masked link + a `--json`
+  // hint) — the TTY/interactive OSC 8 + key-prompt path is exercised at
+  // the mechanism level in tests/ui/maskedLinkPrompt.test.ts, since driving
+  // a REAL raw-mode stdin through a faked `isTTY` throws (not a real
+  // TTY-backed stream) — the same constraint documented in
+  // tests/commands/deployDokploySystemStoreToken.test.ts.
+  test('human mode (non-TTY) prints the MASKED link, a --json hint, and expiry — never the full fragment', async () => {
     const { stdout } = await withCapturedIo(() => new TransportCommand().execute({}));
-    expect(stdout).toContain('https://keep.capy.sc/transport#transport-1.');
+    expect(stdout).toContain('https://keep.capy.sc/transport#…');
+    expect(stdout).toContain('Run with --json to print the full link.');
     expect(stdout).toContain('2026-09-29T00:15:00.000Z');
+    // The fragment (encrypted key material) must never appear in plain text.
+    expect(stdout).not.toContain('transport-1.');
+    expect(stdout).not.toMatch(/#[^…\s]/);
+  });
+
+  test('the QR always encodes the FULL url (fragment and all), never the masked text', async () => {
+    await withCapturedIo(() => new TransportCommand().execute({}));
+    expect(mockRenderTerminalQr).toHaveBeenCalledTimes(1);
+    const [qrArg] = mockRenderTerminalQr.mock.calls[0] as [string];
+    expect(qrArg).toMatch(/^https:\/\/keep\.capy\.sc\/transport#transport-1\.\S+\.\S+$/);
+    expect(qrArg).not.toBe('https://keep.capy.sc/transport#…');
+  });
+
+  test('--json is untouched: renderTerminalQr is never called, and no QR/masked-link text leaks into stdout', async () => {
+    const { stdout } = await withCapturedIo(() => new TransportCommand().execute({ json: true }));
+    expect(mockRenderTerminalQr).not.toHaveBeenCalled();
+    expect(stdout.trim().startsWith('{')).toBe(true);
+    expect(stdout).not.toContain('Run with --json');
   });
 
   test('refuses with a coded TRANSPORT_NO_LOCAL_KEY when there is no local key on this machine', async () => {

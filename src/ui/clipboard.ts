@@ -4,22 +4,27 @@ const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 const GREEN = (s: string) => `\x1b[32m${s}\x1b[0m`;
 const DIM = (s: string) => `\x1b[90m${s}\x1b[0m`;
 
+/** Construction, not mutation: `spawn` either returns the child synchronously or throws — this just turns the throw into a `null` return instead of a reassigned-after-declaration binding. (CAP-684 follow-up cleanup: this function's caller, `copyToClipboard`, is what this change touches.) */
+function trySpawn(cmd: string, args: string[]) {
+  try {
+    return spawn(cmd, args, { stdio: ['pipe', 'ignore', 'ignore'] });
+  } catch {
+    return null;
+  }
+}
+
 function spawnCopy(cmd: string, args: string[], text: string): Promise<boolean> {
+  const child = trySpawn(cmd, args);
+  if (!child) return Promise.resolve(false);
   return new Promise((resolve) => {
-    let child;
-    try {
-      child = spawn(cmd, args, { stdio: ['pipe', 'ignore', 'ignore'] });
-    } catch {
-      resolve(false);
-      return;
-    }
     child.on('error', () => resolve(false));
     child.on('close', (code) => resolve(code === 0));
     child.stdin.end(text);
   });
 }
 
-async function copyToClipboard(text: string): Promise<boolean> {
+/** Exported for `maskedLinkPrompt.ts`'s `c`-to-copy handler, which manages its own raw-mode prompt and calls this directly rather than going through `promptCopyToClipboard`'s own prompt-and-wait loop. */
+export async function copyToClipboard(text: string): Promise<boolean> {
   const platform = process.platform;
   if (platform === 'darwin') return spawnCopy('pbcopy', [], text);
   if (platform === 'win32') return spawnCopy('clip', [], text);
