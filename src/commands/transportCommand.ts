@@ -22,6 +22,7 @@ import { resolveKeepOrigin } from '../config/keepOrigin';
 import { generateTransportKey, sealTransportPayload } from '../crypto/transportCrypto';
 import type { TransportPayload } from '../crypto/pairingPayload';
 import { renderTerminalQr } from '../ui/terminalQr';
+import { printMaskedLinkBlock } from '../ui/maskedLinkPrompt';
 import { CapyError, ERROR_CODES } from '../types/index';
 import { refuseError } from './pairingRefusal';
 
@@ -75,12 +76,20 @@ export class TransportCommand {
         return;
       }
 
+      // The QR always encodes the FULL url (it has to — scanning it on a
+      // phone is how the other device gets the key material) even though
+      // the text link below is masked; only the printed text is masked.
       const qr = renderTerminalQr(url);
       console.log('');
       if (qr) console.log(qr);
-      console.log(`  Open on your other device: ${url}`); // COPY-FLAG
+      const prompt = printMaskedLinkBlock({ fullUrl: url, kind: 'fragment', label: 'Open on your other device:' });
       console.log(`  Expires ${expires_at}`); // COPY-FLAG
       console.log('');
+      // Only set when both ends are a real TTY (see printMaskedLinkBlock) —
+      // blocks until q/Enter/Esc; the link stays valid for 15 minutes
+      // either way, so there's no harm in just returning if the caller's
+      // own process is torn down (e.g. piped into something else) first.
+      if (prompt) await prompt.done;
     } catch (err) {
       refuseError(err, json);
     }
