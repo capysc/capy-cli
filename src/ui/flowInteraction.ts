@@ -325,7 +325,7 @@ export async function runWithFlowInteraction(operation: () => Promise<void>, dev
     project: project.projectName,
     organization: identity.organization_name,
     branch: project.activeBranch,
-  }) });
+  }), ...rootGoalMetadata });
   const receive = async (cursor: number): Promise<void> => {
     if (controller.signal.aborted) return;
     const result = await history(cursor, pageKey);
@@ -410,7 +410,7 @@ export async function runWithFlowInteraction(operation: () => Promise<void>, dev
       const firstOffer: FlowNextOffer = { goal_id: 'project_setup', goal_name: 'Project Setup', prompt: 'Would you like your agent to analyze and configure this project?' };
       await emit('goal_completed', { ...completedGoal, status: 'succeeded', result: initial.result ?? {} });
       await saveCheckpoint({ phase: 'continuation_offer', offer: firstOffer, completed_goal: completedGoal, agent_state: null });
-      const accepted = await askConfirmation('Continue with project setup', firstOffer.prompt, {}, true);
+      const accepted = await askConfirmation('Continue with project setup', firstOffer.prompt, completedGoal, true);
       if (!accepted) {
         await emit('goal', { flow: 'init-wizard', goal: 'repository_onboarded', ...completedGoal, status: 'succeeded', result: { continuation_declined: true } });
       } else {
@@ -454,7 +454,7 @@ export async function runWithFlowInteraction(operation: () => Promise<void>, dev
           emitProgress: async data => emit('progress', data),
           emitCompleted: async (goal, result) => emit('goal_completed', { ...goal, status: 'succeeded', ...(result === undefined ? {} : { result }) }),
           askPlanApproval: async (goal, plan, onPromptEmitted?: () => Promise<void>) => askConfirmation('Review plan', `Approve this plan for ${goal.goal_name}?`, goal, true, onPromptEmitted),
-          askContinuation: async offer => askConfirmation('Continue', offer.prompt),
+          askContinuation: async (offer, precedingGoal?: FlowGoal) => askConfirmation('Continue', offer.prompt, precedingGoal ?? {}),
           emitTerminal: async data => emit('goal', data),
           signChallenge: nonce => sign('sha256', Buffer.from(`capy.flow.agent.v1\n${flowId}\n${nonce}`), keys.privateKey).toString('base64'),
         });
@@ -684,22 +684,22 @@ export const runResumedFlowInteraction = async (flowId: string, devMode: boolean
     await emit('output', { message: value === true ? 'Yes' : 'No', answer_to: id, value, ...goal });
     return value === true;
   };
-  const askContinuation = async (offer: FlowNextOffer): Promise<boolean> => {
+  const askContinuation = async (offer: FlowNextOffer, precedingGoal: Data = {}): Promise<boolean> => {
     const id = randomUUID();
     const answer = new Promise<Data>((resolve, reject) => {
       const failed = (error: unknown): void => { incoming.removeListener(id, answered); reject(error); };
       const answered = (data: Data): void => { incoming.removeListener('failure', failed); resolve(data); };
       incoming.once(id, answered); incoming.once('failure', failed);
     });
-    await emit('prompt', { question: { text: offer.prompt, input: { kind: 'confirm', default: true } }, presentation: { title: 'Continue with project setup', component: 'agent-plan' } }, id);
+    await emit('prompt', { question: { text: offer.prompt, input: { kind: 'confirm', default: true } }, presentation: { title: 'Continue with project setup', component: 'agent-plan' }, ...precedingGoal }, id);
     const value = (await answer).value;
-    await emit('output', { message: value === true ? 'Yes' : 'No', answer_to: id, value });
+    await emit('output', { message: value === true ? 'Yes' : 'No', answer_to: id, value, ...precedingGoal });
     return value === true;
   };
   const stateForRuntime = async (): Promise<FlowAgentState | null> => {
     if (recovered.phase === 'continuation_offer') {
       if (!recovered.offer) throw new Error('FLOW_RECOVERY_CHECKPOINT_INVALID');
-      const accepted = await askContinuation(recovered.offer);
+      const accepted = await askContinuation(recovered.offer, recovered.completed_goal ?? {});
       if (!accepted) {
         await emit('goal', { ...(recovered.completed_goal ?? {}), status: recovered.completed_goal ? 'succeeded' : 'skipped', result: { continuation_declined: true } });
         return null;

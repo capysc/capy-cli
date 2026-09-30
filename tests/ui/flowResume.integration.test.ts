@@ -255,6 +255,8 @@ describe('resumed Flow adapter integration', () => {
       await runResumedFlowInteraction(FLOW_ID, false);
       const calls = await fixture.observed();
       expect(calls.find(call => call.route === 'append' && call.type === 'goal')).toMatchObject({ outcome: 'succeeded', payload: { data: { outcome: { goal_id: 'secrets_setup', goal_name: 'Secrets Setup' } } } });
+      expect(calls.find(call => call.route === 'append' && call.type === 'prompt')).toMatchObject({ payload: { data: { goal_id: 'secrets_setup', goal_name: 'Secrets Setup' } } });
+      expect(calls.find(call => call.route === 'append' && call.type === 'output' && (call.payload as Json).data !== null && ((call.payload as Json).data as Json).value === false)).toMatchObject({ payload: { data: { goal_id: 'secrets_setup', goal_name: 'Secrets Setup' } } });
     } finally { stdout.mockRestore(); fetchSpy.mockRestore(); }
   });
 

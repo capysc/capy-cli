@@ -62,6 +62,17 @@ test('onboarding apply is terminal even when caller supplies another offer', asy
   expect(askContinuation).not.toHaveBeenCalled();
 });
 
+test('passes the preceding goal to a dynamic continuation decision', async () => {
+  const askContinuation = (await import('bun:test')).mock(async () => true);
+  const state = { ...initialFlowAgentState(), goal: { goal_id: 'review', goal_name: 'Review' }, plan, approved: true, application_id: 'apply-review' };
+  const nextOffer = { goal_id: 'deploy_setup', goal_name: 'Deploy Setup', prompt: 'Continue?' };
+  const completed = await processFlowAgentRequest(state, request('review-complete', 'complete', {
+    plan_id: plan.plan_id, plan_hash: plan.plan_hash, application_id: 'apply-review', result: { summary: 'Reviewed', checks: [] }, next_offer: nextOffer,
+  }), body('review-complete'), { ...runtime, askContinuation });
+  expect(askContinuation).toHaveBeenCalledWith(nextOffer, { goal_id: 'review', goal_name: 'Review' });
+  expect(completed.state.goal).toMatchObject({ goal_id: 'deploy_setup', goal_name: 'Deploy Setup' });
+});
+
 test('explicit closure preserves an unaccomplished goal as skipped', async () => {
   const emitTerminal = (await import('bun:test')).mock(async (_data: Readonly<Record<string, unknown>>) => undefined);
   const closed = await processFlowAgentRequest(initialFlowAgentState(), { v: 1, id: 'close', action: 'terminal', token: 'local-token', outcome: 'skipped', reason: 'User chose to finish without project configuration.' }, 'close', { ...runtime, emitTerminal });

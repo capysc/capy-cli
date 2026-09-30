@@ -55,7 +55,7 @@ export type FlowAgentRuntimeInput = Readonly<{
   readonly emitProgress: (data: Json) => Promise<void>;
   readonly emitCompleted: (goal: FlowGoal, result?: Json) => Promise<void>;
   readonly askPlanApproval: (goal: FlowGoal, plan: FlowAgentPlan, onPromptEmitted?: () => Promise<void>) => Promise<boolean>;
-  readonly askContinuation: (offer: FlowNextOffer) => Promise<boolean>;
+  readonly askContinuation: (offer: FlowNextOffer, precedingGoal: FlowGoal) => Promise<boolean>;
   readonly emitTerminal: (data: Json) => Promise<void>;
   readonly signChallenge: (nonce: string) => string;
 }>;
@@ -222,7 +222,7 @@ const processRequest = async (state: State, request: FlowAgentRequest, body: str
     const response = success(request.id, { outcome: 'succeeded' });
     return { state: remembered(state, request, body, response, { terminal: true }), response };
   }
-  const accepted = await input.askContinuation(request.next_offer);
+  const accepted = await input.askContinuation(request.next_offer, state.goal);
   if (!accepted) {
     await input.emitTerminal({ ...state.goal, status: 'succeeded', result: { continuation_declined: true } });
     const response = success(request.id, { outcome: 'succeeded', continuation: 'declined' });

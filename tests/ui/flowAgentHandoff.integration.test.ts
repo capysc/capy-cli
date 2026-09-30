@@ -235,10 +235,16 @@ describe('Flow agent handoff integration', () => {
       const writes = await service.observed();
       const payloads = writes.map(write => write.plaintext);
       const encryptedRoot = writes.find(write => write.plaintext.type === 'goal_completed');
+      const welcome = writes.find(write => write.plaintext.type === 'output' && (write.plaintext.data as Json).kind === 'welcome');
+      const continuationPrompt = writes.find(write => write.plaintext.type === 'prompt');
+      const continuationAnswer = writes.find(write => write.plaintext.type === 'output' && typeof (write.plaintext.data as Json).answer_to === 'string');
       const agentStart = payloads.findIndex(payload => payload.type === 'progress' && (payload.data as Json).kind === 'goal_start');
       const terminal = payloads.findIndex(payload => payload.type === 'goal');
       expect(encryptedRoot).toMatchObject({ plaintext: { data: { type: 'turn', goal_id: 'secrets_setup', outcome: { status: 'succeeded', result: { encrypted: true } } } } });
       expect(encryptedRoot?.body.envelope).not.toContain('secrets_setup');
+      expect(welcome).toMatchObject({ plaintext: { data: { goal_id: 'secrets_setup', goal_name: 'Secrets Setup' } } });
+      expect(continuationPrompt).toMatchObject({ plaintext: { data: { type: 'turn', goal_id: 'secrets_setup', goal_name: 'Secrets Setup' } } });
+      expect(continuationAnswer).toMatchObject({ plaintext: { data: { goal_id: 'secrets_setup', goal_name: 'Secrets Setup', value: true } } });
       expect(agentStart).toBeGreaterThan(-1);
       expect(terminal).toBeGreaterThan(agentStart);
       expect(payloads.filter(payload => payload.type === 'goal')).toHaveLength(1);
@@ -268,6 +274,8 @@ describe('Flow agent handoff integration', () => {
       expect(payloads.find(payload => payload.type === 'goal')).toMatchObject({
         data: { type: 'turn', outcome: { goal_id: 'secrets_setup', status: 'succeeded', result: { continuation_declined: true } } },
       });
+      expect(writes.find(write => write.plaintext.type === 'prompt')).toMatchObject({ plaintext: { data: { type: 'turn', goal_id: 'secrets_setup', goal_name: 'Secrets Setup' } } });
+      expect(writes.find(write => write.plaintext.type === 'goal')).toMatchObject({ plaintext: { data: { messages: [{ type: 'output', data: { goal_id: 'secrets_setup', goal_name: 'Secrets Setup', value: false } }] } } });
     } finally {
       stdout.mockRestore();
       fetchSpy.mockRestore();
