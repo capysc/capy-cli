@@ -625,6 +625,15 @@ export const ERROR_CODES = {
   REMOVE_LOCAL_DRIFT: 'REMOVE_LOCAL_DRIFT',
   /** `capy remove` needs a human (confirmation) and there is no TTY, and `--yes` wasn't passed. */
   REMOVE_NEEDS_TTY: 'REMOVE_NEEDS_TTY',
+  // --- CI-mode target recording (CAP-687) ---
+  /**
+   * A CI-mode deploy delivered successfully (its PR's keep.lock already
+   * carries the target record), but folding that same record into the
+   * SERVER's copy of keep.lock afterward failed — `capy secrets` may not
+   * show this target until a later deploy succeeds in recording it. Never
+   * fails the deploy itself: the delivery already happened.
+   */
+  CI_DEPLOY_TARGETS_RECORD_FAILED: 'CI_DEPLOY_TARGETS_RECORD_FAILED',
 } as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES];

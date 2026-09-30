@@ -455,6 +455,22 @@ function targetRefFor(target: TargetConfig): Record<string, string> | undefined 
  * do" and skips the network entirely. Best-effort: errors are logged, never
  * thrown — the caller's own operation (a deploy, a remove, a revoke) already
  * succeeded or is already committed to happening by the time this runs.
+ *
+ * `opts.writeLocal` (default `true`) gates the two LOCAL side effects below
+ * — writing keep.lock to disk and auto-committing it. Every existing caller
+ * (direct-mode recording, revocation, `capy deploy targets-remove`) keeps
+ * that default and is byte-for-byte unchanged. CI mode passes `false`
+ * (CAP-687): it still reads the local keep.lock/`.env` to build the SAME
+ * push `pushSecrets` would otherwise make (re-sending the branch's current
+ * values unchanged — see `pushSecrets`'s two arguments below, `keep_file`
+ * and the env blob), but never writes keep.lock to disk and never commits —
+ * CI mode must NEVER touch the user's working tree (see `openCiDeployPr`'s
+ * own doc for why).
+ *
+ * `opts.warnCode` prefixes every warning this function prints with a
+ * machine-readable code (Rule 4: never branch on prose, but a human reading
+ * the warning still gets a stable label for it). Omitted by every existing
+ * caller, whose warning text is therefore unchanged.
  */
 async function pushKeepTransform(
   cwd: string,
@@ -462,7 +478,10 @@ async function pushKeepTransform(
   transform: (keep: KeepFile) => KeepFile,
   devMode: boolean | undefined,
   label: string,
+  opts: { writeLocal?: boolean; warnCode?: ErrorCode } = {},
 ): Promise<void> {
+  const writeLocal = opts.writeLocal ?? true;
+  const codePrefix = opts.warnCode ? `${opts.warnCode}: ` : '';
   try {
     const pm = new ProjectManager(cwd);
     // Never push an env blob for a branch other than the one `.env` is
@@ -471,7 +490,7 @@ async function pushKeepTransform(
     // knowable), that would mislabel one branch's values as another's.
     const branchProblem = branchPushProblem(pm.deriveActiveBranch(), branch);
     if (branchProblem) {
-      console.error(`  ${YELLOW('!')} could not ${label} in keep.lock — ${describeBranchProblem(branchProblem)}`);
+      console.error(`  ${YELLOW('!')} could not ${label} in keep.lock — ${codePrefix}${describeBranchProblem(branchProblem)}`);
       return;
     }
     const projectState = await pm.detectProjectState();
@@ -492,7 +511,7 @@ async function pushKeepTransform(
     serviceClient.setTokenProvider(() => authService.getValidToken());
     const authResult = await authenticateSilentWithFallback(authService, projectState.organizationId);
     if (!authResult.success || !authResult.user_id) {
-      console.error(`  ${YELLOW('!')} could not ${label} in keep.lock — ${silentAuthFailureMessage(authResult)}`);
+      console.error(`  ${YELLOW('!')} could not ${label} in keep.lock — ${codePrefix}${silentAuthFailureMessage(authResult)}`);
       return;
     }
     const projectKey = await resolveProjectKey(projectState.organizationId, projectState.projectId, authResult.user_id, {
@@ -510,26 +529,52 @@ async function pushKeepTransform(
       .join('\n');
 
     const pushed = await serviceClient.pushSecrets(projectState.projectId, JSON.stringify(nextKeep), envBlob, branch);
-    const { SyncEngine } = await import('../sync/syncEngine');
-    fm.writeKeepFile(SyncEngine.adoptServerKeep(pushed.keep_file, nextKeep, branch));
 
-    const { autoCommitKeep } = await import('../git/autoCommitKeep');
-    autoCommitKeep(branch, cwd, { quiet: true });
+    if (writeLocal) {
+      const { SyncEngine } = await import('../sync/syncEngine');
+      fm.writeKeepFile(SyncEngine.adoptServerKeep(pushed.keep_file, nextKeep, branch));
+
+      const { autoCommitKeep } = await import('../git/autoCommitKeep');
+      autoCommitKeep(branch, cwd, { quiet: true });
+    }
   } catch (err: any) {
-    console.error(`  ${YELLOW('!')} could not ${label} in keep.lock: ${err?.message ?? err}`);
+    console.error(`  ${YELLOW('!')} could not ${label} in keep.lock: ${codePrefix}${err?.message ?? err}`);
   }
+}
+
+/**
+ * The delivery descriptor + delivered-values pair shared by every "record
+ * this target's delivery" caller below (direct mode, CI mode, and
+ * `buildFinalCiKeep`'s own PR-content version) — same shape, same
+ * `noDeploy` → `deployed: false` rule (CAP-679 follow-up, "pending"; see
+ * `targetsGate.ts#upsertTargetElement`'s doc for why absent/false OMITS the
+ * field instead of writing `deployed: true`, and how this also clears a
+ * PRIOR pending element once a real deploy follows it).
+ */
+function deliveryFor(
+  target: TargetConfig,
+  adapter: DeployAdapter,
+  deployId: string | undefined,
+  noDeploy: boolean,
+  valueHashes: Record<string, string>,
+): { delivery: TargetDeliveryDescriptor; values: readonly VarDelivery[] } {
+  const delivery: TargetDeliveryDescriptor = {
+    provider: adapter.id,
+    target: target.name,
+    ref: targetRefFor(target),
+    deployId,
+    ...(noDeploy ? { deployed: false } : {}),
+  };
+  const values = target.vars
+    .filter((v) => valueHashes[v] !== undefined)
+    .map((v) => ({ name: v, valueHash: valueHashes[v] }));
+  return { delivery, values };
 }
 
 /**
  * Direct-mode-only: after a verified successful deploy (or, when `noDeploy`,
  * after the config write `--no-deploy` still performs), record this
  * target's delivery into every (var, branch) entry it actually shipped.
- *
- * `noDeploy` marks the fresh element `deployed: false` (CAP-679 follow-up,
- * "pending") — the config landed but the platform deploy itself never ran.
- * Absent/false means a real deploy, which OMITS the field (see
- * `targetsGate.ts#upsertTargetElement`'s doc for why, and how this also
- * clears a PRIOR pending element once a real deploy follows it).
  *
  * Best-effort: the platform write already succeeded by the time this runs,
  * so a failure here is reported but does not flip the command's exit code —
@@ -545,16 +590,7 @@ async function recordDeployTargets(
   noDeploy: boolean = false,
 ): Promise<void> {
   const deliveredAt = new Date().toISOString();
-  const delivery: TargetDeliveryDescriptor = {
-    provider: adapter.id,
-    target: target.name,
-    ref: targetRefFor(target),
-    deployId,
-    ...(noDeploy ? { deployed: false } : {}),
-  };
-  const values = target.vars
-    .filter((v) => valueHashes[v] !== undefined)
-    .map((v) => ({ name: v, valueHash: valueHashes[v] }));
+  const { delivery, values } = deliveryFor(target, adapter, deployId, noDeploy, valueHashes);
   if (values.length === 0) return;
   await pushKeepTransform(
     cwd,
@@ -562,6 +598,48 @@ async function recordDeployTargets(
     (keep) => recordTargetDeliveries(keep, target.branch, delivery, deliveredAt, values),
     devMode,
     'record deploy targets',
+  );
+}
+
+/**
+ * CI-mode counterpart to `recordDeployTargets` above (CAP-687). CI mode
+ * already folds this exact delivery into the PR's OWN keep.lock content
+ * (`buildFinalCiKeep`'s `delivery` param) — but that PR has to be reviewed
+ * and merged before it ever reaches the base branch, and `capy secrets`
+ * reads the SERVER's stored keep.lock, not any open PR's. Without this, a
+ * CI-mode target's delivery never shows up in `capy secrets` — the bug this
+ * function fixes.
+ *
+ * Server-only: `pushKeepTransform`'s `writeLocal: false` means this call
+ * reads the local keep.lock/`.env` to build the push (same as direct mode —
+ * see `pushKeepTransform`'s own doc) but never writes keep.lock to disk and
+ * never auto-commits. CI mode must NEVER touch the user's working tree —
+ * see `openCiDeployPr`'s own doc for why.
+ *
+ * Best-effort, same contract as `recordDeployTargets`: the CI delivery
+ * already succeeded by the time this runs, so a failure here is warned
+ * (with a coded message — `ERROR_CODES.CI_DEPLOY_TARGETS_RECORD_FAILED`)
+ * and never flips the command's exit code or un-opens the PR.
+ */
+async function recordDeployTargetsCi(
+  cwd: string,
+  target: TargetConfig,
+  adapter: DeployAdapter,
+  valueHashes: Record<string, string>,
+  deployId: string | undefined,
+  devMode: boolean | undefined,
+  noDeploy: boolean = false,
+): Promise<void> {
+  const deliveredAt = new Date().toISOString();
+  const { delivery, values } = deliveryFor(target, adapter, deployId, noDeploy, valueHashes);
+  if (values.length === 0) return;
+  await pushKeepTransform(
+    cwd,
+    target.branch,
+    (keep) => recordTargetDeliveries(keep, target.branch, delivery, deliveredAt, values),
+    devMode,
+    'record deploy targets',
+    { writeLocal: false, warnCode: ERROR_CODES.CI_DEPLOY_TARGETS_RECORD_FAILED },
   );
 }
 
@@ -3160,11 +3238,18 @@ export async function deployCommand(
   }
   if (mode === 'direct') await unwindGitState(cwd, null, directStashed);
 
-  // ── Record targets (CAP-679) ─────────────────────────────────────────────
-  // Direct mode only: CI mode already folded this delivery into the PR's
-  // keep.lock above (`buildFinalCiKeep`'s `delivery` param) — recording it
-  // AGAIN here, against the user's own branch, would be wrong: CI mode never
-  // touches the user's tree.
+  // ── Record targets (CAP-679, CI mode CAP-687) ────────────────────────────
+  // Direct mode: record against the user's own branch, same as always.
+  //
+  // CI mode: the PR's OWN keep.lock already carries this delivery
+  // (`buildFinalCiKeep`'s `delivery` param) — but `capy secrets` reads the
+  // SERVER's stored keep.lock, not an open PR, so without also recording it
+  // there this target would never show up until someone thinks to inspect
+  // the PR. `recordDeployTargetsCi` is server-only (`pushKeepTransform`'s
+  // `writeLocal: false`): it NEVER writes local keep.lock and NEVER commits
+  // — CI mode never touches the user's tree. Gated on `keepLockChanged`,
+  // same as the PR-open below it: only when the CI gate actually decided to
+  // proceed is there a real delivery worth recording server-side.
   if (mode === 'direct' && !options.dryRun) {
     await recordDeployTargets(cwd, target, adapter, valueHashes, deployToken?.deployId, options.devMode, !!options.noDeploy);
     // "No untracked tokens" (CAP-679 follow-up): only once THIS deploy is a
@@ -3175,6 +3260,8 @@ export async function deployCommand(
     if (!options.noDeploy) {
       await revokeSupersededDeployTokens(cwd, target, adapter, options.devMode);
     }
+  } else if (mode === 'ci' && !options.dryRun && keepLockChanged) {
+    await recordDeployTargetsCi(cwd, target, adapter, valueHashes, deployToken?.deployId, options.devMode, !!options.noDeploy);
   }
 
   // The pull request this run opened, for the result page. Held rather than
