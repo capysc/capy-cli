@@ -73,8 +73,8 @@ export function registerAuditCommand(program: Command, devMode = false): void {
   for (const field of AUDIT_FILTERS) {
     command.option(`--${field.replace(/_/g, '-')} <text>`, `search ${field.replace(/_/g, ' ')} (case-insensitive contains)`);
   }
-  command.action(async (options: Readonly<Record<string, string | boolean>>) => {
+  command.action(async (options: Readonly<Record<string, string | boolean>>, actionCommand: Command) => {
     const searchFields = Object.fromEntries(AUDIT_FILTERS.map(field => [field, options[field.replace(/_([a-z])/g, (_, char: string) => char.toUpperCase())]]));
-    await auditCommand({ ...options, ...searchFields } as AuditOptions, devMode);
+    await auditCommand({ ...options, json: actionCommand.optsWithGlobals().json === true, ...searchFields } as AuditOptions, devMode);
   });
 }
