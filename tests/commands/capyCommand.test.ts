@@ -611,13 +611,13 @@ describe('CapyCommand', () => {
     });
 
     test('a throw during the pre-push prep (encrypt/merge) gets the SAME failure handling as a push failure — not an unhandled rejection', async () => {
-      // MUST-FIX 2 (round-2 review): syncInitialSecrets's prep phase (dynamic
-      // imports, the Encryptor.encrypt loop, deriveResourceId, mergeWithKeep)
-      // must be wrapped in its own tryStep, exactly like the push/write/backup/
-      // encrypt steps after it — otherwise a throw here rejects the whole
-      // function instead of resolving to `{ ok: false, progress, error }`,
-      // and none of the existing failure handling (spinner.fail, the retry
-      // hint, wizard.reportEncryptFailure) ever runs.
+      // syncInitialSecrets's prep phase (dynamic imports, the
+      // Encryptor.encrypt loop, deriveResourceId, mergeWithKeep) must be
+      // guarded exactly like the push/write/backup/encrypt steps after it —
+      // otherwise a throw here rejects the whole function instead of
+      // resolving to the normal failure shape, and none of the existing
+      // failure handling (spinner.fail, the retry hint,
+      // wizard.reportEncryptFailure) ever runs.
       (mockProjectManager.getEnvPath as any) = mock(() => '/test/path/.env');
       const existsSyncSpy = spyOn(fs, 'existsSync').mockReturnValue(true as any);
       mockFileManager.readEnvFile.mockReturnValue({ API_KEY: 'test-key' });

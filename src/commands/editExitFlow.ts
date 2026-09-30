@@ -1,10 +1,10 @@
 /**
  * `capy edit` session → PR on exit.
  *
- * Replaces the old auto-commit-on-whatever-branch-you're-on behaviour (the
- * git-helper module that used to do this is deleted — CAP-667): keep.lock is
- * committed only on an explicit action, and always onto a separate commit
- * branch in an isolated worktree — exactly the way `capy deploy`'s CI mode
+ * Replaces the old auto-commit-on-whatever-branch-you're-on behaviour (that
+ * git helper is deleted entirely): keep.lock is committed only on an
+ * explicit action, and always onto a separate commit branch in an isolated
+ * worktree — exactly the way `capy deploy`'s CI mode
  * already does it
  * (deployCommand.ts, deploy/git.ts, deploy/keepGate.ts). This module reuses
  * those same git helpers rather than duplicating them.

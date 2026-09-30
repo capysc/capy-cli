@@ -286,7 +286,7 @@ function tryReadKeepJson(path: string): ParsedKeepJson | null {
 /**
  * Reads the CURRENT keep.lock — capy's untracked working copy at
  * `.capy/keep.lock` when present, else the tracked file (same preference
- * `ProjectManager.readKeepFile` applies, CAP-667). This is deploy's LOCAL
+ * `ProjectManager.readKeepFile` applies). This is deploy's LOCAL
  * picture of what variables/branches exist, used for the target picker and
  * for decrypting the branch about to ship; it is NOT the CI change-gate's
  * base read, which deliberately reads `origin/<base>`'s keep.lock via git
@@ -506,8 +506,8 @@ function targetRefFor(target: TargetConfig): Record<string, string> | undefined 
  * (`connectors/shared.ts#writeImportedAndSync`) — same push — but
  * generalized over the transform instead of "add these new vars".
  *
- * Writes only the untracked working copy (`writeKeepFile` — CAP-667); it
- * never auto-commits the tracked keep.lock onto whatever branch the caller
+ * Writes only the untracked working copy (`writeKeepFile`); it never
+ * auto-commits the tracked keep.lock onto whatever branch the caller
  * happens to be on. Only `capy deploy`'s own explicit, isolated commit
  * steps (direct mode's own-branch commit, CI mode's worktree PR) ever touch
  * the tracked file.
@@ -3167,9 +3167,10 @@ export async function deployCommand(
   // between an earlier sync and this point (confirm cancel/delete/
   // edit-cancel, a failed preflight recheck, a failed mint/decrypt) would
   // otherwise leave the tracked file modified and uncommitted, reintroducing
-  // the exact CAP-667 symptom: a teammate's next `git pull` refusing with
-  // "local changes would be overwritten". Any failure from here on restores
-  // keep.lock to HEAD's version before returning, for the same reason.
+  // the exact symptom this sync exists to prevent: a teammate's next
+  // `git pull` refusing with "local changes would be overwritten". Any
+  // failure from here on restores keep.lock to HEAD's version before
+  // returning, for the same reason.
   const directCommit = await (async (): Promise<
     | { kind: 'skip' }
     | { kind: 'committed'; stashed: boolean }

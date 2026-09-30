@@ -21,8 +21,8 @@ export interface GitStatusEntry {
  * Copies capy's untracked working copy (`.capy/keep.lock`) over the tracked
  * `keep.lock` at `cwd`, when a working copy exists and differs — so a
  * caller's own explicit commit picks up the CURRENT pins, not whatever was
- * frozen into the tracked file at project init. Post-CAP-667, capy's regular
- * flows (sync/push/rotate/connect/edit) write fresh pins only into the
+ * frozen into the tracked file at project init. capy's regular flows
+ * (sync/push/rotate/connect/edit) write fresh pins only into the
  * untracked working copy — nothing else ever catches the tracked file up, so
  * every caller that commits the tracked file explicitly (direct-mode
  * deploy's own-branch commit, Dokploy discovery's fresh-branch commit) must

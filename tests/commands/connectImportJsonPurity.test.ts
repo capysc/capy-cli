@@ -6,7 +6,7 @@
  * old auto-commit helper, which printed "> keep.lock committed …" straight
  * to stdout.
  *
- * That helper is gone (CAP-667): capy never auto-commits keep.lock onto
+ * That helper is gone entirely: capy never auto-commits keep.lock onto
  * whatever branch the caller happens to be on — `writeImportedAndSync` now
  * only ever writes through the real `FileManager.writeKeepFile`, which
  * itself only ever writes the tracked file the FIRST time it's created and
@@ -15,9 +15,9 @@
  * the same reason — nothing on this path should ever print anything but the
  * one JSON line), AND that the tracked keep.lock this test seeds as already
  * committed comes out the other side byte-identical and un-diffed — not
- * merely "uncommitted" (round-4 validation: a stub `writeKeepFile` that
- * unconditionally rewrote the tracked file made the OLD version of this test
- * pass even though it was asserting the wrong property).
+ * merely "uncommitted" (a stub `writeKeepFile` that unconditionally
+ * rewrote the tracked file would let this pass even though it asserts the
+ * wrong property).
  *
  * This drives the REAL `ConnectCommand.executeImport` → `writeImportedAndSync`
  * chain — including a REAL `FileManager`, never a stub — inside a throwaway
@@ -109,7 +109,7 @@ function fakeCtx(dir: string): ResolvedContext {
 }
 
 describe('capy connect dokploy --json — stdout purity with push on (CAP defect 2)', () => {
-  test('stdout is exactly one JSON line that parses; the tracked keep.lock is never committed (CAP-667)', async () => {
+  test('stdout is exactly one JSON line that parses; the tracked keep.lock is never committed', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'capy-connect-json-purity-'));
     const originalCwd = process.cwd();
     const savedDirName = process.env.CAPY_GLOBAL_DIR_NAME;
@@ -158,7 +158,7 @@ describe('capy connect dokploy --json — stdout purity with push on (CAP defect
     expect(outLines[0]).not.toContain('sk_test_should_not_print');
     expect(errLines.join('\n')).not.toContain('sk_test_should_not_print');
 
-    // CAP-667: no auto-commit at all, AND the real `FileManager.writeKeepFile`
+    // No auto-commit at all, AND the real `FileManager.writeKeepFile`
     // never touches the tracked file once it already exists — HEAD never
     // moved past the seeded 'init' commit, the tracked keep.lock is
     // byte-identical to what was committed, and `git status --porcelain`

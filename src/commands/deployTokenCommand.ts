@@ -30,8 +30,8 @@ import type { ProjectState } from '../types/index';
  * cross-importing `deployCommand.ts` (which itself dynamically imports THIS
  * module for minting), to avoid a module cycle.
  *
- * Writes only the untracked working copy (`writeKeepFile` — CAP-667); it
- * never auto-commits the tracked keep.lock onto whatever branch the caller
+ * Writes only the untracked working copy (`writeKeepFile`); it never
+ * auto-commits the tracked keep.lock onto whatever branch the caller
  * happens to be on.
  *
  * Best-effort and silent on failure beyond a one-line warning: the token is

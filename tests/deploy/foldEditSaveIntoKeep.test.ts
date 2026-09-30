@@ -174,7 +174,7 @@ describe('foldEditSaveIntoKeep', () => {
     expect(serializeKeep(keep)).toBe(beforeSerialized);
   });
 
-  // ── Dates rule (product owner, must-fix review) ───────────────────────────
+  // ── Dates rule ─────────────────────────────────────────────────────────
   // Mirrors buildDeployKeep's `entry.value_hash !== hash` check: same
   // value_hash as the target already has → keep the TARGET's own entry
   // exactly (its dates are never moved by an unrelated save); different hash

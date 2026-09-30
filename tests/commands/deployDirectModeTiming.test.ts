@@ -1,11 +1,10 @@
 /**
- * MUST-FIX 1 (round-2 review): direct-mode deploy's tracked-keep sync must
- * run immediately before the commit, not earlier in the run — otherwise
- * every exit between an early sync and the commit (confirm cancel/delete/
- * edit-cancel, a failed preflight recheck, a failed mint/decrypt) leaves the
- * tracked keep.lock modified and uncommitted, reintroducing the exact
- * CAP-667 symptom: a teammate's next `git pull` refusing with "local
- * changes would be overwritten".
+ * Direct-mode deploy's tracked-keep sync must run immediately before the
+ * commit, not earlier in the run — otherwise every exit between an early
+ * sync and the commit (confirm cancel/delete/edit-cancel, a failed
+ * preflight recheck, a failed mint/decrypt) leaves the tracked keep.lock
+ * modified and uncommitted: a teammate's next `git pull` then refuses with
+ * "local changes would be overwritten".
  *
  * These drive the real, exported `deployCommand()` end to end against a
  * real git repo (no mocks) — the cf-worker adapter needs a real `wrangler`

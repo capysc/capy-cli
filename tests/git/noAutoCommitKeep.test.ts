@@ -1,5 +1,5 @@
 /**
- * CAP-667: automatic keep.lock commits are gone entirely.
+ * Automatic keep.lock commits are gone entirely.
  *
  * `src/git/autoCommitKeep.ts` (which committed keep.lock on whatever branch
  * the user happened to be on, every time secrets changed) is deleted, and no
@@ -23,7 +23,7 @@ function walkTsFiles(dir: string): string[] {
   });
 }
 
-describe('CAP-667 — no automatic keep.lock commits', () => {
+describe('no automatic keep.lock commits', () => {
   test('src/git/autoCommitKeep.ts no longer exists', () => {
     expect(existsSync(join(SRC_ROOT, 'git', 'autoCommitKeep.ts'))).toBe(false);
   });

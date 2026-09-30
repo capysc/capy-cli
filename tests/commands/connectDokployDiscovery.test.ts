@@ -3760,17 +3760,17 @@ describe('commitDiscoveryChanges', () => {
 });
 
 // ── commitDiscoveryChanges syncs the tracked keep.lock from the working
-//    copy (CAP-667 MUST-FIX, round-4 validation 2026-09-30) ────────────────
+//    copy ─────────────────────────────────────────────────────────────────
 //
-// Discovery, like every other post-CAP-667 flow, only ever writes fresh
-// pins into the untracked working copy (`<folder>/.capy/keep.lock` —
+// Discovery, like every other capy flow, only ever writes fresh pins into
+// the untracked working copy (`<folder>/.capy/keep.lock` —
 // `FileManager.writeKeepFile` only touches the TRACKED file the first time
 // it's ever created). Before this fix, `commitDiscoveryChanges` committed
 // the tracked file exactly as it sat on disk — frozen at whatever it was
 // when first created, never the fresh pins. These tests drive a real
 // `FileManager` (never a stub) to reproduce both the fresh-folder and the
 // existing-folder shape of that bug, plus the failure-path rollback.
-describe('commitDiscoveryChanges syncs the tracked keep.lock from .capy/keep.lock first (CAP-667 MUST-FIX)', () => {
+describe('commitDiscoveryChanges syncs the tracked keep.lock from .capy/keep.lock first', () => {
   test('(a) fresh folder: the committed keep.lock contains the imported variables, not {} ', () => {
     const ROOT = realpathSync(mkdtempSync(join(tmpdir(), 'capy-discover-commit-fresh-')));
     initRepo(ROOT);
@@ -3792,7 +3792,7 @@ describe('commitDiscoveryChanges syncs the tracked keep.lock from .capy/keep.loc
       // Discovery's own import step then writes the REAL imported
       // variables — since the tracked file now exists on disk, this only
       // ever updates the working copy (`.capy/keep.lock`), same as every
-      // other post-CAP-667 write.
+      // other write capy makes after the first.
       const withVars: KeepFile = {
         version: '3.0',
         org_id: 'org-1',

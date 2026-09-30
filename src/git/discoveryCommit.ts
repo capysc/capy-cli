@@ -3,12 +3,13 @@
  * decision #9, 2026-09-26): after a REAL (non-dry-run) run finishes, the
  * keep.lock/.gitignore files IT ITSELF wrote get committed onto a NEW git
  * branch, in the repo they live in — never `.env`, never anything else,
- * and never pushed. Same discipline the old auto-commit helper (deleted —
- * CAP-667) used: decide by git's EXIT STATUS alone, never by reading its
- * stderr/stdout text; a failure here is reported with a code, never thrown
- * past this module. Unlike that helper, this one is explicit (opt-in via
- * `--discover`) and always commits onto a fresh branch, never the branch
- * the user happened to be on — so it stays exactly as CAP-667 left it.
+ * and never pushed. Same discipline the old auto-commit helper (deleted
+ * entirely — capy never auto-commits keep.lock at all now) used: decide by
+ * git's EXIT STATUS alone, never by reading its stderr/stdout text; a
+ * failure here is reported with a code, never thrown past this module.
+ * Unlike that helper, this one is explicit (opt-in via `--discover`) and
+ * always commits onto a fresh branch, never the branch the user happened
+ * to be on.
  *
  * The refusal codes are checked in order, before any git-mutating command
  * runs, so a refusal always leaves the repo exactly as it was:
@@ -35,18 +36,17 @@
  * never touched by the rollback, only the index entries and branch/HEAD
  * state.
  *
- * MUST-FIX (round-4 validation, 2026-09-30): this used to commit the
- * TRACKED `<folder>/keep.lock` as discovery itself left it — but discovery
- * (like every other post-CAP-667 flow) only ever writes the untracked
- * working copy at `<folder>/.capy/keep.lock`. A fresh folder's tracked file
- * never got the imported variables at all (`{variables: {}}`, frozen at
- * `capy`'s own init write); an existing folder's tracked file committed
- * whatever was frozen there before, not the fresh pins. Fixed the same way
- * as direct-mode deploy: `syncTrackedKeepFromWorkingCopy` runs per folder,
- * immediately before staging (after every refusal guard, so a refusal still
- * leaves the repo untouched, and never during `--dry-run`), catching each
- * folder's tracked keep.lock up to its own working copy right before this
- * function commits it.
+ * Discovery, like every other capy flow, only ever writes fresh pins into
+ * the untracked working copy at `<folder>/.capy/keep.lock` — the TRACKED
+ * `<folder>/keep.lock` is never rewritten after it's first created. Left on
+ * its own, a fresh folder's tracked file would still carry no variables at
+ * all (`{variables: {}}`, frozen at `capy`'s own init write), and an
+ * existing folder's tracked file would carry whatever was frozen there from
+ * a prior run, never the fresh pins. `syncTrackedKeepFromWorkingCopy` runs
+ * per folder to catch the tracked file up to its own working copy right
+ * before this function commits it — immediately before staging (after every
+ * refusal guard, so a refusal still leaves the repo untouched, and never
+ * during `--dry-run`).
  */
 import { execFileSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
@@ -189,8 +189,7 @@ export function commitDiscoveryChanges(
   // The keep.lock path(s) among `paths` (one per folder this commit covers)
   // — every other guard above has already passed, and `--dry-run` already
   // returned, so this is the LAST thing that happens before staging. See
-  // this function's own doc (MUST-FIX, 2026-09-30) for why it has to run
-  // here and not earlier.
+  // this function's own doc for why it has to run here and not earlier.
   const keepPaths = paths.filter((p) => p === 'keep.lock' || p.endsWith('/keep.lock'));
   keepPaths.forEach((relPath) => syncTrackedKeepFromWorkingCopy(join(repoRoot, dirname(relPath))));
 
@@ -207,8 +206,9 @@ export function commitDiscoveryChanges(
     // switch still staged. `restorePathsToHead`, scoped to just the
     // keep.lock path(s) the sync above touched, un-does that write too —
     // without it, a failed commit would leave the tracked keep.lock
-    // modified-and-uncommitted even after the branch rollback, the exact
-    // CAP-667 symptom this whole fix exists to prevent.
+    // modified-and-uncommitted even after the branch rollback, right back
+    // to the "local changes would be overwritten" symptom this sync exists
+    // to prevent.
     tryGit(repoRoot, ['reset', '-q', '--', ...paths]);
     if (keepPaths.length > 0) restorePathsToHead(repoRoot, [...keepPaths]);
     tryGit(repoRoot, ['checkout', '-']);

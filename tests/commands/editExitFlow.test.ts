@@ -4,8 +4,9 @@
  * the style of tests/deploy/deployFlow.test.ts for `capy deploy` CI mode,
  * whose worktree machinery this flow reuses.
  *
- * Covers the CAP-667 regression directly: the OLD behavior (auto-commit
- * keep.lock on whatever branch the user was on) left the tracked keep.lock
+ * Covers the old auto-commit regression directly: the OLD behavior
+ * (auto-commit keep.lock on whatever branch the user was on) left the
+ * tracked keep.lock
  * dirty in the user's own clone, and `git pull` there refused with "local
  * changes would be overwritten". The NEW flow never touches the user's
  * clone at all — it builds the commit(s) in an isolated worktree off

@@ -1,6 +1,6 @@
 /**
- * MUST-FIX 2 (independent-validation review): after CAP-667, capy's regular
- * flows (sync/push/rotate/connect/edit) write fresh pins only into the
+ * capy's regular flows (sync/push/rotate/connect/edit) write fresh pins
+ * only into the
  * untracked working copy at `.capy/keep.lock` — the tracked `keep.lock` is
  * frozen after project init (FileManager.writeKeepFile). `capy deploy`'s
  * `readKeep` and its direct-mode "commit keep.lock on the current branch"
@@ -38,7 +38,7 @@ function keepWith(vars: Record<string, string>, branch: string): KeepFile {
   return { version: '3', org_id: 'org-1', project_id: 'proj-1', project_name: 'test-project', variables };
 }
 
-describe('readKeep prefers .capy/keep.lock over the tracked file (CAP-667)', () => {
+describe('readKeep prefers .capy/keep.lock over the tracked file', () => {
   const TMP = join(tmpdir(), `capy-readkeep-${process.pid}`);
 
   beforeEach(() => {
@@ -133,8 +133,8 @@ describe('deploy direct mode end-to-end: commits the up-to-date pins, not the fr
     git(['config', 'user.name', 'T'], REPO);
     git(['config', 'commit.gpgsign', 'false'], REPO);
 
-    // Simulate the post-CAP-667 world: the tracked keep.lock was created
-    // once at init (empty variables) and committed — exactly what
+    // Simulate the real world: the tracked keep.lock was created once at
+    // init (empty variables) and committed — exactly what
     // FileManager.writeKeepFile leaves behind, and exactly what direct-mode
     // deploy used to read and re-commit verbatim.
     // Same as `ensureCapyGitignore` leaves behind — `.capy/` (the working

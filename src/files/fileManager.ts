@@ -224,9 +224,9 @@ export class FileManager {
    * new project / `capy` init) — and never touched again after that. Capy
    * used to keep rewriting the tracked file on every pin change and
    * auto-committing it on whatever branch the user happened to be on; that's
-   * what caused the constant merge conflicts (CAP-667) and made `git pull`
-   * refuse with "local changes would be overwritten" when the auto-commit
-   * didn't happen to run. Only an explicit action (or `capy deploy`, into its
+   * what caused constant merge conflicts and made `git pull` refuse with
+   * "local changes would be overwritten" when the auto-commit didn't happen
+   * to run. Only an explicit action (or `capy deploy`, into its
    * own isolated worktree) ever writes the tracked file now.
    */
   writeKeepFile(keep: KeepFile): void {

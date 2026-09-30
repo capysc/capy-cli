@@ -124,7 +124,7 @@ describe('ProjectManager', () => {
       expect(mockReadFileSync).toHaveBeenCalledWith(join(testRoot, 'keep.lock'), 'utf-8');
     });
 
-    test('prefers .capy/keep.lock over the tracked file when both exist (CAP-667)', () => {
+    test('prefers .capy/keep.lock over the tracked file when both exist', () => {
       const workingKeep = {
         version: '3.0',
         org_id: 'org_123',
