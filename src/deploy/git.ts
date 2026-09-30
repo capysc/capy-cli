@@ -7,12 +7,44 @@
  * deploy with other uncommitted code changes.
  */
 import { spawnSync } from 'child_process';
+import { existsSync, readFileSync, writeFileSync } from 'fs';
 import { resolveGh, GH_SEARCHED } from '../utils/gh';
+import { ProjectManager } from '../core/projectManager';
 
 export interface GitStatusEntry {
   /** Two-character short status from `git status --porcelain`. */
   code: string;
   path: string;
+}
+
+/**
+ * Copies capy's untracked working copy (`.capy/keep.lock`) over the tracked
+ * `keep.lock` at `cwd`, when a working copy exists and differs — so a
+ * caller's own explicit commit picks up the CURRENT pins, not whatever was
+ * frozen into the tracked file at project init. capy's regular flows
+ * (sync/push/rotate/connect/edit) write fresh pins only into the
+ * untracked working copy — nothing else ever catches the tracked file up, so
+ * every caller that commits the tracked file explicitly (direct-mode
+ * deploy's own-branch commit, Dokploy discovery's fresh-branch commit) must
+ * run this immediately before it does. A no-op when there's no working copy
+ * yet (fresh worktree, or a project that predates it) — the tracked file is
+ * already the best information available, same as
+ * `ProjectManager.readKeepFile()`'s own fallback.
+ *
+ * Never touches `.capy/keep.lock` itself, so it stays exactly what it was —
+ * only the tracked file is brought in line with it. `cwd` is the directory
+ * the tracked `keep.lock` (and its sibling `.capy/`) live in directly — the
+ * project root for direct-mode deploy, or `<repoRoot>/<folder>` for a
+ * per-repo Dokploy discovery target.
+ */
+export function syncTrackedKeepFromWorkingCopy(cwd: string): void {
+  const pm = new ProjectManager(cwd);
+  const workingPath = pm.getWorkingKeepPath();
+  if (!existsSync(workingPath)) return;
+  const workingContent = readFileSync(workingPath, 'utf-8');
+  const trackedPath = pm.getKeepPath();
+  if (existsSync(trackedPath) && readFileSync(trackedPath, 'utf-8') === workingContent) return;
+  writeFileSync(trackedPath, workingContent, 'utf-8');
 }
 
 function git(args: string[], cwd: string, stdin?: string): {
@@ -80,6 +112,23 @@ export function listAllBranches(cwd: string): string[] {
     if (name && name !== 'HEAD' && name !== 'origin') seen.add(name);
   }
   return [...seen];
+}
+
+/**
+ * The repo's default branch, resolved from the local `origin/HEAD` symbolic
+ * ref (set by `git clone`, refreshable via `git remote set-head origin
+ * --auto`). Returns null when it can't be resolved — never fetched, no
+ * `origin` remote, or the ref is just missing — so callers fall back to
+ * other heuristics (current branch, then main/master).
+ */
+export function resolveDefaultBranch(cwd: string): string | null {
+  const r = git(['symbolic-ref', 'refs/remotes/origin/HEAD'], cwd);
+  if (r.code !== 0) return null;
+  const ref = r.stdout.trim();
+  const prefix = 'refs/remotes/origin/';
+  if (!ref.startsWith(prefix)) return null;
+  const name = ref.slice(prefix.length);
+  return name || null;
 }
 
 export function getStatus(cwd: string): GitStatusEntry[] {
@@ -281,6 +330,24 @@ export function discardPaths(
   paths: string[],
 ): { ok: boolean; error?: string } {
   const r = git(['checkout', '--', ...paths], cwd);
+  if (r.code !== 0) return { ok: false, error: r.stderr.trim() };
+  return { ok: true };
+}
+
+/**
+ * Restore specific paths to exactly their HEAD version — both the index AND
+ * the working tree. Unlike `discardPaths` (`git checkout -- <path>`, which
+ * restores from the INDEX), this un-does a `git add` too: direct-mode
+ * deploy's keep.lock sync may have staged the file before its commit failed,
+ * and `git checkout -- keep.lock` alone would just restore that same staged
+ * (uncommitted) content, leaving the tree dirty. `git checkout HEAD --
+ * <path>` resets both, so a failed commit never leaves keep.lock modified.
+ */
+export function restorePathsToHead(
+  cwd: string,
+  paths: string[],
+): { ok: boolean; error?: string } {
+  const r = git(['checkout', 'HEAD', '--', ...paths], cwd);
   if (r.code !== 0) return { ok: false, error: r.stderr.trim() };
   return { ok: true };
 }

@@ -29,6 +29,7 @@ import {
   currentBranch,
   checkoutBranch,
   discardPaths,
+  restorePathsToHead,
   stashOtherChanges,
   popStash,
   pushBranch,
@@ -41,6 +42,7 @@ import {
   worktreeAddNewBranch,
   worktreeRemove,
   deleteLocalBranch,
+  syncTrackedKeepFromWorkingCopy,
 } from '../deploy/git';
 import { buildDeployKeep, touchDeployKeep, reconcileVars, hashValue } from '../deploy/keepGate';
 import {
@@ -240,38 +242,92 @@ async function authenticateSilentWithFallback(
 
 // ── Project-level keep.lock parsing ────────────────────────────────────────
 
-interface KeepInfo {
+export interface KeepInfo {
   orgId: string;
   projectId: string;
   variables: string[];
   branches: string[];
 }
 
-function readKeep(cwd: string): KeepInfo | null {
-  const p = join(cwd, 'keep.lock');
-  if (!existsSync(p)) return null;
+/** One (variable, branch) entry, as loosely as `readKeep` needs to read it. */
+interface ParsedKeepEntry {
+  branch?: string;
+}
+
+/**
+ * The keep.lock shape `readKeep` needs — org_id/project_id required (nothing
+ * useful can come from a file missing either), variables optional and only
+ * as deep as `readKeep` reads it. Deliberately looser than a fully validated
+ * `KeepFile` (that's `ProjectManager.readKeepFile`, which additionally
+ * requires `project_name`/`version` and is used by every OTHER reader) — the
+ * runtime check in `readKeep` below is still what actually enforces
+ * org_id/project_id being present; this type just replaces `any` in the
+ * code that reads the parsed result.
+ */
+interface ParsedKeepJson {
+  org_id: string;
+  project_id: string;
+  variables?: Record<string, ParsedKeepEntry[]>;
+}
+
+/**
+ * Best-effort JSON read: null on anything short of a parsed object (missing
+ * file, unreadable, malformed JSON) — `readKeep` below only ever needs
+ * org_id/project_id/variables out of this, not a fully validated KeepFile.
+ */
+function tryReadKeepJson(path: string): ParsedKeepJson | null {
+  if (!existsSync(path)) return null;
   try {
-    const raw = JSON.parse(readFileSync(p, 'utf-8'));
-    if (!raw.org_id || !raw.project_id) return null;
-    const variables = Object.keys(raw.variables ?? {}).sort();
-    const branches = new Set<string>();
-    for (const entries of Object.values(raw.variables ?? {}) as any[]) {
-      if (Array.isArray(entries)) {
-        for (const e of entries) {
-          if (e?.branch) branches.add(e.branch);
-        }
-      }
-    }
-    return {
-      orgId: raw.org_id,
-      projectId: raw.project_id,
-      variables,
-      branches: Array.from(branches).sort(),
-    };
+    return JSON.parse(readFileSync(path, 'utf-8')) as ParsedKeepJson;
   } catch {
     return null;
   }
 }
+
+/**
+ * Reads the CURRENT keep.lock — capy's untracked working copy at
+ * `.capy/keep.lock` when present, else the tracked file (same preference
+ * `ProjectManager.readKeepFile` applies). This is deploy's LOCAL
+ * picture of what variables/branches exist, used for the target picker and
+ * for decrypting the branch about to ship; it is NOT the CI change-gate's
+ * base read, which deliberately reads `origin/<base>`'s keep.lock via git
+ * and is untouched by this.
+ *
+ * Before this fix, deploy read the tracked file directly — which the rest
+ * of capy no longer updates after project init, so a deploy run any time
+ * after the first `capy push` would see a stale, empty-ish variable/branch
+ * list here.
+ */
+export function readKeep(cwd: string): KeepInfo | null {
+  const pm = new ProjectManager(cwd);
+  const raw = tryReadKeepJson(pm.getWorkingKeepPath()) ?? tryReadKeepJson(pm.getKeepPath());
+  if (!raw || !raw.org_id || !raw.project_id) return null;
+  const variables = Object.keys(raw.variables ?? {}).sort();
+  const branches = Array.from(
+    new Set(
+      Object.values(raw.variables ?? {})
+        .flatMap((entries) => (Array.isArray(entries) ? entries : []))
+        .map((e) => e?.branch)
+        .filter((b): b is string => Boolean(b)),
+    ),
+  ).sort();
+  return {
+    orgId: raw.org_id,
+    projectId: raw.project_id,
+    variables,
+    branches,
+  };
+}
+
+/**
+ * `syncTrackedKeepFromWorkingCopy` (deploy/git.ts), under the name direct-
+ * mode deploy and its tests already use. Kept as a re-export rather than
+ * inlined here so Dokploy discovery's commit step (src/git/discoveryCommit.ts)
+ * can share the exact same helper instead of duplicating it — see that
+ * function's own doc for why every caller that commits the tracked
+ * keep.lock explicitly needs this immediately before it does.
+ */
+export { syncTrackedKeepFromWorkingCopy as syncTrackedKeepForDirectDeploy } from '../deploy/git';
 
 // ── Decryption (uses same path as `capy export` / `capy run`) ──────────────
 
@@ -445,12 +501,17 @@ function targetRefFor(target: TargetConfig): Record<string, string> | undefined 
 }
 
 /**
- * Read → transform → push → auto-commit keep.lock through the existing sync
- * path, for a pure `KeepFile → KeepFile` change that isn't a value edit
- * (targets recording/stripping). Mirrors `capy connect`'s import write
- * (`connectors/shared.ts#writeImportedAndSync`) — same push, same
- * auto-commit — but generalized over the transform instead of "add these
- * new vars".
+ * Read → transform → push keep.lock through the existing sync path, for a
+ * pure `KeepFile → KeepFile` change that isn't a value edit (targets
+ * recording/stripping). Mirrors `capy connect`'s import write
+ * (`connectors/shared.ts#writeImportedAndSync`) — same push — but
+ * generalized over the transform instead of "add these new vars".
+ *
+ * Writes only the untracked working copy (`writeKeepFile`); it never
+ * auto-commits the tracked keep.lock onto whatever branch the caller
+ * happens to be on. Only `capy deploy`'s own explicit, isolated commit
+ * steps (direct mode's own-branch commit, CI mode's worktree PR) ever touch
+ * the tracked file.
  *
  * `transform` returning the SAME object (`===`) is treated as "nothing to
  * do" and skips the network entirely. Best-effort: errors are logged, never
@@ -484,11 +545,11 @@ function targetRefFor(target: TargetConfig): Record<string, string> | undefined 
  * this branch — skip the write with a warning rather than risk a
  * keep/blob pair the server never actually produced together.
  *
- * `opts.writeLocal` (default `true`) gates the two LOCAL side effects below
- * — writing keep.lock to disk and auto-committing it. CI mode passes
- * `false` (CAP-687): it must NEVER write keep.lock to disk or commit — CI
- * mode must NEVER touch the user's working tree (see `openCiDeployPr`'s own
- * doc for why). Every other caller keeps the default.
+ * `opts.writeLocal` (default `true`) gates the LOCAL side effect below —
+ * writing the untracked working copy. CI mode passes `false` (CAP-687): it
+ * must NEVER write keep.lock to disk — CI mode must NEVER touch the user's
+ * working tree (see `openCiDeployPr`'s own doc for why). Every other
+ * caller keeps the default.
  *
  * `opts.warnCode` prefixes every warning this function prints with a
  * machine-readable code (Rule 4: never branch on prose, but a human reading
@@ -531,9 +592,6 @@ async function pushKeepTransform(
       const { SyncEngine } = await import('../sync/syncEngine');
       const fm = new FileManager(cwd);
       fm.writeKeepFile(SyncEngine.adoptServerKeep(pushed.keep_file, nextKeep, branch));
-
-      const { autoCommitKeep } = await import('../git/autoCommitKeep');
-      autoCommitKeep(branch, cwd, { quiet: true });
     }
     return { ok: true };
   } catch (err: any) {
@@ -2845,34 +2903,6 @@ async function openCiDeployPr(
   return { ok: true, openedPr: committed.openedPr };
 }
 
-/**
- * Stash other working-tree changes and commit `keep.lock` on the current
- * branch — direct mode only. CI mode never touches the user's tree; it
- * builds the PR commit in an isolated worktree instead (`openCiDeployPr`).
- */
-async function commitDirectModeKeepLock(
-  cwd: string,
-  msg: string,
-): Promise<{ ok: true; stashed: boolean } | { ok: false }> {
-  const stash = stashOtherChanges(cwd);
-  if (!stash.ok) {
-    console.error(`${RED('✗')} git stash: ${stash.error}`);
-    return { ok: false };
-  }
-  const stashed = stash.stashed;
-  if (stashed) {
-    console.log(`  ${GREEN('✓')} stash   set aside other working-tree changes (will restore)`);
-  }
-  const commit = stageAndCommit(cwd, ['keep.lock'], msg);
-  if (!commit.ok) {
-    console.error(`${RED('✗')} ${commit.error}`);
-    await unwindGitState(cwd, null, stashed);
-    return { ok: false };
-  }
-  console.log(`  ${GREEN('✓')} commit  ${msg}`);
-  return { ok: true, stashed };
-}
-
 // ── Main: capy deploy [name] ───────────────────────────────────────────────
 
 export async function deployCommand(
@@ -3264,7 +3294,6 @@ export async function deployCommand(
   // capy never blocks on uncommitted source changes. It only ever stages and
   // commits keep.lock — your work-in-progress is left exactly as it was.
   const gitOk = !options.dryRun && isGitRepo(cwd);
-  const keepLockDirty = gitOk && hasKeepLockChanges(cwd);
 
   // Confirm-or-edit loop. Single-keypress picker (c/e/d/esc) so the user
   // can fix a saved target inline instead of having to abort, run
@@ -3373,15 +3402,55 @@ export async function deployCommand(
   if (!changeGate.ok) return 1;
   const { keepLockChanged, deployKeepContent } = changeGate;
 
-  // ── Direct mode only: commit keep.lock on the current branch, stashing other
-  //    WIP. CI mode never touches the user's tree — it builds the PR commit in
-  //    an isolated worktree below.
-  const directCommit =
-    gitOk && mode === 'direct' && keepLockDirty
-      ? await commitDirectModeKeepLock(cwd, msg)
-      : { ok: true as const, stashed: false };
-  if (!directCommit.ok) return 1;
-  const directStashed = directCommit.stashed;
+  // ── Direct mode only: commit keep.lock on the current branch, stashing
+  //    other WIP. CI mode never touches the user's tree — it builds the PR
+  //    commit in an isolated worktree below.
+  //
+  // The tracked-keep sync (catching it up to capy's current pins — sync/
+  // push/edit now write only into the untracked working copy,
+  // .capy/keep.lock — see syncTrackedKeepFromWorkingCopy, deploy/git.ts)
+  // runs HERE, immediately before deciding whether keep.lock is dirty and immediately
+  // before the commit itself — not any earlier in the run. Every exit
+  // between an earlier sync and this point (confirm cancel/delete/
+  // edit-cancel, a failed preflight recheck, a failed mint/decrypt) would
+  // otherwise leave the tracked file modified and uncommitted, reintroducing
+  // the exact symptom this sync exists to prevent: a teammate's next
+  // `git pull` refusing with "local changes would be overwritten". Any
+  // failure from here on restores keep.lock to HEAD's version before
+  // returning, for the same reason.
+  const directCommit = await (async (): Promise<
+    | { kind: 'skip' }
+    | { kind: 'committed'; stashed: boolean }
+    | { kind: 'failed'; stashed: boolean }
+  > => {
+    if (!gitOk || mode !== 'direct') return { kind: 'skip' };
+    syncTrackedKeepFromWorkingCopy(cwd);
+    if (!hasKeepLockChanges(cwd)) return { kind: 'skip' };
+
+    const stash = stashOtherChanges(cwd);
+    if (!stash.ok) {
+      console.error(`${RED('✗')} git stash: ${stash.error}`);
+      restorePathsToHead(cwd, ['keep.lock']);
+      return { kind: 'failed', stashed: false };
+    }
+    if (stash.stashed) {
+      console.log(`  ${GREEN('✓')} stash   set aside other working-tree changes (will restore)`);
+    }
+    const commit = stageAndCommit(cwd, ['keep.lock'], msg);
+    if (!commit.ok) {
+      console.error(`${RED('✗')} ${commit.error}`);
+      restorePathsToHead(cwd, ['keep.lock']);
+      await unwindGitState(cwd, null, stash.stashed);
+      return { kind: 'failed', stashed: stash.stashed };
+    }
+    console.log(`  ${GREEN('✓')} commit  ${msg}`);
+    return { kind: 'committed', stashed: stash.stashed };
+  })();
+
+  if (directCommit.kind === 'failed') {
+    return 1;
+  }
+  const directStashed = directCommit.kind === 'committed' ? directCommit.stashed : false;
 
   // ── Push the secrets.
   const result = await adapter.deploy(target, {

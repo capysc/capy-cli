@@ -440,10 +440,11 @@ export class ConnectCommand {
     // WOULD import/clear) — never actually written, locally or to Capy.
     const dryRun = !!opts.dryRun;
 
-    // Under `--json`, stdout must be exactly one JSON object — the
-    // "keep.lock committed" line autoCommitKeep would otherwise print goes
-    // to stderr instead (see autoCommitKeep.ts's `quiet` option).
-    const { wrote } = await writeImportOutcome(ctx, outcome, { push: !opts.noPush, quiet: opts.json, dryRun });
+    // Under `--json`, stdout must be exactly one JSON object.
+    // `writeImportOutcome` never auto-commits keep.lock and never prints
+    // anything itself, so there is nothing left for a `quiet` flag to
+    // suppress here.
+    const { wrote } = await writeImportOutcome(ctx, outcome, { push: !opts.noPush, dryRun });
     const pushed = !opts.noPush && wrote;
     const cleared = outcome.cleared ?? [];
     const hasChange = outcome.imported.length > 0 || cleared.length > 0;

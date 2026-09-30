@@ -138,8 +138,16 @@ describe('FileManager', () => {
         variables: {}
       };
 
+      // Tracked file already exists (so it's never rewritten — see the
+      // writeKeepFile no-op-guard tests below); the .capy/ working copy
+      // exists too, with different content, so writeKeepFile proceeds to
+      // back it up and rewrite it — that's the write this test fails.
       const keepPath = join(testRoot, 'keep.lock');
-      mockExistsSync.mockImplementation((path) => path === keepPath);
+      const capyDir = join(testRoot, '.capy');
+      const workingPath = join(testRoot, '.capy', 'keep.lock');
+      mockExistsSync.mockImplementation(
+        (path) => path === keepPath || path === capyDir || path === workingPath,
+      );
       mockReadFileSync.mockReturnValue('old keep content');
 
       let writeCallCount = 0;
@@ -369,9 +377,13 @@ describe('FileManager', () => {
       variables: {},
     };
 
-    test('does not rewrite keep.lock when on-disk content is already canonical', () => {
+    test('does not rewrite either copy when both are already canonical', () => {
       const keepPath = join(testRoot, 'keep.lock');
-      mockExistsSync.mockImplementation((p: string) => p === keepPath);
+      const capyDir = join(testRoot, '.capy');
+      const workingPath = join(testRoot, '.capy', 'keep.lock');
+      mockExistsSync.mockImplementation(
+        (p: string) => p === keepPath || p === capyDir || p === workingPath,
+      );
       mockReadFileSync.mockReturnValue(serializeKeep(keep));
 
       fileManager.writeKeepFile(keep);
@@ -379,18 +391,56 @@ describe('FileManager', () => {
       expect(mockWriteFileSync).not.toHaveBeenCalled();
     });
 
-    test('rewrites keep.lock when on-disk content differs', () => {
+    test('rewrites the .capy/ working copy when its on-disk content differs', () => {
       const keepPath = join(testRoot, 'keep.lock');
-      mockExistsSync.mockImplementation((p: string) => p === keepPath);
-      mockReadFileSync.mockReturnValue('stale content');
+      const capyDir = join(testRoot, '.capy');
+      const workingPath = join(testRoot, '.capy', 'keep.lock');
+      mockExistsSync.mockImplementation(
+        (p: string) => p === keepPath || p === capyDir || p === workingPath,
+      );
+      // Tracked file matches canonical (so it's left alone); the working
+      // copy is stale and gets rewritten.
+      mockReadFileSync.mockImplementation((p: string) =>
+        p === workingPath ? 'stale content' : serializeKeep(keep),
+      );
 
       fileManager.writeKeepFile(keep);
 
+      // One call backs up the stale working copy, one writes the new
+      // content; the tracked file (matching canonical) is untouched either way.
       expect(mockWriteFileSync).toHaveBeenCalledWith(
-        keepPath,
+        workingPath,
         serializeKeep(keep),
         'utf-8',
       );
+      const writtenPaths = mockWriteFileSync.mock.calls.map((c: any[]) => c[0]);
+      expect(writtenPaths).not.toContain(keepPath);
+    });
+
+    test('never rewrites an existing tracked keep.lock, even when its content differs', () => {
+      const keepPath = join(testRoot, 'keep.lock');
+      const workingPath = join(testRoot, '.capy', 'keep.lock');
+      // Tracked file exists with stale content; no .capy/ working copy yet
+      // (brand-new working copy, pre-existing tracked project).
+      mockExistsSync.mockImplementation((p: string) => p === keepPath);
+      mockReadFileSync.mockReturnValue('stale tracked content');
+
+      fileManager.writeKeepFile(keep);
+
+      const writtenPaths = mockWriteFileSync.mock.calls.map((c: any[]) => c[0]);
+      expect(writtenPaths).not.toContain(keepPath);
+      expect(writtenPaths).toContain(workingPath);
+    });
+
+    test('writes the tracked keep.lock once, only when it does not exist yet (brand-new project)', () => {
+      const keepPath = join(testRoot, 'keep.lock');
+      const workingPath = join(testRoot, '.capy', 'keep.lock');
+      mockExistsSync.mockReturnValue(false);
+
+      fileManager.writeKeepFile(keep);
+
+      expect(mockWriteFileSync).toHaveBeenCalledWith(keepPath, serializeKeep(keep), 'utf-8');
+      expect(mockWriteFileSync).toHaveBeenCalledWith(workingPath, serializeKeep(keep), 'utf-8');
     });
   });
 

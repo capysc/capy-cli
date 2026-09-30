@@ -3,9 +3,13 @@
  * decision #9, 2026-09-26): after a REAL (non-dry-run) run finishes, the
  * keep.lock/.gitignore files IT ITSELF wrote get committed onto a NEW git
  * branch, in the repo they live in — never `.env`, never anything else,
- * and never pushed. Mirrors `autoCommitKeep.ts`'s own pattern (decide by
+ * and never pushed. Same discipline the old auto-commit helper (deleted
+ * entirely — capy never auto-commits keep.lock at all now) used: decide by
  * git's EXIT STATUS alone, never by reading its stderr/stdout text; a
- * failure here is reported with a code, never thrown past this module).
+ * failure here is reported with a code, never thrown past this module.
+ * Unlike that helper, this one is explicit (opt-in via `--discover`) and
+ * always commits onto a fresh branch, never the branch the user happened
+ * to be on.
  *
  * The refusal codes are checked in order, before any git-mutating command
  * runs, so a refusal always leaves the repo exactly as it was:
@@ -27,10 +31,26 @@
  * can leave a newly-`add`ed path staged on the ORIGINAL branch — it only
  * touches what differs between the two branches' trees, not every index
  * entry), then checkout back to the original branch, then delete the new
- * branch. The working-tree FILES themselves are never touched by the
- * rollback — only the index entries and the branch/HEAD state.
+ * branch. `restorePathsToHead` additionally un-does the keep.lock sync
+ * below (see its own doc) — the working-tree FILES for every OTHER path are
+ * never touched by the rollback, only the index entries and branch/HEAD
+ * state.
+ *
+ * Discovery, like every other capy flow, only ever writes fresh pins into
+ * the untracked working copy at `<folder>/.capy/keep.lock` — the TRACKED
+ * `<folder>/keep.lock` is never rewritten after it's first created. Left on
+ * its own, a fresh folder's tracked file would still carry no variables at
+ * all (`{variables: {}}`, frozen at `capy`'s own init write), and an
+ * existing folder's tracked file would carry whatever was frozen there from
+ * a prior run, never the fresh pins. `syncTrackedKeepFromWorkingCopy` runs
+ * per folder to catch the tracked file up to its own working copy right
+ * before this function commits it — immediately before staging (after every
+ * refusal guard, so a refusal still leaves the repo untouched, and never
+ * during `--dry-run`).
  */
 import { execFileSync } from 'node:child_process';
+import { dirname, join } from 'node:path';
+import { restorePathsToHead, syncTrackedKeepFromWorkingCopy } from '../deploy/git';
 
 function git(repoRoot: string, args: readonly string[]): string {
   // `env: process.env` explicitly: Bun's `execFileSync` (unlike Node's)
@@ -166,6 +186,13 @@ export function commitDiscoveryChanges(
     return { ok: false, code: 'DOKPLOY_COMMIT_FAILED', message: `Could not create branch "${opts.branchName}".` };
   }
 
+  // The keep.lock path(s) among `paths` (one per folder this commit covers)
+  // — every other guard above has already passed, and `--dry-run` already
+  // returned, so this is the LAST thing that happens before staging. See
+  // this function's own doc for why it has to run here and not earlier.
+  const keepPaths = paths.filter((p) => p === 'keep.lock' || p.endsWith('/keep.lock'));
+  keepPaths.forEach((relPath) => syncTrackedKeepFromWorkingCopy(join(repoRoot, dirname(relPath))));
+
   const added = tryGit(repoRoot, ['add', '--', ...paths]);
   const messageArgs = ['-m', 'chore(capy): import Dokploy environments', ...(opts.summaryLines.length > 0 ? ['-m', opts.summaryLines.join('\n')] : [])];
   const committed = added.ok ? tryGit(repoRoot, ['commit', ...messageArgs, '--', ...paths]) : { ok: false as const };
@@ -176,8 +203,14 @@ export function commitDiscoveryChanges(
     // untouched) runs BEFORE the checkout back: `checkout` alone only
     // resets index entries for paths that differ between the two
     // branches' trees, so a newly-`add`ed path can otherwise survive the
-    // switch still staged.
+    // switch still staged. `restorePathsToHead`, scoped to just the
+    // keep.lock path(s) the sync above touched, un-does that write too —
+    // without it, a failed commit would leave the tracked keep.lock
+    // modified-and-uncommitted even after the branch rollback, right back
+    // to the "local changes would be overwritten" symptom this sync exists
+    // to prevent.
     tryGit(repoRoot, ['reset', '-q', '--', ...paths]);
+    if (keepPaths.length > 0) restorePathsToHead(repoRoot, [...keepPaths]);
     tryGit(repoRoot, ['checkout', '-']);
     tryGit(repoRoot, ['branch', '-D', opts.branchName]);
     return { ok: false, code: 'DOKPLOY_COMMIT_FAILED', message: 'git commit failed.' };

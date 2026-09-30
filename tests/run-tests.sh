@@ -42,6 +42,7 @@ ISOLATED_FILES=(
   tests/commands/deployCiChangeGate.test.ts
   tests/commands/deployCiTargetsRecord.test.ts
   tests/commands/deployRevokeWiring.test.ts
+  tests/commands/deployDirectModeTiming.test.ts
   tests/commands/deployDokployPickerTokenEnv.test.ts
   tests/files/fileManager.test.ts
   tests/ui/promptEngine.test.ts

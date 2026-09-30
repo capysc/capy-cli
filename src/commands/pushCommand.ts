@@ -86,21 +86,27 @@ export class PushCommand {
     // commit — the local writes below ARE the commit. serviceClient is unused.
     const localMode = isLocalOnly();
 
-    let userId: string;
-    let encryptionKey: string;
-    if (localMode) {
-      userId = LOCAL_USER_ID;
-      encryptionKey = await resolveLocalProjectKey(projectState.projectId!);
-    } else {
+    const { userId, encryptionKey } = await (async (): Promise<{ userId: string; encryptionKey: string }> => {
+      if (localMode) {
+        return {
+          userId: LOCAL_USER_ID,
+          encryptionKey: await resolveLocalProjectKey(projectState.projectId!),
+        };
+      }
+
       if (projectState.userId) {
         this.authService.setSessionUserId(projectState.userId);
       }
 
-      // Authenticate
+      // Authenticate — try silent first (scoped, then any session), then interactive.
       const spinner = ora('Authenticating...').start();
-      let authResult = await this.authService.authenticateSilent(projectState.organizationId);
-      if (!authResult.success) authResult = await this.authService.authenticateSilent();
-      if (!authResult.success) authResult = await this.authService.authenticate(projectState.organizationId);
+      const authResult = await (async () => {
+        const scoped = await this.authService.authenticateSilent(projectState.organizationId);
+        if (scoped.success) return scoped;
+        const anySession = await this.authService.authenticateSilent();
+        if (anySession.success) return anySession;
+        return this.authService.authenticate(projectState.organizationId);
+      })();
       this.debug('authResult', {
         success: authResult.success,
         user_id: authResult.user_id,
@@ -117,14 +123,14 @@ export class PushCommand {
         coDecrypt: (oid, ct) => this.serviceClient.coDecrypt(oid, ct).then(r => r.plaintext),
         wrapOuterLayer: (oid, pt) => this.serviceClient.wrapOuterLayer(oid, pt).then(r => r.ciphertext),
       };
-      encryptionKey = await resolveProjectKey(
+      const resolvedKey = await resolveProjectKey(
         projectState.organizationId!,
         projectState.projectId!,
         authResult.user_id!,
         keyOps,
       );
-      userId = authResult.user_id!;
-    }
+      return { userId: authResult.user_id!, encryptionKey: resolvedKey };
+    })();
     this.debug('encryptionKey resolved', { length: encryptionKey.length });
 
     // Read keep.lock
@@ -160,18 +166,18 @@ export class PushCommand {
 
     // Encrypt all values
     const { Encryptor } = await import('../crypto/encryptor');
-    const encrypted: Record<string, string> = {};
-    for (const [key, value] of Object.entries(rawLocal)) {
-      if (value.startsWith('capy:')) {
-        this.debug(`${key}: already encrypted, passing through`);
-        encrypted[key] = value; // Already encrypted
-      } else {
+    const encrypted = Object.fromEntries(
+      Object.entries(rawLocal).map(([key, value]) => {
+        if (value.startsWith('capy:')) {
+          this.debug(`${key}: already encrypted, passing through`);
+          return [key, value]; // Already encrypted
+        }
         const enc = Encryptor.encrypt(value, encryptionKey);
         const resourceId = deriveResourceId(branch, key);
-        encrypted[key] = `capy:${resourceId}:${enc}`;
         this.debug(`${key}: encrypted`, { resourceId, encLength: enc.length });
-      }
-    }
+        return [key, `capy:${resourceId}:${enc}`];
+      }),
+    );
 
     const envBlob = Object.entries(encrypted)
       .map(([key, value]) => `${key}=${value}`)
@@ -179,15 +185,16 @@ export class PushCommand {
     this.debug('envBlob length', envBlob.length);
 
     // Update keep.lock hashes for the active branch
-    const pushedVars: Record<string, { resource_id: string; value_hash: string }> = {};
-    for (const [key, value] of Object.entries(rawLocal)) {
-      const plaintext = value.startsWith('capy:')
-        ? this.fileManager.decryptValue(value, encryptionKey)
-        : value;
-      const valueHash = createHash('sha256').update(plaintext).digest('hex').slice(0, 16);
-      const resourceId = deriveResourceId(branch, key);
-      pushedVars[key] = { resource_id: resourceId, value_hash: valueHash };
-    }
+    const pushedVars = Object.fromEntries(
+      Object.entries(rawLocal).map(([key, value]) => {
+        const plaintext = value.startsWith('capy:')
+          ? this.fileManager.decryptValue(value, encryptionKey)
+          : value;
+        const valueHash = createHash('sha256').update(plaintext).digest('hex').slice(0, 16);
+        const resourceId = deriveResourceId(branch, key);
+        return [key, { resource_id: resourceId, value_hash: valueHash }];
+      }),
+    );
     this.debug('pushedVars', pushedVars);
 
     const syncEngine = new SyncEngine();
@@ -244,10 +251,6 @@ export class PushCommand {
         ? `Stored ${Object.keys(rawLocal).length} secret(s) locally (local-only mode)`
         : `Pushed ${Object.keys(rawLocal).length} secret(s) to Keep`
     );
-
-    // The push is only visible to teammates' pins once keep.lock is in git.
-    const { autoCommitKeep } = await import('../git/autoCommitKeep');
-    autoCommitKeep(branch);
 
     const { printExpiryWarnings } = await import('./connectors/shared');
     printExpiryWarnings();

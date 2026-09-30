@@ -24,11 +24,15 @@ import type { ProjectState } from '../types/index';
 
 /**
  * `deploy revoke <id>` (CAP-679): strip every `targets` element carrying
- * this `deploy_id` from keep.lock, push through the existing sync path, and
- * auto-commit — the same "read → transform → push → commit" shape as
+ * this `deploy_id` from keep.lock and push through the existing sync path —
+ * the same "read → transform → push" shape as
  * `deployCommand.ts#pushKeepTransform`, kept local here rather than
  * cross-importing `deployCommand.ts` (which itself dynamically imports THIS
  * module for minting), to avoid a module cycle.
+ *
+ * Writes only the untracked working copy (`writeKeepFile`); it never
+ * auto-commits the tracked keep.lock onto whatever branch the caller
+ * happens to be on.
  *
  * Best-effort and silent on failure beyond a one-line warning: the token is
  * already revoked by the time this runs, so a keep.lock hiccup here must
@@ -79,8 +83,6 @@ async function stripRevokedTargets(
     const pushed = await serviceClient.pushSecrets(projectState.projectId, JSON.stringify(nextKeep), envBlob, branch);
     const { SyncEngine } = await import('../sync/syncEngine');
     fm.writeKeepFile(SyncEngine.adoptServerKeep(pushed.keep_file, nextKeep, branch));
-    const { autoCommitKeep } = await import('../git/autoCommitKeep');
-    autoCommitKeep(branch, process.cwd(), { quiet: true });
   } catch (err: any) {
     console.error(`  \x1b[33m!\x1b[0m could not strip revoked deploy targets in keep.lock: ${err?.message ?? err}`);
   }

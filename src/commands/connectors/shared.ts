@@ -130,16 +130,18 @@ export async function resolveContext(opts: { apiUrl?: string; devMode?: boolean 
  *
  * `value === undefined` is the METADATA-ONLY mode, and it is what `connect`
  * uses: the env map goes to the service unchanged and only keep.lock's
- * connector entry moves. Everything downstream — the keep merge, the push, the
- * cache, the sync state, the auto-commit — is identical either way, which is
- * why this is one function and not two. `rotate` is the caller that passes a
- * value, because replacing a credential is what rotate is for.
+ * connector entry moves. Everything downstream — the keep merge, the push,
+ * the cache, the sync state — is identical either way, which is why this is
+ * one function and not two. `rotate` is the caller that passes a value,
+ * because replacing a credential is what rotate is for.
  */
 /**
  * Shared tail of `writeAndSync`/`removeAndSync`: encrypt the full desired
  * `finalEnv`, merge it into keep.lock for `branch` (dropping any entry for a
  * name no longer in `finalEnv`), push, cache the pushed blob, adopt the
- * server's copy, write `.env` + sync state, and auto-commit keep.lock.
+ * server's copy, and write `.env` + sync state. Writes only the untracked
+ * working copy (`writeKeepFile`); it never auto-commits the tracked
+ * keep.lock onto whatever branch the caller happens to be on.
  *
  * `keepMutator` runs on the post-merge, post-drop `KeepFile` right before the
  * push — `writeAndSync` uses it to attach connector metadata; a plain remove
@@ -152,22 +154,25 @@ async function commitFinalEnv(
 ): Promise<void> {
   const { pm, fileManager, serviceClient, orgId, projectId, branch, userId, projectKey, keep } = ctx;
 
-  const encrypted: Record<string, string> = {};
-  for (const [k, v] of Object.entries(finalEnv)) {
-    const resourceId = deriveResourceId(branch, k);
-    encrypted[k] = `capy:${resourceId}:${Encryptor.encrypt(v, projectKey)}`;
-  }
+  const encrypted = Object.fromEntries(
+    Object.entries(finalEnv).map(([k, v]) => [
+      k,
+      `capy:${deriveResourceId(branch, k)}:${Encryptor.encrypt(v, projectKey)}`,
+    ]),
+  );
   const envBlob = Object.entries(encrypted)
     .map(([k, v]) => `${k}=${v}`)
     .join('\n');
 
-  const pushedVars: Record<string, { resource_id: string; value_hash: string }> = {};
-  for (const [k, v] of Object.entries(finalEnv)) {
-    pushedVars[k] = {
-      resource_id: deriveResourceId(branch, k),
-      value_hash: createHash('sha256').update(v).digest('hex').slice(0, 16),
-    };
-  }
+  const pushedVars = Object.fromEntries(
+    Object.entries(finalEnv).map(([k, v]) => [
+      k,
+      {
+        resource_id: deriveResourceId(branch, k),
+        value_hash: createHash('sha256').update(v).digest('hex').slice(0, 16),
+      },
+    ]),
+  );
 
   const syncEngine = new SyncEngine();
   const merged = syncEngine.mergeWithKeep(keep, pushedVars, branch);
@@ -201,10 +206,6 @@ async function commitFinalEnv(
     user_id: userId,
     keep_hash: setSyncKeepHash(existingSyncState, branch, SyncEngine.computeKeepHash(finalKeep, branch)),
   });
-
-  // The new pin reaches teammates only through git.
-  const { autoCommitKeep } = await import('../../git/autoCommitKeep');
-  autoCommitKeep(branch);
 }
 
 export async function writeAndSync(
@@ -240,7 +241,7 @@ export async function writeAndSync(
  * `capy remove NAME...` — drop `names` from the active branch and push the
  * remaining set through the exact same mechanics `writeAndSync` uses (encrypt
  * full set, `mergeWithKeep`, drop entries for names no longer present, push,
- * cache, adopt, write `.env` + sync state, auto-commit).
+ * cache, adopt, write `.env` + sync state).
  *
  * Callers are expected to have already confirmed `names` are all present and
  * that nothing ELSE in `ctx.localPlaintext` has drifted from the pinned
@@ -272,9 +273,6 @@ export async function writeImportedAndSync(
   entries: ReadonlyArray<{ varName: string; value: string; entry: ConnectorMetadata }>,
   opts: {
     push: boolean;
-    quiet?: boolean;
-    /** Dokploy DISCOVERY import only: skip the git auto-commit entirely — the discovery run commits nothing on the user's behalf (Vince's rule). Default false preserves every other caller's behavior. */
-    skipAutoCommit?: boolean;
     /**
      * `--overwrite` clear-only writes: proceed even when `entries` is empty.
      * Clearing removes names from `ctx.localPlaintext` (the caller passes a
@@ -353,10 +351,6 @@ export async function writeImportedAndSync(
     user_id: userId,
     keep_hash: setSyncKeepHash(existingSyncState, branch, SyncEngine.computeKeepHash(finalKeep, branch)),
   });
-
-  if (opts.skipAutoCommit) return;
-  const { autoCommitKeep } = await import('../../git/autoCommitKeep');
-  autoCommitKeep(branch, process.cwd(), { quiet: opts.quiet });
 }
 
 /**
@@ -377,7 +371,7 @@ export async function writeImportedAndSync(
 export async function writeImportOutcome(
   ctx: ResolvedContext,
   outcome: Extract<ImportOutcome, { ok: true }>,
-  opts: { push: boolean; quiet?: boolean; skipAutoCommit?: boolean; dryRun: boolean },
+  opts: { push: boolean; dryRun: boolean },
 ): Promise<{ wrote: boolean }> {
   if (opts.dryRun) return { wrote: false };
   const cleared = outcome.cleared ?? [];
@@ -399,8 +393,6 @@ export async function writeImportOutcome(
 
   await writeImportedAndSync(prunedCtx, [...outcome.imported, ...unchangedEntries], {
     push: opts.push,
-    quiet: opts.quiet,
-    skipAutoCommit: opts.skipAutoCommit,
     forceWrite: cleared.length > 0 || unchangedEntries.length > 0,
   });
   return { wrote: true };

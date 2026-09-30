@@ -20,9 +20,6 @@ mock.module('../../src/sync/syncEngine', () => {
   (MockSyncEngine as any).adoptServerKeep = mock((_json: any, fallback: any) => fallback);
   return { SyncEngine: MockSyncEngine };
 });
-mock.module('../../src/git/autoCommitKeep', () => ({
-  autoCommitKeep: mock(() => ({ committed: false, reason: 'disabled' })),
-}));
 mock.module('../../src/ui/promptEngine', () => ({
   PromptEngine: mock(() => ({})),
 }));
@@ -608,6 +605,45 @@ describe('CapyCommand', () => {
       // Should complete initialization despite sync failure
       expect(consoleSpy).toHaveBeenCalledWith(expect.stringMatching(/You can run .*capy.* again to retry syncing/));
       expect(mockFileManager.ensureCapyGitignore).toHaveBeenCalled();
+
+      existsSyncSpy.mockRestore();
+      consoleSpy.mockRestore();
+    });
+
+    test('a throw during the pre-push prep (encrypt/merge) gets the SAME failure handling as a push failure — not an unhandled rejection', async () => {
+      // syncInitialSecrets's prep phase (dynamic imports, the
+      // Encryptor.encrypt loop, deriveResourceId, mergeWithKeep) must be
+      // guarded exactly like the push/write/backup/encrypt steps after it —
+      // otherwise a throw here rejects the whole function instead of
+      // resolving to the normal failure shape, and none of the existing
+      // failure handling (spinner.fail, the retry hint,
+      // wizard.reportEncryptFailure) ever runs.
+      (mockProjectManager.getEnvPath as any) = mock(() => '/test/path/.env');
+      const existsSyncSpy = spyOn(fs, 'existsSync').mockReturnValue(true as any);
+      mockFileManager.readEnvFile.mockReturnValue({ API_KEY: 'test-key' });
+      mockServiceClient.getDecryptData.mockResolvedValue({
+        decrypt_key: 'decrypt-key-123',
+        env_content: '',
+        expires_at: new Date().toISOString(),
+      });
+
+      // Force the PREP phase itself to throw — mergeWithKeep runs inside it,
+      // before pushSecrets is ever called.
+      mockSyncEngine.mergeWithKeep.mockImplementation(() => {
+        throw new Error('merge boom');
+      });
+
+      const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
+
+      // Must resolve, not reject — this is the actual bug: before the fix,
+      // this `await` would throw instead of the function completing.
+      await (capyCommand as any).initializeProject();
+
+      // Same failure handling as the existing push-failure test above.
+      expect(consoleSpy).toHaveBeenCalledWith(expect.stringMatching(/You can run .*capy.* again to retry syncing/));
+      expect(mockFileManager.ensureCapyGitignore).toHaveBeenCalled();
+      // Never reached the push — proves the throw was caught in prep, not later.
+      expect(mockServiceClient.pushSecrets).not.toHaveBeenCalled();
 
       existsSyncSpy.mockRestore();
       consoleSpy.mockRestore();

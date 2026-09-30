@@ -213,17 +213,46 @@ export class FileManager {
     return parseDotenv(content);
   }
 
+  /**
+   * Writes capy's own working copy of keep.lock, at `.capy/keep.lock` —
+   * untracked (`.capy/` is gitignored by `ensureCapyGitignore`) and safe for
+   * capy to rewrite on every sync/push/rotate/connect/edit without a commit.
+   *
+   * The TRACKED `<projectRoot>/keep.lock` is the project marker (`capy run`
+   * reads org_id/project_id from it; it's how capy detects "is this a Capy
+   * project"). It's written once, only when it doesn't exist yet (a brand
+   * new project / `capy` init) — and never touched again after that. Capy
+   * used to keep rewriting the tracked file on every pin change and
+   * auto-committing it on whatever branch the user happened to be on; that's
+   * what caused constant merge conflicts and made `git pull` refuse with
+   * "local changes would be overwritten" when the auto-commit didn't happen
+   * to run. Only an explicit action (or `capy deploy`, into its
+   * own isolated worktree) ever writes the tracked file now.
+   */
   writeKeepFile(keep: KeepFile): void {
-    const keepPath = join(this.projectRoot, 'keep.lock');
     const content = serializeKeep(keep);
 
-    // No-op guard: if the on-disk lockfile is already byte-identical to the
-    // canonical output, don't touch it. This keeps `capy` from churning
-    // keep.lock (and producing a spurious git diff) on every sync when nothing
-    // actually changed.
-    if (existsSync(keepPath)) {
+    const trackedPath = join(this.projectRoot, 'keep.lock');
+    if (!existsSync(trackedPath)) {
+      this.writeKeepContentTo(trackedPath, content);
+    }
+
+    const capyDir = join(this.projectRoot, '.capy');
+    this.ensureDirectoryExists(capyDir);
+    this.writeKeepContentTo(join(capyDir, 'keep.lock'), content);
+  }
+
+  /**
+   * No-op guard + backup/restore, shared by both keep.lock copies
+   * `writeKeepFile` writes. If the on-disk file is already byte-identical to
+   * the canonical output, don't touch it — this keeps capy from churning
+   * keep.lock (and producing a spurious diff on the tracked copy, back when
+   * it was rewritten every time) on every sync when nothing actually changed.
+   */
+  private writeKeepContentTo(path: string, content: string): void {
+    if (existsSync(path)) {
       try {
-        if (readFileSync(keepPath, 'utf-8') === content) {
+        if (readFileSync(path, 'utf-8') === content) {
           return;
         }
       } catch {
@@ -231,22 +260,22 @@ export class FileManager {
       }
     }
 
-    const backup = this.createBackup(keepPath);
+    const backup = this.createBackup(path);
 
     try {
-      writeFileSync(keepPath, content, 'utf-8');
+      writeFileSync(path, content, 'utf-8');
 
       if (backup) {
         this.removeBackup(backup);
       }
     } catch (error) {
       if (backup) {
-        this.restoreBackup(backup, keepPath);
+        this.restoreBackup(backup, path);
       }
       throw new CapyError(
         'Failed to write keep.lock file',
         ERROR_CODES.PERMISSION_DENIED,
-        { error, path: keepPath }
+        { error, path }
       );
     }
   }

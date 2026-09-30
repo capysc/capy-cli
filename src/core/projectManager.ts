@@ -54,8 +54,20 @@ export class ProjectManager {
     };
   }
 
+  /**
+   * The TRACKED keep.lock at the project root — the project marker `capy
+   * run` and project-init detection read directly, and the only copy that
+   * ever goes into git (see FileManager.writeKeepFile). Readers after
+   * pins/variables should go through `readKeepFile()` instead, which prefers
+   * the untracked working copy when one exists.
+   */
   getKeepPath(): string {
     return join(this.projectRoot, 'keep.lock');
+  }
+
+  /** capy's own untracked working copy of keep.lock (gitignored, may be absent). */
+  getWorkingKeepPath(): string {
+    return join(this.getCapyDir(), 'keep.lock');
   }
 
   getCapyDir(): string {
@@ -174,8 +186,19 @@ export class ProjectManager {
     return normalized;
   }
 
+  /**
+   * Path to actually READ keep.lock from: the untracked working copy under
+   * `.capy/` when present, else the tracked file at the project root. A
+   * fresh git worktree (or a project that predates this working copy) has
+   * only the tracked file, so falling back keeps behavior working there.
+   */
+  private resolveReadableKeepPath(): string {
+    const workingPath = this.getWorkingKeepPath();
+    return existsSync(workingPath) ? workingPath : this.getKeepPath();
+  }
+
   readKeepFile(): KeepFile | null {
-    const keepPath = this.getKeepPath();
+    const keepPath = this.resolveReadableKeepPath();
     if (!existsSync(keepPath)) {
       return null;
     }

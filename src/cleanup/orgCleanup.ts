@@ -71,12 +71,22 @@ export function cleanupOrgData(orgId: string, userId?: string): void {
     // sibling state present — leave the dir alone.
   }
 
-  // 4. Local keep.lock — pointer to an org the user is no longer in.
+  // 4. Local keep.lock — pointer to an org the user is no longer in. Both
+  //    the tracked file and capy's own untracked working copy
+  //    (.capy/keep.lock — see FileManager.writeKeepFile): leaving the
+  //    working copy behind would make readKeepFile() keep preferring the
+  //    stale pointer over a freshly re-initialized tracked file.
   const keepPath = join(process.cwd(), 'keep.lock');
   if (existsSync(keepPath)) {
     try {
       unlinkSync(keepPath);
       console.log('  Removed keep.lock (no longer a member).');
+    } catch {}
+  }
+  const workingKeepPath = join(process.cwd(), '.capy', 'keep.lock');
+  if (existsSync(workingKeepPath)) {
+    try {
+      unlinkSync(workingKeepPath);
     } catch {}
   }
 }

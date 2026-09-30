@@ -1915,7 +1915,7 @@ async function importIntoBranchSafe(
   // sequence at a time, so letting this throw would abort every folder
   // still queued behind this one, not just this one.
   try {
-    await writeImportOutcome(resolvedCtx, outcome, { push: !runOpts.noPush, quiet: true, skipAutoCommit: true, dryRun: false });
+    await writeImportOutcome(resolvedCtx, outcome, { push: !runOpts.noPush, dryRun: false });
   } catch (err) {
     return { ok: false, code: 'DOKPLOY_PUSH_FAILED', message: err instanceof Error ? err.message : String(err) };
   }

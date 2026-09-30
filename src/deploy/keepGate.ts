@@ -14,7 +14,7 @@
 import { createHash } from 'crypto';
 import { serializeKeep } from '../files/fileManager';
 import { deriveResourceId } from '../crypto/resourceId';
-import { KeepFile } from '../types/index';
+import { KeepFile, KeepVariableEntry } from '../types/index';
 import { TargetDeliveryDescriptor, isDeliveryDescriptor, upsertTargetElement } from './targetsGate';
 
 /** keep.lock records this 16-hex-char hash per (var, branch) — never the value. */
@@ -118,6 +118,72 @@ export function touchDeployKeep(baseKeep: KeepFile, _vars: string[], _branch: st
   const keep = JSON.parse(JSON.stringify(baseKeep)) as KeepFile & { deploy_revision?: unknown };
   const current = typeof keep.deploy_revision === 'number' ? keep.deploy_revision : 0;
   return serializeKeep({ ...keep, deploy_revision: current + 1 } as KeepFile);
+}
+
+/**
+ * One `capy edit` session save: the Capy branch being edited, and the
+ * resulting keep.lock entry for each variable the save touched — `null`
+ * when the save left that variable with no entry for this branch at all
+ * (a deletion).
+ *
+ * Captured immutably per save so the exit-time PR flow
+ * (commands/editExitFlow.ts) can replay every save, in order, onto whatever
+ * keep.lock the chosen target git branch actually has — which can differ
+ * from what this edit session saw, since other pushes may have landed on
+ * other branches while the session was open.
+ */
+export interface EditSaveRecord {
+  readonly branch: string;
+  readonly entries: ReadonlyArray<{ readonly variable: string; readonly entry: KeepVariableEntry | null }>;
+}
+
+/**
+ * What should land in the folded keep for one (variable, branch): a `null`
+ * `saveEntry` is a deletion — drop any existing entry outright, regardless
+ * of hashes. Otherwise, mirror `buildDeployKeep`'s `entry.value_hash !==
+ * hash` check: the target (git) already has an entry with the SAME
+ * value_hash → the value hasn't actually changed from git's perspective, so
+ * keep the target's entry EXACTLY as it is — every field, including an
+ * absent `changed_at` — rather than let an unrelated save move its date.
+ * Different hash (or no existing entry at all) → use the save's entry,
+ * which already carries the real server-assigned `changed_at` from the push
+ * that produced it.
+ */
+function resolveEntryForFold(
+  existingEntry: KeepVariableEntry | undefined,
+  saveEntry: KeepVariableEntry | null,
+): KeepVariableEntry | undefined {
+  if (saveEntry === null) return undefined;
+  if (existingEntry && existingEntry.value_hash === saveEntry.value_hash) return existingEntry;
+  return saveEntry;
+}
+
+/**
+ * Fold one recorded edit-session save into `keep`: resolve the
+ * (variable, branch) entry per `resolveEntryForFold` above, drop a variable
+ * whose entry list becomes empty as a result, and leave every other entry —
+ * same variable/other branch, or any other variable — untouched. A save
+ * whose every touched variable already matches the target's value_hash
+ * resolves to exactly the target's own entries, so it serializes identically
+ * to `keep` — the caller's no-diff check (editExitFlow.ts) skips committing it.
+ */
+export function foldEditSaveIntoKeep(keep: KeepFile, record: EditSaveRecord): KeepFile {
+  const variables = record.entries.reduce<Record<string, KeepVariableEntry[]>>(
+    (vars, { variable, entry }) => {
+      const existing = vars[variable] ?? [];
+      const withoutBranch = existing.filter((e) => e.branch !== record.branch);
+      const existingEntry = existing.find((e) => e.branch === record.branch);
+      const resolvedEntry = resolveEntryForFold(existingEntry, entry);
+      const nextEntries = resolvedEntry ? [...withoutBranch, resolvedEntry] : withoutBranch;
+      if (nextEntries.length === 0) {
+        const { [variable]: _dropped, ...rest } = vars;
+        return rest;
+      }
+      return { ...vars, [variable]: nextEntries };
+    },
+    keep.variables,
+  );
+  return { ...keep, variables };
 }
 
 /**
