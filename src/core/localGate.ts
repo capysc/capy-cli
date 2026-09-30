@@ -14,6 +14,7 @@ export const LOCAL_ONLY_DISABLED_COMMANDS = [
   'invite',
   'kick',
   'users',
+  'audit',
   'grant-branch',
   'revoke-branch',
   'org',

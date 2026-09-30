@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { Command } from 'commander';
+import { registerAuditCommand } from './commands/auditCommand';
 import { CapyCommand } from './commands/capyCommand';
 import { CliOptions } from './types/index';
 import { assertNotLocalOnly } from './core/localGate';
@@ -40,6 +41,7 @@ if (process.argv.includes('-v') || process.argv.includes('--verbose')) {
 }
 
 const program = new Command();
+registerAuditCommand(program);
 
 program
   // Bin name is overridable so sibling wrappers (e.g. bin/capy-staging) render
