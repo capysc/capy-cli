@@ -30,10 +30,27 @@
  * can leave a newly-`add`ed path staged on the ORIGINAL branch — it only
  * touches what differs between the two branches' trees, not every index
  * entry), then checkout back to the original branch, then delete the new
- * branch. The working-tree FILES themselves are never touched by the
- * rollback — only the index entries and the branch/HEAD state.
+ * branch. `restorePathsToHead` additionally un-does the keep.lock sync
+ * below (see its own doc) — the working-tree FILES for every OTHER path are
+ * never touched by the rollback, only the index entries and branch/HEAD
+ * state.
+ *
+ * MUST-FIX (round-4 validation, 2026-09-30): this used to commit the
+ * TRACKED `<folder>/keep.lock` as discovery itself left it — but discovery
+ * (like every other post-CAP-667 flow) only ever writes the untracked
+ * working copy at `<folder>/.capy/keep.lock`. A fresh folder's tracked file
+ * never got the imported variables at all (`{variables: {}}`, frozen at
+ * `capy`'s own init write); an existing folder's tracked file committed
+ * whatever was frozen there before, not the fresh pins. Fixed the same way
+ * as direct-mode deploy: `syncTrackedKeepFromWorkingCopy` runs per folder,
+ * immediately before staging (after every refusal guard, so a refusal still
+ * leaves the repo untouched, and never during `--dry-run`), catching each
+ * folder's tracked keep.lock up to its own working copy right before this
+ * function commits it.
  */
 import { execFileSync } from 'node:child_process';
+import { dirname, join } from 'node:path';
+import { restorePathsToHead, syncTrackedKeepFromWorkingCopy } from '../deploy/git';
 
 function git(repoRoot: string, args: readonly string[]): string {
   // `env: process.env` explicitly: Bun's `execFileSync` (unlike Node's)
@@ -169,6 +186,14 @@ export function commitDiscoveryChanges(
     return { ok: false, code: 'DOKPLOY_COMMIT_FAILED', message: `Could not create branch "${opts.branchName}".` };
   }
 
+  // The keep.lock path(s) among `paths` (one per folder this commit covers)
+  // — every other guard above has already passed, and `--dry-run` already
+  // returned, so this is the LAST thing that happens before staging. See
+  // this function's own doc (MUST-FIX, 2026-09-30) for why it has to run
+  // here and not earlier.
+  const keepPaths = paths.filter((p) => p === 'keep.lock' || p.endsWith('/keep.lock'));
+  keepPaths.forEach((relPath) => syncTrackedKeepFromWorkingCopy(join(repoRoot, dirname(relPath))));
+
   const added = tryGit(repoRoot, ['add', '--', ...paths]);
   const messageArgs = ['-m', 'chore(capy): import Dokploy environments', ...(opts.summaryLines.length > 0 ? ['-m', opts.summaryLines.join('\n')] : [])];
   const committed = added.ok ? tryGit(repoRoot, ['commit', ...messageArgs, '--', ...paths]) : { ok: false as const };
@@ -179,8 +204,13 @@ export function commitDiscoveryChanges(
     // untouched) runs BEFORE the checkout back: `checkout` alone only
     // resets index entries for paths that differ between the two
     // branches' trees, so a newly-`add`ed path can otherwise survive the
-    // switch still staged.
+    // switch still staged. `restorePathsToHead`, scoped to just the
+    // keep.lock path(s) the sync above touched, un-does that write too —
+    // without it, a failed commit would leave the tracked keep.lock
+    // modified-and-uncommitted even after the branch rollback, the exact
+    // CAP-667 symptom this whole fix exists to prevent.
     tryGit(repoRoot, ['reset', '-q', '--', ...paths]);
+    if (keepPaths.length > 0) restorePathsToHead(repoRoot, [...keepPaths]);
     tryGit(repoRoot, ['checkout', '-']);
     tryGit(repoRoot, ['branch', '-D', opts.branchName]);
     return { ok: false, code: 'DOKPLOY_COMMIT_FAILED', message: 'git commit failed.' };

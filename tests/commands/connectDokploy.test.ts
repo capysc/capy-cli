@@ -773,7 +773,7 @@ describe('writeImportOutcome — unchanged-value connector backfill', () => {
       deployTargetSaved: false,
     };
 
-    const { wrote } = await writeImportOutcome(ctx, outcome, { push: true, dryRun: false, skipAutoCommit: true });
+    const { wrote } = await writeImportOutcome(ctx, outcome, { push: true, dryRun: false });
 
     // A backfill-only run still counts as "wrote" — it synced keep.lock.
     expect(wrote).toBe(true);

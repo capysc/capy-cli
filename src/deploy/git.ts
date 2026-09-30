@@ -7,12 +7,44 @@
  * deploy with other uncommitted code changes.
  */
 import { spawnSync } from 'child_process';
+import { existsSync, readFileSync, writeFileSync } from 'fs';
 import { resolveGh, GH_SEARCHED } from '../utils/gh';
+import { ProjectManager } from '../core/projectManager';
 
 export interface GitStatusEntry {
   /** Two-character short status from `git status --porcelain`. */
   code: string;
   path: string;
+}
+
+/**
+ * Copies capy's untracked working copy (`.capy/keep.lock`) over the tracked
+ * `keep.lock` at `cwd`, when a working copy exists and differs — so a
+ * caller's own explicit commit picks up the CURRENT pins, not whatever was
+ * frozen into the tracked file at project init. Post-CAP-667, capy's regular
+ * flows (sync/push/rotate/connect/edit) write fresh pins only into the
+ * untracked working copy — nothing else ever catches the tracked file up, so
+ * every caller that commits the tracked file explicitly (direct-mode
+ * deploy's own-branch commit, Dokploy discovery's fresh-branch commit) must
+ * run this immediately before it does. A no-op when there's no working copy
+ * yet (fresh worktree, or a project that predates it) — the tracked file is
+ * already the best information available, same as
+ * `ProjectManager.readKeepFile()`'s own fallback.
+ *
+ * Never touches `.capy/keep.lock` itself, so it stays exactly what it was —
+ * only the tracked file is brought in line with it. `cwd` is the directory
+ * the tracked `keep.lock` (and its sibling `.capy/`) live in directly — the
+ * project root for direct-mode deploy, or `<repoRoot>/<folder>` for a
+ * per-repo Dokploy discovery target.
+ */
+export function syncTrackedKeepFromWorkingCopy(cwd: string): void {
+  const pm = new ProjectManager(cwd);
+  const workingPath = pm.getWorkingKeepPath();
+  if (!existsSync(workingPath)) return;
+  const workingContent = readFileSync(workingPath, 'utf-8');
+  const trackedPath = pm.getKeepPath();
+  if (existsSync(trackedPath) && readFileSync(trackedPath, 'utf-8') === workingContent) return;
+  writeFileSync(trackedPath, workingContent, 'utf-8');
 }
 
 function git(args: string[], cwd: string, stdin?: string): {

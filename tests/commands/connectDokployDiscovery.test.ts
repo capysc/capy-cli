@@ -3759,6 +3759,193 @@ describe('commitDiscoveryChanges', () => {
   });
 });
 
+// ── commitDiscoveryChanges syncs the tracked keep.lock from the working
+//    copy (CAP-667 MUST-FIX, round-4 validation 2026-09-30) ────────────────
+//
+// Discovery, like every other post-CAP-667 flow, only ever writes fresh
+// pins into the untracked working copy (`<folder>/.capy/keep.lock` —
+// `FileManager.writeKeepFile` only touches the TRACKED file the first time
+// it's ever created). Before this fix, `commitDiscoveryChanges` committed
+// the tracked file exactly as it sat on disk — frozen at whatever it was
+// when first created, never the fresh pins. These tests drive a real
+// `FileManager` (never a stub) to reproduce both the fresh-folder and the
+// existing-folder shape of that bug, plus the failure-path rollback.
+describe('commitDiscoveryChanges syncs the tracked keep.lock from .capy/keep.lock first (CAP-667 MUST-FIX)', () => {
+  test('(a) fresh folder: the committed keep.lock contains the imported variables, not {} ', () => {
+    const ROOT = realpathSync(mkdtempSync(join(tmpdir(), 'capy-discover-commit-fresh-')));
+    initRepo(ROOT);
+    try {
+      const fm = new FileManager(ROOT);
+
+      // No keep.lock anywhere yet — `beforeStatus` is what `snapshotPathStatus`
+      // would see BEFORE discovery's own init/import writes run.
+      const beforeStatus = snapshotPathStatus(ROOT, ['keep.lock']);
+      expect(beforeStatus.size).toBe(0);
+
+      // Discovery's own init step (folder had no local keep.lock at all):
+      // `writeKeepFile` creates the tracked file since it doesn't exist yet,
+      // with no variables — exactly `FileManager.writeKeepFile`'s real
+      // behavior, not a stub.
+      fm.writeKeepFile({ version: '3.0', org_id: 'org-1', project_id: 'proj-1', project_name: 'demo', variables: {} });
+      expect(JSON.parse(readFileSync(join(ROOT, 'keep.lock'), 'utf-8')).variables).toEqual({});
+
+      // Discovery's own import step then writes the REAL imported
+      // variables — since the tracked file now exists on disk, this only
+      // ever updates the working copy (`.capy/keep.lock`), same as every
+      // other post-CAP-667 write.
+      const withVars: KeepFile = {
+        version: '3.0',
+        org_id: 'org-1',
+        project_id: 'proj-1',
+        project_name: 'demo',
+        variables: { API_KEY: [{ resource_id: 'r-api-key', branch: 'development', value_hash: hashValue('secret-value') }] },
+      };
+      fm.writeKeepFile(withVars);
+      expect(JSON.parse(readFileSync(join(ROOT, 'keep.lock'), 'utf-8')).variables).toEqual({}); // tracked still frozen
+
+      const outcome = commitDiscoveryChanges(ROOT, ['keep.lock'], beforeStatus, {
+        branchName: 'capy/dokploy-fresh-folder',
+        dryRun: false,
+        summaryLines: [],
+      });
+      expect(outcome.ok).toBe(true);
+      if (!outcome.ok || outcome.dryRun) return;
+
+      const committed = JSON.parse(git(ROOT, ['show', 'HEAD:keep.lock']));
+      expect(committed.variables).toEqual(withVars.variables);
+
+      // The working copy is exactly what it was — this only ever reads from
+      // it, never writes to it.
+      expect(JSON.parse(readFileSync(join(ROOT, '.capy', 'keep.lock'), 'utf-8')).variables).toEqual(withVars.variables);
+    } finally {
+      rmSync(ROOT, { recursive: true, force: true });
+    }
+  });
+
+  test('(b) existing committed keep.lock: the committed file carries the new pins, and nothing else about it changed', () => {
+    const ROOT = realpathSync(mkdtempSync(join(tmpdir(), 'capy-discover-commit-existing-')));
+    initRepo(ROOT);
+    try {
+      const fm = new FileManager(ROOT);
+
+      // A PRIOR run already initialized + committed this folder's tracked
+      // keep.lock, with its own (now stale) variables.
+      const oldKeep: KeepFile = {
+        version: '3.0',
+        org_id: 'org-1',
+        project_id: 'proj-1',
+        project_name: 'demo',
+        variables: { OLD_VAR: [{ resource_id: 'r-old', branch: 'development', value_hash: hashValue('old-value') }] },
+      };
+      fm.writeKeepFile(oldKeep);
+      git(ROOT, ['add', 'keep.lock']);
+      git(ROOT, ['commit', '-q', '-m', 'prior discovery run']);
+
+      // Snapshot taken BEFORE this run's own writes — the file is clean
+      // (fully committed), so nothing pre-existing is dirty.
+      const beforeStatus = snapshotPathStatus(ROOT, ['keep.lock']);
+      expect(beforeStatus.size).toBe(0);
+
+      // This run's import writes fresh pins — tracked already exists on
+      // disk, so only the working copy is updated.
+      const newKeep: KeepFile = {
+        version: '3.0',
+        org_id: 'org-1',
+        project_id: 'proj-1',
+        project_name: 'demo',
+        variables: { NEW_VAR: [{ resource_id: 'r-new', branch: 'development', value_hash: hashValue('new-value') }] },
+      };
+      fm.writeKeepFile(newKeep);
+      expect(JSON.parse(readFileSync(join(ROOT, 'keep.lock'), 'utf-8')).variables).toEqual(oldKeep.variables); // tracked still stale
+
+      const outcome = commitDiscoveryChanges(ROOT, ['keep.lock'], beforeStatus, {
+        branchName: 'capy/dokploy-existing-folder',
+        dryRun: false,
+        summaryLines: [],
+      });
+      expect(outcome.ok).toBe(true);
+      if (!outcome.ok || outcome.dryRun) return;
+
+      const committed = JSON.parse(git(ROOT, ['show', 'HEAD:keep.lock']));
+      // The new pins, and ONLY the new pins — the stale variable is gone.
+      expect(committed.variables).toEqual(newKeep.variables);
+      expect(committed.variables).not.toHaveProperty('OLD_VAR');
+      // Everything else about the file (identity) is unchanged.
+      expect(committed.org_id).toBe(oldKeep.org_id);
+      expect(committed.project_id).toBe(oldKeep.project_id);
+      expect(committed.project_name).toBe(oldKeep.project_name);
+    } finally {
+      rmSync(ROOT, { recursive: true, force: true });
+    }
+  });
+
+  test('(c) a forced commit failure restores the tracked keep.lock to HEAD — no keep.lock diff left behind', () => {
+    const ROOT = realpathSync(mkdtempSync(join(tmpdir(), 'capy-discover-commit-failure-')));
+    initRepo(ROOT);
+    try {
+      const fm = new FileManager(ROOT);
+
+      const oldKeep: KeepFile = {
+        version: '3.0',
+        org_id: 'org-1',
+        project_id: 'proj-1',
+        project_name: 'demo',
+        variables: { OLD_VAR: [{ resource_id: 'r-old', branch: 'development', value_hash: hashValue('old-value') }] },
+      };
+      fm.writeKeepFile(oldKeep);
+      git(ROOT, ['add', 'keep.lock']);
+      git(ROOT, ['commit', '-q', '-m', 'prior discovery run']);
+      const headSha = git(ROOT, ['rev-parse', 'HEAD']).trim();
+      const headContent = git(ROOT, ['show', 'HEAD:keep.lock']);
+
+      const beforeStatus = snapshotPathStatus(ROOT, ['keep.lock']);
+
+      const newKeep: KeepFile = {
+        version: '3.0',
+        org_id: 'org-1',
+        project_id: 'proj-1',
+        project_name: 'demo',
+        variables: { NEW_VAR: [{ resource_id: 'r-new', branch: 'development', value_hash: hashValue('new-value') }] },
+      };
+      fm.writeKeepFile(newKeep);
+
+      // A pre-commit hook that always refuses — forces the commit step
+      // (which runs right after the sync) to fail.
+      const hooksDir = join(ROOT, '.git', 'hooks');
+      mkdirSync(hooksDir, { recursive: true });
+      writeFileSync(join(hooksDir, 'pre-commit'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+
+      const originalBranch = git(ROOT, ['rev-parse', '--abbrev-ref', 'HEAD']).trim();
+
+      const outcome = commitDiscoveryChanges(ROOT, ['keep.lock'], beforeStatus, {
+        branchName: 'capy/dokploy-forced-failure',
+        dryRun: false,
+        summaryLines: [],
+      });
+      expect(outcome.ok).toBe(false);
+      if (outcome.ok) return;
+      expect(outcome.code).toBe('DOKPLOY_COMMIT_FAILED');
+
+      // HEAD is back on the original branch, unmoved.
+      expect(git(ROOT, ['rev-parse', '--abbrev-ref', 'HEAD']).trim()).toBe(originalBranch);
+      expect(git(ROOT, ['rev-parse', 'HEAD']).trim()).toBe(headSha);
+      expect(tryGitRevParse(ROOT, 'refs/heads/capy/dokploy-forced-failure')).toBe(false);
+
+      // The tracked keep.lock is restored to exactly HEAD's version — the
+      // sync's write is fully undone, not left modified-and-uncommitted.
+      expect(readFileSync(join(ROOT, 'keep.lock'), 'utf-8')).toBe(headContent);
+      const status = git(ROOT, ['status', '--porcelain']).trim();
+      expect(status).not.toContain('keep.lock');
+
+      // The working copy (what the sync reads FROM) is untouched — still
+      // has the new pins, ready for a retry.
+      expect(JSON.parse(readFileSync(join(ROOT, '.capy', 'keep.lock'), 'utf-8')).variables).toEqual(newKeep.variables);
+    } finally {
+      rmSync(ROOT, { recursive: true, force: true });
+    }
+  });
+});
+
 function tryGitRevParse(repoRoot: string, ref: string): boolean {
   try {
     execFileSync('git', ['rev-parse', '--verify', '--quiet', ref], { cwd: repoRoot, stdio: ['ignore', 'pipe', 'pipe'] });

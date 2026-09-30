@@ -42,6 +42,7 @@ import {
   worktreeAddNewBranch,
   worktreeRemove,
   deleteLocalBranch,
+  syncTrackedKeepFromWorkingCopy,
 } from '../deploy/git';
 import { buildDeployKeep, touchDeployKeep, reconcileVars, hashValue } from '../deploy/keepGate';
 import {
@@ -318,25 +319,14 @@ export function readKeep(cwd: string): KeepInfo | null {
 }
 
 /**
- * Copies capy's untracked working copy (`.capy/keep.lock`) over the tracked
- * `keep.lock`, when it exists and differs — so direct-mode deploy's
- * "keep.lock dirty? commit it" check (below) and its commit both see the
- * CURRENT pins, not whatever was frozen into the tracked file at project
- * init. A no-op when there's no working copy yet (fresh worktree, or a
- * project that predates it) — the tracked file is already the best
- * information available, same as `ProjectManager.readKeepFile`'s fallback.
- *
- * Never touches `.capy/keep.lock` itself, so it stays exactly what it was —
- * only the tracked file is brought in line with it.
+ * `syncTrackedKeepFromWorkingCopy` (deploy/git.ts), under the name direct-
+ * mode deploy and its tests already use. Kept as a re-export rather than
+ * inlined here so Dokploy discovery's commit step (src/git/discoveryCommit.ts)
+ * can share the exact same helper instead of duplicating it — see that
+ * function's own doc for why every caller that commits the tracked
+ * keep.lock explicitly needs this immediately before it does.
  */
-export function syncTrackedKeepForDirectDeploy(cwd: string): void {
-  const workingPath = new ProjectManager(cwd).getWorkingKeepPath();
-  if (!existsSync(workingPath)) return;
-  const workingContent = readFileSync(workingPath, 'utf-8');
-  const trackedPath = join(cwd, 'keep.lock');
-  if (existsSync(trackedPath) && readFileSync(trackedPath, 'utf-8') === workingContent) return;
-  writeFileSync(trackedPath, workingContent, 'utf-8');
-}
+export { syncTrackedKeepFromWorkingCopy as syncTrackedKeepForDirectDeploy } from '../deploy/git';
 
 // ── Decryption (uses same path as `capy export` / `capy run`) ──────────────
 
@@ -3171,8 +3161,8 @@ export async function deployCommand(
   //
   // The tracked-keep sync (catching it up to capy's current pins — sync/
   // push/edit now write only into the untracked working copy,
-  // .capy/keep.lock — see syncTrackedKeepForDirectDeploy) runs HERE,
-  // immediately before deciding whether keep.lock is dirty and immediately
+  // .capy/keep.lock — see syncTrackedKeepFromWorkingCopy, deploy/git.ts)
+  // runs HERE, immediately before deciding whether keep.lock is dirty and immediately
   // before the commit itself — not any earlier in the run. Every exit
   // between an earlier sync and this point (confirm cancel/delete/
   // edit-cancel, a failed preflight recheck, a failed mint/decrypt) would
@@ -3186,7 +3176,7 @@ export async function deployCommand(
     | { kind: 'failed'; stashed: boolean }
   > => {
     if (!gitOk || mode !== 'direct') return { kind: 'skip' };
-    syncTrackedKeepForDirectDeploy(cwd);
+    syncTrackedKeepFromWorkingCopy(cwd);
     if (!hasKeepLockChanges(cwd)) return { kind: 'skip' };
 
     const stash = stashOtherChanges(cwd);

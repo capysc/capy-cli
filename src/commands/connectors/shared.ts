@@ -238,9 +238,6 @@ export async function writeImportedAndSync(
   entries: ReadonlyArray<{ varName: string; value: string; entry: ConnectorMetadata }>,
   opts: {
     push: boolean;
-    quiet?: boolean;
-    /** Dokploy DISCOVERY import only: skip the git auto-commit entirely — the discovery run commits nothing on the user's behalf (Vince's rule). Default false preserves every other caller's behavior. */
-    skipAutoCommit?: boolean;
     /**
      * `--overwrite` clear-only writes: proceed even when `entries` is empty.
      * Clearing removes names from `ctx.localPlaintext` (the caller passes a
@@ -339,7 +336,7 @@ export async function writeImportedAndSync(
 export async function writeImportOutcome(
   ctx: ResolvedContext,
   outcome: Extract<ImportOutcome, { ok: true }>,
-  opts: { push: boolean; quiet?: boolean; skipAutoCommit?: boolean; dryRun: boolean },
+  opts: { push: boolean; dryRun: boolean },
 ): Promise<{ wrote: boolean }> {
   if (opts.dryRun) return { wrote: false };
   const cleared = outcome.cleared ?? [];
@@ -361,8 +358,6 @@ export async function writeImportOutcome(
 
   await writeImportedAndSync(prunedCtx, [...outcome.imported, ...unchangedEntries], {
     push: opts.push,
-    quiet: opts.quiet,
-    skipAutoCommit: opts.skipAutoCommit,
     forceWrite: cleared.length > 0 || unchangedEntries.length > 0,
   });
   return { wrote: true };

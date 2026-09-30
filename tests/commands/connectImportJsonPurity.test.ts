@@ -8,20 +8,24 @@
  *
  * That helper is gone (CAP-667): capy never auto-commits keep.lock onto
  * whatever branch the caller happens to be on — `writeImportedAndSync` now
- * only ever writes the untracked working copy (`.capy/keep.lock`), and the
- * tracked keep.lock this test seeds is left exactly as committed. So the
- * property this file proves is now two-sided: stdout purity (still, for the
- * same reason — nothing on this path should ever print anything but the one
- * JSON line), AND that the tracked keep.lock genuinely never gets committed
- * to on this path any more.
+ * only ever writes through the real `FileManager.writeKeepFile`, which
+ * itself only ever writes the tracked file the FIRST time it's created and
+ * otherwise only touches the untracked working copy (`.capy/keep.lock`). So
+ * the property this file proves is now two-sided: stdout purity (still, for
+ * the same reason — nothing on this path should ever print anything but the
+ * one JSON line), AND that the tracked keep.lock this test seeds as already
+ * committed comes out the other side byte-identical and un-diffed — not
+ * merely "uncommitted" (round-4 validation: a stub `writeKeepFile` that
+ * unconditionally rewrote the tracked file made the OLD version of this test
+ * pass even though it was asserting the wrong property).
  *
  * This drives the REAL `ConnectCommand.executeImport` → `writeImportedAndSync`
- * chain, inside a throwaway git repo, and checks stdout byte for byte plus
- * the repo's git state afterward. `SyncEngine` and `writeKeepCache` run for
- * real too — both are pure/best-effort and `CAPY_GLOBAL_DIR_NAME` isolates
- * the global config dir they touch, so nothing here reaches this developer's
- * real `~/.capy` or git checkout. No `mock.module()`, so this file runs in
- * the normal batch.
+ * chain — including a REAL `FileManager`, never a stub — inside a throwaway
+ * git repo, and checks stdout byte for byte plus the repo's git state
+ * afterward. `SyncEngine` and `writeKeepCache` run for real too — both are
+ * pure/best-effort and `CAPY_GLOBAL_DIR_NAME` isolates the global config dir
+ * they touch, so nothing here reaches this developer's real `~/.capy` or git
+ * checkout. No `mock.module()`, so this file runs in the normal batch.
  */
 import { describe, test, expect, spyOn } from 'bun:test';
 import { execFileSync } from 'node:child_process';
@@ -29,6 +33,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ConnectCommand } from '../../src/commands/connectCommand';
+import { FileManager } from '../../src/files/fileManager';
 import type { ResolvedContext } from '../../src/commands/connectors/shared';
 import type { ConnectOpts, ConnectorModule, ImportOutcome } from '../../src/commands/connectors/registry';
 import type { ConnectorMetadata, KeepFile } from '../../src/types/index';
@@ -77,13 +82,14 @@ function fakeImportModule(outcome: ImportOutcome): ConnectorModule {
   };
 }
 
-/** A ctx whose `fileManager.writeKeepFile` actually writes to disk, so the test can inspect the tracked keep.lock's git state afterward. */
+/** A ctx with a REAL `FileManager` (never a stub), so `writeKeepFile` follows its actual once-only-tracked / always-working-copy rule and the test can inspect the tracked keep.lock's real git state afterward. */
 function fakeCtx(dir: string): ResolvedContext {
   const keep: KeepFile = { version: '3.0', org_id: 'o', project_id: 'p', project_name: 'demo', variables: {} };
+  const fileManager = new FileManager(dir);
   return {
     pm: { readSyncState: () => null },
     fileManager: {
-      writeKeepFile: (k: KeepFile) => writeFileSync(join(dir, 'keep.lock'), JSON.stringify(k)),
+      writeKeepFile: (k: KeepFile) => fileManager.writeKeepFile(k),
       writeEncryptedEnvFile: () => {},
       writeSyncState: () => {},
     },
@@ -123,9 +129,11 @@ describe('capy connect dokploy --json — stdout purity with push on (CAP defect
     }) as never);
 
     let headBefore = '';
+    let trackedBefore = '';
     try {
       initRepoWithKeep(dir);
       headBefore = git(dir, ['rev-parse', 'HEAD']).trim();
+      trackedBefore = readFileSync(join(dir, 'keep.lock'), 'utf-8');
       process.chdir(dir);
 
       const command = new ConnectCommand(false);
@@ -150,10 +158,16 @@ describe('capy connect dokploy --json — stdout purity with push on (CAP defect
     expect(outLines[0]).not.toContain('sk_test_should_not_print');
     expect(errLines.join('\n')).not.toContain('sk_test_should_not_print');
 
-    // CAP-667: no auto-commit at all. HEAD never moved past the seeded
-    // 'init' commit, and the tracked keep.lock this test's fake
-    // `writeKeepFile` wrote to sits uncommitted in the working tree.
+    // CAP-667: no auto-commit at all, AND the real `FileManager.writeKeepFile`
+    // never touches the tracked file once it already exists — HEAD never
+    // moved past the seeded 'init' commit, the tracked keep.lock is
+    // byte-identical to what was committed, and `git status --porcelain`
+    // shows no diff on it at all (only the untracked `.capy/keep.lock`
+    // working copy the real import wrote to is new).
     expect(git(dir, ['rev-parse', 'HEAD']).trim()).toBe(headBefore);
-    expect(git(dir, ['status', '--porcelain']).trim()).toBe('M keep.lock');
+    expect(readFileSync(join(dir, 'keep.lock'), 'utf-8')).toBe(trackedBefore);
+    const status = git(dir, ['status', '--porcelain']);
+    expect(status).not.toContain('keep.lock');
+    expect(status).toContain('.capy/');
   }, 30_000);
 });
