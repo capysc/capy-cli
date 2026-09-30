@@ -1,0 +1,3 @@
+[test]
+# Runs before every test file, under `tests/run-tests.sh` and a bare `bun test` alike.
+preload = ["./tests/preload.ts"]
