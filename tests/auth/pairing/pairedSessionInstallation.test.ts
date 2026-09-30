@@ -2,8 +2,9 @@ import { afterAll, beforeEach, expect, mock, test } from 'bun:test';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { createHash } from 'crypto';
+import { tmpdir } from 'os';
 
-const temporaryHome = mkdtempSync('/private/tmp/capy-paired-installation-');
+const temporaryHome = mkdtempSync(join(tmpdir(), 'capy-paired-installation-'));
 mock.module('os', () => ({ ...require('os'), homedir: () => temporaryHome }));
 const { FileSessionStorageBackend } = await import('../../../src/auth/session/fileBackend');
 const { capturePairedSessionInstallationBaseline: capture, installDeviceAuthenticatedSession: install } =

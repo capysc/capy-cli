@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # Bun's mock.module() is process-wide — mocked modules leak across files in a
-# single bun test run.  Work around this by running each file that uses
-# mock.module() in its own subprocess, then batching the rest together.
+# single bun test run. Run each test file in its own subprocess.
 
 set -euo pipefail
 cd "$(dirname "$0")/.."

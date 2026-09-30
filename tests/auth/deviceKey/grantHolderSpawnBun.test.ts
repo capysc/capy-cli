@@ -122,7 +122,7 @@ function readOwnedSocketPath(ownershipRecordPath: string): string | undefined {
 describe('Bun grant daemon launch without a TTY', () => {
   test('transfers material and remains live after the non-TTY launcher exits', async () => {
     const home = mkdtempSync(join(tmpdir(), 'capy-grant-bun-non-tty-'));
-    const tempDirectory = join(home, 'claude-state', 'runtime', 'tmp');
+    const tempDirectory = join(home, 'runtime-state', 'runtime', 'long-temporary-directory-for-socket-limit');
     const ownershipRecordPath = join(home, 'owned-grant.socket-path');
     mkdirSync(tempDirectory, { recursive: true, mode: 0o700 });
     try {
@@ -134,9 +134,9 @@ describe('Bun grant daemon launch without a TTY', () => {
       expect(Buffer.byteLength(wouldBeSocket)).toBeGreaterThan(103);
 
       const result = await runNonTtyLauncher(home, tempDirectory, ownershipRecordPath);
+      expect({ status: result.status, stderr: result.stderr }).toEqual({ status: 0, stderr: '' });
       const [announcedSocketPath = '', handleJson = ''] = result.stdout.trimEnd().split('\n');
       expect(announcedSocketPath.length).toBeGreaterThan(0);
-      expect({ status: result.status, stderr: result.stderr }).toEqual({ status: 0, stderr: '' });
       const handle = JSON.parse(handleJson) as Readonly<{ socketPath: string; expiresAt: number; pid: number }>;
       expect(handle.socketPath).toBe(announcedSocketPath);
       const fetched = await fetchGrantedKLocal(handle.socketPath, USER_ID);
