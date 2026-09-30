@@ -6,6 +6,34 @@ Version `0.9.5`. Generated from `capy help --json`.
 
 ## Commands
 
+## `capy audit`
+
+Search organization audit logs in a TUI (owner/admin only)
+
+```
+capy audit [options]
+```
+
+| Option | Description | Default |
+|---|---|---|
+| `--org <id>` | organization ID (defaults to this project or session) |  |
+| `--json` | return one page as JSON without opening the TUI |  |
+| `--sort <field>` | sort by occurred_at, actor_id, actor_name, actor_type, action, target_id, target_name, target_type | `"occurred_at"` |
+| `--order <direction>` | asc or desc | `"desc"` |
+| `--limit <count>` | events per page (1–200; defaults to terminal height or 50 for JSON) |  |
+| `--cursor <cursor>` | continue the same search with next_cursor |  |
+| `--actor <text>` | search actor (case-insensitive contains) |  |
+| `--actor-id <text>` | search actor id (case-insensitive contains) |  |
+| `--actor-name <text>` | search actor name (case-insensitive contains) |  |
+| `--actor-type <text>` | search actor type (case-insensitive contains) |  |
+| `--action <text>` | search action (case-insensitive contains) |  |
+| `--target <text>` | search target (case-insensitive contains) |  |
+| `--target-id <text>` | search target id (case-insensitive contains) |  |
+| `--target-name <text>` | search target name (case-insensitive contains) |  |
+| `--target-type <text>` | search target type (case-insensitive contains) |  |
+
+JSON support: yes (`--json`)
+
 ## `capy run`
 
 Run a command with decrypted secrets
