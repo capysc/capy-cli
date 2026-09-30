@@ -57,6 +57,7 @@ import {
 } from '../deploy/targetsGate';
 import { KeepFile, ERROR_CODES, AuthResult, ErrorCode } from '../types/index';
 import type { AuthService } from '../auth/authService';
+import type { ServiceClient } from '../service/serviceClient';
 import { ProjectManager } from '../core/projectManager';
 import { tmpdir } from 'os';
 import { ALL_ADAPTERS, getAdapter, listPlanned } from '../deploy/registry';
@@ -455,6 +456,54 @@ function targetRefFor(target: TargetConfig): Record<string, string> | undefined 
  * do" and skips the network entirely. Best-effort: errors are logged, never
  * thrown — the caller's own operation (a deploy, a remove, a revoke) already
  * succeeded or is already committed to happening by the time this runs.
+ *
+ * CAP-687 (validator fix-first): this used to build the pushed env blob by
+ * decrypting the LOCAL `.env` and re-encrypting it fresh. That's wrong for
+ * EVERY caller here, not just CI mode — none of them are value edits, so
+ * NOTHING about the branch's secret values should ever be able to change as
+ * a side effect of "record a target" or "revoke a token". But a local `.env`
+ * can hold unpushed edits, or a variable that was never synced at all, and
+ * the server's `keep_hash` only covers `name:resource_id:value_hash` — not
+ * blob content — so a keep-only write that rebuilds the blob from local
+ * `.env` can silently overwrite the team's stored blob under an UNCHANGED
+ * hash: the next `capy` pull anyone runs decrypts the same pin to a
+ * different value, with no signal anything drifted.
+ *
+ * Fixed by never touching local `.env` here at all. Instead: fetch the
+ * server's OWN current snapshot for `branch` (`getLatestSecrets` — one read,
+ * so the returned `env_file` and `keep_hash` can never disagree with each
+ * other) and verify that hash against the LOCAL keep's branch entries
+ * (`SyncEngine.computeKeepHash`) — `transform` only ever touches `targets`/
+ * `connector` metadata, never `resource_id`/`value_hash`, so the hash is the
+ * same whether computed before or after it runs. A match proves the local
+ * keep's pins for this branch are exactly what's already live, so it's safe
+ * to (a) push the fetched `env_file` straight through, byte-for-byte, as
+ * the SAME blob already stored, and (b) build `nextKeep` off the LOCAL keep
+ * (preserving every other branch's entries exactly as the local file has
+ * them, same as before). A mismatch means the local keep.lock is stale for
+ * this branch — skip the write with a warning rather than risk a
+ * keep/blob pair the server never actually produced together.
+ *
+ * `opts.writeLocal` (default `true`) gates the two LOCAL side effects below
+ * — writing keep.lock to disk and auto-committing it. CI mode passes
+ * `false` (CAP-687): it must NEVER write keep.lock to disk or commit — CI
+ * mode must NEVER touch the user's working tree (see `openCiDeployPr`'s own
+ * doc for why). Every other caller keeps the default.
+ *
+ * `opts.warnCode` prefixes every warning this function prints with a
+ * machine-readable code (Rule 4: never branch on prose, but a human reading
+ * the warning still gets a stable label for it). Omitted by callers that
+ * predate CAP-687, whose warning text for the branch-mismatch/auth-failure/
+ * exception cases is therefore unchanged; the two NEW warning cases this fix
+ * introduces (no server snapshot yet, local keep out of sync with it) are
+ * new regardless, so there's no "unchanged text" to preserve for them.
+ *
+ * Returns `{ ok: true }` on an actual push OR a genuine no-op (`transform`
+ * found nothing to change); `{ ok: false }` on ANY refusal or failure —
+ * callers that minted a deploy token before calling this (CAP-687 follow-up,
+ * "no untracked tokens") check `.ok` to decide whether the mint is now
+ * untracked, and `capy deploy targets-remove` checks it to decide whether
+ * revoking is still safe. Never throws.
  */
 async function pushKeepTransform(
   cwd: string,
@@ -462,62 +511,160 @@ async function pushKeepTransform(
   transform: (keep: KeepFile) => KeepFile,
   devMode: boolean | undefined,
   label: string,
-): Promise<void> {
+  opts: { writeLocal?: boolean; warnCode?: ErrorCode } = {},
+): Promise<{ ok: boolean }> {
+  const writeLocal = opts.writeLocal ?? true;
+  const codePrefix = opts.warnCode ? `${opts.warnCode}: ` : '';
   try {
     const pm = new ProjectManager(cwd);
-    // Never push an env blob for a branch other than the one `.env` is
-    // actually on — `.env`'s plaintext below is encrypted and pushed as
-    // `branch`'s secrets; if `.env` is on a different branch (or none is
-    // knowable), that would mislabel one branch's values as another's.
+    const keep = pm.readKeepFile();
+    if (!keep) return { ok: false };
+    const nextKeep = transform(keep);
+    if (nextKeep === keep) return { ok: true };
+
+    const fresh = await resolveFreshSnapshot(cwd, branch, devMode, `${label} in keep.lock`, opts.warnCode);
+    if (!fresh) return { ok: false };
+
+    const pushed = await fresh.serviceClient.pushSecrets(fresh.projectId, JSON.stringify(nextKeep), fresh.latest.env_file, branch);
+
+    if (writeLocal) {
+      const { SyncEngine } = await import('../sync/syncEngine');
+      const fm = new FileManager(cwd);
+      fm.writeKeepFile(SyncEngine.adoptServerKeep(pushed.keep_file, nextKeep, branch));
+
+      const { autoCommitKeep } = await import('../git/autoCommitKeep');
+      autoCommitKeep(branch, cwd, { quiet: true });
+    }
+    return { ok: true };
+  } catch (err: any) {
+    console.error(`  ${YELLOW('!')} could not ${label} in keep.lock: ${codePrefix}${err?.message ?? err}`);
+    return { ok: false };
+  }
+}
+
+/**
+ * The freshness check shared by `pushKeepTransform` above (its own
+ * pre-push gate) AND every "no untracked tokens" PRE-check below (before
+ * minting a deploy token, before a direct-mode delivery, before
+ * `targets-remove` strips+revokes) — CAP-687 follow-up: minting or
+ * revoking against a stale local keep.lock left a fresh token, or a
+ * fresh revocation, recorded nowhere. Reads local keep.lock, authenticates,
+ * fetches the server's CURRENT snapshot for `branch` (`getLatestSecrets` —
+ * blob and hash from the SAME read, so they can never disagree with each
+ * other), and verifies that hash against the local keep's branch entries
+ * (`SyncEngine.computeKeepHash`).
+ *
+ * On success, returns everything a caller that's about to push needs — the
+ * local `KeepFile`, the server's snapshot, and an already-authenticated
+ * `ServiceClient` + `projectId`, so `pushKeepTransform` doesn't authenticate
+ * a second time. On ANY refusal (branch mismatch, uninitialized project, no
+ * local keep.lock, auth failure, no server snapshot yet, stale hash) or a
+ * thrown exception, prints ONE coded warning (via `label`/`warnCode`) and
+ * returns `null`. Never throws.
+ */
+async function resolveFreshSnapshot(
+  cwd: string,
+  branch: string,
+  devMode: boolean | undefined,
+  label: string,
+  warnCode?: ErrorCode,
+): Promise<{
+  keep: KeepFile;
+  latest: { env_file: string; keep_hash: string; keep_file?: string };
+  projectId: string;
+  serviceClient: ServiceClient;
+} | null> {
+  const codePrefix = warnCode ? `${warnCode}: ` : '';
+  try {
+    const pm = new ProjectManager(cwd);
+    // Never check (or later push) against a branch other than the one
+    // `.env` is actually on — proceeding under the wrong branch would file
+    // this write against the wrong branch entirely.
     const branchProblem = branchPushProblem(pm.deriveActiveBranch(), branch);
     if (branchProblem) {
-      console.error(`  ${YELLOW('!')} could not ${label} in keep.lock — ${describeBranchProblem(branchProblem)}`);
-      return;
+      console.error(`  ${YELLOW('!')} could not ${label} — ${codePrefix}${describeBranchProblem(branchProblem)}`);
+      return null;
     }
     const projectState = await pm.detectProjectState();
-    if (!projectState.initialized || !projectState.organizationId || !projectState.projectId) return;
+    if (!projectState.initialized || !projectState.organizationId || !projectState.projectId) return null;
     const keep = pm.readKeepFile();
-    if (!keep) return;
-    const nextKeep = transform(keep);
-    if (nextKeep === keep) return;
+    if (!keep) return null;
 
     const { AuthService, silentAuthFailureMessage } = await import('../auth/authService');
     const { ServiceClient } = await import('../service/serviceClient');
-    const { resolveProjectKey } = await import('../crypto/keyResolver');
-    const { Encryptor } = await import('../crypto/encryptor');
-    const { deriveResourceId } = await import('../crypto/resourceId');
+    const { SyncEngine } = await import('../sync/syncEngine');
 
     const authService = new AuthService(undefined, devMode, projectState.userId);
     const serviceClient = new ServiceClient(undefined, devMode);
     serviceClient.setTokenProvider(() => authService.getValidToken());
     const authResult = await authenticateSilentWithFallback(authService, projectState.organizationId);
     if (!authResult.success || !authResult.user_id) {
-      console.error(`  ${YELLOW('!')} could not ${label} in keep.lock — ${silentAuthFailureMessage(authResult)}`);
-      return;
+      console.error(`  ${YELLOW('!')} could not ${label} — ${codePrefix}${silentAuthFailureMessage(authResult)}`);
+      return null;
     }
-    const projectKey = await resolveProjectKey(projectState.organizationId, projectState.projectId, authResult.user_id, {
-      coDecrypt: (o, c) => serviceClient.coDecrypt(o, c).then((r) => r.plaintext),
-      wrapOuterLayer: (o, p) => serviceClient.wrapOuterLayer(o, p).then((r) => r.ciphertext),
-    });
 
-    const fm = new FileManager(cwd);
-    const rawLocal = fm.readEnvFile();
-    const localPlaintext = Object.fromEntries(
-      Object.entries(rawLocal).map(([k, v]) => [k, v.startsWith('capy:') ? fm.decryptValue(v, projectKey) : v]),
-    );
-    const envBlob = Object.entries(localPlaintext)
-      .map(([k, v]) => `${k}=capy:${deriveResourceId(branch, k)}:${Encryptor.encrypt(v, projectKey)}`)
-      .join('\n');
-
-    const pushed = await serviceClient.pushSecrets(projectState.projectId, JSON.stringify(nextKeep), envBlob, branch);
-    const { SyncEngine } = await import('../sync/syncEngine');
-    fm.writeKeepFile(SyncEngine.adoptServerKeep(pushed.keep_file, nextKeep, branch));
-
-    const { autoCommitKeep } = await import('../git/autoCommitKeep');
-    autoCommitKeep(branch, cwd, { quiet: true });
+    const latest = await serviceClient.getLatestSecrets(projectState.projectId, branch);
+    if (!latest) {
+      console.error(`  ${YELLOW('!')} could not ${label} — ${codePrefix}no secrets have been pushed for branch "${branch}" yet.`);
+      return null;
+    }
+    const localHash = SyncEngine.computeKeepHash(keep, branch);
+    if (latest.keep_hash !== localHash) {
+      console.error(
+        `  ${YELLOW('!')} could not ${label} — ${codePrefix}local keep.lock is out of sync with the server for branch "${branch}"; run \`capy\` to sync first.`,
+      );
+      return null;
+    }
+    return { keep, latest, projectId: projectState.projectId, serviceClient };
   } catch (err: any) {
-    console.error(`  ${YELLOW('!')} could not ${label} in keep.lock: ${err?.message ?? err}`);
+    console.error(`  ${YELLOW('!')} could not ${label}: ${codePrefix}${err?.message ?? err}`);
+    return null;
   }
+}
+
+/**
+ * Prints the CAP-687 follow-up "untracked token" warning when a deploy
+ * token was minted but `pushKeepTransform`'s own record push (the backstop
+ * — a caller should already have refused BEFORE minting via
+ * `resolveFreshSnapshot`, so this only fires on a race) came back
+ * `{ ok: false }`. A no-op (nothing to record) or a call with no
+ * `deployId` at all is silent — there is no token to lose track of.
+ */
+function warnIfTokenUntracked(result: { ok: boolean }, deployId: string | undefined, targetName: string): void {
+  if (result.ok || !deployId) return;
+  console.error(
+    `  ${RED('✗')} ${ERROR_CODES.DEPLOY_TOKEN_UNTRACKED}: deploy token "${deployId}" for "${targetName}" was minted ` +
+      `but could not be recorded in keep.lock — it is now UNTRACKED. Run \`capy deploy revoke ${deployId}\` to revoke it.`,
+  );
+}
+
+/**
+ * The delivery descriptor + delivered-values pair shared by every "record
+ * this target's delivery" caller below (direct mode, CI mode, and
+ * `buildFinalCiKeep`'s own PR-content version) — same shape, same
+ * `noDeploy` → `deployed: false` rule (CAP-679 follow-up, "pending"; see
+ * `targetsGate.ts#upsertTargetElement`'s doc for why absent/false OMITS the
+ * field instead of writing `deployed: true`, and how this also clears a
+ * PRIOR pending element once a real deploy follows it).
+ */
+function deliveryFor(
+  target: TargetConfig,
+  adapter: DeployAdapter,
+  deployId: string | undefined,
+  noDeploy: boolean,
+  valueHashes: Record<string, string>,
+): { delivery: TargetDeliveryDescriptor; values: readonly VarDelivery[] } {
+  const delivery: TargetDeliveryDescriptor = {
+    provider: adapter.id,
+    target: target.name,
+    ref: targetRefFor(target),
+    deployId,
+    ...(noDeploy ? { deployed: false } : {}),
+  };
+  const values = target.vars
+    .filter((v) => valueHashes[v] !== undefined)
+    .map((v) => ({ name: v, valueHash: valueHashes[v] }));
+  return { delivery, values };
 }
 
 /**
@@ -525,15 +672,18 @@ async function pushKeepTransform(
  * after the config write `--no-deploy` still performs), record this
  * target's delivery into every (var, branch) entry it actually shipped.
  *
- * `noDeploy` marks the fresh element `deployed: false` (CAP-679 follow-up,
- * "pending") — the config landed but the platform deploy itself never ran.
- * Absent/false means a real deploy, which OMITS the field (see
- * `targetsGate.ts#upsertTargetElement`'s doc for why, and how this also
- * clears a PRIOR pending element once a real deploy follows it).
- *
  * Best-effort: the platform write already succeeded by the time this runs,
  * so a failure here is reported but does not flip the command's exit code —
  * the deploy itself did not fail.
+ *
+ * CAP-687 follow-up ("no untracked tokens"): the caller is expected to have
+ * already refused to mint/deliver at all when `resolveFreshSnapshot` found
+ * the local keep stale (see the main flow's own pre-check, right before
+ * `loadDeploySecrets`). This call is therefore the common case, and should
+ * succeed — but if keep.lock drifted again in the gap between that
+ * pre-check and this post-delivery record (a race, not a bug), and a token
+ * WAS minted, `warnIfTokenUntracked` escalates past the generic
+ * best-effort warning `pushKeepTransform` already printed.
  */
 async function recordDeployTargets(
   cwd: string,
@@ -545,24 +695,60 @@ async function recordDeployTargets(
   noDeploy: boolean = false,
 ): Promise<void> {
   const deliveredAt = new Date().toISOString();
-  const delivery: TargetDeliveryDescriptor = {
-    provider: adapter.id,
-    target: target.name,
-    ref: targetRefFor(target),
-    deployId,
-    ...(noDeploy ? { deployed: false } : {}),
-  };
-  const values = target.vars
-    .filter((v) => valueHashes[v] !== undefined)
-    .map((v) => ({ name: v, valueHash: valueHashes[v] }));
+  const { delivery, values } = deliveryFor(target, adapter, deployId, noDeploy, valueHashes);
   if (values.length === 0) return;
-  await pushKeepTransform(
+  const result = await pushKeepTransform(
     cwd,
     target.branch,
     (keep) => recordTargetDeliveries(keep, target.branch, delivery, deliveredAt, values),
     devMode,
     'record deploy targets',
   );
+  warnIfTokenUntracked(result, deployId, target.name);
+}
+
+/**
+ * CI-mode counterpart to `recordDeployTargets` above (CAP-687). CI mode
+ * already folds this exact delivery into the PR's OWN keep.lock content
+ * (`buildFinalCiKeep`'s `delivery` param) — but that PR has to be reviewed
+ * and merged before it ever reaches the base branch, and `capy secrets`
+ * reads the SERVER's stored keep.lock, not any open PR's. Without this, a
+ * CI-mode target's delivery never shows up in `capy secrets` — the bug this
+ * function fixes.
+ *
+ * Server-only: `pushKeepTransform`'s `writeLocal: false` means this call
+ * pushes exactly like direct mode's `recordDeployTargets` (same server
+ * snapshot fetch, same re-sent-unchanged blob — see `pushKeepTransform`'s
+ * own doc) but never writes keep.lock to disk and never auto-commits. CI
+ * mode must NEVER touch the user's working tree — see `openCiDeployPr`'s
+ * own doc for why.
+ *
+ * Best-effort, same contract as `recordDeployTargets`: the CI delivery
+ * already succeeded by the time this runs, so a failure here is warned
+ * (with a coded message — `ERROR_CODES.CI_DEPLOY_TARGETS_RECORD_FAILED`)
+ * and never flips the command's exit code or un-opens the PR.
+ */
+async function recordDeployTargetsCi(
+  cwd: string,
+  target: TargetConfig,
+  adapter: DeployAdapter,
+  valueHashes: Record<string, string>,
+  deployId: string | undefined,
+  devMode: boolean | undefined,
+  noDeploy: boolean = false,
+): Promise<void> {
+  const deliveredAt = new Date().toISOString();
+  const { delivery, values } = deliveryFor(target, adapter, deployId, noDeploy, valueHashes);
+  if (values.length === 0) return;
+  const result = await pushKeepTransform(
+    cwd,
+    target.branch,
+    (keep) => recordTargetDeliveries(keep, target.branch, delivery, deliveredAt, values),
+    devMode,
+    'record deploy targets',
+    { writeLocal: false, warnCode: ERROR_CODES.CI_DEPLOY_TARGETS_RECORD_FAILED },
+  );
+  warnIfTokenUntracked(result, deployId, target.name);
 }
 
 /**
@@ -1922,44 +2108,85 @@ export async function deployRemove(
   // record of "this target received these vars" should not survive removal
   // — but it has its own independent guard (the branch check inside
   // `pushKeepTransform`).
+  //
+  // CAP-687 follow-up ("no untracked tokens"): when there ARE tokens to
+  // revoke, strip and revoke must happen TOGETHER — revoking first (the old
+  // order) could leave tokens revoked with their keep.lock records still
+  // live, if the strip afterward then silently skipped on a stale local
+  // keep.lock. So: a freshness pre-check refuses BOTH up front rather than
+  // discovering the mismatch mid-way, and the strip runs BEFORE revoke —
+  // revoke only fires once the strip has actually landed.
   if (target) {
     const stripSucceededOrNothingToDo = !offer || offer.ok;
     const pm = new ProjectManager(cwd);
     const keep = pm.readKeepFile();
     if (keep) {
       const deployIds = deployIdsForTarget(keep, target.kind, target.name);
-      if (deployIds.length > 0) {
-        if (!stripSucceededOrNothingToDo) {
-          console.log(
-            `  ${YELLOW('!')} keeping ${deployIds.length} deploy token(s) for "${name}" live — the platform-side ` +
-              `cleanup above did not succeed, so revoking now would strand secrets it already delivered.`,
-          );
+      const wantsRevoke = deployIds.length > 0 && stripSucceededOrNothingToDo;
+
+      if (deployIds.length > 0 && !stripSucceededOrNothingToDo) {
+        console.log(
+          `  ${YELLOW('!')} keeping ${deployIds.length} deploy token(s) for "${name}" live — the platform-side ` +
+            `cleanup above did not succeed, so revoking now would strand secrets it already delivered.`,
+        );
+      }
+
+      if (!wantsRevoke) {
+        // Nothing to revoke (or cleanup didn't succeed) — still strip the
+        // records unconditionally, same as always: the LOCAL record of
+        // "this target received these vars" should not survive removal
+        // regardless of the platform-side outcome.
+        await pushKeepTransform(
+          cwd,
+          target.branch,
+          (k) => stripTargetsForProviderTarget(k, target.kind, target.name),
+          opts.devMode,
+          'strip deploy targets',
+        );
+      } else {
+        const fresh = await resolveFreshSnapshot(cwd, target.branch, opts.devMode, 'strip deploy targets', ERROR_CODES.DEPLOY_STALE_KEEP);
+        if (!fresh) {
+          // Keep the target in .capy/deploy.json: removing it here would orphan
+          // its keep.lock records (the strip path needs the target to find them).
+          // COPY-FLAG
+          console.error(`${RED('✗')} refusing to strip targets or revoke deploy token(s) for "${name}" — see the warning above. The target was kept; run \`capy\` to sync, then remove it again.`);
+          return 1;
         } else {
-          try {
-            const { AuthService } = await import('../auth/authService');
-            const { ServiceClient } = await import('../service/serviceClient');
-            const projectState = await pm.detectProjectState();
-            if (!projectState.organizationId) throw new Error('no organization id in keep.lock');
-            const authService = new AuthService(undefined, opts.devMode, projectState.userId);
-            const serviceClient = new ServiceClient(undefined, opts.devMode);
-            serviceClient.setTokenProvider(() => authService.getValidToken());
-            const authResult = await authenticateSilentWithFallback(authService, projectState.organizationId);
-            if (authResult.success) {
-              await Promise.all(deployIds.map((id) => serviceClient.revokeDeployToken(id).catch(() => {})));
-              console.log(`  ${GREEN('✓')} revoked ${deployIds.length} deploy token(s) for "${name}".`);
+          const stripResult = await pushKeepTransform(
+            cwd,
+            target.branch,
+            (k) => stripTargetsForProviderTarget(k, target.kind, target.name),
+            opts.devMode,
+            'strip deploy targets',
+          );
+          if (!stripResult.ok) {
+            console.error(
+              `  ${YELLOW('!')} kept ${deployIds.length} deploy token(s) for "${name}" live — the keep.lock strip ` +
+                `did not complete (see the warning above), so revoking them now would leave a stale record. ` +
+                // COPY-FLAG
+                `The target was kept; run \`capy\` to sync, then remove it again.`,
+            );
+            return 1;
+          } else {
+            try {
+              const { AuthService } = await import('../auth/authService');
+              const { ServiceClient } = await import('../service/serviceClient');
+              const projectState = await pm.detectProjectState();
+              if (!projectState.organizationId) throw new Error('no organization id in keep.lock');
+              const authService = new AuthService(undefined, opts.devMode, projectState.userId);
+              const serviceClient = new ServiceClient(undefined, opts.devMode);
+              serviceClient.setTokenProvider(() => authService.getValidToken());
+              const authResult = await authenticateSilentWithFallback(authService, projectState.organizationId);
+              if (authResult.success) {
+                await Promise.all(deployIds.map((id) => serviceClient.revokeDeployToken(id).catch(() => {})));
+                console.log(`  ${GREEN('✓')} revoked ${deployIds.length} deploy token(s) for "${name}".`);
+              }
+            } catch (err: any) {
+              console.error(`  ${YELLOW('!')} could not revoke deploy token(s) for "${name}": ${err?.message ?? err}`);
             }
-          } catch (err: any) {
-            console.error(`  ${YELLOW('!')} could not revoke deploy token(s) for "${name}": ${err?.message ?? err}`);
           }
         }
       }
-      await pushKeepTransform(
-        cwd,
-        target.branch,
-        (k) => stripTargetsForProviderTarget(k, target.kind, target.name),
-        opts.devMode,
-        'strip deploy targets',
-      );
     }
   }
 
@@ -3110,6 +3337,26 @@ export async function deployCommand(
   if (gateOutcome?.kind === 'error') return 1;
   if (gateOutcome?.kind === 'unchanged') return 0;
 
+  // ── "No untracked tokens" pre-check (CAP-687 follow-up) — BEFORE minting
+  //    a deploy token or delivering ANYTHING. Direct mode always (it mints
+  //    and/or delivers unconditionally below); CI mode only when this
+  //    adapter actually mints a token (CI's own change-gate above already
+  //    stops an UNCHANGED run from minting — this catches the different
+  //    case: a real change, but a stale local keep.lock). Without this, a
+  //    fresh token gets minted and delivered, then `recordDeployTargets`'s
+  //    own post-delivery push (below) discovers the staleness and skips —
+  //    leaving that live token recorded NOWHERE. See `resolveFreshSnapshot`'s
+  //    own doc; `recordDeployTargets`/`recordDeployTargetsCi`'s
+  //    `warnIfTokenUntracked` is the backstop for the race this can't close
+  //    (keep.lock drifting again in the gap between this check and delivery).
+  if (!options.dryRun && (mode === 'direct' || (mode === 'ci' && adapter.needsDeployToken))) {
+    const fresh = await resolveFreshSnapshot(cwd, target.branch, options.devMode, 'deploy', ERROR_CODES.DEPLOY_STALE_KEEP);
+    if (!fresh) {
+      console.error(`${RED('✗')} refusing to deploy — see the warning above.`);
+      return 1;
+    }
+  }
+
   // ── Decrypt the secrets we're about to push (and, for a token adapter,
   //    mint) — only reached when direct mode, or CI mode just decided
   //    something is actually worth shipping.
@@ -3160,11 +3407,18 @@ export async function deployCommand(
   }
   if (mode === 'direct') await unwindGitState(cwd, null, directStashed);
 
-  // ── Record targets (CAP-679) ─────────────────────────────────────────────
-  // Direct mode only: CI mode already folded this delivery into the PR's
-  // keep.lock above (`buildFinalCiKeep`'s `delivery` param) — recording it
-  // AGAIN here, against the user's own branch, would be wrong: CI mode never
-  // touches the user's tree.
+  // ── Record targets (CAP-679, CI mode CAP-687) ────────────────────────────
+  // Direct mode: record against the user's own branch, same as always.
+  //
+  // CI mode: the PR's OWN keep.lock already carries this delivery
+  // (`buildFinalCiKeep`'s `delivery` param) — but `capy secrets` reads the
+  // SERVER's stored keep.lock, not an open PR, so without also recording it
+  // there this target would never show up until someone thinks to inspect
+  // the PR. `recordDeployTargetsCi` is server-only (`pushKeepTransform`'s
+  // `writeLocal: false`): it NEVER writes local keep.lock and NEVER commits
+  // — CI mode never touches the user's tree. Gated on `keepLockChanged`,
+  // same as the PR-open below it: only when the CI gate actually decided to
+  // proceed is there a real delivery worth recording server-side.
   if (mode === 'direct' && !options.dryRun) {
     await recordDeployTargets(cwd, target, adapter, valueHashes, deployToken?.deployId, options.devMode, !!options.noDeploy);
     // "No untracked tokens" (CAP-679 follow-up): only once THIS deploy is a
@@ -3175,6 +3429,8 @@ export async function deployCommand(
     if (!options.noDeploy) {
       await revokeSupersededDeployTokens(cwd, target, adapter, options.devMode);
     }
+  } else if (mode === 'ci' && !options.dryRun && keepLockChanged) {
+    await recordDeployTargetsCi(cwd, target, adapter, valueHashes, deployToken?.deployId, options.devMode, !!options.noDeploy);
   }
 
   // The pull request this run opened, for the result page. Held rather than
