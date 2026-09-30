@@ -24,14 +24,47 @@
  *     the adapter that recorded them still mints tokens at all (the LAST
  *     test: two pre-recorded `superseded_deploy_ids` plus the current one).
  *
- * Every crypto/key-resolution dependency `pushKeepTransform` touches
- * (`resolveProjectKey`, `Encryptor`, `deriveResourceId`) is mocked to a
- * trivial fake — this file is about the REVOKE WIRING, not real crypto,
- * which is already covered elsewhere (`tests/crypto/*`, `tests/system/systemStore.test.ts`).
+ * CAP-687 (validator fix-first): `pushKeepTransform` no longer builds the
+ * pushed env blob from local `.env` at all — it fetches the server's OWN
+ * current snapshot for the branch (`getLatestSecrets`) and re-sends that
+ * blob unchanged, after verifying its `keep_hash` matches the local keep's
+ * branch entries. The mocked `ServiceClient` below fakes that snapshot by
+ * reading + hashing `ROOT/keep.lock` itself (via the REAL `SyncEngine`, not
+ * mocked here) — always "in sync", since this file is about the REVOKE
+ * WIRING, not the drift guard (see `deployCiTargetsRecord.test.ts` for
+ * that). No crypto mocking is needed any more: `pushKeepTransform` never
+ * touches `resolveProjectKey`/`Encryptor`/`deriveResourceId`, and this
+ * fixture's `.env` is plain (unencrypted), so `decryptCurrentBranch` never
+ * needs them either.
  *
  * `mock.module()` is process-wide: this file runs isolated (tests/run-tests.sh).
  */
 import { describe, test, expect, mock, spyOn, afterEach } from 'bun:test';
+import { mkdirSync, writeFileSync, rmSync, readFileSync, existsSync } from 'fs';
+import { join } from 'path';
+import { tmpdir } from 'os';
+import { SyncEngine } from '../../src/sync/syncEngine';
+import { ProjectManager } from '../../src/core/projectManager';
+
+/** Sentinel filename (see the mocked `getLatestSecrets` below) — its mere presence next to `ROOT/keep.lock` models a stale local keep.lock. */
+const STALE_KEEP_MARKER = '.simulate-stale-keep';
+
+/**
+ * When present, the mocked `getLatestSecrets` below hashes THIS file's
+ * content as "the server's real snapshot" instead of deriving one from
+ * whatever sits on disk locally — an independent ground truth, so a test
+ * can model "the server already has these pins" without that just being
+ * the same local read the code under test also makes (which would always
+ * trivially agree with itself). See the two "working copy vs tracked file"
+ * tests below.
+ */
+const SERVER_SNAPSHOT_OVERRIDE = '.simulate-server-snapshot';
+
+// Declared before the mocks below (which close over it) — a `const` at
+// module scope is fully initialized before any test() callback runs, so the
+// mocked `ServiceClient` class reading it at call time is safe even though
+// this line executes before the class body below does.
+const ROOT = join(tmpdir(), `capy-deploy-revoke-wiring-${process.pid}-${Date.now()}`);
 
 mock.module('../../src/auth/authService', () => ({
   AuthService: class {
@@ -59,19 +92,31 @@ mock.module('../../src/service/serviceClient', () => ({
     async pushSecrets(projectId: string, keepFileJson: string, envBlob: string, branch: string) {
       return pushSecretsMock(projectId, keepFileJson, envBlob, branch);
     }
+    // Fakes "the server agrees with local" by reading local keep.lock the
+    // SAME way the real code under test does (`ProjectManager.readKeepFile`
+    // — the untracked working copy when one exists, else the tracked
+    // file), and hashing it the same way the real server would, so
+    // `pushKeepTransform`'s (and `resolveFreshSnapshot`'s) drift guard
+    // always proceeds. A test that wants to model a STALE local keep.lock
+    // instead drops the sentinel file `STALE_KEEP_MARKER` (below) next to
+    // it — its mere presence, not its content, flips this to return a hash
+    // that can never match the local file's real one. `SERVER_SNAPSHOT_OVERRIDE`
+    // (also below) models an independent server snapshot instead of
+    // deriving one from the local read at all.
+    async getLatestSecrets(_projectId: string, branch: string) {
+      const overridePath = join(ROOT, SERVER_SNAPSHOT_OVERRIDE);
+      const keep = existsSync(overridePath)
+        ? JSON.parse(readFileSync(overridePath, 'utf-8'))
+        : new ProjectManager(ROOT).readKeepFile();
+      if (!keep) throw new Error('test fixture has no keep.lock to read');
+      const realHash = SyncEngine.computeKeepHash(keep, branch);
+      return {
+        env_file: 'STUB_ENV_FILE',
+        keep_hash: existsSync(join(ROOT, STALE_KEEP_MARKER)) ? `stale-${realHash}` : realHash,
+        keep_file: JSON.stringify(keep),
+      };
+    }
   },
-}));
-mock.module('../../src/crypto/keyResolver', () => ({
-  resolveProjectKey: async () => 'a'.repeat(64),
-}));
-mock.module('../../src/crypto/encryptor', () => ({
-  Encryptor: {
-    encrypt: (v: string) => `ENC:${v}`,
-    decrypt: (v: string) => v.slice(4),
-  },
-}));
-mock.module('../../src/crypto/resourceId', () => ({
-  deriveResourceId: (branch: string, name: string) => `rid-${branch}-${name}`,
 }));
 
 /**
@@ -97,13 +142,9 @@ afterEach(() => {
   mintDeployTokenMock.mockClear();
 });
 
-import { mkdirSync, writeFileSync, rmSync } from 'fs';
-import { join } from 'path';
-import { tmpdir } from 'os';
 import { deployCommand, deployRemove } from '../../src/commands/deployCommand';
 import { mergeManagedValuesBlock } from '../../src/deploy/dokployApi';
 
-const ROOT = join(tmpdir(), `capy-deploy-revoke-wiring-${process.pid}-${Date.now()}`);
 const APP_ID = 'app_revoke_test';
 /** An active line for STRIPE_KEY already outside the block — gets COMMENTED once Capy delivers it. */
 const RAW_ENV = 'STRIPE_KEY=stale\n';
@@ -262,12 +303,30 @@ async function withEnv<T>(vars: Readonly<Record<string, string | undefined>>, fn
 async function runScriptedDeploy(
   fetchMock: ReturnType<typeof dokployFetchMock>,
   options: Parameters<typeof deployCommand>[1] = { yes: true },
+  errorMock: ReturnType<typeof mock> = mock((..._a: unknown[]) => {}),
 ): Promise<number> {
   const logSpy = spyOn(console, 'log').mockImplementation((() => {}) as never);
-  const errSpy = spyOn(console, 'error').mockImplementation((() => {}) as never);
+  const errSpy = spyOn(console, 'error').mockImplementation(errorMock as never);
   const fetchSpy = spyOn(globalThis, 'fetch').mockImplementation(fetchMock as never);
   try {
     return await deployCommand('dokploy-direct', options, ROOT);
+  } finally {
+    logSpy.mockRestore();
+    errSpy.mockRestore();
+    fetchSpy.mockRestore();
+  }
+}
+
+/** Same shape as `runScriptedDeploy`, for `deployRemove` instead. */
+async function runScriptedRemove(
+  fetchMock: ReturnType<typeof mock>,
+  errorMock: ReturnType<typeof mock> = mock((..._a: unknown[]) => {}),
+): Promise<number> {
+  const logSpy = spyOn(console, 'log').mockImplementation((() => {}) as never);
+  const errSpy = spyOn(console, 'error').mockImplementation(errorMock as never);
+  const fetchSpy = spyOn(globalThis, 'fetch').mockImplementation(fetchMock as never);
+  try {
+    return await deployRemove('dokploy-direct', ROOT, {});
   } finally {
     logSpy.mockRestore();
     errSpy.mockRestore();
@@ -377,5 +436,189 @@ describe('capy deploy — superseded deploy-token revocation wiring (validator f
       new Set(['dep_prior', 'dep_older_1', 'dep_older_2']),
     );
     expect(revokeDeployTokenMock).toHaveBeenCalledTimes(3);
+  }, 30_000);
+
+  // ── "No untracked tokens" pre-checks (CAP-687 follow-up) ─────────────────
+  // A stale local keep.lock must refuse BEFORE minting or delivering
+  // anything — not discover the staleness only AFTER something was already
+  // minted or revoked with nothing left to record it against.
+
+  test('direct mode: a stale local keep.lock refuses to mint/deliver anything, with a coded error', async () => {
+    setUp({ mode: 'direct' });
+    writeFileSync(join(ROOT, STALE_KEEP_MARKER), '');
+    revokeDeployTokenMock.mockClear();
+    pushSecretsMock.mockClear();
+    mintDeployTokenMock.mockClear();
+
+    // Scripted for a full real deploy — proves the refusal happens before
+    // ANY of it, not just before whichever step happens to be reached first.
+    const fetchMock = dokployFetchMock({ realDeploy: true });
+    const errorMock = mock((..._a: unknown[]) => {});
+
+    const code = await withEnv({ MY_REVOKE_TEST_TOKEN: 'dk_token' }, () =>
+      runScriptedDeploy(fetchMock, { yes: true }, errorMock),
+    );
+
+    expect(code).toBe(1);
+    expect(mintDeployTokenMock).not.toHaveBeenCalled();
+    expect(pushSecretsMock).not.toHaveBeenCalled();
+    expect(revokeDeployTokenMock).not.toHaveBeenCalled();
+    // Only the preflight read happened — no delivery
+    // (`application.saveEnvironment`), no trigger, no poll.
+    expect(fetchMock.mock.calls.every((c) => !(c[0] as string).includes('saveEnvironment'))).toBe(true);
+    expect(fetchMock.mock.calls.every((c) => !(c[0] as string).includes('deployment'))).toBe(true);
+
+    const warnings = errorMock.mock.calls.map((c) => c.join(' ')).join('\n');
+    expect(warnings).toContain('DEPLOY_STALE_KEEP');
+  }, 30_000);
+
+  test('targets-remove: a stale local keep.lock refuses to strip or revoke anything, with a coded error', async () => {
+    setUp({ mode: 'direct' });
+    writeFileSync(join(ROOT, STALE_KEEP_MARKER), '');
+    revokeDeployTokenMock.mockClear();
+    pushSecretsMock.mockClear();
+
+    const fetchMock = mock(async (url: string) => {
+      const u = new URL(url);
+      if (u.pathname.endsWith('application.one')) {
+        return {
+          status: 200,
+          ok: true,
+          text: async () =>
+            JSON.stringify({
+              applicationId: APP_ID,
+              name: 'demo-app',
+              env: 'NODE_ENV=production', // no Capy block — onRemove reports nothing_to_remove, offer.ok stays true
+              buildArgs: null,
+              buildSecrets: null,
+              createEnvFile: true,
+            }),
+        };
+      }
+      throw new Error(`unscripted request: ${url}`);
+    });
+    const errorMock = mock((..._a: unknown[]) => {});
+
+    const code = await withEnv({ MY_REVOKE_TEST_TOKEN: 'dk_token' }, () => runScriptedRemove(fetchMock, errorMock));
+
+    // Refused as a whole: nothing stripped, nothing revoked, and the target
+    // stays in .capy/deploy.json — removing it would orphan its keep.lock
+    // records, since the strip path needs the target to find them.
+    expect(code).toBe(1);
+    expect(revokeDeployTokenMock).not.toHaveBeenCalled();
+    expect(pushSecretsMock).not.toHaveBeenCalled();
+    const deployJson = JSON.parse(readFileSync(join(ROOT, '.capy', 'deploy.json'), 'utf-8'));
+    expect(Object.keys(deployJson.targets)).toContain('dokploy-direct');
+
+    const warnings = errorMock.mock.calls.map((c) => c.join(' ')).join('\n');
+    expect(warnings).toContain('DEPLOY_STALE_KEEP');
+  }, 30_000);
+
+  // ── The freshness check must read the untracked working copy
+  //    (.capy/keep.lock), not the tracked file frozen at project init ──────
+  //
+  // The tracked `keep.lock` `setUp()` writes is never rewritten again after
+  // it is first created — every regular flow (sync/push/rotate/connect/
+  // edit) only ever updates the untracked working copy at
+  // `.capy/keep.lock`. If the freshness check read the tracked file
+  // directly instead of going through `ProjectManager.readKeepFile()`'s
+  // working-copy-first resolution, a repo that had ever synced a new
+  // variable after init would look "stale" forever, even though the
+  // working copy is exactly what the server has — and deploy/revoke would
+  // refuse permanently. These two tests reproduce both directions with a
+  // real temp repo and a real `FileManager`: the server snapshot below is
+  // independent of either local file (`SERVER_SNAPSHOT_OVERRIDE`), so it
+  // can't just agree with whatever the code under test happens to read.
+  const noCapyBlockFetchMock = () =>
+    mock(async (url: string) => {
+      const u = new URL(url);
+      if (u.pathname.endsWith('application.one')) {
+        return {
+          status: 200,
+          ok: true,
+          text: async () =>
+            JSON.stringify({
+              applicationId: APP_ID,
+              name: 'demo-app',
+              env: 'NODE_ENV=production', // no Capy block — onRemove reports nothing_to_remove, offer.ok stays true
+              buildArgs: null,
+              buildSecrets: null,
+              createEnvFile: true,
+            }),
+        };
+      }
+      throw new Error(`unscripted request: ${url}`);
+    });
+
+  /** The tracked keep.lock's exact STRIPE_KEY entry, plus one extra (name, hash) pair — used to build both the "fresh working copy" and "independent server snapshot" fixtures below without duplicating the base shape. */
+  function keepWithExtraVar(name: string, hash: string): Record<string, unknown> {
+    const tracked = JSON.parse(readFileSync(join(ROOT, 'keep.lock'), 'utf-8'));
+    return {
+      ...tracked,
+      variables: {
+        ...tracked.variables,
+        [name]: [{ resource_id: `r-${name}`, branch: 'production', value_hash: hash }],
+      },
+    };
+  }
+
+  test('working copy has fresh pins the tracked file lacks, and the server already agrees with the working copy: targets-remove proceeds (not refused)', async () => {
+    setUp({ mode: 'direct' });
+    revokeDeployTokenMock.mockClear();
+    pushSecretsMock.mockClear();
+
+    // A regular sync/push after init added NEW_VAR — written only to the
+    // working copy, exactly like every real post-init write. The tracked
+    // file (from setUp()) never gets touched again.
+    const freshKeep = keepWithExtraVar('NEW_VAR', 'fresh-hash');
+    writeFileSync(join(ROOT, '.capy', 'keep.lock'), JSON.stringify(freshKeep));
+    // The server's real snapshot already has NEW_VAR too (that's what the
+    // earlier push produced) — modeled independently of either local file.
+    writeFileSync(join(ROOT, SERVER_SNAPSHOT_OVERRIDE), JSON.stringify(freshKeep));
+
+    const errorMock = mock((..._a: unknown[]) => {});
+    const code = await withEnv({ MY_REVOKE_TEST_TOKEN: 'dk_token' }, () =>
+      runScriptedRemove(noCapyBlockFetchMock(), errorMock),
+    );
+
+    expect(code).toBe(0);
+    expect(revokeDeployTokenMock).toHaveBeenCalledTimes(1);
+    expect(pushSecretsMock).toHaveBeenCalledTimes(1);
+    const warnings = errorMock.mock.calls.map((c) => c.join(' ')).join('\n');
+    expect(warnings).not.toContain('DEPLOY_STALE_KEEP');
+  }, 30_000);
+
+  test('working copy is itself stale vs a server that has moved further ahead: targets-remove refuses, with a coded error', async () => {
+    setUp({ mode: 'direct' });
+    revokeDeployTokenMock.mockClear();
+    pushSecretsMock.mockClear();
+
+    // The working copy caught up to NEW_VAR...
+    const workingKeep = keepWithExtraVar('NEW_VAR', 'fresh-hash');
+    writeFileSync(join(ROOT, '.capy', 'keep.lock'), JSON.stringify(workingKeep));
+    // ...but the server has since moved on to an EVEN NEWER pin the working
+    // copy was never told about — a genuine staleness the working-copy-
+    // first read must still catch.
+    const tracked = JSON.parse(readFileSync(join(ROOT, 'keep.lock'), 'utf-8'));
+    const serverKeep = {
+      ...tracked,
+      variables: {
+        ...tracked.variables,
+        NEW_VAR: [{ resource_id: 'r-NEW_VAR', branch: 'production', value_hash: 'fresh-hash' }],
+        EVEN_NEWER_VAR: [{ resource_id: 'r-EVEN_NEWER_VAR', branch: 'production', value_hash: 'newer-hash' }],
+      },
+    };
+    writeFileSync(join(ROOT, SERVER_SNAPSHOT_OVERRIDE), JSON.stringify(serverKeep));
+
+    const errorMock = mock((..._a: unknown[]) => {});
+    const code = await withEnv({ MY_REVOKE_TEST_TOKEN: 'dk_token' }, () =>
+      runScriptedRemove(noCapyBlockFetchMock(), errorMock),
+    );
+
+    expect(code).toBe(1);
+    expect(revokeDeployTokenMock).not.toHaveBeenCalled();
+    expect(pushSecretsMock).not.toHaveBeenCalled();
+    const warnings = errorMock.mock.calls.map((c) => c.join(' ')).join('\n');
+    expect(warnings).toContain('DEPLOY_STALE_KEEP');
   }, 30_000);
 });

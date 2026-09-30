@@ -612,6 +612,47 @@ export const ERROR_CODES = {
   PAIR_NO_KEYS: 'PAIR_NO_KEYS',
   /** `capy pair`: an entry's `local.key` already exists on this machine with a DIFFERENT value — refused unless `--force`. */
   PAIR_LOCAL_KEY_CONFLICT: 'PAIR_LOCAL_KEY_CONFLICT',
+  // --- capy remove (CAP-686) ---
+  /** `capy remove NAME...`: one or more names given are not on the active branch. */
+  VAR_NOT_FOUND: 'VAR_NOT_FOUND',
+  /**
+   * `capy remove` refused: the working `.env` has unpushed differences (new,
+   * changed, or locally-missing values) for variables OTHER than the ones
+   * being removed. Removing would push that full remaining set — including
+   * those unrelated edits — as a side effect, so it's refused instead of
+   * carrying someone else's in-progress change along for the ride.
+   */
+  REMOVE_LOCAL_DRIFT: 'REMOVE_LOCAL_DRIFT',
+  /** `capy remove` needs a human (confirmation) and there is no TTY, and `--yes` wasn't passed. */
+  REMOVE_NEEDS_TTY: 'REMOVE_NEEDS_TTY',
+  // --- CI-mode target recording (CAP-687) ---
+  /**
+   * A CI-mode deploy delivered successfully (its PR's keep.lock already
+   * carries the target record), but folding that same record into the
+   * SERVER's copy of keep.lock afterward failed — `capy secrets` may not
+   * show this target until a later deploy succeeds in recording it. Never
+   * fails the deploy itself: the delivery already happened.
+   */
+  CI_DEPLOY_TARGETS_RECORD_FAILED: 'CI_DEPLOY_TARGETS_RECORD_FAILED',
+  // --- "No untracked tokens" pre-checks (CAP-687 follow-up) ---
+  /**
+   * Refused BEFORE minting a deploy token, delivering a direct-mode deploy,
+   * or stripping+revoking `targets-remove`'s records: the local keep.lock's
+   * branch entries don't match what the server has stored. Proceeding
+   * anyway risks a freshly minted token (or a freshly revoked one) landing
+   * nowhere in keep.lock — untracked, with no way to find it again short of
+   * `capy deploy list`. Run `capy` to sync keep.lock first, then retry.
+   */
+  DEPLOY_STALE_KEEP: 'DEPLOY_STALE_KEEP',
+  /**
+   * The freshness pre-check above passed, but keep.lock drifted again
+   * before the POST-delivery record could land (a race, not a bug) — a
+   * deploy token was minted and IS live on the platform, but nothing in
+   * keep.lock (local or server) points at it. The warning this code
+   * prefixes always names the `deploy_id` — run `capy deploy revoke <id>`
+   * to clean it up manually.
+   */
+  DEPLOY_TOKEN_UNTRACKED: 'DEPLOY_TOKEN_UNTRACKED',
 } as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES];

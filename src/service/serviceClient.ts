@@ -536,6 +536,39 @@ export class ServiceClient {
   }
 
   /**
+   * v3, "latest" mode: `GET /secrets/:projectId?branch=` with NO `keep_hash`
+   * — see `service/src/routes/secrets.ts`'s own doc on that route. Resolves
+   * server-side to the branch's current snapshot and returns it in one read:
+   * the env blob, the hash it's stored under, and the server's own
+   * `keep_file` (always present when the response succeeds in this mode —
+   * the route 404s instead of omitting it).
+   *
+   * Used by `deployCommand.ts#pushKeepTransform` for keep-only writes
+   * (recording/stripping deploy targets, revocation) that must re-send a
+   * branch's secrets UNCHANGED: reading this instead of a locally-built blob
+   * is what stops an unpushed local edit — or a variable that was never
+   * synced at all — from leaking into the server's stored blob under an
+   * unchanged `keep_hash` (CAP-687).
+   */
+  async getLatestSecrets(
+    projectId: string,
+    branch: string,
+  ): Promise<{ env_file: string; keep_hash: string; keep_file?: string } | null> {
+    try {
+      const data = await this.request<{ env_file: string; keep_hash: string; keep_file?: string }>(
+        'GET',
+        `/secrets/${projectId}?branch=${encodeURIComponent(branch)}`,
+      );
+      return data;
+    } catch (error: any) {
+      if (error instanceof CapyError && error.details?.status === 404) {
+        return null;
+      }
+      throw error;
+    }
+  }
+
+  /**
    * v3: Push a single env blob to content-addressed storage.
    * The response's keep_file (when the server sends one) is the pushed
    * keep.lock with server-assigned changed_at timestamps — callers should

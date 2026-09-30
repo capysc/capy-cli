@@ -130,36 +130,29 @@ export async function resolveContext(opts: { apiUrl?: string; devMode?: boolean 
  *
  * `value === undefined` is the METADATA-ONLY mode, and it is what `connect`
  * uses: the env map goes to the service unchanged and only keep.lock's
- * connector entry moves. Everything downstream — the keep merge, the push, the
- * cache, the sync state, the auto-commit — is identical either way, which is
- * why this is one function and not two. `rotate` is the caller that passes a
- * value, because replacing a credential is what rotate is for.
+ * connector entry moves. Everything downstream — the keep merge, the push,
+ * the cache, the sync state — is identical either way, which is why this is
+ * one function and not two. `rotate` is the caller that passes a value,
+ * because replacing a credential is what rotate is for.
  */
-export async function writeAndSync(
+/**
+ * Shared tail of `writeAndSync`/`removeAndSync`: encrypt the full desired
+ * `finalEnv`, merge it into keep.lock for `branch` (dropping any entry for a
+ * name no longer in `finalEnv`), push, cache the pushed blob, adopt the
+ * server's copy, and write `.env` + sync state. Writes only the untracked
+ * working copy (`writeKeepFile`); it never auto-commits the tracked
+ * keep.lock onto whatever branch the caller happens to be on.
+ *
+ * `keepMutator` runs on the post-merge, post-drop `KeepFile` right before the
+ * push — `writeAndSync` uses it to attach connector metadata; a plain remove
+ * passes the identity function through.
+ */
+async function commitFinalEnv(
   ctx: ResolvedContext,
-  varName: string,
-  value: string | undefined,
-  opts: {
-    push: boolean;
-    connector?: ConnectorMetadata;
-    /** Additional (varName, connector) pairs to mark managed in the same write. */
-    alsoConnect?: ReadonlyArray<{ varName: string; entry: ConnectorMetadata }>;
-  },
+  finalEnv: Record<string, string>,
+  keepMutator: (merged: KeepFile) => KeepFile,
 ): Promise<void> {
-  const { pm, fileManager, serviceClient, orgId, projectId, branch, userId, projectKey, keep, localPlaintext } = ctx;
-
-  const finalEnv: Record<string, string> =
-    value === undefined ? { ...localPlaintext } : { ...localPlaintext, [varName]: value };
-
-  if (!opts.push) {
-    // Local-only path. Even though we're not hitting the service, we still
-    // need to attach the connector marker to keep.lock so a follow-up `capy
-    // push` (which will round-trip through mergeWithKeep) preserves it.
-    const merged = applyConnectors(keep, branch, varName, opts.connector, opts.alsoConnect);
-    if (merged !== keep) fileManager.writeKeepFile(merged);
-    fileManager.writeEncryptedEnvFile(finalEnv, projectKey, undefined, merged, branch);
-    return;
-  }
+  const { pm, fileManager, serviceClient, orgId, projectId, branch, userId, projectKey, keep } = ctx;
 
   const encrypted = Object.fromEntries(
     Object.entries(finalEnv).map(([k, v]) => [
@@ -182,25 +175,21 @@ export async function writeAndSync(
   );
 
   const syncEngine = new SyncEngine();
-  const mergedKeep = syncEngine.mergeWithKeep(keep, pushedVars, branch);
-
-  // Drop entries for variables no longer in finalEnv — built as a new object
-  // rather than mutated in place (was a `for` loop doing
-  // `finalKeep.variables[name] = entries` / `delete
-  // finalKeep.variables[name]` on the value mergeWithKeep returned, with
-  // `finalKeep` itself a `let` reassigned again just below).
-  const prunedKeep: KeepFile = {
-    ...mergedKeep,
+  const merged = syncEngine.mergeWithKeep(keep, pushedVars, branch);
+  // Drop entries for names no longer in `finalEnv` — a plain filter/flatMap
+  // over the merged map rather than a mutate-in-place loop, so `merged`
+  // itself is never touched after `mergeWithKeep` hands it back.
+  const dropped: KeepFile = {
+    ...merged,
     variables: Object.fromEntries(
-      Object.entries(mergedKeep.variables).flatMap(([name, entries]) => {
-        if (name in finalEnv) return [[name, entries]];
+      Object.entries(merged.variables).flatMap(([name, entries]) => {
+        if (name in finalEnv) return [[name, entries]] as const;
         const kept = entries.filter((e) => e.branch !== branch);
-        return kept.length > 0 ? [[name, kept]] : [];
+        return kept.length > 0 ? ([[name, kept]] as const) : [];
       }),
     ),
   };
-
-  const finalKeep = applyConnectors(prunedKeep, branch, varName, opts.connector, opts.alsoConnect);
+  const finalKeep = keepMutator(dropped);
 
   const result = await serviceClient.pushSecrets(projectId, JSON.stringify(finalKeep), envBlob, branch);
 
@@ -217,6 +206,52 @@ export async function writeAndSync(
     user_id: userId,
     keep_hash: setSyncKeepHash(existingSyncState, branch, SyncEngine.computeKeepHash(finalKeep, branch)),
   });
+}
+
+export async function writeAndSync(
+  ctx: ResolvedContext,
+  varName: string,
+  value: string | undefined,
+  opts: {
+    push: boolean;
+    connector?: ConnectorMetadata;
+    /** Additional (varName, connector) pairs to mark managed in the same write. */
+    alsoConnect?: ReadonlyArray<{ varName: string; entry: ConnectorMetadata }>;
+  },
+): Promise<void> {
+  const { fileManager, branch, projectKey, keep, localPlaintext } = ctx;
+
+  const finalEnv: Record<string, string> =
+    value === undefined ? { ...localPlaintext } : { ...localPlaintext, [varName]: value };
+
+  if (!opts.push) {
+    // Local-only path. Even though we're not hitting the service, we still
+    // need to attach the connector marker to keep.lock so a follow-up `capy
+    // push` (which will round-trip through mergeWithKeep) preserves it.
+    const merged = applyConnectors(keep, branch, varName, opts.connector, opts.alsoConnect);
+    if (merged !== keep) fileManager.writeKeepFile(merged);
+    fileManager.writeEncryptedEnvFile(finalEnv, projectKey, undefined, merged, branch);
+    return;
+  }
+
+  await commitFinalEnv(ctx, finalEnv, (merged) => applyConnectors(merged, branch, varName, opts.connector, opts.alsoConnect));
+}
+
+/**
+ * `capy remove NAME...` — drop `names` from the active branch and push the
+ * remaining set through the exact same mechanics `writeAndSync` uses (encrypt
+ * full set, `mergeWithKeep`, drop entries for names no longer present, push,
+ * cache, adopt, write `.env` + sync state).
+ *
+ * Callers are expected to have already confirmed `names` are all present and
+ * that nothing ELSE in `ctx.localPlaintext` has drifted from the pinned
+ * baseline — this function does no such checking itself, it only performs
+ * the write.
+ */
+export async function removeAndSync(ctx: ResolvedContext, names: readonly string[]): Promise<void> {
+  const removed = new Set(names);
+  const finalEnv = Object.fromEntries(Object.entries(ctx.localPlaintext).filter(([k]) => !removed.has(k)));
+  await commitFinalEnv(ctx, finalEnv, (merged) => merged);
 }
 
 /**

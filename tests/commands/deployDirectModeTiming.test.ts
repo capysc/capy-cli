@@ -7,18 +7,58 @@
  * "local changes would be overwritten".
  *
  * These drive the real, exported `deployCommand()` end to end against a
- * real git repo (no mocks) — the cf-worker adapter needs a real `wrangler`
- * binary on PATH for preflight (gated below, same as
+ * real git repo — the cf-worker adapter needs a real `wrangler` binary on
+ * PATH for preflight (gated below, same as
  * tests/commands/deployCommand.test.ts), but never needs real Cloudflare
  * credentials: preflight only checks the binary exists, and the vendor push
  * itself (which fails without real auth) runs AFTER the keep.lock commit —
  * exactly the part these tests aren't checking.
+ *
+ * Direct-mode deploy now also runs a pre-check (`resolveFreshSnapshot`)
+ * before it will commit anything at all — it authenticates and fetches the
+ * server's current snapshot for the branch, refusing if the local keep.lock
+ * doesn't match it. `authService`/`serviceClient` are mocked below purely so
+ * that check always succeeds (matching whatever the real `.capy/keep.lock`
+ * on disk resolves to) — everything these tests actually care about (git,
+ * the tracked/working keep.lock files, the commit itself) stays real.
+ * `mock.module()` is process-wide, so this file runs isolated
+ * (tests/run-tests.sh).
  */
-import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
+import { describe, test, expect, beforeEach, afterEach, mock } from 'bun:test';
 import { mkdirSync, writeFileSync, readFileSync, rmSync, chmodSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { spawnSync } from 'child_process';
+import { ProjectManager } from '../../src/core/projectManager';
+import { SyncEngine } from '../../src/sync/syncEngine';
+
+const REPO_FOR_MOCK = join(tmpdir(), `capy-deploy-timing-${process.pid}`, 'repo');
+
+mock.module('../../src/auth/authService', () => ({
+  AuthService: class {
+    async authenticateSilent() {
+      return { success: true, user_id: 'user_1' };
+    }
+    async getValidToken() {
+      return 'fake-session-token';
+    }
+  },
+  silentAuthFailureMessage: () => 'auth failed',
+}));
+mock.module('../../src/service/serviceClient', () => ({
+  ServiceClient: class {
+    setTokenProvider() {}
+    // Always "in sync" — reads local keep.lock the same working-copy-first
+    // way the real code under test does, so this pre-check never refuses.
+    // Staleness itself is covered separately (deployRevokeWiring.test.ts).
+    async getLatestSecrets(_projectId: string, branch: string) {
+      const keep = new ProjectManager(REPO_FOR_MOCK).readKeepFile();
+      if (!keep) return null;
+      return { env_file: 'STUB_ENV_FILE', keep_hash: SyncEngine.computeKeepHash(keep, branch), keep_file: JSON.stringify(keep) };
+    }
+  },
+}));
+
 import { deployCommand } from '../../src/commands/deployCommand';
 
 const HAS_WRANGLER = spawnSync('which', ['wrangler']).status === 0;
