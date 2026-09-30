@@ -1,49 +1,130 @@
 import { describe, expect, it, jest } from 'bun:test';
-import { auditText, renderAuditPage, runAuditTui } from '../../src/ui/auditTui';
-import type { AuditEvent } from '../../src/service/auditClient';
+import { EventEmitter } from 'node:events';
+import { auditKey, auditText, initialAuditState, renderAuditScreen, runAuditTui } from '../../src/ui/auditTui';
+import type { AuditState } from '../../src/ui/auditTui';
+import { AUDIT_FILTERS, AUDIT_SORTS, type AuditEvent } from '../../src/service/auditClient';
 
 const event: AuditEvent = {
   id: 'event-1', occurredAt: '2026-09-30T12:00:00Z', actorId: 'alice', actorName: 'Alice', actorType: 'user',
   action: 'secret.read', targetType: 'project', targetId: 'p-1', targetName: 'Production', metadata: { version: 1 }, ipAddress: null, userAgent: null,
 };
+const ready: AuditState = { ...initialAuditState({ actor: 'alice' }), loading: false, page: { entries: [event], next_cursor: 'page-2' } };
+const press = (state: AuditState, name: string, text = '') => auditKey(state, text, { name });
 
 describe('audit TUI', () => {
-  it('issues database searches when filters or sort change and discards stale cursors', async () => {
-    const query = jest.fn(async () => ({ entries: [event], next_cursor: 'page-2' }));
-    const choose = jest.fn().mockResolvedValueOnce('search').mockResolvedValueOnce('target_name')
-      .mockResolvedValueOnce('sort').mockResolvedValueOnce('actor_name').mockResolvedValueOnce('asc').mockResolvedValueOnce('quit');
-    await runAuditTui('Org', query, { cursor: 'old', actor: 'alice' }, {
-      write: jest.fn(), choose, input: jest.fn(async () => 'Production'),
-    });
-    expect(query.mock.calls[1]?.[0]).toEqual({ cursor: undefined, actor: 'alice', target_name: 'Production' });
-    expect(query.mock.calls[2]?.[0]).toEqual({ cursor: undefined, actor: 'alice', target_name: 'Production', sort: 'actor_name', order: 'asc' });
+  it.each(AUDIT_FILTERS)('submits %s as a server search and discards cursors', field => {
+    const editing = press({ ...ready, search: { ...ready.search, cursor: 'old' }, field: AUDIT_FILTERS.indexOf(field) }, '/', '/');
+    const next = press({ ...editing, draft: 'Production' }, 'return');
+    expect(next.search).toEqual({ actor: 'alice', [field]: 'Production', cursor: undefined });
+    expect(next.loading).toBe(true);
+    expect(next.page.entries).toEqual([]);
+    expect(next.request).toBe(1);
+    expect(next.history).toEqual([]);
   });
-  it('pages forward and backward without losing filters', async () => {
-    const query = jest.fn(async () => ({ entries: [event], next_cursor: 'page-2' }));
-    await runAuditTui('Org', query, { actor: 'alice' }, {
-      write: jest.fn(), input: jest.fn(),
-      choose: jest.fn().mockResolvedValueOnce('next').mockResolvedValueOnce('previous').mockResolvedValueOnce('quit'),
-    });
-    expect(query.mock.calls.map(call => call[0])).toEqual([{ actor: 'alice' }, { actor: 'alice', cursor: 'page-2' }, { actor: 'alice' }]);
+  it.each(AUDIT_SORTS)('sorts by %s without retaining a stale cursor', sort => {
+    const next = press({ ...ready, mode: 'sort', sort: AUDIT_SORTS.indexOf(sort), order: 'asc' }, 'return');
+    expect(next.search).toEqual({ actor: 'alice', sort, order: 'asc', cursor: undefined });
+    expect(next.request).toBe(1);
   });
-  it('offers search on an empty result and clears all filters', async () => {
-    const query = jest.fn(async () => ({ entries: [], next_cursor: null }));
-    const write = jest.fn();
-    await runAuditTui('Org', query, { actor: 'missing', target_type: 'project' }, {
-      write, input: jest.fn(), choose: jest.fn().mockResolvedValueOnce('clear').mockResolvedValueOnce('quit'),
-    });
-    expect(query.mock.calls[1]?.[0]).toEqual({ sort: undefined, order: undefined, limit: undefined });
-    expect(write.mock.calls[0]?.[0]).toContain('No matching audit events');
+  it('pages forward and backward without losing filters', () => {
+    const next = press(ready, 'n', 'n');
+    expect(next.search).toEqual({ actor: 'alice', cursor: 'page-2' });
+    expect(press({ ...next, loading: false }, 'p', 'p').search).toEqual(ready.search);
   });
-  it('refuses to show records when a new query is denied', async () => {
-    const write = jest.fn();
-    await expect(runAuditTui('Org', jest.fn(async () => { throw new Error('admin-only'); }), {}, {
-      write, input: jest.fn(), choose: jest.fn(),
-    })).rejects.toThrow('admin-only');
-    expect(write).not.toHaveBeenCalled();
+  it('edits inline, cycles fields, cancels drafts, and clears filters', () => {
+    const editing = press(ready, '/', '/');
+    expect(press(editing, 'q', 'q').draft).toBe('aliceq');
+    expect(press(editing, 'tab').field).toBe(1);
+    expect(press(editing, 'escape').search).toEqual(ready.search);
+    expect(press(ready, 'c', 'c').search.actor).toBeUndefined();
+    expect(auditKey(editing, '', { name: 'u', ctrl: true }).draft).toBe('');
   });
-  it('shows stored attributes and neutralizes terminal controls', () => {
-    expect(renderAuditPage('Org', { entries: [event], next_cursor: null }, {})).toContain('project: Production');
+  it('treats bracketed paste as text and never executes pasted shortcuts', () => {
+    const start = auditKey(ready, '', { sequence: '\x1b[200~' });
+    expect(press(start, 'q', 'q').quit).toBe(false);
+    const editing = { ...start, mode: 'search' as const, draft: '' };
+    expect(press(editing, 'return', '\n').request).toBe(0);
+    expect(press(editing, 'q', 'q').draft).toBe('q');
+    expect(auditKey(editing, '', { sequence: '\x1b[201~' }).pasting).toBe(false);
+  });
+  it('renders an edit-style table, selection, inline search and scrollable details', () => {
+    const screen = renderAuditScreen('Org', ready, 100, 24);
+    expect(screen).toContain('capy audit');
+    expect(screen).toContain('ACTOR');
+    expect(screen).toContain('\x1b[7m▶ Alice');
+    expect(screen).toContain('project: Production');
+    expect(renderAuditScreen('Org', press(ready, '/', '/'))).toContain('Search\x1b[0m actor:');
+    const details = press(ready, 'return');
+    expect(renderAuditScreen('Org', details)).toContain('actorId: alice');
+    expect(renderAuditScreen('Org', { ...details, detailOffset: 100 })).toContain('userAgent:');
     expect(auditText('\x1b[2Jbad\nvalue\x9b')).not.toMatch(/[\x00-\x1f\x7f-\x9f]/);
+    for (const columns of [40, 80, 120]) {
+      const lines = renderAuditScreen('Org', ready, columns, 24).replace(/\x1b\[[0-9;]*m|\x1b\[K/g, '').split('\n');
+      expect(lines.length).toBeLessThan(24);
+      expect(lines.every(line => line.length <= columns)).toBe(true);
+    }
+  });
+  it('queries on submitted search and restores terminal on exit', async () => {
+    const close = jest.fn();
+    const query = jest.fn(async () => ({ entries: [event], next_cursor: null }));
+    const channel = new EventEmitter();
+    const write = jest.fn((text: string) => {
+      if (text.includes('▶ Alice')) channel.emit('input', { type: 'quit' });
+    });
+    await runAuditTui('Org', query, {}, {
+      size: () => ({ columns: 100, rows: 24 }), write,
+      open: send => {
+        channel.on('input', send);
+        for (const input of [
+          { type: 'key', text: '/', key: {} },
+          { type: 'key', text: 'alice', key: {} },
+          { type: 'key', text: '', key: { name: 'return' } },
+        ] as const) send(input);
+        return close;
+      },
+    });
+    expect(query.mock.calls.map(call => call[0])).toEqual([{}, { actor: 'alice', cursor: undefined }]);
+    expect(close).toHaveBeenCalledTimes(1);
+  });
+  it('permits quitting while a query is pending', async () => {
+    const close = jest.fn();
+    const query = jest.fn(() => new Promise<never>(() => {}));
+    await runAuditTui('Org', query, {}, {
+      size: () => ({ columns: 80, rows: 24 }), write: jest.fn(),
+      open: send => { send({ type: 'quit' }); return close; },
+    });
+    expect(close).toHaveBeenCalledTimes(1);
+  });
+  it('never displays an older response after a newer search finishes', async () => {
+    const channel = new EventEmitter();
+    const write = jest.fn();
+    const query = async (search: Readonly<{ actor?: string }>) => {
+      if (!search.actor) await new Promise(resolve => setTimeout(resolve, 10));
+      return { entries: [{ ...event, actorName: search.actor ? 'Current' : 'Stale' }], next_cursor: null };
+    };
+    await runAuditTui('Org', query, {}, {
+      size: () => ({ columns: 80, rows: 24 }), write,
+      open: send => {
+        channel.on('input', send);
+        for (const input of [
+          { type: 'key', text: '/', key: {} },
+          { type: 'key', text: 'alice', key: {} },
+          { type: 'key', text: '', key: { name: 'return' } },
+        ] as const) send(input);
+        const timeout = setTimeout(() => send({ type: 'quit' }), 30);
+        return () => { clearTimeout(timeout); channel.off('input', send); };
+      },
+    });
+    expect(write.mock.calls.some(call => call[0].includes('Current'))).toBe(true);
+    expect(write.mock.calls.every(call => !call[0].includes('Stale'))).toBe(true);
+  });
+  it('cleans up and refuses to show records when authorization fails', async () => {
+    const close = jest.fn();
+    const write = jest.fn();
+    await expect(runAuditTui('Org', async () => { throw new Error('admin-only'); }, {}, {
+      size: () => ({ columns: 80, rows: 24 }), write, open: () => close,
+    })).rejects.toThrow('admin-only');
+    expect(close).toHaveBeenCalledTimes(1);
+    expect(write.mock.calls.every(call => !call[0].includes('Alice'))).toBe(true);
   });
 });

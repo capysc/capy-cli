@@ -36,9 +36,9 @@ export function createAuditClient(
   tokenProvider: () => Promise<ServiceToken | null>,
   apiUrl = resolveActiveUrl(false),
   fetchFn: typeof fetch = fetch,
-): (search: AuditSearch) => Promise<AuditPage> {
+): (search: AuditSearch, signal?: AbortSignal) => Promise<AuditPage> {
   installProfileTlsTrust();
-  return async (search) => {
+  return async (search, signal) => {
     const token = await tokenProvider();
     if (!token) throw new CapyError('Sign in to view the audit log.', ERROR_CODES.AUTH_FAILED);
     const params = new URLSearchParams(Object.entries(search)
@@ -46,7 +46,7 @@ export function createAuditClient(
       .map(([key, value]): [string, string] => [key, String(value)]));
     const response = await fetchFn(`${apiUrl}/orgs/${encodeURIComponent(organizationId)}/audit?${params}`, {
       headers: { Authorization: `Bearer ${token.access_token}` },
-      signal: AbortSignal.timeout(30000),
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(30000)]) : AbortSignal.timeout(30000),
     });
     const body = await response.json() as AuditPage & { readonly error?: string };
     if (!response.ok) {
