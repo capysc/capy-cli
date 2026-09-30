@@ -1427,6 +1427,40 @@ async function resolveGitBaseBranch(
   return ans.gitBaseBranch.trim();
 }
 
+/**
+ * A saved target after its project's variables changed: removed variables are
+ * dropped, the chosen new ones are added, and `knownVars` becomes the current
+ * set so the same drift is not asked about again. Nothing else changes.
+ */
+export function applyVarDrift(
+  target: TargetConfig,
+  currentVars: readonly string[],
+  includedNew: readonly string[],
+): TargetConfig {
+  const wanted = new Set([...target.vars, ...includedNew]);
+  return {
+    ...target,
+    vars: currentVars.filter((v) => wanted.has(v)),
+    knownVars: [...currentVars],
+  };
+}
+
+/** Asks which newly added project variables this target should deliver (Ctrl-C is handled globally). */
+async function pickNewVars(target: TargetConfig, added: readonly string[]): Promise<string[]> {
+  const ans = (await inquirer.prompt([
+    {
+      type: 'checkbox',
+      name: 'vars',
+      // COPY-FLAG
+      message: `Include these new variable(s) in "${target.name}"?`,
+      instructions: CHECKBOX_INSTRUCTIONS,
+      theme: CHECKBOX_THEME,
+      choices: added.map((v) => ({ name: v, value: v, checked: true })),
+    } as any,
+  ])) as { vars: string[] };
+  return ans.vars;
+}
+
 async function runPicker(
   cwd: string,
   keep: KeepInfo,
@@ -2908,7 +2942,14 @@ export async function deployCommand(
         console.log(`  ${YELLOW('!')} new project var(s) not in this target: ${B(added.join(', '))}`);
       if (removed.length)
         console.log(`  ${YELLOW('!')} target var(s) no longer in the project: ${B(removed.join(', '))}`);
-      if (!options.yes && !options.dryRun && (web.web || process.stdin.isTTY)) {
+      if (!options.yes && !options.dryRun && !web.web && process.stdin.isTTY) {
+        // Only the variable list changed, so only the variables are asked about.
+        // Every other setting (adapter, branch, options, mode, name) is kept.
+        const includedNew = added.length ? await pickNewVars(target, added) : [];
+        target = applyVarDrift(target, currentVars, includedNew);
+        upsertTarget(cwd, target);
+        console.log(GREEN(`✓ Updated target "${target.name}" in .capy/deploy.json`));
+      } else if (!options.yes && !options.dryRun && web.web) {
         console.log(`  ${DIM('The project\'s variables changed — re-confirm this target.')}`);
         const reconfirmed = await runPicker(
           cwd,
