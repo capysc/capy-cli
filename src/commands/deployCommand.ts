@@ -456,21 +456,46 @@ function targetRefFor(target: TargetConfig): Record<string, string> | undefined 
  * thrown — the caller's own operation (a deploy, a remove, a revoke) already
  * succeeded or is already committed to happening by the time this runs.
  *
+ * CAP-687 (validator fix-first): this used to build the pushed env blob by
+ * decrypting the LOCAL `.env` and re-encrypting it fresh. That's wrong for
+ * EVERY caller here, not just CI mode — none of them are value edits, so
+ * NOTHING about the branch's secret values should ever be able to change as
+ * a side effect of "record a target" or "revoke a token". But a local `.env`
+ * can hold unpushed edits, or a variable that was never synced at all, and
+ * the server's `keep_hash` only covers `name:resource_id:value_hash` — not
+ * blob content — so a keep-only write that rebuilds the blob from local
+ * `.env` can silently overwrite the team's stored blob under an UNCHANGED
+ * hash: the next `capy` pull anyone runs decrypts the same pin to a
+ * different value, with no signal anything drifted.
+ *
+ * Fixed by never touching local `.env` here at all. Instead: fetch the
+ * server's OWN current snapshot for `branch` (`getLatestSecrets` — one read,
+ * so the returned `env_file` and `keep_hash` can never disagree with each
+ * other) and verify that hash against the LOCAL keep's branch entries
+ * (`SyncEngine.computeKeepHash`) — `transform` only ever touches `targets`/
+ * `connector` metadata, never `resource_id`/`value_hash`, so the hash is the
+ * same whether computed before or after it runs. A match proves the local
+ * keep's pins for this branch are exactly what's already live, so it's safe
+ * to (a) push the fetched `env_file` straight through, byte-for-byte, as
+ * the SAME blob already stored, and (b) build `nextKeep` off the LOCAL keep
+ * (preserving every other branch's entries exactly as the local file has
+ * them, same as before). A mismatch means the local keep.lock is stale for
+ * this branch — skip the write with a warning rather than risk a
+ * keep/blob pair the server never actually produced together.
+ *
  * `opts.writeLocal` (default `true`) gates the two LOCAL side effects below
- * — writing keep.lock to disk and auto-committing it. Every existing caller
- * (direct-mode recording, revocation, `capy deploy targets-remove`) keeps
- * that default and is byte-for-byte unchanged. CI mode passes `false`
- * (CAP-687): it still reads the local keep.lock/`.env` to build the SAME
- * push `pushSecrets` would otherwise make (re-sending the branch's current
- * values unchanged — see `pushSecrets`'s two arguments below, `keep_file`
- * and the env blob), but never writes keep.lock to disk and never commits —
- * CI mode must NEVER touch the user's working tree (see `openCiDeployPr`'s
- * own doc for why).
+ * — writing keep.lock to disk and auto-committing it. CI mode passes
+ * `false` (CAP-687): it must NEVER write keep.lock to disk or commit — CI
+ * mode must NEVER touch the user's working tree (see `openCiDeployPr`'s own
+ * doc for why). Every other caller keeps the default.
  *
  * `opts.warnCode` prefixes every warning this function prints with a
  * machine-readable code (Rule 4: never branch on prose, but a human reading
- * the warning still gets a stable label for it). Omitted by every existing
- * caller, whose warning text is therefore unchanged.
+ * the warning still gets a stable label for it). Omitted by callers that
+ * predate CAP-687, whose warning text for the branch-mismatch/auth-failure/
+ * exception cases is therefore unchanged; the two NEW warning cases this fix
+ * introduces (no server snapshot yet, local keep out of sync with it) are
+ * new regardless, so there's no "unchanged text" to preserve for them.
  */
 async function pushKeepTransform(
   cwd: string,
@@ -485,9 +510,9 @@ async function pushKeepTransform(
   try {
     const pm = new ProjectManager(cwd);
     // Never push an env blob for a branch other than the one `.env` is
-    // actually on — `.env`'s plaintext below is encrypted and pushed as
-    // `branch`'s secrets; if `.env` is on a different branch (or none is
-    // knowable), that would mislabel one branch's values as another's.
+    // actually on — pushing under the wrong branch would file this write's
+    // keep-only change (and, below, the branch's re-sent secrets) against
+    // the wrong branch entirely.
     const branchProblem = branchPushProblem(pm.deriveActiveBranch(), branch);
     if (branchProblem) {
       console.error(`  ${YELLOW('!')} could not ${label} in keep.lock — ${codePrefix}${describeBranchProblem(branchProblem)}`);
@@ -502,9 +527,7 @@ async function pushKeepTransform(
 
     const { AuthService, silentAuthFailureMessage } = await import('../auth/authService');
     const { ServiceClient } = await import('../service/serviceClient');
-    const { resolveProjectKey } = await import('../crypto/keyResolver');
-    const { Encryptor } = await import('../crypto/encryptor');
-    const { deriveResourceId } = await import('../crypto/resourceId');
+    const { SyncEngine } = await import('../sync/syncEngine');
 
     const authService = new AuthService(undefined, devMode, projectState.userId);
     const serviceClient = new ServiceClient(undefined, devMode);
@@ -514,24 +537,28 @@ async function pushKeepTransform(
       console.error(`  ${YELLOW('!')} could not ${label} in keep.lock — ${codePrefix}${silentAuthFailureMessage(authResult)}`);
       return;
     }
-    const projectKey = await resolveProjectKey(projectState.organizationId, projectState.projectId, authResult.user_id, {
-      coDecrypt: (o, c) => serviceClient.coDecrypt(o, c).then((r) => r.plaintext),
-      wrapOuterLayer: (o, p) => serviceClient.wrapOuterLayer(o, p).then((r) => r.ciphertext),
-    });
 
-    const fm = new FileManager(cwd);
-    const rawLocal = fm.readEnvFile();
-    const localPlaintext = Object.fromEntries(
-      Object.entries(rawLocal).map(([k, v]) => [k, v.startsWith('capy:') ? fm.decryptValue(v, projectKey) : v]),
-    );
-    const envBlob = Object.entries(localPlaintext)
-      .map(([k, v]) => `${k}=capy:${deriveResourceId(branch, k)}:${Encryptor.encrypt(v, projectKey)}`)
-      .join('\n');
+    // The server's CURRENT snapshot for this branch — blob and hash from the
+    // SAME read, never derived locally. See this function's own doc for why.
+    const latest = await serviceClient.getLatestSecrets(projectState.projectId, branch);
+    if (!latest) {
+      console.error(
+        `  ${YELLOW('!')} could not ${label} in keep.lock — ${codePrefix}no secrets have been pushed for branch "${branch}" yet.`,
+      );
+      return;
+    }
+    const localHash = SyncEngine.computeKeepHash(keep, branch);
+    if (latest.keep_hash !== localHash) {
+      console.error(
+        `  ${YELLOW('!')} could not ${label} in keep.lock — ${codePrefix}local keep.lock is out of sync with the server for branch "${branch}"; run \`capy\` to sync first.`,
+      );
+      return;
+    }
 
-    const pushed = await serviceClient.pushSecrets(projectState.projectId, JSON.stringify(nextKeep), envBlob, branch);
+    const pushed = await serviceClient.pushSecrets(projectState.projectId, JSON.stringify(nextKeep), latest.env_file, branch);
 
     if (writeLocal) {
-      const { SyncEngine } = await import('../sync/syncEngine');
+      const fm = new FileManager(cwd);
       fm.writeKeepFile(SyncEngine.adoptServerKeep(pushed.keep_file, nextKeep, branch));
 
       const { autoCommitKeep } = await import('../git/autoCommitKeep');
@@ -611,10 +638,11 @@ async function recordDeployTargets(
  * function fixes.
  *
  * Server-only: `pushKeepTransform`'s `writeLocal: false` means this call
- * reads the local keep.lock/`.env` to build the push (same as direct mode —
- * see `pushKeepTransform`'s own doc) but never writes keep.lock to disk and
- * never auto-commits. CI mode must NEVER touch the user's working tree —
- * see `openCiDeployPr`'s own doc for why.
+ * pushes exactly like direct mode's `recordDeployTargets` (same server
+ * snapshot fetch, same re-sent-unchanged blob — see `pushKeepTransform`'s
+ * own doc) but never writes keep.lock to disk and never auto-commits. CI
+ * mode must NEVER touch the user's working tree — see `openCiDeployPr`'s
+ * own doc for why.
  *
  * Best-effort, same contract as `recordDeployTargets`: the CI delivery
  * already succeeded by the time this runs, so a failure here is warned

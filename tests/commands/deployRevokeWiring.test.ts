@@ -24,14 +24,32 @@
  *     the adapter that recorded them still mints tokens at all (the LAST
  *     test: two pre-recorded `superseded_deploy_ids` plus the current one).
  *
- * Every crypto/key-resolution dependency `pushKeepTransform` touches
- * (`resolveProjectKey`, `Encryptor`, `deriveResourceId`) is mocked to a
- * trivial fake — this file is about the REVOKE WIRING, not real crypto,
- * which is already covered elsewhere (`tests/crypto/*`, `tests/system/systemStore.test.ts`).
+ * CAP-687 (validator fix-first): `pushKeepTransform` no longer builds the
+ * pushed env blob from local `.env` at all — it fetches the server's OWN
+ * current snapshot for the branch (`getLatestSecrets`) and re-sends that
+ * blob unchanged, after verifying its `keep_hash` matches the local keep's
+ * branch entries. The mocked `ServiceClient` below fakes that snapshot by
+ * reading + hashing `ROOT/keep.lock` itself (via the REAL `SyncEngine`, not
+ * mocked here) — always "in sync", since this file is about the REVOKE
+ * WIRING, not the drift guard (see `deployCiTargetsRecord.test.ts` for
+ * that). No crypto mocking is needed any more: `pushKeepTransform` never
+ * touches `resolveProjectKey`/`Encryptor`/`deriveResourceId`, and this
+ * fixture's `.env` is plain (unencrypted), so `decryptCurrentBranch` never
+ * needs them either.
  *
  * `mock.module()` is process-wide: this file runs isolated (tests/run-tests.sh).
  */
 import { describe, test, expect, mock, spyOn, afterEach } from 'bun:test';
+import { mkdirSync, writeFileSync, rmSync, readFileSync } from 'fs';
+import { join } from 'path';
+import { tmpdir } from 'os';
+import { SyncEngine } from '../../src/sync/syncEngine';
+
+// Declared before the mocks below (which close over it) — a `const` at
+// module scope is fully initialized before any test() callback runs, so the
+// mocked `ServiceClient` class reading it at call time is safe even though
+// this line executes before the class body below does.
+const ROOT = join(tmpdir(), `capy-deploy-revoke-wiring-${process.pid}-${Date.now()}`);
 
 mock.module('../../src/auth/authService', () => ({
   AuthService: class {
@@ -59,19 +77,18 @@ mock.module('../../src/service/serviceClient', () => ({
     async pushSecrets(projectId: string, keepFileJson: string, envBlob: string, branch: string) {
       return pushSecretsMock(projectId, keepFileJson, envBlob, branch);
     }
+    // Fakes "the server agrees with local" — reads the SAME keep.lock
+    // `pm.readKeepFile()` just read and hashes it the same way the real
+    // server would, so `pushKeepTransform`'s drift guard always proceeds.
+    async getLatestSecrets(_projectId: string, branch: string) {
+      const keep = JSON.parse(readFileSync(join(ROOT, 'keep.lock'), 'utf-8'));
+      return {
+        env_file: 'STUB_ENV_FILE',
+        keep_hash: SyncEngine.computeKeepHash(keep, branch),
+        keep_file: JSON.stringify(keep),
+      };
+    }
   },
-}));
-mock.module('../../src/crypto/keyResolver', () => ({
-  resolveProjectKey: async () => 'a'.repeat(64),
-}));
-mock.module('../../src/crypto/encryptor', () => ({
-  Encryptor: {
-    encrypt: (v: string) => `ENC:${v}`,
-    decrypt: (v: string) => v.slice(4),
-  },
-}));
-mock.module('../../src/crypto/resourceId', () => ({
-  deriveResourceId: (branch: string, name: string) => `rid-${branch}-${name}`,
 }));
 
 /**
@@ -97,13 +114,9 @@ afterEach(() => {
   mintDeployTokenMock.mockClear();
 });
 
-import { mkdirSync, writeFileSync, rmSync } from 'fs';
-import { join } from 'path';
-import { tmpdir } from 'os';
 import { deployCommand, deployRemove } from '../../src/commands/deployCommand';
 import { mergeManagedValuesBlock } from '../../src/deploy/dokployApi';
 
-const ROOT = join(tmpdir(), `capy-deploy-revoke-wiring-${process.pid}-${Date.now()}`);
 const APP_ID = 'app_revoke_test';
 /** An active line for STRIPE_KEY already outside the block — gets COMMENTED once Capy delivers it. */
 const RAW_ENV = 'STRIPE_KEY=stale\n';
