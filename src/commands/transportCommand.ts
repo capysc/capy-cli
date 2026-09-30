@@ -1,19 +1,25 @@
 /**
- * `capy transport` (CAP-684, docs/basic-pair.md) — replaces the old
- * invite-shaped transport command. `capy redeem` is untouched: it shares
- * only `crypto/inviteCrypto.ts`'s parse/unwrap helpers, which this command
- * never imports.
+ * `capy transport` "v2" (CAP-684, docs/basic-pair.md — updated 2026-09-30).
+ * `capy redeem` is untouched: it shares only `crypto/inviteCrypto.ts`'s
+ * parse/unwrap helpers, which this command never imports.
  *
  * Moves this machine's `local.key` + `key.enc` (for the project's org and
- * the current user) to another device, via Keep: seal them under a random
- * key T, hand the ciphertext to the service (which never sees T — it only
- * ever travels in the printed URL's fragment, which browsers never send to
- * a server), and print a QR code plus the link.
+ * the current user) to another device, via Keep:
+ *
+ *   1. Mint a random 32-byte key S and hand it to the service AS the
+ *      `POST /transports` `ciphertext` field (base64url) — the service
+ *      stores only this one-time decryption key, never the key material
+ *      itself, and hands back `{id, expires_at}`.
+ *   2. Seal the payload under S with AAD bound to `id` (`sealTransportPayload`),
+ *      so sealing can only happen after step 1 — the AAD needs the id.
+ *   3. Print a QR code + `.../transport#<id>.<iv>.<ct>`. S is NEVER in the
+ *      link; the link is useless without also authenticating as the right
+ *      user to activate the row and get S back.
  */
 import { resolveOrgContext } from '../core/orgContext';
 import { readLocalRoot, readOrgKeyFileRaw } from '../config/globalConfig';
 import { resolveKeepOrigin } from '../config/keepOrigin';
-import { generateTransportToken, sealTransportPayload } from '../crypto/transportCrypto';
+import { generateTransportKey, sealTransportPayload } from '../crypto/transportCrypto';
 import type { TransportPayload } from '../crypto/pairingPayload';
 import { renderTerminalQr } from '../ui/terminalQr';
 import { CapyError, ERROR_CODES } from '../types/index';
@@ -56,11 +62,13 @@ export class TransportCommand {
         }],
       };
 
-      const token = generateTransportToken();
-      const envelope = sealTransportPayload(payload, token);
+      const key = generateTransportKey();
+      const { id, expires_at } = await serviceClient.createTransport(key.toString('base64url'));
 
-      const { id, expires_at } = await serviceClient.createTransport(JSON.stringify(envelope));
-      const url = `${resolveKeepOrigin()}/transport#${id}.${token.toString('base64url')}`;
+      // AAD binds to `id`, which only exists after the call above — sealing
+      // has to happen here, not before it, unlike v1's token-first order.
+      const fragment = sealTransportPayload(payload, key, id);
+      const url = `${resolveKeepOrigin()}/transport#${id}.${fragment.iv}.${fragment.ct}`;
 
       if (json) {
         console.log(JSON.stringify({ url, expires_at }, null, 2));

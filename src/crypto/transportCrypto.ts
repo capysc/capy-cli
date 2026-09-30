@@ -1,92 +1,123 @@
 /**
- * `capy transport` envelope (CAP-684, docs/basic-pair.md).
+ * `capy transport` "v2" (CAP-684, docs/basic-pair.md — updated 2026-09-30).
  *
- * The CLI mints a random 32-byte T and AES-256-GCM-encrypts the transport
- * payload under it directly — T *is* the key, there is no HKDF step (unlike
- * the pair envelope, which derives its key from an ECDH shared secret). The
- * envelope travels to the service as ciphertext; T never does — it only ever
- * appears in the URL fragment (`#<id>.<T>`), which browsers never send to a
- * server.
+ * v1 (T only ever in the URL fragment, the service held only ciphertext) is
+ * gone — nothing shipped, so there is no compatibility to keep. v2 flips
+ * which side holds what:
+ *
+ *   - The CLI mints a random 32-byte S and sends it to the service AS the
+ *     `ciphertext` field of `POST /transports` (base64url) — the service is
+ *     unchanged, it still just stores whatever string it's given and hands
+ *     it back unmodified from `activate`. S is a one-time decryption key,
+ *     not "the key material" (K_local / key.enc) itself.
+ *   - The payload is encrypted under S, AES-256-GCM, with AAD
+ *     `capy:transport:v2:<id>` — bound to the specific transport row, so a
+ *     ciphertext minted for one `id` can never be opened against another.
+ *   - The link carries `<id>.<iv>.<ct>` in the fragment — S is NOT there.
+ *     A leaked link alone is useless without also being able to activate
+ *     the row as the right authenticated user; a leaked S alone (the
+ *     service's own row) is useless without the fragment.
  *
  * `sealTransportPayload` is the only function of this pair the CLI's own
- * production code calls (it is the sender). `openTransportEnvelope` is the
- * Keep `/transport` page's job in production (WebCrypto, not this module) —
- * it exists here so the round trip can be tested from this side too, and so
- * a corrupted or wrong-key envelope has one place that says so.
+ * production code calls (it is the sender, and `id` isn't known until after
+ * `POST /transports` returns — so sealing happens AFTER that call, not
+ * before, unlike v1). `openTransportFragment` is the Keep `/transport`
+ * page's job in production (WebCrypto, not this module) — it exists here so
+ * the round trip is testable and a corrupted/wrong-key fragment has one
+ * place that says so.
  */
 import { randomBytes, createCipheriv, createDecipheriv } from 'crypto';
 import { CapyError, ERROR_CODES } from '../types/index';
 import type { TransportPayload } from './pairingPayload';
 
-export interface TransportEnvelope {
-  v: 1;
+const AES_ALGORITHM = 'aes-256-gcm';
+const IV_LENGTH = 12;
+const AUTH_TAG_LENGTH = 16;
+const S_LENGTH = 32;
+const AAD_PREFIX = 'capy:transport:v2:';
+
+/** Mints a fresh random 32-byte S — the one-time key the service stores (never the fragment). */
+export function generateTransportKey(): Buffer {
+  return randomBytes(S_LENGTH);
+}
+
+/** `capy:transport:v2:<id>` — binds a sealed fragment to the specific transport row it was minted for. */
+export function transportAad(id: string): Buffer {
+  return Buffer.from(`${AAD_PREFIX}${id}`, 'utf8');
+}
+
+/** What the URL fragment carries alongside `id`: `#<id>.<iv>.<ct>`. */
+export interface TransportFragment {
   /** 12-byte random IV, base64url. */
   iv: string;
   /** ciphertext with the 16-byte GCM tag appended, base64url. */
   ct: string;
 }
 
-const AES_ALGORITHM = 'aes-256-gcm';
-const IV_LENGTH = 12;
-const AUTH_TAG_LENGTH = 16;
-const T_LENGTH = 32;
-
-export const TRANSPORT_AAD = Buffer.from('capy:transport:v1', 'utf8');
-
-/** Mints a fresh random 32-byte T. */
-export function generateTransportToken(): Buffer {
-  return randomBytes(T_LENGTH);
+function assertKeyLength(key: Buffer): void {
+  if (key.length !== S_LENGTH) {
+    throw new CapyError('Transport key must be 32 bytes', ERROR_CODES.ENCRYPTION_ERROR);
+  }
 }
 
-/** Seals `payload` under `token` (T). Returns the envelope; `token` is the caller's to place in the URL fragment. */
-export function sealTransportPayload(payload: TransportPayload, token: Buffer): TransportEnvelope {
-  if (token.length !== T_LENGTH) {
-    throw new CapyError('Transport token must be 32 bytes', ERROR_CODES.ENCRYPTION_ERROR);
-  }
+/** Seals `payload` under `key` (S), bound to `id` via AAD. `id` is the service's own id for this transport row — known only after `POST /transports` returns, so this always runs after that call. */
+export function sealTransportPayload(payload: TransportPayload, key: Buffer, id: string): TransportFragment {
+  assertKeyLength(key);
   const iv = randomBytes(IV_LENGTH);
-  const cipher = createCipheriv(AES_ALGORITHM, token, iv, { authTagLength: AUTH_TAG_LENGTH });
-  cipher.setAAD(TRANSPORT_AAD);
+  const cipher = createCipheriv(AES_ALGORITHM, key, iv, { authTagLength: AUTH_TAG_LENGTH });
+  cipher.setAAD(transportAad(id));
   const plaintext = Buffer.from(JSON.stringify(payload), 'utf8');
   const encrypted = Buffer.concat([cipher.update(plaintext), cipher.final()]);
   const authTag = cipher.getAuthTag();
   return {
-    v: 1,
     iv: iv.toString('base64url'),
     ct: Buffer.concat([encrypted, authTag]).toString('base64url'),
   };
 }
 
 /**
- * Opens a transport envelope with `token` (T). Throws `DECRYPT_KEY_MISMATCH`
- * on a wrong token or a tampered envelope — GCM does not distinguish the two.
- * Not used by CLI production code (Keep opens transport envelopes); kept here
- * so the round trip is testable and the shape has one authoritative reader.
+ * Opens a transport fragment with `key` (S), bound to `id` via AAD. Throws
+ * `DECRYPT_KEY_MISMATCH` on a wrong key, a wrong/tampered `id`, or a
+ * tampered fragment — GCM does not distinguish any of those. Not used by
+ * CLI production code (Keep opens transport fragments); kept here so the
+ * round trip is testable and the shape has one authoritative reader.
  */
-export function openTransportEnvelope(envelope: TransportEnvelope, token: Buffer): TransportPayload {
-  if (envelope.v !== 1) {
-    throw new CapyError('Unsupported transport envelope version', ERROR_CODES.INVALID_FORMAT, { v: envelope.v });
-  }
-  if (token.length !== T_LENGTH) {
-    throw new CapyError('Transport token must be 32 bytes', ERROR_CODES.ENCRYPTION_ERROR);
-  }
-  const iv = Buffer.from(envelope.iv, 'base64url');
-  const combined = Buffer.from(envelope.ct, 'base64url');
+export function openTransportFragment(fragment: TransportFragment, key: Buffer, id: string): TransportPayload {
+  assertKeyLength(key);
+  const iv = Buffer.from(fragment.iv, 'base64url');
+  const combined = Buffer.from(fragment.ct, 'base64url');
   if (combined.length < AUTH_TAG_LENGTH) {
-    throw new CapyError('Transport envelope ciphertext too short', ERROR_CODES.INVALID_FORMAT);
+    throw new CapyError('Transport fragment ciphertext too short', ERROR_CODES.INVALID_FORMAT);
   }
   const ciphertext = combined.subarray(0, combined.length - AUTH_TAG_LENGTH);
   const authTag = combined.subarray(combined.length - AUTH_TAG_LENGTH);
 
-  const decipher = createDecipheriv(AES_ALGORITHM, token, iv, { authTagLength: AUTH_TAG_LENGTH });
-  decipher.setAAD(TRANSPORT_AAD);
+  const decipher = createDecipheriv(AES_ALGORITHM, key, iv, { authTagLength: AUTH_TAG_LENGTH });
+  decipher.setAAD(transportAad(id));
   decipher.setAuthTag(authTag);
   try {
     const plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
     return JSON.parse(plaintext.toString('utf8')) as TransportPayload;
   } catch {
     throw new CapyError(
-      'Could not open transport envelope — wrong token or tampered ciphertext',
+      'Could not open transport fragment — wrong key, wrong transport id, or tampered ciphertext',
       ERROR_CODES.DECRYPT_KEY_MISMATCH,
     );
   }
+}
+
+/**
+ * Parses a `capy transport` URL's fragment (`<id>.<iv>.<ct>`, the part
+ * after `#`) into its three parts. The CLI itself never needs to parse a
+ * fragment it just built — this exists for tests to prove the link they
+ * asserted on round-trips into what `openTransportFragment` expects, the
+ * same way Keep's `/transport` page will parse it.
+ */
+export function parseTransportFragment(fragment: string): { id: string; iv: string; ct: string } {
+  const parts = fragment.split('.');
+  if (parts.length !== 3 || parts.some((p) => p.length === 0)) {
+    throw new CapyError('Malformed transport link fragment', ERROR_CODES.INVALID_FORMAT);
+  }
+  const [id, iv, ct] = parts;
+  return { id, iv, ct };
 }

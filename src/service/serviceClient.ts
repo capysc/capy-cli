@@ -659,7 +659,15 @@ export class ServiceClient {
 
   // --- Basic pairing (CAP-684, docs/basic-pair.md) ---
 
-  /** `capy transport`: stores the sealed transport envelope; the row is deleted on first activate or after 15 minutes, whichever comes first. */
+  /**
+   * `capy transport` "v2": `ciphertext` here is `base64url(S)` — the
+   * one-time 32-byte transport key itself, NOT the encrypted payload (that
+   * lives only in the printed link's fragment, which this call never sees).
+   * The service is unchanged and unaware of the swap: it still just stores
+   * whatever string it's given and hands it back unmodified from
+   * `activate`. The row is deleted on first activate or after 15 minutes,
+   * whichever comes first.
+   */
   async createTransport(ciphertext: string): Promise<{ id: string; expires_at: string }> {
     return this.request('POST', '/transports', { ciphertext });
   }
@@ -670,9 +678,8 @@ export class ServiceClient {
    * only once — the row is deleted on pickup, same lifecycle as `/transports`.
    *
    * `sealed` is a JSON STRING (the `JSON.stringify` of the pair envelope
-   * `{v:1, epk, iv, ct}`, the same convention `createTransport`'s
-   * `ciphertext` argument uses) — the caller must `JSON.parse` and validate
-   * it before opening (see `crypto/pairCrypto.ts#parsePairEnvelope`).
+   * `{v:1, epk, iv, ct}`) — the caller must `JSON.parse` and validate it
+   * before opening (see `crypto/pairCrypto.ts#parsePairEnvelope`).
    */
   async pickupDevicePairing(deviceCode: string): Promise<{ sealed: string }> {
     return this.request('POST', '/device-pairings/pickup', { device_code: deviceCode });

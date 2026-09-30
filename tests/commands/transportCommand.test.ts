@@ -114,18 +114,42 @@ describe('TransportCommand', () => {
     expect(stdout.trim().startsWith('{')).toBe(true);
   });
 
-  test('sends the org+user local key and key.enc content as the transport payload', async () => {
-    await withCapturedIo(() => new TransportCommand().execute({ json: true }));
+  test('sends S (a fresh 32-byte key) as the transport ciphertext field — never the payload, never k_local/key.enc', async () => {
+    const { stdout } = await withCapturedIo(() => new TransportCommand().execute({ json: true }));
     expect(mockCreateTransport).toHaveBeenCalledTimes(1);
     const ciphertextArg = mockCreateTransport.mock.calls[0][0];
-    // The envelope is opaque ciphertext to this test — it must not contain
-    // the plaintext k_local or key_enc content anywhere.
+    // "v2": this argument IS the one-time key S itself (base64url), not a
+    // sealed envelope — assert its shape, and that it carries no trace of
+    // the plaintext k_local or key_enc content.
+    expect(typeof ciphertextArg).toBe('string');
+    expect(Buffer.from(ciphertextArg, 'base64url').length).toBe(32);
     expect(ciphertextArg).not.toContain(K_LOCAL.toString('base64url'));
     expect(ciphertextArg).not.toContain('blob');
-    const envelope = JSON.parse(ciphertextArg);
-    expect(envelope.v).toBe(1);
-    expect(typeof envelope.iv).toBe('string');
-    expect(typeof envelope.ct).toBe('string');
+
+    // The actual sealed payload (iv + ciphertext) lives only in the printed
+    // link's fragment — S itself never appears there.
+    const parsed = JSON.parse(stdout);
+    const fragment = parsed.url.split('#')[1];
+    expect(fragment.split('.')).toHaveLength(3);
+    expect(fragment).not.toContain(ciphertextArg);
+  });
+
+  test('the link fragment opens with S and the returned id, and fails with a different id (AAD binding)', async () => {
+    const { stdout } = await withCapturedIo(() => new TransportCommand().execute({ json: true }));
+    const { openTransportFragment, parseTransportFragment } = await import('../../src/crypto/transportCrypto');
+
+    const parsed = JSON.parse(stdout);
+    const fragment = parseTransportFragment(parsed.url.split('#')[1]);
+    expect(fragment.id).toBe('transport-1');
+
+    const key = Buffer.from(mockCreateTransport.mock.calls[0][0], 'base64url');
+    const opened = openTransportFragment({ iv: fragment.iv, ct: fragment.ct }, key, fragment.id);
+    expect(opened).toEqual({
+      v: 1,
+      entries: [{ org_id: 'org-123', user_id: 'user-456', k_local: K_LOCAL.toString('base64url'), key_enc: KEY_ENC }],
+    });
+
+    expect(() => openTransportFragment({ iv: fragment.iv, ct: fragment.ct }, key, 'transport-someone-elses')).toThrow();
   });
 
   test('human mode prints the link and expiry', async () => {
