@@ -29,6 +29,7 @@ import {
   currentBranch,
   checkoutBranch,
   discardPaths,
+  restorePathsToHead,
   stashOtherChanges,
   popStash,
   pushBranch,
@@ -146,17 +147,36 @@ export interface KeepInfo {
   branches: string[];
 }
 
+/** One (variable, branch) entry, as loosely as `readKeep` needs to read it. */
+interface ParsedKeepEntry {
+  branch?: string;
+}
+
+/**
+ * The keep.lock shape `readKeep` needs — org_id/project_id required (nothing
+ * useful can come from a file missing either), variables optional and only
+ * as deep as `readKeep` reads it. Deliberately looser than a fully validated
+ * `KeepFile` (that's `ProjectManager.readKeepFile`, which additionally
+ * requires `project_name`/`version` and is used by every OTHER reader) — the
+ * runtime check in `readKeep` below is still what actually enforces
+ * org_id/project_id being present; this type just replaces `any` in the
+ * code that reads the parsed result.
+ */
+interface ParsedKeepJson {
+  org_id: string;
+  project_id: string;
+  variables?: Record<string, ParsedKeepEntry[]>;
+}
+
 /**
  * Best-effort JSON read: null on anything short of a parsed object (missing
  * file, unreadable, malformed JSON) — `readKeep` below only ever needs
- * org_id/project_id/variables out of this, not a fully validated KeepFile
- * (that's `ProjectManager.readKeepFile`, which is stricter — it requires
- * `project_name`/`version` too — and used by every OTHER reader).
+ * org_id/project_id/variables out of this, not a fully validated KeepFile.
  */
-function tryReadKeepJson(path: string): any | null {
+function tryReadKeepJson(path: string): ParsedKeepJson | null {
   if (!existsSync(path)) return null;
   try {
-    return JSON.parse(readFileSync(path, 'utf-8'));
+    return JSON.parse(readFileSync(path, 'utf-8')) as ParsedKeepJson;
   } catch {
     return null;
   }
@@ -185,7 +205,7 @@ export function readKeep(cwd: string): KeepInfo | null {
     new Set(
       Object.values(raw.variables ?? {})
         .flatMap((entries) => (Array.isArray(entries) ? entries : []))
-        .map((e: any) => e?.branch)
+        .map((e) => e?.branch)
         .filter((b): b is string => Boolean(b)),
     ),
   ).sort();
@@ -1849,19 +1869,6 @@ export async function deployCommand(
   // capy never blocks on uncommitted source changes. It only ever stages and
   // commits keep.lock — your work-in-progress is left exactly as it was.
   const gitOk = !options.dryRun && isGitRepo(cwd);
-  // Direct mode is one of the sanctioned exceptions to "the tracked
-  // keep.lock is written once and never touched again" (FileManager.
-  // writeKeepFile, CAP-667) — it's an explicit action that commits keep.lock
-  // onto the user's OWN current branch. Since sync/push/edit now write pins
-  // only into the untracked working copy (.capy/keep.lock), catch the
-  // tracked file up to it here, BEFORE deciding whether keep.lock is dirty —
-  // otherwise the tracked file (frozen since project init) never looks
-  // dirty, this commit step never fires, and a deploy ships secrets whose
-  // pins were never captured in git.
-  if (gitOk && mode === 'direct') {
-    syncTrackedKeepForDirectDeploy(cwd);
-  }
-  const keepLockDirty = gitOk && hasKeepLockChanges(cwd);
 
   // Confirm-or-edit loop. Single-keypress picker (c/e/d/esc) so the user
   // can fix a saved target inline instead of having to abort, run
@@ -2017,28 +2024,54 @@ export async function deployCommand(
     }
   }
 
-  // ── Direct mode only: commit keep.lock on the current branch, stashing other
-  //    WIP. CI mode never touches the user's tree — it builds the PR commit in
-  //    an isolated worktree below.
-  let directStashed = false;
-  if (gitOk && mode === 'direct' && keepLockDirty) {
+  // ── Direct mode only: commit keep.lock on the current branch, stashing
+  //    other WIP. CI mode never touches the user's tree — it builds the PR
+  //    commit in an isolated worktree below.
+  //
+  // The tracked-keep sync (catching it up to capy's current pins — sync/
+  // push/edit now write only into the untracked working copy,
+  // .capy/keep.lock — see syncTrackedKeepForDirectDeploy) runs HERE,
+  // immediately before deciding whether keep.lock is dirty and immediately
+  // before the commit itself — not any earlier in the run. Every exit
+  // between an earlier sync and this point (confirm cancel/delete/
+  // edit-cancel, a failed preflight recheck, a failed mint/decrypt) would
+  // otherwise leave the tracked file modified and uncommitted, reintroducing
+  // the exact CAP-667 symptom: a teammate's next `git pull` refusing with
+  // "local changes would be overwritten". Any failure from here on restores
+  // keep.lock to HEAD's version before returning, for the same reason.
+  const directCommit = await (async (): Promise<
+    | { kind: 'skip' }
+    | { kind: 'committed'; stashed: boolean }
+    | { kind: 'failed'; stashed: boolean }
+  > => {
+    if (!gitOk || mode !== 'direct') return { kind: 'skip' };
+    syncTrackedKeepForDirectDeploy(cwd);
+    if (!hasKeepLockChanges(cwd)) return { kind: 'skip' };
+
     const stash = stashOtherChanges(cwd);
     if (!stash.ok) {
       console.error(`${RED('✗')} git stash: ${stash.error}`);
-      return 1;
+      restorePathsToHead(cwd, ['keep.lock']);
+      return { kind: 'failed', stashed: false };
     }
-    directStashed = stash.stashed;
-    if (directStashed) {
+    if (stash.stashed) {
       console.log(`  ${GREEN('✓')} stash   set aside other working-tree changes (will restore)`);
     }
     const commit = stageAndCommit(cwd, ['keep.lock'], msg);
     if (!commit.ok) {
       console.error(`${RED('✗')} ${commit.error}`);
-      await unwindGitState(cwd, null, directStashed);
-      return 1;
+      restorePathsToHead(cwd, ['keep.lock']);
+      await unwindGitState(cwd, null, stash.stashed);
+      return { kind: 'failed', stashed: stash.stashed };
     }
     console.log(`  ${GREEN('✓')} commit  ${msg}`);
+    return { kind: 'committed', stashed: stash.stashed };
+  })();
+
+  if (directCommit.kind === 'failed') {
+    return 1;
   }
+  const directStashed = directCommit.kind === 'committed' ? directCommit.stashed : false;
 
   // ── Push the secrets.
   const result = await adapter.deploy(target, {

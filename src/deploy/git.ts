@@ -302,6 +302,24 @@ export function discardPaths(
   return { ok: true };
 }
 
+/**
+ * Restore specific paths to exactly their HEAD version — both the index AND
+ * the working tree. Unlike `discardPaths` (`git checkout -- <path>`, which
+ * restores from the INDEX), this un-does a `git add` too: direct-mode
+ * deploy's keep.lock sync may have staged the file before its commit failed,
+ * and `git checkout -- keep.lock` alone would just restore that same staged
+ * (uncommitted) content, leaving the tree dirty. `git checkout HEAD --
+ * <path>` resets both, so a failed commit never leaves keep.lock modified.
+ */
+export function restorePathsToHead(
+  cwd: string,
+  paths: string[],
+): { ok: boolean; error?: string } {
+  const r = git(['checkout', 'HEAD', '--', ...paths], cwd);
+  if (r.code !== 0) return { ok: false, error: r.stderr.trim() };
+  return { ok: true };
+}
+
 export function pushBranch(
   cwd: string,
   branch: string,
