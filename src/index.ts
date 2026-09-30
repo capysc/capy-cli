@@ -3,6 +3,7 @@
 // land before a single Capy module reads configuration.
 import { applyProdPins, formatPinNotice } from './config/prodPins';
 import { Command } from 'commander';
+import { registerAuditCommand } from './commands/auditCommand';
 import { CapyCommand } from './commands/capyCommand';
 import { CapyError, CliOptions, ERROR_CODES } from './types/index';
 import { assertNotLocalOnly } from './core/localGate';
@@ -62,6 +63,7 @@ const pinNotice = formatPinNotice(strippedPins);
 if (pinNotice) console.error(pinNotice);
 
 const program = new Command();
+registerAuditCommand(program);
 
 program
   // Bin name is overridable so sibling wrappers (e.g. bin/capy-staging) render

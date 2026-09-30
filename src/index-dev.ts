@@ -7,6 +7,7 @@
 import { config } from 'dotenv';
 import { resolve } from 'path';
 import { Command } from 'commander';
+import { registerAuditCommand } from './commands/auditCommand';
 import { CapyCommand } from './commands/capyCommand';
 import { CliOptions } from './types/index';
 import { version as CLI_VERSION } from '../package.json';
@@ -86,6 +87,7 @@ if (!process.env.CAPY_KEEP_ORIGIN) {
 }
 
 const program = new Command();
+registerAuditCommand(program, true);
 
 program
   .name('capy-dev')

@@ -13,6 +13,7 @@ describe('local-only command gating', () => {
       'invite',
       'kick',
       'users',
+      'audit',
       'grant-branch',
       'revoke-branch',
       'org',
@@ -27,8 +28,8 @@ describe('local-only command gating', () => {
       'branch',
       'checkout',
       'flow',
-    ].sort();
-    expect([...LOCAL_ONLY_DISABLED_COMMANDS].sort()).toEqual(expected);
+    ];
+    expect(new Set(LOCAL_ONLY_DISABLED_COMMANDS)).toEqual(new Set(expected));
   });
 
   it('does NOT disable the offline-capable commands', () => {
