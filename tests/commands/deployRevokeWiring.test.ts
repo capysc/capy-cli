@@ -40,10 +40,13 @@
  * `mock.module()` is process-wide: this file runs isolated (tests/run-tests.sh).
  */
 import { describe, test, expect, mock, spyOn, afterEach } from 'bun:test';
-import { mkdirSync, writeFileSync, rmSync, readFileSync } from 'fs';
+import { mkdirSync, writeFileSync, rmSync, readFileSync, existsSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { SyncEngine } from '../../src/sync/syncEngine';
+
+/** Sentinel filename (see the mocked `getLatestSecrets` below) — its mere presence next to `ROOT/keep.lock` models a stale local keep.lock. */
+const STALE_KEEP_MARKER = '.simulate-stale-keep';
 
 // Declared before the mocks below (which close over it) — a `const` at
 // module scope is fully initialized before any test() callback runs, so the
@@ -79,12 +82,17 @@ mock.module('../../src/service/serviceClient', () => ({
     }
     // Fakes "the server agrees with local" — reads the SAME keep.lock
     // `pm.readKeepFile()` just read and hashes it the same way the real
-    // server would, so `pushKeepTransform`'s drift guard always proceeds.
+    // server would, so `pushKeepTransform`'s (and `resolveFreshSnapshot`'s)
+    // drift guard always proceeds. A test that wants to model a STALE local
+    // keep.lock instead drops the sentinel file `STALE_KEEP_MARKER` (below)
+    // next to it — its mere presence, not its content, flips this to return
+    // a hash that can never match the local file's real one.
     async getLatestSecrets(_projectId: string, branch: string) {
       const keep = JSON.parse(readFileSync(join(ROOT, 'keep.lock'), 'utf-8'));
+      const realHash = SyncEngine.computeKeepHash(keep, branch);
       return {
         env_file: 'STUB_ENV_FILE',
-        keep_hash: SyncEngine.computeKeepHash(keep, branch),
+        keep_hash: existsSync(join(ROOT, STALE_KEEP_MARKER)) ? `stale-${realHash}` : realHash,
         keep_file: JSON.stringify(keep),
       };
     }
@@ -275,12 +283,30 @@ async function withEnv<T>(vars: Readonly<Record<string, string | undefined>>, fn
 async function runScriptedDeploy(
   fetchMock: ReturnType<typeof dokployFetchMock>,
   options: Parameters<typeof deployCommand>[1] = { yes: true },
+  errorMock: ReturnType<typeof mock> = mock((..._a: unknown[]) => {}),
 ): Promise<number> {
   const logSpy = spyOn(console, 'log').mockImplementation((() => {}) as never);
-  const errSpy = spyOn(console, 'error').mockImplementation((() => {}) as never);
+  const errSpy = spyOn(console, 'error').mockImplementation(errorMock as never);
   const fetchSpy = spyOn(globalThis, 'fetch').mockImplementation(fetchMock as never);
   try {
     return await deployCommand('dokploy-direct', options, ROOT);
+  } finally {
+    logSpy.mockRestore();
+    errSpy.mockRestore();
+    fetchSpy.mockRestore();
+  }
+}
+
+/** Same shape as `runScriptedDeploy`, for `deployRemove` instead. */
+async function runScriptedRemove(
+  fetchMock: ReturnType<typeof mock>,
+  errorMock: ReturnType<typeof mock> = mock((..._a: unknown[]) => {}),
+): Promise<number> {
+  const logSpy = spyOn(console, 'log').mockImplementation((() => {}) as never);
+  const errSpy = spyOn(console, 'error').mockImplementation(errorMock as never);
+  const fetchSpy = spyOn(globalThis, 'fetch').mockImplementation(fetchMock as never);
+  try {
+    return await deployRemove('dokploy-direct', ROOT, {});
   } finally {
     logSpy.mockRestore();
     errSpy.mockRestore();
@@ -390,5 +416,79 @@ describe('capy deploy — superseded deploy-token revocation wiring (validator f
       new Set(['dep_prior', 'dep_older_1', 'dep_older_2']),
     );
     expect(revokeDeployTokenMock).toHaveBeenCalledTimes(3);
+  }, 30_000);
+
+  // ── "No untracked tokens" pre-checks (CAP-687 follow-up) ─────────────────
+  // A stale local keep.lock must refuse BEFORE minting or delivering
+  // anything — not discover the staleness only AFTER something was already
+  // minted or revoked with nothing left to record it against.
+
+  test('direct mode: a stale local keep.lock refuses to mint/deliver anything, with a coded error', async () => {
+    setUp({ mode: 'direct' });
+    writeFileSync(join(ROOT, STALE_KEEP_MARKER), '');
+    revokeDeployTokenMock.mockClear();
+    pushSecretsMock.mockClear();
+    mintDeployTokenMock.mockClear();
+
+    // Scripted for a full real deploy — proves the refusal happens before
+    // ANY of it, not just before whichever step happens to be reached first.
+    const fetchMock = dokployFetchMock({ realDeploy: true });
+    const errorMock = mock((..._a: unknown[]) => {});
+
+    const code = await withEnv({ MY_REVOKE_TEST_TOKEN: 'dk_token' }, () =>
+      runScriptedDeploy(fetchMock, { yes: true }, errorMock),
+    );
+
+    expect(code).toBe(1);
+    expect(mintDeployTokenMock).not.toHaveBeenCalled();
+    expect(pushSecretsMock).not.toHaveBeenCalled();
+    expect(revokeDeployTokenMock).not.toHaveBeenCalled();
+    // Only the preflight read happened — no delivery
+    // (`application.saveEnvironment`), no trigger, no poll.
+    expect(fetchMock.mock.calls.every((c) => !(c[0] as string).includes('saveEnvironment'))).toBe(true);
+    expect(fetchMock.mock.calls.every((c) => !(c[0] as string).includes('deployment'))).toBe(true);
+
+    const warnings = errorMock.mock.calls.map((c) => c.join(' ')).join('\n');
+    expect(warnings).toContain('DEPLOY_STALE_KEEP');
+  }, 30_000);
+
+  test('targets-remove: a stale local keep.lock refuses to strip or revoke anything, with a coded error', async () => {
+    setUp({ mode: 'direct' });
+    writeFileSync(join(ROOT, STALE_KEEP_MARKER), '');
+    revokeDeployTokenMock.mockClear();
+    pushSecretsMock.mockClear();
+
+    const fetchMock = mock(async (url: string) => {
+      const u = new URL(url);
+      if (u.pathname.endsWith('application.one')) {
+        return {
+          status: 200,
+          ok: true,
+          text: async () =>
+            JSON.stringify({
+              applicationId: APP_ID,
+              name: 'demo-app',
+              env: 'NODE_ENV=production', // no Capy block — onRemove reports nothing_to_remove, offer.ok stays true
+              buildArgs: null,
+              buildSecrets: null,
+              createEnvFile: true,
+            }),
+        };
+      }
+      throw new Error(`unscripted request: ${url}`);
+    });
+    const errorMock = mock((..._a: unknown[]) => {});
+
+    const code = await withEnv({ MY_REVOKE_TEST_TOKEN: 'dk_token' }, () => runScriptedRemove(fetchMock, errorMock));
+
+    // The target config itself is still removed locally (that's
+    // `removeTarget`, unrelated to the keep.lock strip/revoke pairing this
+    // guards) — only the strip+revoke pairing is refused.
+    expect(code).toBe(0);
+    expect(revokeDeployTokenMock).not.toHaveBeenCalled();
+    expect(pushSecretsMock).not.toHaveBeenCalled();
+
+    const warnings = errorMock.mock.calls.map((c) => c.join(' ')).join('\n');
+    expect(warnings).toContain('DEPLOY_STALE_KEEP');
   }, 30_000);
 });

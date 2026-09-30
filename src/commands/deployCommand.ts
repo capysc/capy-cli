@@ -57,6 +57,7 @@ import {
 } from '../deploy/targetsGate';
 import { KeepFile, ERROR_CODES, AuthResult, ErrorCode } from '../types/index';
 import type { AuthService } from '../auth/authService';
+import type { ServiceClient } from '../service/serviceClient';
 import { ProjectManager } from '../core/projectManager';
 import { tmpdir } from 'os';
 import { ALL_ADAPTERS, getAdapter, listPlanned } from '../deploy/registry';
@@ -496,6 +497,13 @@ function targetRefFor(target: TargetConfig): Record<string, string> | undefined 
  * exception cases is therefore unchanged; the two NEW warning cases this fix
  * introduces (no server snapshot yet, local keep out of sync with it) are
  * new regardless, so there's no "unchanged text" to preserve for them.
+ *
+ * Returns `{ ok: true }` on an actual push OR a genuine no-op (`transform`
+ * found nothing to change); `{ ok: false }` on ANY refusal or failure —
+ * callers that minted a deploy token before calling this (CAP-687 follow-up,
+ * "no untracked tokens") check `.ok` to decide whether the mint is now
+ * untracked, and `capy deploy targets-remove` checks it to decide whether
+ * revoking is still safe. Never throws.
  */
 async function pushKeepTransform(
   cwd: string,
@@ -504,26 +512,83 @@ async function pushKeepTransform(
   devMode: boolean | undefined,
   label: string,
   opts: { writeLocal?: boolean; warnCode?: ErrorCode } = {},
-): Promise<void> {
+): Promise<{ ok: boolean }> {
   const writeLocal = opts.writeLocal ?? true;
   const codePrefix = opts.warnCode ? `${opts.warnCode}: ` : '';
   try {
     const pm = new ProjectManager(cwd);
-    // Never push an env blob for a branch other than the one `.env` is
-    // actually on — pushing under the wrong branch would file this write's
-    // keep-only change (and, below, the branch's re-sent secrets) against
-    // the wrong branch entirely.
+    const keep = pm.readKeepFile();
+    if (!keep) return { ok: false };
+    const nextKeep = transform(keep);
+    if (nextKeep === keep) return { ok: true };
+
+    const fresh = await resolveFreshSnapshot(cwd, branch, devMode, `${label} in keep.lock`, opts.warnCode);
+    if (!fresh) return { ok: false };
+
+    const pushed = await fresh.serviceClient.pushSecrets(fresh.projectId, JSON.stringify(nextKeep), fresh.latest.env_file, branch);
+
+    if (writeLocal) {
+      const { SyncEngine } = await import('../sync/syncEngine');
+      const fm = new FileManager(cwd);
+      fm.writeKeepFile(SyncEngine.adoptServerKeep(pushed.keep_file, nextKeep, branch));
+
+      const { autoCommitKeep } = await import('../git/autoCommitKeep');
+      autoCommitKeep(branch, cwd, { quiet: true });
+    }
+    return { ok: true };
+  } catch (err: any) {
+    console.error(`  ${YELLOW('!')} could not ${label} in keep.lock: ${codePrefix}${err?.message ?? err}`);
+    return { ok: false };
+  }
+}
+
+/**
+ * The freshness check shared by `pushKeepTransform` above (its own
+ * pre-push gate) AND every "no untracked tokens" PRE-check below (before
+ * minting a deploy token, before a direct-mode delivery, before
+ * `targets-remove` strips+revokes) — CAP-687 follow-up: minting or
+ * revoking against a stale local keep.lock left a fresh token, or a
+ * fresh revocation, recorded nowhere. Reads local keep.lock, authenticates,
+ * fetches the server's CURRENT snapshot for `branch` (`getLatestSecrets` —
+ * blob and hash from the SAME read, so they can never disagree with each
+ * other), and verifies that hash against the local keep's branch entries
+ * (`SyncEngine.computeKeepHash`).
+ *
+ * On success, returns everything a caller that's about to push needs — the
+ * local `KeepFile`, the server's snapshot, and an already-authenticated
+ * `ServiceClient` + `projectId`, so `pushKeepTransform` doesn't authenticate
+ * a second time. On ANY refusal (branch mismatch, uninitialized project, no
+ * local keep.lock, auth failure, no server snapshot yet, stale hash) or a
+ * thrown exception, prints ONE coded warning (via `label`/`warnCode`) and
+ * returns `null`. Never throws.
+ */
+async function resolveFreshSnapshot(
+  cwd: string,
+  branch: string,
+  devMode: boolean | undefined,
+  label: string,
+  warnCode?: ErrorCode,
+): Promise<{
+  keep: KeepFile;
+  latest: { env_file: string; keep_hash: string; keep_file?: string };
+  projectId: string;
+  serviceClient: ServiceClient;
+} | null> {
+  const codePrefix = warnCode ? `${warnCode}: ` : '';
+  try {
+    const pm = new ProjectManager(cwd);
+    // Never check (or later push) against a branch other than the one
+    // `.env` is actually on — proceeding under the wrong branch would file
+    // this write against the wrong branch entirely.
     const branchProblem = branchPushProblem(pm.deriveActiveBranch(), branch);
     if (branchProblem) {
-      console.error(`  ${YELLOW('!')} could not ${label} in keep.lock — ${codePrefix}${describeBranchProblem(branchProblem)}`);
-      return;
+      console.error(`  ${YELLOW('!')} could not ${label} — ${codePrefix}${describeBranchProblem(branchProblem)}`);
+      return null;
     }
     const projectState = await pm.detectProjectState();
-    if (!projectState.initialized || !projectState.organizationId || !projectState.projectId) return;
+    if (!projectState.initialized || !projectState.organizationId || !projectState.projectId) return null;
     const keep = pm.readKeepFile();
-    if (!keep) return;
-    const nextKeep = transform(keep);
-    if (nextKeep === keep) return;
+    if (!keep) return null;
 
     const { AuthService, silentAuthFailureMessage } = await import('../auth/authService');
     const { ServiceClient } = await import('../service/serviceClient');
@@ -534,39 +599,43 @@ async function pushKeepTransform(
     serviceClient.setTokenProvider(() => authService.getValidToken());
     const authResult = await authenticateSilentWithFallback(authService, projectState.organizationId);
     if (!authResult.success || !authResult.user_id) {
-      console.error(`  ${YELLOW('!')} could not ${label} in keep.lock — ${codePrefix}${silentAuthFailureMessage(authResult)}`);
-      return;
+      console.error(`  ${YELLOW('!')} could not ${label} — ${codePrefix}${silentAuthFailureMessage(authResult)}`);
+      return null;
     }
 
-    // The server's CURRENT snapshot for this branch — blob and hash from the
-    // SAME read, never derived locally. See this function's own doc for why.
     const latest = await serviceClient.getLatestSecrets(projectState.projectId, branch);
     if (!latest) {
-      console.error(
-        `  ${YELLOW('!')} could not ${label} in keep.lock — ${codePrefix}no secrets have been pushed for branch "${branch}" yet.`,
-      );
-      return;
+      console.error(`  ${YELLOW('!')} could not ${label} — ${codePrefix}no secrets have been pushed for branch "${branch}" yet.`);
+      return null;
     }
     const localHash = SyncEngine.computeKeepHash(keep, branch);
     if (latest.keep_hash !== localHash) {
       console.error(
-        `  ${YELLOW('!')} could not ${label} in keep.lock — ${codePrefix}local keep.lock is out of sync with the server for branch "${branch}"; run \`capy\` to sync first.`,
+        `  ${YELLOW('!')} could not ${label} — ${codePrefix}local keep.lock is out of sync with the server for branch "${branch}"; run \`capy\` to sync first.`,
       );
-      return;
+      return null;
     }
-
-    const pushed = await serviceClient.pushSecrets(projectState.projectId, JSON.stringify(nextKeep), latest.env_file, branch);
-
-    if (writeLocal) {
-      const fm = new FileManager(cwd);
-      fm.writeKeepFile(SyncEngine.adoptServerKeep(pushed.keep_file, nextKeep, branch));
-
-      const { autoCommitKeep } = await import('../git/autoCommitKeep');
-      autoCommitKeep(branch, cwd, { quiet: true });
-    }
+    return { keep, latest, projectId: projectState.projectId, serviceClient };
   } catch (err: any) {
-    console.error(`  ${YELLOW('!')} could not ${label} in keep.lock: ${codePrefix}${err?.message ?? err}`);
+    console.error(`  ${YELLOW('!')} could not ${label}: ${codePrefix}${err?.message ?? err}`);
+    return null;
   }
+}
+
+/**
+ * Prints the CAP-687 follow-up "untracked token" warning when a deploy
+ * token was minted but `pushKeepTransform`'s own record push (the backstop
+ * — a caller should already have refused BEFORE minting via
+ * `resolveFreshSnapshot`, so this only fires on a race) came back
+ * `{ ok: false }`. A no-op (nothing to record) or a call with no
+ * `deployId` at all is silent — there is no token to lose track of.
+ */
+function warnIfTokenUntracked(result: { ok: boolean }, deployId: string | undefined, targetName: string): void {
+  if (result.ok || !deployId) return;
+  console.error(
+    `  ${RED('✗')} ${ERROR_CODES.DEPLOY_TOKEN_UNTRACKED}: deploy token "${deployId}" for "${targetName}" was minted ` +
+      `but could not be recorded in keep.lock — it is now UNTRACKED. Run \`capy deploy revoke ${deployId}\` to revoke it.`,
+  );
 }
 
 /**
@@ -606,6 +675,15 @@ function deliveryFor(
  * Best-effort: the platform write already succeeded by the time this runs,
  * so a failure here is reported but does not flip the command's exit code —
  * the deploy itself did not fail.
+ *
+ * CAP-687 follow-up ("no untracked tokens"): the caller is expected to have
+ * already refused to mint/deliver at all when `resolveFreshSnapshot` found
+ * the local keep stale (see the main flow's own pre-check, right before
+ * `loadDeploySecrets`). This call is therefore the common case, and should
+ * succeed — but if keep.lock drifted again in the gap between that
+ * pre-check and this post-delivery record (a race, not a bug), and a token
+ * WAS minted, `warnIfTokenUntracked` escalates past the generic
+ * best-effort warning `pushKeepTransform` already printed.
  */
 async function recordDeployTargets(
   cwd: string,
@@ -619,13 +697,14 @@ async function recordDeployTargets(
   const deliveredAt = new Date().toISOString();
   const { delivery, values } = deliveryFor(target, adapter, deployId, noDeploy, valueHashes);
   if (values.length === 0) return;
-  await pushKeepTransform(
+  const result = await pushKeepTransform(
     cwd,
     target.branch,
     (keep) => recordTargetDeliveries(keep, target.branch, delivery, deliveredAt, values),
     devMode,
     'record deploy targets',
   );
+  warnIfTokenUntracked(result, deployId, target.name);
 }
 
 /**
@@ -661,7 +740,7 @@ async function recordDeployTargetsCi(
   const deliveredAt = new Date().toISOString();
   const { delivery, values } = deliveryFor(target, adapter, deployId, noDeploy, valueHashes);
   if (values.length === 0) return;
-  await pushKeepTransform(
+  const result = await pushKeepTransform(
     cwd,
     target.branch,
     (keep) => recordTargetDeliveries(keep, target.branch, delivery, deliveredAt, values),
@@ -669,6 +748,7 @@ async function recordDeployTargetsCi(
     'record deploy targets',
     { writeLocal: false, warnCode: ERROR_CODES.CI_DEPLOY_TARGETS_RECORD_FAILED },
   );
+  warnIfTokenUntracked(result, deployId, target.name);
 }
 
 /**
@@ -2028,44 +2108,78 @@ export async function deployRemove(
   // record of "this target received these vars" should not survive removal
   // — but it has its own independent guard (the branch check inside
   // `pushKeepTransform`).
+  //
+  // CAP-687 follow-up ("no untracked tokens"): when there ARE tokens to
+  // revoke, strip and revoke must happen TOGETHER — revoking first (the old
+  // order) could leave tokens revoked with their keep.lock records still
+  // live, if the strip afterward then silently skipped on a stale local
+  // keep.lock. So: a freshness pre-check refuses BOTH up front rather than
+  // discovering the mismatch mid-way, and the strip runs BEFORE revoke —
+  // revoke only fires once the strip has actually landed.
   if (target) {
     const stripSucceededOrNothingToDo = !offer || offer.ok;
     const pm = new ProjectManager(cwd);
     const keep = pm.readKeepFile();
     if (keep) {
       const deployIds = deployIdsForTarget(keep, target.kind, target.name);
-      if (deployIds.length > 0) {
-        if (!stripSucceededOrNothingToDo) {
-          console.log(
-            `  ${YELLOW('!')} keeping ${deployIds.length} deploy token(s) for "${name}" live — the platform-side ` +
-              `cleanup above did not succeed, so revoking now would strand secrets it already delivered.`,
-          );
+      const wantsRevoke = deployIds.length > 0 && stripSucceededOrNothingToDo;
+
+      if (deployIds.length > 0 && !stripSucceededOrNothingToDo) {
+        console.log(
+          `  ${YELLOW('!')} keeping ${deployIds.length} deploy token(s) for "${name}" live — the platform-side ` +
+            `cleanup above did not succeed, so revoking now would strand secrets it already delivered.`,
+        );
+      }
+
+      if (!wantsRevoke) {
+        // Nothing to revoke (or cleanup didn't succeed) — still strip the
+        // records unconditionally, same as always: the LOCAL record of
+        // "this target received these vars" should not survive removal
+        // regardless of the platform-side outcome.
+        await pushKeepTransform(
+          cwd,
+          target.branch,
+          (k) => stripTargetsForProviderTarget(k, target.kind, target.name),
+          opts.devMode,
+          'strip deploy targets',
+        );
+      } else {
+        const fresh = await resolveFreshSnapshot(cwd, target.branch, opts.devMode, 'strip deploy targets', ERROR_CODES.DEPLOY_STALE_KEEP);
+        if (!fresh) {
+          console.error(`${RED('✗')} refusing to strip targets or revoke deploy token(s) for "${name}" — see the warning above.`);
         } else {
-          try {
-            const { AuthService } = await import('../auth/authService');
-            const { ServiceClient } = await import('../service/serviceClient');
-            const projectState = await pm.detectProjectState();
-            if (!projectState.organizationId) throw new Error('no organization id in keep.lock');
-            const authService = new AuthService(undefined, opts.devMode, projectState.userId);
-            const serviceClient = new ServiceClient(undefined, opts.devMode);
-            serviceClient.setTokenProvider(() => authService.getValidToken());
-            const authResult = await authenticateSilentWithFallback(authService, projectState.organizationId);
-            if (authResult.success) {
-              await Promise.all(deployIds.map((id) => serviceClient.revokeDeployToken(id).catch(() => {})));
-              console.log(`  ${GREEN('✓')} revoked ${deployIds.length} deploy token(s) for "${name}".`);
+          const stripResult = await pushKeepTransform(
+            cwd,
+            target.branch,
+            (k) => stripTargetsForProviderTarget(k, target.kind, target.name),
+            opts.devMode,
+            'strip deploy targets',
+          );
+          if (!stripResult.ok) {
+            console.error(
+              `  ${YELLOW('!')} kept ${deployIds.length} deploy token(s) for "${name}" live — the keep.lock strip ` +
+                `did not complete (see the warning above), so revoking them now would leave a stale record.`,
+            );
+          } else {
+            try {
+              const { AuthService } = await import('../auth/authService');
+              const { ServiceClient } = await import('../service/serviceClient');
+              const projectState = await pm.detectProjectState();
+              if (!projectState.organizationId) throw new Error('no organization id in keep.lock');
+              const authService = new AuthService(undefined, opts.devMode, projectState.userId);
+              const serviceClient = new ServiceClient(undefined, opts.devMode);
+              serviceClient.setTokenProvider(() => authService.getValidToken());
+              const authResult = await authenticateSilentWithFallback(authService, projectState.organizationId);
+              if (authResult.success) {
+                await Promise.all(deployIds.map((id) => serviceClient.revokeDeployToken(id).catch(() => {})));
+                console.log(`  ${GREEN('✓')} revoked ${deployIds.length} deploy token(s) for "${name}".`);
+              }
+            } catch (err: any) {
+              console.error(`  ${YELLOW('!')} could not revoke deploy token(s) for "${name}": ${err?.message ?? err}`);
             }
-          } catch (err: any) {
-            console.error(`  ${YELLOW('!')} could not revoke deploy token(s) for "${name}": ${err?.message ?? err}`);
           }
         }
       }
-      await pushKeepTransform(
-        cwd,
-        target.branch,
-        (k) => stripTargetsForProviderTarget(k, target.kind, target.name),
-        opts.devMode,
-        'strip deploy targets',
-      );
     }
   }
 
@@ -3215,6 +3329,26 @@ export async function deployCommand(
     : null;
   if (gateOutcome?.kind === 'error') return 1;
   if (gateOutcome?.kind === 'unchanged') return 0;
+
+  // ── "No untracked tokens" pre-check (CAP-687 follow-up) — BEFORE minting
+  //    a deploy token or delivering ANYTHING. Direct mode always (it mints
+  //    and/or delivers unconditionally below); CI mode only when this
+  //    adapter actually mints a token (CI's own change-gate above already
+  //    stops an UNCHANGED run from minting — this catches the different
+  //    case: a real change, but a stale local keep.lock). Without this, a
+  //    fresh token gets minted and delivered, then `recordDeployTargets`'s
+  //    own post-delivery push (below) discovers the staleness and skips —
+  //    leaving that live token recorded NOWHERE. See `resolveFreshSnapshot`'s
+  //    own doc; `recordDeployTargets`/`recordDeployTargetsCi`'s
+  //    `warnIfTokenUntracked` is the backstop for the race this can't close
+  //    (keep.lock drifting again in the gap between this check and delivery).
+  if (!options.dryRun && (mode === 'direct' || (mode === 'ci' && adapter.needsDeployToken))) {
+    const fresh = await resolveFreshSnapshot(cwd, target.branch, options.devMode, 'deploy', ERROR_CODES.DEPLOY_STALE_KEEP);
+    if (!fresh) {
+      console.error(`${RED('✗')} refusing to deploy — see the warning above.`);
+      return 1;
+    }
+  }
 
   // ── Decrypt the secrets we're about to push (and, for a token adapter,
   //    mint) — only reached when direct mode, or CI mode just decided

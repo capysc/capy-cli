@@ -726,6 +726,8 @@ Every refusal carries a stable `code` — branch on it, never on message text.
 - `REMOVE_LOCAL_DRIFT`
 - `REMOVE_NEEDS_TTY`
 - `CI_DEPLOY_TARGETS_RECORD_FAILED`
+- `DEPLOY_STALE_KEEP`
+- `DEPLOY_TOKEN_UNTRACKED`
 
 ## Conventions
 
