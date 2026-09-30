@@ -31,6 +31,14 @@ describe('audit TUI', () => {
     expect(next.search).toEqual({ actor: 'alice', cursor: 'page-2' });
     expect(press({ ...next, loading: false }, 'p', 'p').search).toEqual(ready.search);
   });
+  it('refreshes the current page and retains the previous-page route', () => {
+    const next = press(ready, 'n', 'n');
+    const refreshed = press({ ...next, loading: false }, 'r', 'r');
+    expect(refreshed.search.cursor).toBe('page-2');
+    expect(refreshed.history).toEqual([ready.search]);
+    expect(refreshed.loading).toBe(true);
+    expect(press({ ...refreshed, loading: false }, 'p', 'p').search).toEqual(ready.search);
+  });
   it('edits inline, cycles fields, cancels drafts, and clears filters', () => {
     const editing = press(ready, '/', '/');
     expect(press(editing, 'q', 'q').draft).toBe('aliceq');
@@ -63,6 +71,16 @@ describe('audit TUI', () => {
       expect(lines.length).toBeLessThan(24);
       expect(lines.every(line => line.length <= columns)).toBe(true);
     }
+  });
+  it('pads wide names by terminal columns and keeps combining marks with their text', () => {
+    const state = { ...ready, page: { entries: [{ ...event, actorName: '王小明', targetName: 'Cafe\u0301' }], next_cursor: null } };
+    const screen = renderAuditScreen('Org', state, 80, 24);
+    expect(screen).toContain(`▶ 王小明${' '.repeat(10)}  secret.read`);
+    expect(screen).toContain(`project: Cafe\u0301${' '.repeat(6)}  `);
+    const editing = { ...state, mode: 'search' as const, draft: '王'.repeat(40) };
+    const searchLine = renderAuditScreen('Org', editing, 80, 24).split('\n')[5];
+    expect(searchLine).toContain('王'.repeat(30));
+    expect(searchLine).not.toContain('王'.repeat(31));
   });
   it('queries on submitted search and restores terminal on exit', async () => {
     const close = jest.fn();

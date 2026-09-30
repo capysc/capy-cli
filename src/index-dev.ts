@@ -107,7 +107,11 @@ program
   // flag, and threading a boolean through every signature between here and
   // there would be forgotten on the nineteenth. Commands that decide their own
   // flow still read `command.optsWithGlobals().web`.
-  .hook('preAction', (thisCommand) => {
+  .hook('preAction', (thisCommand, actionCommand) => {
+    // Commander consumes shared flags at the root before dispatching a child.
+    if (thisCommand.opts().json === true && actionCommand.options.some(option => option.long === '--json')) {
+      actionCommand.setOptionValue('json', true);
+    }
     setWebMode(thisCommand.opts().web === true);
   })
   .action(async (options, cmd) => {

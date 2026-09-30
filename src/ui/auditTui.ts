@@ -1,6 +1,7 @@
 import { emitKeypressEvents } from 'node:readline';
 import { PassThrough } from 'node:stream';
 import { AUDIT_FILTERS, AUDIT_SORTS, AuditPage, AuditSearch } from '../service/auditClient';
+import { clipTerminalText, terminalWidth, wrapTerminalText } from './terminalColumns';
 
 const RESET = '\x1b[0m';
 const DIM = '\x1b[90m';
@@ -15,7 +16,8 @@ export const auditText = (value: unknown): string => String(value ?? '—')
 
 const cell = (value: unknown, width: number): string => {
   const text = auditText(value);
-  return (text.length > width ? `${text.slice(0, Math.max(0, width - 1))}…` : text).padEnd(width);
+  const clipped = terminalWidth(text) > width ? `${clipTerminalText(text, Math.max(0, width - 1))}…` : text;
+  return clipped + ' '.repeat(Math.max(0, width - terminalWidth(clipped)));
 };
 const label = (value: string): string => value.replace(/_/g, ' ');
 
@@ -95,7 +97,7 @@ export function auditKey(state: AuditState, text: string, key: AuditKey): AuditS
   if (text === '/') return { ...state, mode: 'search', draft: state.search[AUDIT_FILTERS[state.field]] ?? '' };
   if (text === 's') return { ...state, mode: 'sort', sort: AUDIT_SORTS.indexOf(state.search.sort ?? 'occurred_at'), order: state.search.order ?? 'desc' };
   if (text === 'c') return load(state, { sort: state.search.sort, order: state.search.order, limit: state.search.limit });
-  if (text === 'r') return load(state, { ...state.search, cursor: undefined });
+  if (text === 'r') return load(state, state.search, state.history);
   if (state.loading) return state;
   if (key.name === 'up') return { ...state, selected: Math.max(0, state.selected - 1) };
   if (key.name === 'down') return { ...state, selected: Math.min(Math.max(0, state.page.entries.length - 1), state.selected + 1) };
@@ -105,10 +107,6 @@ export function auditKey(state: AuditState, text: string, key: AuditKey): AuditS
   return state;
 }
 
-const wrap = (text: string, width: number): readonly string[] => Array.from(
-  { length: Math.max(1, Math.ceil(text.length / width)) }, (_, index) => text.slice(index * width, (index + 1) * width),
-);
-
 /** Matches edit's two-column margin, summary cells, table selection and inline inspector. */
 export function renderAuditScreen(org: string, state: AuditState, columns = 80, rows = 24): string {
   const width = Math.max(12, columns - 4);
@@ -116,9 +114,9 @@ export function renderAuditScreen(org: string, state: AuditState, columns = 80, 
   const summaries = [`${state.page.entries.length} events`, `page ${state.history.length + 1}`, `${state.search.sort ?? 'occurred_at'} ${state.search.order ?? 'desc'}`];
   const summaryWidth = Math.floor(width / 3);
   const draftWidth = Math.max(1, width - 10 - label(AUDIT_FILTERS[state.field]).length);
-  const visibleDraft = auditText(state.draft).slice(-draftWidth);
+  const visibleDraft = clipTerminalText(auditText(state.draft), draftWidth, true);
   const searchLine = state.mode === 'search'
-    ? `${BOLD}Search${RESET} ${label(AUDIT_FILTERS[state.field])}: ${visibleDraft}${INVERSE} ${RESET}${' '.repeat(draftWidth - visibleDraft.length)}`
+    ? `${BOLD}Search${RESET} ${label(AUDIT_FILTERS[state.field])}: ${visibleDraft}${INVERSE} ${RESET}${' '.repeat(draftWidth - terminalWidth(visibleDraft))}`
     : `${DIM}${cell(`Search: ${filters || 'all events'}`, width)}${RESET}`;
   const heading = state.mode === 'sort'
     ? `${BOLD}Sort${RESET} ${label(AUDIT_SORTS[state.sort])} ${state.order}` : `${BOLD}Audit events${RESET}`;
@@ -127,7 +125,7 @@ export function renderAuditScreen(org: string, state: AuditState, columns = 80, 
   const selectedEvent = state.page.entries[state.selected];
   const bodyHeight = Math.max(1, rows - 12);
   const offset = Math.max(0, state.selected - bodyHeight + 1);
-  const detailLines = selectedEvent ? Object.entries(selectedEvent).flatMap(([key, value]) => wrap(
+  const detailLines = selectedEvent ? Object.entries(selectedEvent).flatMap(([key, value]) => wrapTerminalText(
     `${key}: ${auditText(typeof value === 'object' && value !== null ? JSON.stringify(value) : value)}`, Math.max(1, width - 5),
   ).map(line => `     ${line}`)) : [];
   const row = (index: number): string => {
