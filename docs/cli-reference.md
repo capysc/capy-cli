@@ -2,7 +2,7 @@
 
 # capy CLI reference
 
-Version `0.9.3`. Generated from `capy help --json`.
+Version `0.9.5`. Generated from `capy help --json`.
 
 ## Commands
 
