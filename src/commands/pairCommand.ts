@@ -19,6 +19,7 @@ import { AuthService } from '../auth/authService';
 import { ServiceClient } from '../service/serviceClient';
 import { readLocalRoot, saveLocalRoot, writeOrgKeyFileRaw } from '../config/globalConfig';
 import { renderTerminalQr } from '../ui/terminalQr';
+import { printMaskedLinkBlock, type MaskedLinkPromptHandle } from '../ui/maskedLinkPrompt';
 import { CapyError, ERROR_CODES } from '../types/index';
 import { refuseError } from './pairingRefusal';
 import type { PairingEntry } from '../crypto/pairingPayload';
@@ -60,6 +61,22 @@ function writeEntry(entry: PairingEntry, force: boolean): 'written' {
   return 'written';
 }
 
+/**
+ * Prints the non-`--json` (human) link block: QR (always the full,
+ * unmasked `deviceLink` — a phone scanning it needs the real `code` query
+ * param) then the masked link, interactive on a real TTY. `--json`'s own
+ * progress output (to stderr, unmasked, unchanged) is a separate branch in
+ * `pairCommand` below — this function is never called under `--json`.
+ */
+function printHumanPairBlock(deviceLink: string, qr: string | null, userCode: string): MaskedLinkPromptHandle | null {
+  console.log('');
+  if (qr) console.log(qr);
+  const prompt = printMaskedLinkBlock({ fullUrl: deviceLink, kind: 'query', label: 'Approve on your other device:' });
+  console.log(`  Code: ${userCode}`); // COPY-FLAG
+  console.log('');
+  return prompt;
+}
+
 export async function pairCommand(options: PairOptions = {}): Promise<void> {
   const json = options.json === true;
   const force = options.force === true;
@@ -72,18 +89,37 @@ export async function pairCommand(options: PairOptions = {}): Promise<void> {
     const keyPair = generatePairKeyPair();
     const authorize = await authorizeDevice(apiUrl, keyPair.publicKey);
 
+    // The QR always encodes the FULL deviceLink (fragment/query and all) —
+    // only the TEXT link below is ever masked.
     const deviceLink = `${resolveKeepOrigin()}/device?code=${encodeURIComponent(authorize.user_code)}`;
     const qr = renderTerminalQr(deviceLink);
-    announce(json, '');
-    if (qr) announce(json, qr);
-    announce(json, `  Approve on your other device: ${deviceLink}`); // COPY-FLAG
-    announce(json, `  Code: ${authorize.user_code}`); // COPY-FLAG
-    announce(json, '');
 
-    const exchange = await pollDeviceToken(apiUrl, authorize.device_code, {
-      intervalMs: authorize.interval * 1000,
-      timeoutMs: authorize.expires_in * 1000,
-    });
+    // `--json`'s progress output (stderr, unmasked) is unchanged below;
+    // this is the new masked/interactive block, printed only in human mode.
+    const prompt = json ? null : printHumanPairBlock(deviceLink, qr, authorize.user_code);
+    if (json) {
+      announce(true, '');
+      if (qr) announce(true, qr);
+      announce(true, `  Approve on your other device: ${deviceLink}`); // COPY-FLAG
+      announce(true, `  Code: ${authorize.user_code}`); // COPY-FLAG
+      announce(true, '');
+    }
+
+    // The poll and the masked-link key listener (`c`/`r`/`q`) run
+    // CONCURRENTLY — the listener is event-driven (stdin 'data'), never a
+    // blocking read, so it can never delay this. `prompt.stop()` always
+    // runs once the poll settles (success OR failure), restoring raw mode
+    // and detaching the listener even if the user never pressed a key.
+    const exchange = await (async () => {
+      try {
+        return await pollDeviceToken(apiUrl, authorize.device_code, {
+          intervalMs: authorize.interval * 1000,
+          timeoutMs: authorize.expires_in * 1000,
+        });
+      } finally {
+        prompt?.stop();
+      }
+    })();
 
     const authService = new AuthService(options.apiUrl, devMode);
     const installed = await authService.installDeviceGrantSession(exchange.token, exchange.user, exchange.organizations);
