@@ -433,11 +433,22 @@ program
 
 program
   .command('transport')
-  .description('Generate a redeem code to move your account to another machine')
-  .action(async (_options, command) => {
+  .description('Move your local key to another device via Keep (prints a QR code + link)')
+  .option('--json', 'emit machine-readable JSON instead of the human UI')
+  .action(async (options) => {
     const { TransportCommand } = await import('./commands/transportCommand');
     const cmd = new TransportCommand(process.env.CAPY_API_URL, true);
-    await cmd.execute({ web: command.optsWithGlobals().web === true });
+    await cmd.execute({ json: options.json === true });
+  });
+
+program
+  .command('pair')
+  .description('Pair this device into an org via Keep (device-code login + key pickup)')
+  .option('--json', 'emit machine-readable JSON instead of the human UI')
+  .option('--force', 'overwrite a different local key already on this machine')
+  .action(async (options) => {
+    const { pairCommand } = await import('./commands/pairCommand');
+    await pairCommand({ json: options.json === true, force: options.force === true, apiUrl: process.env.CAPY_API_URL, devMode: true });
   });
 
 program

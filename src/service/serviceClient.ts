@@ -32,6 +32,14 @@ const SERVER_CODES = new Set<string>([
   ERROR_CODES.NO_SECRETS,
   ERROR_CODES.ORG_NOT_FOUND,
   ERROR_CODES.DEPLOY_TOKEN_NOT_FOUND,
+  // CAP-684 basic pairing — device-pairings pickup refusals. INVALID_FORMAT
+  // is real here too: pickup's own `sendError` 400 for a missing/empty
+  // `device_code` (service/src/routes/devicePairings.ts) — without it in
+  // this allowlist, that 400 would misclassify as the generic SERVICE_ERROR.
+  ERROR_CODES.PAIRING_NOT_FOUND,
+  ERROR_CODES.PAIRING_WRONG_USER,
+  ERROR_CODES.PAIRING_NOT_READY,
+  ERROR_CODES.INVALID_FORMAT,
 ]);
 
 /**
@@ -247,28 +255,23 @@ export class ServiceClient {
     this.tokenProvider = provider;
   }
 
-  private async request<T>(method: string, path: string, body?: unknown, options?: { timeout?: number; _retried?: boolean }): Promise<T> {
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-    };
-    const token = this.tokenProvider ? await this.tokenProvider() : null;
-    if (token) {
-      headers['Authorization'] = `Bearer ${token.access_token}`;
-    }
-
+  /**
+   * The actual network round trip, isolated so `request()` never needs a
+   * `let`-then-try/catch-assignment binding for the response — this returns
+   * it (or throws the same `NETWORK_ERROR` it always did) instead of a
+   * caller having to declare `res` before the try block.
+   */
+  private async fetchOnce(method: string, path: string, headers: Record<string, string>, body: unknown, timeoutMs: number): Promise<Response> {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), options?.timeout ?? 30000);
-
-    let res: Response;
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      res = await fetch(`${this.apiUrl}${path}`, {
+      return await fetch(`${this.apiUrl}${path}`, {
         method,
         headers,
         body: body !== undefined ? JSON.stringify(body) : undefined,
         signal: controller.signal,
       });
     } catch (err: any) {
-      clearTimeout(timeout);
       if (err.name === 'AbortError') {
         throw new CapyError(
           `Failed to connect to ${B('Capy')} service. Please check your internet connection.`,
@@ -281,8 +284,21 @@ export class ServiceClient {
         ERROR_CODES.NETWORK_ERROR,
         { code: err.code || err.cause?.code }
       );
+    } finally {
+      clearTimeout(timeout);
     }
-    clearTimeout(timeout);
+  }
+
+  private async request<T>(method: string, path: string, body?: unknown, options?: { timeout?: number; _retried?: boolean }): Promise<T> {
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+    const token = this.tokenProvider ? await this.tokenProvider() : null;
+    if (token) {
+      headers['Authorization'] = `Bearer ${token.access_token}`;
+    }
+
+    const res = await this.fetchOnce(method, path, headers, body, options?.timeout ?? 30000);
 
     if (!res.ok) {
       const data = await res.json().catch(() => ({})) as Record<string, any>;
@@ -639,6 +655,34 @@ export class ServiceClient {
 
   async coDecrypt(orgId: string, ciphertext: string, notAfter?: number): Promise<{ plaintext: string }> {
     return this.request('POST', `/orgs/${orgId}/co-decrypt`, { ciphertext, ...(notAfter !== undefined ? { not_after: notAfter } : {}) });
+  }
+
+  // --- Basic pairing (CAP-684, docs/basic-pair.md) ---
+
+  /**
+   * `capy transport` "v2": `ciphertext` here is `base64url(S)` — the
+   * one-time 32-byte transport key itself, NOT the encrypted payload (that
+   * lives only in the printed link's fragment, which this call never sees).
+   * The service is unchanged and unaware of the swap: it still just stores
+   * whatever string it's given and hands it back unmodified from
+   * `activate`. The row is deleted on first activate or after 15 minutes,
+   * whichever comes first.
+   */
+  async createTransport(ciphertext: string): Promise<{ id: string; expires_at: string }> {
+    return this.request('POST', '/transports', { ciphertext });
+  }
+
+  /**
+   * `capy pair`'s last step: exchanges the now-authenticated device code for
+   * whatever Keep sealed to the CLI's public key. The server returns this
+   * only once — the row is deleted on pickup, same lifecycle as `/transports`.
+   *
+   * `sealed` is a JSON STRING (the `JSON.stringify` of the pair envelope
+   * `{v:1, epk, iv, ct}`) — the caller must `JSON.parse` and validate it
+   * before opening (see `crypto/pairCrypto.ts#parsePairEnvelope`).
+   */
+  async pickupDevicePairing(deviceCode: string): Promise<{ sealed: string }> {
+    return this.request('POST', '/device-pairings/pickup', { device_code: deviceCode });
   }
 
 
