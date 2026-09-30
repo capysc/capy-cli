@@ -28,13 +28,13 @@ function checkoutFeatureBranch(dir: string, name = 'feature'): void {
 }
 
 /** Runs `fn` with console.error captured, returning its value alongside the captured lines. */
-function withCapturedStderr<T>(fn: () => T): { value: T; errLines: string[] } {
-  const errLines: string[] = [];
-  const errSpy = spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
-    errLines.push(args.map(String).join(' '));
-  });
+function withCapturedStderr<T>(fn: () => T): { value: T; errLines: readonly string[] } {
+  const errSpy = spyOn(console, 'error').mockImplementation(() => {});
   try {
-    return { value: fn(), errLines };
+    const value = fn();
+    // Read the spy's own call record rather than pushing into an accumulator.
+    const errLines = errSpy.mock.calls.map((args) => args.map(String).join(' '));
+    return { value, errLines };
   } finally {
     errSpy.mockRestore();
   }
