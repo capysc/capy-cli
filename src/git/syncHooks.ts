@@ -18,8 +18,13 @@ import { join } from 'path';
 export const SYNC_HOOK_MARKER = '# --- capy auto-sync (do not remove) ---';
 export const SYNC_HOOK_END_MARKER = '# --- end capy ---';
 
+/** Escapes every RegExp metacharacter (backslash included) so `s` matches literally. */
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\\/-]/g, '\\$&');
+}
+
 const BLOCK_RE = new RegExp(
-  `${SYNC_HOOK_MARKER.replace(/[()]/g, '\\$&')}[\\s\\S]*?${SYNC_HOOK_END_MARKER.replace(/[()]/g, '\\$&')}\\n?`,
+  `${escapeRegExp(SYNC_HOOK_MARKER)}[\\s\\S]*?${escapeRegExp(SYNC_HOOK_END_MARKER)}\\n?`,
 );
 
 /** `capy status` if `cmd` is installed; never a non-zero status. */
