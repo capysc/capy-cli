@@ -495,15 +495,16 @@ function mulberry32Step(state: number): { value: number; next: number } {
   return { value, next: s };
 }
 
-/** `count` pseudo-random floats in [0, 1), deterministic from `seed` — built via `reduce`, each step a fresh array (spread), never `.push` onto an existing one. */
+/**
+ * `count` pseudo-random floats in [0, 1), deterministic from `seed`. mulberry32's
+ * state only ever advances by the constant 0x6d2b79f5, so the state before draw
+ * `k` is `(seed + k * 0x6d2b79f5) | 0` and every draw can be computed from its
+ * index directly: the same sequence as threading the state step by step, in
+ * linear time and with no accumulator. (`k * 0x6d2b79f5` stays well inside
+ * 2^53 for any count used here, so `| 0` wraps it exactly.)
+ */
 function randomSequence(seed: number, count: number): readonly number[] {
-  return Array.from({ length: count }).reduce<{ values: readonly number[]; state: number }>(
-    (acc) => {
-      const { value, next } = mulberry32Step(acc.state);
-      return { values: [...acc.values, value], state: next };
-    },
-    { values: [], state: seed },
-  ).values;
+  return Array.from({ length: count }, (_, k) => mulberry32Step((seed + k * 0x6d2b79f5) | 0).value);
 }
 
 const FUZZ_ALPHABET = ["'", '"', '`', '\\', 'n', 'r', '\n', ' ', '#', '$', '{', '}', '=', 'a', '\t'] as const;
