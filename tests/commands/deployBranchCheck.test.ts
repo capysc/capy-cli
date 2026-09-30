@@ -5,15 +5,61 @@
  * presence on both `deploy` and `deploy targets-remove` help text.
  *
  * Uses the same spawned-CLI style as `deployCommand.test.ts`.
+ *
+ * Hermetic: every spawned CLI runs under a throwaway HOME that holds a fake
+ * cached session (so `authenticate()` returns `cached` and NEVER starts the
+ * loopback OAuth login on 127.0.0.1:19420-19424) and a profile pointing the
+ * service at a closed loopback port (so every service call is refused
+ * locally, in milliseconds, instead of reaching api.capy.sc). The paths that
+ * used to "fail downstream at auth" now fail at that refused service call —
+ * the branch-check assertions below never depended on which.
  */
-import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
-import { mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'fs';
+import { describe, test, expect, beforeEach, afterEach, afterAll } from 'bun:test';
+import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { spawnSync } from 'child_process';
 
 const CLI = join(__dirname, '../../dist/index.js');
 const ROOT = join(tmpdir(), `capy-deploy-branch-${process.pid}-${Date.now()}`);
+
+/** Port 9 (discard) on loopback — nothing listens there, so connections are refused at once. */
+const UNREACHABLE_SERVICE_URL = 'http://127.0.0.1:9';
+
+/** Far enough ahead that the cached token never counts as expired. */
+const FAKE_SESSION_EXPIRES_AT = Date.UTC(2100, 0, 1);
+
+/** A CLI run that outlives this has hung — kill it rather than stall the suite. */
+const CLI_TIMEOUT_MS = 30_000;
+
+function makeFakeHome(): string {
+  const home = mkdtempSync(join(tmpdir(), 'capy-deploy-branch-home-'));
+  mkdirSync(join(home, '.capy', 'auth'), { recursive: true });
+  writeFileSync(
+    join(home, '.capy', 'config.json'),
+    JSON.stringify({ default: 'test', profiles: { test: { url: UNREACHABLE_SERVICE_URL } } }),
+  );
+  writeFileSync(
+    join(home, '.capy', 'auth', 'session.json'),
+    JSON.stringify({
+      version: 2,
+      user_id: 'user-test',
+      user_email: 'deploy-branch-test@example.com',
+      refresh_token: 'fake-refresh-token',
+      organizations: [{ id: 'org-test', workos_org_id: 'org_workos_test', name: 'test' }],
+      // `e30` is base64url for `{}` — a JWT-shaped token with no org_id claim.
+      sessions: { 'org-test': { access_token: 'fake.e30.token', expires_at: FAKE_SESSION_EXPIRES_AT } },
+    }),
+  );
+  return home;
+}
+
+const FAKE_HOME = makeFakeHome();
+
+// The deploy target reads its token from DOKPLOY_API_KEY; a developer's own
+// value must never reach these runs.
+const { DOKPLOY_API_KEY: _ignoredDokployKey, ...inheritedEnv } = process.env;
+const CLI_ENV = { ...inheritedEnv, HOME: FAKE_HOME, USERPROFILE: FAKE_HOME, CAPY_WEB_NO_OPEN: '1' };
 
 beforeEach(() => {
   if (existsSync(ROOT)) rmSync(ROOT, { recursive: true, force: true });
@@ -24,16 +70,28 @@ afterEach(() => {
   if (existsSync(ROOT)) rmSync(ROOT, { recursive: true, force: true });
 });
 
+afterAll(() => {
+  rmSync(FAKE_HOME, { recursive: true, force: true });
+});
+
 function capy(args: string[], cwd: string = ROOT): { stdout: string; stderr: string; code: number } {
-  const r = spawnSync('node', [CLI, ...args], { cwd, encoding: 'utf-8' });
+  const r = spawnSync('node', [CLI, ...args], {
+    cwd,
+    env: CLI_ENV,
+    encoding: 'utf-8',
+    timeout: CLI_TIMEOUT_MS,
+    killSignal: 'SIGKILL',
+  });
   return { stdout: r.stdout ?? '', stderr: r.stderr ?? '', code: r.status ?? 1 };
 }
 
 function writeKeep(dir: string, branches: string[] = ['development', 'production']): void {
-  const variables: Record<string, any[]> = {};
-  for (const v of ['DATABASE_URL']) {
-    variables[v] = branches.map((b) => ({ resource_id: 'rid' + b[0], branch: b, value_hash: 'hhh' }));
-  }
+  const variables = Object.fromEntries(
+    ['DATABASE_URL'].map((v) => [
+      v,
+      branches.map((b) => ({ resource_id: 'rid' + b[0], branch: b, value_hash: 'hhh' })),
+    ]),
+  );
   writeFileSync(
     join(dir, 'keep.lock'),
     JSON.stringify({ version: '3.0', org_id: 'org-test', project_id: 'proj-test', project_name: 'test', variables }, null, 2),
@@ -42,8 +100,7 @@ function writeKeep(dir: string, branches: string[] = ['development', 'production
 
 function writeDeployConfig(cwd: string, targets: any[]): void {
   mkdirSync(join(cwd, '.capy'), { recursive: true });
-  const obj: any = { version: '1', targets: {} };
-  for (const t of targets) obj.targets[t.name] = t;
+  const obj = { version: '1', targets: Object.fromEntries(targets.map((t) => [t.name, t])) };
   writeFileSync(join(cwd, '.capy/deploy.json'), JSON.stringify(obj, null, 2));
 }
 

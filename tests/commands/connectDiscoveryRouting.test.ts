@@ -23,6 +23,14 @@
  * is an empty object on purpose: any attempt to reach the org system store
  * for the key throws LOCALLY (a missing method), so this makes zero real
  * network calls either way.
+ *
+ * Discovery hands the system store an explicit `orgId`, and on that path
+ * `openSystemStoreContext` builds its OWN `AuthService` rather than using
+ * the fake context above. Left real, that service refreshes against the
+ * live API and then falls through to a loopback OAuth login — binding
+ * 127.0.0.1:19420-19424 and waiting five minutes for a browser. Both of its
+ * entry points are stubbed to a coded `no_session` failure for this whole
+ * file, so the store refuses with `AUTH_FAILED` instantly and locally.
  */
 import { mock, describe, test, expect, spyOn, afterAll } from 'bun:test';
 import { join } from 'node:path';
@@ -42,12 +50,29 @@ mock.module(join(import.meta.dir, '../../src/core/orgContext.ts'), () => ({
   resolveOrgContext: async () => FAKE_ORG_CONTEXT,
 }));
 
-afterAll(() => mock.restore());
-
 import { mkdtempSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { AuthService } from '../../src/auth/authService';
 import { ConnectCommand } from '../../src/commands/connectCommand';
 import type { ConnectOpts } from '../../src/commands/connectors/registry';
+import type { AuthResult } from '../../src/types/index';
+
+/** Thrown by the `process.exit` stub so the test can tell "exited" apart from any other error by type. */
+class ProcessExitCalled extends Error {
+  constructor(readonly code: number | undefined) {
+    super(`process.exit(${code})`);
+  }
+}
+
+const NO_SESSION: AuthResult = { success: false, error: 'No valid session available', error_code: 'no_session' };
+const silentAuthSpy = spyOn(AuthService.prototype, 'authenticateSilent').mockResolvedValue(NO_SESSION);
+const interactiveAuthSpy = spyOn(AuthService.prototype, 'authenticate').mockResolvedValue(NO_SESSION);
+
+afterAll(() => {
+  silentAuthSpy.mockRestore();
+  interactiveAuthSpy.mockRestore();
+  mock.restore();
+});
 
 describe('ConnectCommand.execute() --discover routing (isolated: mock.module on resolveOrgContext)', () => {
   test('discover:true, dryRun:true from a dir with NO keep.lock reaches discovery — never calls resolveContext / process.exit', async () => {
@@ -90,10 +115,8 @@ describe('ConnectCommand.execute() --discover routing (isolated: mock.module on 
   test('sanity check: the SAME missing-keep.lock directory, WITHOUT --discover, does exit via resolveContext', async () => {
     const ROOT = mkdtempSync(join(tmpdir(), 'capy-discover-routing-sanity-'));
     const originalCwd = process.cwd();
-    const exitCodes: Array<number | undefined> = [];
     const exitSpy = spyOn(process, 'exit').mockImplementation(((code?: number) => {
-      exitCodes.push(code);
-      throw new Error(`__exit_${code}__`);
+      throw new ProcessExitCalled(code);
     }) as never);
     try {
       process.chdir(ROOT);
@@ -101,14 +124,13 @@ describe('ConnectCommand.execute() --discover routing (isolated: mock.module on 
       await cmd
         .execute('dokploy', { nonTty: true, baseUrl: 'https://d', application: 'app_1', tokenEnv: 'T' } as ConnectOpts)
         .catch((err: unknown) => {
-          const m = err instanceof Error ? err.message : String(err);
-          if (!m.startsWith('__exit_')) throw err;
+          if (!(err instanceof ProcessExitCalled)) throw err;
         });
       // Proves the detector actually works: the single-service path (no
       // `--discover`) DOES hit `resolveContext()`'s "no keep.lock" exit —
       // the routing test above is catching a REAL ordering, not a fixture
       // that would pass no matter what.
-      expect(exitCodes).toEqual([1]);
+      expect(exitSpy.mock.calls.map(([code]) => code)).toEqual([1]);
     } finally {
       process.chdir(originalCwd);
       exitSpy.mockRestore();
