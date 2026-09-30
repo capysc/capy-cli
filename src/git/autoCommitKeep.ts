@@ -9,10 +9,17 @@ export interface AutoCommitResult {
   /** True when a commit containing keep.lock was created. */
   committed: boolean;
   /**
-   * Why no commit happened. 'unchanged' and 'disabled' are silent;
-   * everything else prints the drift warning.
+   * Why no commit happened. 'unchanged', 'disabled' and 'default_branch' are
+   * silent (well, 'default_branch' prints its own neutral hint, not the
+   * drift warning); everything else prints the drift warning.
    */
-  reason?: 'disabled' | 'not_a_repo' | 'unchanged' | 'in_progress_operation' | 'commit_failed';
+  reason?:
+    | 'disabled'
+    | 'not_a_repo'
+    | 'unchanged'
+    | 'in_progress_operation'
+    | 'commit_failed'
+    | 'default_branch';
 }
 
 function git(projectRoot: string, args: string[]): string {
@@ -29,6 +36,54 @@ function tryIsInsideWorkTree(projectRoot: string): boolean {
   } catch {
     return false;
   }
+}
+
+/** The ref name origin/HEAD points at, e.g. 'main' from 'refs/remotes/origin/main'. */
+function tryDefaultBranchFromOriginHead(projectRoot: string): string | null {
+  try {
+    const ref = git(projectRoot, ['symbolic-ref', 'refs/remotes/origin/HEAD']).trim();
+    const match = ref.match(/^refs\/remotes\/origin\/(.+)$/);
+    return match ? match[1] : null;
+  } catch {
+    return null;
+  }
+}
+
+function tryLocalBranchExists(projectRoot: string, branch: string): boolean {
+  try {
+    git(projectRoot, ['show-ref', '--verify', '--quiet', `refs/heads/${branch}`]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The repo's default branch: origin/HEAD when set, else a local `main` or
+ * `master` (in that order), else null when none of those exist. Resolved
+ * entirely from exit codes and ref names — never from parsed prose.
+ */
+function tryGetDefaultBranch(projectRoot: string): string | null {
+  const fromOrigin = tryDefaultBranchFromOriginHead(projectRoot);
+  if (fromOrigin) return fromOrigin;
+  if (tryLocalBranchExists(projectRoot, 'main')) return 'main';
+  if (tryLocalBranchExists(projectRoot, 'master')) return 'master';
+  return null;
+}
+
+function tryGetCurrentBranch(projectRoot: string): string | null {
+  try {
+    const name = git(projectRoot, ['rev-parse', '--abbrev-ref', 'HEAD']).trim();
+    return name === 'HEAD' ? null : name; // detached HEAD
+  } catch {
+    return null;
+  }
+}
+
+function hintDefaultBranchNotCommitted(branch: string): void {
+  // COPY-FLAG: no approved user-facing string was supplied for this case;
+  // kept minimal and neutral pending copy review.
+  console.error(`keep.lock updated, not committed (default branch: ${branch}).`);
 }
 
 /**
@@ -83,6 +138,17 @@ export function autoCommitKeep(
         warnUncommitted('a rebase/merge is in progress');
         return { committed: false, reason: 'in_progress_operation' };
       }
+    }
+
+    // A checkout on the repo's default branch is typically PR-only (never
+    // pushed to directly); auto-committing there piles up local pin commits
+    // that diverge from every `git pull`. Leave keep.lock changed and let
+    // the caller commit it deliberately on a feature branch instead.
+    const currentBranch = tryGetCurrentBranch(projectRoot);
+    const defaultBranch = tryGetDefaultBranch(projectRoot);
+    if (currentBranch !== null && defaultBranch !== null && currentBranch === defaultBranch) {
+      hintDefaultBranchNotCommitted(defaultBranch);
+      return { committed: false, reason: 'default_branch' };
     }
 
     git(projectRoot, ['add', '--', 'keep.lock']);

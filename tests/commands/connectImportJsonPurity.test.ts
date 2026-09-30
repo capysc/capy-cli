@@ -37,6 +37,10 @@ function initRepoWithKeep(dir: string): void {
   writeFileSync(join(dir, 'keep.lock'), JSON.stringify({ v: 0 }));
   git(dir, ['add', '.']);
   git(dir, ['commit', '-q', '-m', 'init']);
+  // autoCommitKeep now refuses to commit on the repo's default branch
+  // (CAP-690) — move off of it so this test still exercises the real
+  // commit-and-report-on-stderr path it's named for, not that guard.
+  git(dir, ['checkout', '-q', '-b', 'feature']);
 }
 
 const successOutcome = (): ImportOutcome => ({
