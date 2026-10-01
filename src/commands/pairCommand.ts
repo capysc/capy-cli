@@ -3,9 +3,11 @@
  * org by pulling `local.key` + `key.enc` from a browser already signed into
  * Keep, via a WorkOS RFC 8628 device-grant login.
  *
- * 1. Mint a one-time P-256 ECDH key pair and `POST /auth/device/authorize`.
+ * 1. Require the expected account email, then mint a one-time P-256 ECDH
+ *    key pair and `POST /auth/device/authorize`.
  * 2. Print a QR code + link, then poll `/auth/device/token` (RFC 8628).
- * 3. Once approved, install the session the same way `capy` login does
+ * 3. Once approved, require the returned account email to match before
+ *    installing the session the same way `capy` login does
  *    (`AuthService#installDeviceGrantSession`).
  * 4. `POST /device-pairings/pickup` with the new token, open the sealed
  *    payload with the key pair from step 1, and write `local.key` +
@@ -26,10 +28,11 @@ import { refuseError } from './pairingRefusal';
 import type { PairingEntry } from '../crypto/pairingPayload';
 
 export interface PairOptions {
-  json?: boolean;
-  force?: boolean;
-  apiUrl?: string;
-  devMode?: boolean;
+  readonly email?: string;
+  readonly json?: boolean;
+  readonly force?: boolean;
+  readonly apiUrl?: string;
+  readonly devMode?: boolean;
 }
 
 /** Prose/QR/progress output. Always sent to stderr under `--json` so stdout stays pure JSON; stdout in human mode otherwise. */
@@ -63,6 +66,33 @@ function writeEntry(entry: PairingEntry, force: boolean): 'written' {
 }
 
 const PAIR_LINK_LABEL = 'Approve on your other device:'; // COPY-FLAG
+
+const PAIR_EMAIL_PROMPT = 'Enter the email of the account you want to activate this location with';
+
+function normalizedEmail(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+function validEmail(value: string): boolean {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value.trim());
+}
+
+async function expectedPairEmail(options: PairOptions): Promise<string> {
+  if (options.email !== undefined) {
+    if (!validEmail(options.email)) throw new CapyError('Enter a valid account email with --email.', ERROR_CODES.INVALID_FORMAT);
+    return normalizedEmail(options.email);
+  }
+  if (!process.stdin.isTTY) {
+    throw new CapyError('Pairing requires the expected account email. Pass --email <email>.', ERROR_CODES.INVALID_FORMAT);
+  }
+  const inquirer = (await import('inquirer')).default;
+  const prompt = inquirer.createPromptModule({ output: options.json ? process.stderr : process.stdout });
+  const answer = await prompt<{ readonly email: string }>([{
+    type: 'input', name: 'email', message: PAIR_EMAIL_PROMPT,
+    validate: (value: string) => validEmail(value) || 'Enter a valid email address.',
+  }]);
+  return normalizedEmail(answer.email);
+}
 
 /**
  * Prints the non-`--json` (human) link block: QR (always the full,
@@ -121,6 +151,7 @@ export async function pairCommand(options: PairOptions = {}): Promise<void> {
   const force = options.force === true;
   const devMode = options.devMode === true;
   try {
+    const expectedEmail = await expectedPairEmail(options);
     // Same precedence ServiceClient's constructor uses: explicit override
     // wins, otherwise the profile chain (CAPY_API_URL → profile → default).
     const apiUrl = options.apiUrl || resolveActiveUrl(devMode);
@@ -162,6 +193,13 @@ export async function pairCommand(options: PairOptions = {}): Promise<void> {
         prompt?.stop();
       }
     })();
+
+    if (normalizedEmail(exchange.user.email) !== expectedEmail) {
+      throw new CapyError(
+        `Pairing returned a different account (${exchange.user.email}). No session or keys were installed. Run capy pair again for ${expectedEmail}.`,
+        ERROR_CODES.AUTH_FAILED,
+      );
+    }
 
     const authService = new AuthService(options.apiUrl, devMode);
     const installed = await authService.installDeviceGrantSession(exchange.token, exchange.user, exchange.organizations);
