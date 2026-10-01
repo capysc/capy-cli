@@ -936,16 +936,21 @@ program
   .option(
     '--help-url <NAME=URL>',
     'per-variable "where to find this" link, e.g. STRIPE_SECRET_KEY=https://dashboard.stripe.com/apikeys (repeatable)',
-    (val: string, acc: string[]) => {
-      acc.push(val);
-      return acc;
-    },
+    (val: string, acc: string[]) => [...acc, val],
     [] as string[],
   )
   .option('--no-open', 'do not auto-open the browser; print the URL only')
   .option('--no-push', 'write to .env only; do not push to Capy')
   .option('-f, --force', 'overwrite existing values without prompting')
   .option('--non-tty', 'never prompt; resolve from flags or fail fast (agents/CI)')
+  .option('--json', 'emit machine-readable JSON instead of the human UI (piped value)')
+  .addHelpText(
+    'after',
+    // COPY-FLAG
+    '\n' +
+      'With a value piped in and one name, adds that variable (an existing one needs --force):\n' +
+      '  <cmd> | capy-dev add NAME --json\n',
+  )
   .action(async (varNames, options, command) => {
     const { AddCommand } = await import('./commands/addCommand');
     const cmd = new AddCommand(true); // devMode: dev backend + ~/.capy-dev
@@ -958,6 +963,7 @@ program
       noPush: options.push === false,
       force: merged.force,
       nonTty: options.nonTty,
+      json: options.json,
     });
   });
 

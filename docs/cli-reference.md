@@ -34,15 +34,19 @@ JSON support: yes (`--json`)
 
 ## `capy edit`
 
-Inspect and edit secrets in an interactive TUI
+Inspect and edit secrets in an interactive TUI, or set one variable from a piped value
 
 ```
-capy edit
+capy edit [name] [options]
 ```
 
-_No options._
+| Option | Description | Default |
+|---|---|---|
+| `--no-push` | piped value: write .env only; do not push to Capy |  |
+| `--json` | emit machine-readable JSON instead of the human UI (piped value) |  |
+| `--non-tty` | treat stdin as not a terminal; never prompt (agents/CI) |  |
 
-JSON support: no
+JSON support: yes (`--json`)
 
 ## `capy branch`
 
@@ -581,8 +585,9 @@ capy add <vars...> [options]
 | `--no-push` | write to .env only; do not push to Capy |  |
 | `-f, --force` | overwrite existing values without prompting |  |
 | `--non-tty` | never prompt; resolve from flags or fail fast (agents/CI) |  |
+| `--json` | emit machine-readable JSON instead of the human UI (piped value) |  |
 
-JSON support: no
+JSON support: yes (`--json`)
 
 ## `capy remove`
 
@@ -732,6 +737,12 @@ Every refusal carries a stable `code` — branch on it, never on message text.
 - `CI_DEPLOY_TARGETS_RECORD_FAILED`
 - `DEPLOY_STALE_KEEP`
 - `DEPLOY_TOKEN_UNTRACKED`
+- `EDIT_NEEDS_TTY`
+- `EDIT_STDIN_LOCAL_ONLY`
+- `STDIN_EMPTY`
+- `STDIN_TOO_LARGE`
+- `ADD_STDIN_ONE_NAME`
+- `ADD_VAR_EXISTS`
 
 ## Conventions
 
