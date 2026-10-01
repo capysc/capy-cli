@@ -30,6 +30,38 @@ export interface TransportOptions {
   json?: boolean;
 }
 
+/**
+ * ANSI bold for an inline command name, respecting `NO_COLOR` the same way
+ * `terminalQr.ts` gates its own decoration (https://no-color.org — any
+ * non-empty value opts out). Plain `\x1b[1m` bold, the same look
+ * `errorScreen.ts`'s `bold()` gives inline command names like
+ * `capy decrypt`/`capy transport` in prose — just gated on `NO_COLOR` too,
+ * since this is new styled output rather than an existing call site.
+ */
+function bold(s: string): string {
+  const noColor = typeof process.env.NO_COLOR === 'string' && process.env.NO_COLOR.length > 0;
+  return noColor ? s : `\x1b[1m${s}\x1b[0m`;
+}
+
+/**
+ * CAP-684 copy (Vince-approved verbatim, 2026-09-30): explains what
+ * `capy transport` is for and how to use the link, printed before the
+ * QR/link themselves. Built fresh per call (never a module-level constant)
+ * so it re-reads `NO_COLOR` at print time, same as the rest of this file.
+ */
+// COPY-FLAG (approved verbatim — see CAP-684 follow-up)
+function buildTransportIntro(): string {
+  return [
+    `  Transport works with ${bold('capy pair')} to let you use Capy anywhere: your other devices, sandboxes, and cloud AI sessions.`,
+    '',
+    `  Open or scan this link to activate your transport key and keep it in a browser you can always reach. We recommend your phone's browser. Sign in with the same account as this capy session, or activation won't work.`,
+    '',
+    `  If you lose the device or browser that activated the key, run ${bold('capy transport')} on any device where Capy is set up. That creates a new transport key to activate in a new browser.`,
+    '',
+    `  Why we do this: https://capy.sc/zero-trust`,
+  ].join('\n');
+}
+
 export class TransportCommand {
   private apiUrl?: string;
   private devMode: boolean;
@@ -81,6 +113,7 @@ export class TransportCommand {
       // the text link below is masked; only the printed text is masked.
       const qr = renderTerminalQr(url);
       console.log('');
+      console.log(buildTransportIntro());
       if (qr) console.log(qr);
       const prompt = printMaskedLinkBlock({ fullUrl: url, kind: 'fragment', label: 'Open on your other device:' });
       console.log(`  Expires ${expires_at}`); // COPY-FLAG
