@@ -332,7 +332,7 @@ export function deepestCommonDir(dirs: readonly string[]): string {
 }
 
 /** A Compose service's folder is its compose file's directory; an Application's is the repo root (`''`). */
-export function serviceFolder(service: { serviceKind: 'application' | 'compose'; composePath?: string }): string {
+export function serviceFolder(service: { serviceKind: DiscoveryServiceKind; composePath?: string }): string {
   if (service.serviceKind === 'application' || !service.composePath) return '';
   return normalizeRelativeDir(posix.dirname(normalizeRelativeDir(service.composePath)));
 }
@@ -411,7 +411,8 @@ export const DISCOVERY_PROJECT_NAME_MAX_LENGTH = 255;
 
 // ── Matching Dokploy services to repos ──────────────────────────────────────
 
-export type DiscoveryServiceKind = 'application' | 'compose';
+/** `'vercel'` (CAP-696): a Vercel project, whose id rides in `serviceId` — see `vercelDiscovery.ts`. */
+export type DiscoveryServiceKind = 'application' | 'compose' | 'vercel';
 
 interface ServiceDetail {
   projectName: string;
@@ -430,12 +431,20 @@ interface ServiceDetail {
 
 export type DiscoveryUnmatchedReason = 'no_git_source' | 'no_remote_match';
 
+/** Why a Vercel project was not matched to a local repo (CAP-696). */
+export type VercelUnmatchedReason =
+  | 'no_git_link'
+  | 'unsupported_git_provider'
+  | 'no_remote_match'
+  | 'root_directory_missing'
+  | 'no_variables';
+
 export interface DiscoveryUnmatched {
   projectName: string;
   serviceName: string;
   serviceKind: DiscoveryServiceKind;
   serviceId: string;
-  reason: DiscoveryUnmatchedReason;
+  reason: DiscoveryUnmatchedReason | VercelUnmatchedReason;
 }
 
 interface MatchedService extends ServiceDetail {
@@ -558,6 +567,12 @@ export interface DiscoveryPlanEnv {
   gitBranch?: string;
   /** Already-fetched (`application.one`/`compose.one`) env — plan preview reads this; the real per-environment import step re-fetches fresh rather than trusting a plan-time snapshot that may be stale by the time it runs. */
   rawEnv: string | null;
+  /**
+   * Vercel plan only (CAP-696): the names this environment will NOT import and
+   * the stable reason code for each (`gitBranch` for a branch-scoped preview
+   * record). Names only. Absent for Dokploy.
+   */
+  skipped?: ReadonlyArray<{ name: string; code: string; gitBranch?: string }>;
   /**
    * PREVIEW ONLY, and only known when `DiscoveryPlanFolder.initialized` —
    * whether this environment's branch already exists on the server, i.e.
@@ -783,7 +798,7 @@ export interface DiscoveryCollision {
 }
 
 /** Two or more distinct (project, service) groups mapping the same (repoDir, folder, environment). */
-function detectCollisions(folders: readonly DiscoveryPlanFolder[]): readonly DiscoveryCollision[] {
+export function detectCollisions(folders: readonly DiscoveryPlanFolder[]): readonly DiscoveryCollision[] {
   interface Cell {
     repoDir: string;
     folder: string;
@@ -841,6 +856,8 @@ export interface DiscoveryPlan {
   allEnvironmentNames: readonly string[];
   /** The `--environment` names this plan was filtered to, if any (CAP-657 follow-up) — for the plan header ("filtered to: staging"). Absent when no filter was passed. */
   environmentFilter?: readonly string[];
+  /** Vercel plan only (CAP-696): the team scope the plan read. Absent for Dokploy and for a personal-account Vercel plan. */
+  team?: { id: string; slug?: string };
 }
 
 /**

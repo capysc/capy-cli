@@ -93,6 +93,16 @@ export interface ConnectorMetadata {
    * availability rule as `dokploy_project`.
    */
   environment?: string;
+  /** Vercel import only (CAP-696): the Vercel project's id. */
+  vercel_project_id?: string;
+  /** Vercel import only (CAP-696): the Vercel project's name. */
+  vercel_project?: string;
+  /** Vercel import only (CAP-696): the Vercel team id; absent for a personal-account project. */
+  team_id?: string;
+  /** Vercel import only (CAP-696): the id of the Vercel env record the value came from (`environment`, above, names the Vercel environment). */
+  env_id?: string;
+  /** Vercel import only (CAP-696): the integration configuration id on the env record, when Vercel set one. */
+  configuration_id?: string;
 }
 
 /**
@@ -664,6 +674,33 @@ export const ERROR_CODES = {
    * to clean it up manually.
    */
   DEPLOY_TOKEN_UNTRACKED: 'DEPLOY_TOKEN_UNTRACKED',
+  // CAP-696 Vercel import
+  /** `capy connect vercel`: no token anywhere (`_CONNECTOR_VERCEL_TOKEN`, `--token-env`, `$VERCEL_TOKEN`) and no way to ask. */
+  VERCEL_TOKEN_MISSING: 'VERCEL_TOKEN_MISSING',
+  /** `_CONNECTOR_VERCEL_TOKEN` is absent, `_TARGET_VERCEL_TOKEN` holds a token, and there is no TTY to ask which to use. */
+  VERCEL_CONNECTOR_KEY_MISSING: 'VERCEL_CONNECTOR_KEY_MISSING',
+  /** Vercel answered 401/403 to the token. */
+  VERCEL_AUTH_FAILED: 'VERCEL_AUTH_FAILED',
+  /** Any other failed or unreadable Vercel response. */
+  VERCEL_API_ERROR: 'VERCEL_API_ERROR',
+  /** Vercel kept answering 429 after the bounded retries, or asked for a wait longer than the cap. */
+  VERCEL_RATE_LIMITED: 'VERCEL_RATE_LIMITED',
+  /** The token sees several teams and no `--team` was given, and this run cannot ask. */
+  VERCEL_TEAM_REQUIRED: 'VERCEL_TEAM_REQUIRED',
+  /** `--team` matched none of the teams the token sees. */
+  VERCEL_TEAM_NOT_FOUND: 'VERCEL_TEAM_NOT_FOUND',
+  /** Single import with no `--project`, and this run cannot ask. */
+  VERCEL_PROJECT_REQUIRED: 'VERCEL_PROJECT_REQUIRED',
+  /** `--project` names no project Vercel can see. */
+  VERCEL_PROJECT_NOT_FOUND: 'VERCEL_PROJECT_NOT_FOUND',
+  /** Single import: the current Capy branch is not a Vercel environment of the project, and no `--environment` was given. */
+  VERCEL_ENVIRONMENT_REQUIRED: 'VERCEL_ENVIRONMENT_REQUIRED',
+  /** `--environment` names no environment of the project (single import), or none the plan has (discover). */
+  VERCEL_ENVIRONMENT_NOT_FOUND: 'VERCEL_ENVIRONMENT_NOT_FOUND',
+  /** A real write needs a yes (`--yes`) and this run cannot ask. */
+  VERCEL_CONFIRMATION_REQUIRED: 'VERCEL_CONFIRMATION_REQUIRED',
+  /** Several Vercel projects map to the same repo, folder and branch, and this run cannot ask which wins. */
+  VERCEL_MAPPING_COLLISION: 'VERCEL_MAPPING_COLLISION',
 } as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES];

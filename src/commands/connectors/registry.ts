@@ -1,6 +1,7 @@
 import { ConnectorMetadata } from '../../types/index';
 import type { Blocked } from '../../ui/screens/contract';
 import type { DokployImportSource } from '../../deploy/dokployApi';
+import type { VercelImportSource } from '../../deploy/vercelApi';
 import type { DiscoveryContext, DiscoveryOutcome } from './dokployDiscovery';
 import { ResolvedContext } from './shared';
 
@@ -162,6 +163,34 @@ export interface ConnectOpts {
    * the connector entry's `environment` field (CAP-673).
    */
   dokployEnvironmentName?: string;
+  /**
+   * Vercel import only (CAP-696): the project to import from (flag
+   * `--project`, id or name). Under `--discover` it is instead the
+   * collision-winner hint, the same way `application`/`compose` are for
+   * Dokploy. Other connectors never read this.
+   */
+  project?: string;
+  /** Vercel import only (CAP-696): team slug or id (flag `--team`). Other connectors never read this. */
+  team?: string;
+  /**
+   * Vercel DISCOVERY only, set INTERNALLY by `discover()`'s own per-environment
+   * step — never a CLI flag. The team scope discovery already resolved
+   * (`id` undefined = the personal account), so the single import it runs
+   * does not list teams again.
+   */
+  vercelTeam?: { id?: string };
+  /**
+   * Vercel DISCOVERY only, set INTERNALLY alongside `vercelTeam`: the project
+   * facts the plan already read, so the single import does not fetch the
+   * project again.
+   */
+  vercelProject?: { id: string; name: string; productionBranch?: string };
+  /**
+   * Vercel import only: the folder a saved deploy target's `.capy/deploy.json`
+   * belongs in. Set INTERNALLY by discovery (each folder has its own); a plain
+   * import uses the current directory.
+   */
+  projectDir?: string;
 }
 
 export interface RotateOpts {
@@ -222,6 +251,8 @@ export interface ImportedVarEntry {
 export interface ImportSkip {
   name: string;
   code: string;
+  /** Vercel import only, for `git_branch_scoped`: the branch the record is scoped to — a name, never a value. */
+  gitBranch?: string;
 }
 
 /** A non-blocking heads-up about the import, grouped by code like `DeployWarning`. */
@@ -243,7 +274,7 @@ export type ImportOutcome =
        */
       applicationId?: string;
       /** Dokploy import only: which Dokploy object this import read from. */
-      source?: DokployImportSource;
+      source?: DokployImportSource | VercelImportSource;
       imported: readonly ImportedVarEntry[];
       unchanged: readonly string[];
       skipped: readonly ImportSkip[];
@@ -310,6 +341,12 @@ export interface ConnectorModule {
    */
   kind?: 'link' | 'import';
   /**
+   * The provider's display name in import/discovery output ("from Dokploy",
+   * "from Vercel"). Omitted means `Dokploy` — the only import connector that
+   * existed before this field, whose output stays byte-identical.
+   */
+  displayName?: string;
+  /**
    * Set when rotating runs an interactive auth step the user must complete by
    * hand (e.g. Stripe shells out to `stripe login`, which opens a browser).
    * Surfaced as a leading "Auth" stop in the rotate plan so the user knows a
@@ -359,6 +396,13 @@ export interface ConnectorModule {
    * that implement it — no other provider does today.
    */
   discover?(ctx: DiscoveryContext, opts: ConnectOpts): Promise<DiscoveryOutcome>;
+  /**
+   * A connector whose discovery plan has its own shape (Vercel: project name
+   * + id, skipped names grouped by reason) prints and emits it here instead
+   * of through `ConnectCommand`'s built-in Dokploy-shaped report. Returns
+   * whether anything was linked, exactly like `executeDiscovery` does.
+   */
+  reportDiscovery?(outcome: Extract<DiscoveryOutcome, { ok: true }>, opts: ConnectOpts, provider: string): { linked: boolean };
 }
 
 /** Registered providers, keyed by name (matches `connector.provider` on each keep.lock entry). */
@@ -366,6 +410,7 @@ export const providers: Record<string, () => Promise<ConnectorModule>> = {
   stripe: async () => (await import('./stripe')).stripeConnector,
   workos: async () => (await import('./workos')).workosConnector,
   dokploy: async () => (await import('./dokploy')).dokployConnector,
+  vercel: async () => (await import('./vercel')).vercelConnector,
 };
 
 export function listProviders(): { name: string; description: string }[] {
@@ -374,6 +419,8 @@ export function listProviders(): { name: string; description: string }[] {
     { name: 'workos', description: 'WorkOS environment API key (sandbox or production)' },
     // COPY-FLAG: new user-facing string, minimal/neutral wording.
     { name: 'dokploy', description: 'One-time import of env vars from a Dokploy Application or Compose service' },
+    // COPY-FLAG: new user-facing string, minimal/neutral wording.
+    { name: 'vercel', description: 'One-time import of env vars from a Vercel project' },
   ];
 }
 

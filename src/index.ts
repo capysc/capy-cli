@@ -915,7 +915,9 @@ program
   .option('--base-url <url>', 'dokploy import: dashboard URL')
   .option('--application <id>', 'dokploy import: Application id (mutually exclusive with --compose)')
   .option('--compose <id>', 'dokploy import: Compose service id (mutually exclusive with --application)')
-  .option('--token-env <name>', 'dokploy import: env var holding the API token')
+  .option('--token-env <name>', 'dokploy/vercel import: env var holding the API token')
+  .option('--project <project>', 'vercel import: Vercel project id or name (under --discover: the project that wins a mapping collision)')
+  .option('--team <team>', 'vercel import/discover: Vercel team slug or id (default: the token\'s only team)')
   .option('--json', 'emit machine-readable JSON instead of the human UI (import connectors)')
   .option(
     '--dry-run',
@@ -923,7 +925,7 @@ program
   )
   .option(
     '--discover',
-    'dokploy: find every Dokploy service matching a repo under cwd, instead of one named --application/--compose',
+    'dokploy/vercel: find every Dokploy service / Vercel project matching a repo under cwd, instead of one named --application/--compose/--project',
   )
   .option(
     '-y, --yes',
@@ -935,7 +937,7 @@ program
   )
   .option(
     '--environment <names>',
-    'dokploy discover: restrict the plan to these Dokploy environment names, comma-separated (e.g. staging,preview)',
+    'dokploy/vercel discover: restrict the plan to these environment names, comma-separated (e.g. staging,preview); vercel import: which Vercel environment to read (default: the current branch\'s name)',
   )
   .action(async (provider, options, command) => {
     assertNotLocalOnly('connect');
@@ -971,6 +973,8 @@ program
       yes: options.yes === true,
       overwrite: options.overwrite === true,
       environment: options.environment,
+      project: options.project,
+      team: options.team,
     });
   });
 

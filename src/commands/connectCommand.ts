@@ -424,6 +424,9 @@ export class ConnectCommand {
     opts: ConnectOpts,
   ): Promise<{ linked: boolean }> {
     const outcome = await mod.import!(ctx, opts);
+    // "from Dokploy" / "from Vercel": omitted `displayName` is Dokploy, the
+    // only import connector that predates the field (its output is unchanged).
+    const label = mod.displayName ?? 'Dokploy';
 
     if (!outcome.ok) {
       if (opts.json) {
@@ -478,7 +481,7 @@ export class ConnectCommand {
       console.log(dryRun ? '  Nothing to import.' : '  Nothing new to import.');
     } else if (dryRun) {
       if (outcome.imported.length > 0) {
-        console.log(`  Would import ${outcome.imported.map((e) => B(e.varName)).join(', ')} from Dokploy.`);
+        console.log(`  Would import ${outcome.imported.map((e) => B(e.varName)).join(', ')} from ${label}.`);
       }
       if (cleared.length > 0) {
         console.log(`  Would clear: ${cleared.join(', ')}`);
@@ -486,11 +489,11 @@ export class ConnectCommand {
     } else {
       if (outcome.imported.length > 0) {
         console.log(
-          `  ✓ Imported ${outcome.imported.map((e) => B(e.varName)).join(', ')} from Dokploy` +
+          `  ✓ Imported ${outcome.imported.map((e) => B(e.varName)).join(', ')} from ${label}` +
             `${pushed ? ' and pushed' : ' (not pushed)'}.`,
         );
       } else {
-        console.log(`  ✓ Cleared from Dokploy${pushed ? ' and pushed' : ' (not pushed)'}.`);
+        console.log(`  ✓ Cleared from ${label}${pushed ? ' and pushed' : ' (not pushed)'}.`);
       }
       if (cleared.length > 0) {
         console.log(`  Cleared: ${cleared.join(', ')}`);
@@ -512,7 +515,9 @@ export class ConnectCommand {
       console.log(`  ⚠ ${w.code}: ${w.names.join(', ')}`);
     }
     if (outcome.deployTargetSaved) {
-      console.log(`  Saved a Dokploy deploy target for application ${outcome.applicationId}.`);
+      console.log(
+        mod.displayName ? `  Saved a ${label} deploy target.` : `  Saved a Dokploy deploy target for application ${outcome.applicationId}.`,
+      );
     }
     console.log('');
     return { linked: wrote };
@@ -541,6 +546,9 @@ export class ConnectCommand {
       process.exitCode = 1;
       return { linked: false };
     }
+
+    // A connector whose plan has its own shape (Vercel) reports it itself.
+    if (mod.reportDiscovery) return mod.reportDiscovery(outcome, opts, provider);
 
     const planForOutput = {
       ...(outcome.plan.environmentFilter ? { environmentFilter: outcome.plan.environmentFilter } : {}),

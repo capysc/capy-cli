@@ -91,10 +91,10 @@ export function snapshotPathStatus(repoRoot: string, paths: readonly string[]): 
 }
 
 /** `capy/dokploy-import-<YYYYMMDD-HHMM>` — the default branch name, used whenever nothing asked for (or answered) a different one. */
-export function defaultDiscoveryCommitBranchName(now: Date = new Date()): string {
+export function defaultDiscoveryCommitBranchName(now: Date = new Date(), provider: string = 'dokploy'): string {
   const pad = (n: number): string => String(n).padStart(2, '0');
   const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}`;
-  return `capy/dokploy-import-${stamp}`;
+  return `capy/${provider}-import-${stamp}`;
 }
 
 /**
@@ -143,7 +143,13 @@ export function commitDiscoveryChanges(
   repoRoot: string,
   paths: readonly string[],
   beforeStatus: ReadonlySet<string>,
-  opts: { branchName: string; dryRun: boolean; summaryLines: readonly string[] },
+  opts: {
+    branchName: string;
+    dryRun: boolean;
+    summaryLines: readonly string[];
+    /** The commit subject. Default is the Dokploy one, so every existing caller's commit is unchanged. */
+    commitMessage?: string;
+  },
 ): DiscoveryCommitOutcome {
   if (paths.length === 0) {
     return { ok: true, dryRun: true, branch: opts.branchName, wouldCommitFiles: [] };
@@ -194,7 +200,7 @@ export function commitDiscoveryChanges(
   keepPaths.forEach((relPath) => syncTrackedKeepFromWorkingCopy(join(repoRoot, dirname(relPath))));
 
   const added = tryGit(repoRoot, ['add', '--', ...paths]);
-  const messageArgs = ['-m', 'chore(capy): import Dokploy environments', ...(opts.summaryLines.length > 0 ? ['-m', opts.summaryLines.join('\n')] : [])];
+  const messageArgs = ['-m', opts.commitMessage ?? 'chore(capy): import Dokploy environments', ...(opts.summaryLines.length > 0 ? ['-m', opts.summaryLines.join('\n')] : [])];
   const committed = added.ok ? tryGit(repoRoot, ['commit', ...messageArgs, '--', ...paths]) : { ok: false as const };
   if (!committed.ok) {
     // Never leaves the repo stranded on a half-made branch after a failed

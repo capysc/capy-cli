@@ -464,7 +464,7 @@ export interface DokployConnectorDeps {
   getConnectorSecret?: (name: string, opts: DokploySystemStoreCallOptions) => Promise<string | null>;
 }
 
-async function defaultConfirm(message: string, defaultValue: boolean): Promise<boolean> {
+export async function defaultConfirm(message: string, defaultValue: boolean): Promise<boolean> {
   const inquirer = (await import('inquirer')).default;
   const { ok } = await inquirer.prompt([{ type: 'confirm', name: 'ok', message, default: defaultValue }]);
   return ok;
@@ -569,7 +569,7 @@ async function defaultAskDiscoveryBaseUrl(): Promise<string> {
 export const DISCOVERY_NEW_PROJECT = '__capy_discovery_new_project__';
 
 // COPY-FLAG: new user-facing string, minimal/neutral wording.
-async function defaultAskExistingOrNewProject(
+export async function defaultAskExistingOrNewProject(
   existing: ReadonlyArray<{ id: string; name: string }>,
   defaultName: string,
 ): Promise<string> {
@@ -601,7 +601,7 @@ function discoveryProjectNameProblem(trimmed: string): string | null {
   return null;
 }
 
-async function defaultAskDiscoveryProjectName(defaultName: string): Promise<string> {
+export async function defaultAskDiscoveryProjectName(defaultName: string): Promise<string> {
   const inquirer = (await import('inquirer')).default;
   const { name } = await inquirer.prompt([
     {
@@ -620,7 +620,7 @@ async function defaultAskDiscoveryProjectName(defaultName: string): Promise<stri
 }
 
 // COPY-FLAG: new user-facing string, minimal/neutral wording.
-async function defaultAskDiscoveryCommitBranchName(defaultName: string): Promise<string> {
+export async function defaultAskDiscoveryCommitBranchName(defaultName: string): Promise<string> {
   const inquirer = (await import('inquirer')).default;
   const { name } = await inquirer.prompt([
     {
@@ -641,7 +641,7 @@ async function defaultAskDiscoveryCommitBranchName(defaultName: string): Promise
 }
 
 // COPY-FLAG: new user-facing string, minimal/neutral wording.
-async function defaultPickCollisionWinner(collision: DiscoveryCollision): Promise<string> {
+export async function defaultPickCollisionWinner(collision: DiscoveryCollision): Promise<string> {
   const inquirer = (await import('inquirer')).default;
   const { winner } = await inquirer.prompt([
     {
@@ -1285,7 +1285,7 @@ export function createDokployConnector(deps: DokployConnectorDeps = {}): Connect
 }
 
 /** Plan-time-only local keep.lock read (no auth) — see `PeekLocalKeep`'s own doc. */
-function peekLocalKeepForFolder(repoDir: string, folder: string): KeepFile | null {
+export function peekLocalKeepForFolder(repoDir: string, folder: string): KeepFile | null {
   return new ProjectManager(folder ? join(repoDir, folder) : repoDir).readKeepFile();
 }
 
@@ -1319,7 +1319,7 @@ function discoveryConfirmMessage(folders: readonly DiscoveryPlanFolder[], overwr
 const folderPath = (repoDir: string, folder: string): string => (folder ? join(repoDir, folder) : repoDir);
 
 /** keep.lock and .gitignore, relative to `repoDir` — the ONLY paths discovery's own commit step ever touches. */
-function discoveryCommitPathsFor(folder: string): readonly string[] {
+export function discoveryCommitPathsFor(folder: string): readonly string[] {
   const prefix = folder ? `${folder}/` : '';
   return [`${prefix}keep.lock`, `${prefix}.gitignore`];
 }
@@ -1337,11 +1337,16 @@ function discoveryCommitPathsFor(folder: string): readonly string[] {
  * `discoveryCommitPathsFor` would otherwise be counted once per entry,
  * reporting `keep.lock`/`.gitignore` twice for what is really one write.
  */
-function commitPreviewForFolders(folders: readonly DiscoveryPlanFolder[], branchName: string): readonly DiscoveryRepoCommitResult[] {
+export function commitPreviewForFolders(
+  folders: readonly DiscoveryPlanFolder[],
+  branchName: string,
+  /** The commit subject; default is the Dokploy one. */
+  commitMessage?: string,
+): readonly DiscoveryRepoCommitResult[] {
   const repoDirs = [...new Set(folders.map((f) => f.repoDir))];
   return repoDirs.map((repoDir) => {
     const paths = [...new Set(folders.filter((f) => f.repoDir === repoDir).flatMap((f) => discoveryCommitPathsFor(f.folder)))];
-    const outcome = commitDiscoveryChanges(repoDir, paths, new Set(), { branchName, dryRun: true, summaryLines: [] });
+    const outcome = commitDiscoveryChanges(repoDir, paths, new Set(), { branchName, dryRun: true, summaryLines: [], ...(commitMessage ? { commitMessage } : {}) });
     return { repoDir, ...outcome };
   });
 }
@@ -1353,10 +1358,12 @@ function commitPreviewForFolders(folders: readonly DiscoveryPlanFolder[], branch
  * zero successful folders is skipped entirely (nothing to commit, no
  * refusal either).
  */
-function commitForAppliedRepos(
+export function commitForAppliedRepos(
   applied: readonly DiscoveryFolderResult[],
   beforeStatusByRepo: ReadonlyMap<string, ReadonlySet<string>>,
   branchName: string,
+  /** The commit subject; default is the Dokploy one. */
+  commitMessage?: string,
 ): readonly DiscoveryRepoCommitResult[] {
   const repoDirs = [...new Set(applied.map((f) => f.repoDir))];
   return repoDirs.flatMap((repoDir) => {
@@ -1368,13 +1375,14 @@ function commitForAppliedRepos(
       branchName,
       dryRun: false,
       summaryLines,
+      ...(commitMessage ? { commitMessage } : {}),
     });
     return [{ repoDir, ...outcome }];
   });
 }
 
 /** What `listOrgProjectsOrUnavailable` returns — named here so the non-interactive `--yes` snapshot (see `ensureProjectSafe`'s doc) and the interactive per-folder lookup share one type. */
-type ExistingProjectsSnapshot = {
+export type ExistingProjectsSnapshot = {
   existingProjects: ReadonlyArray<{ id: string; name: string; organization_id: string }>;
   projectsUnavailable: boolean;
 };
@@ -1414,7 +1422,7 @@ function sameRunFolderKey(repoDir: string, folder: string): string {
  * that is NOT the first candidate to claim its (normalized) default name;
  * the very first claimant of a name is never in the returned set.
  */
-function computeSameRunNameCollisions(folders: readonly DiscoveryPlanFolder[]): ReadonlySet<string> {
+export function computeSameRunNameCollisions(folders: readonly DiscoveryPlanFolder[]): ReadonlySet<string> {
   const candidates = folders
     .filter((f) => !f.initialized)
     .map((f) => ({ key: sameRunFolderKey(f.repoDir, f.folder), normalizedName: normalizeProjectName(defaultDiscoveryProjectName(f.repoDir, f.folder, f.remote)) }));
@@ -1833,7 +1841,16 @@ async function importIntoBranchSafe(
   folder: string,
   env: DiscoveryPlanEnv,
   overwrite: boolean,
-  runOpts: { noPush: boolean; interactive: boolean; json: boolean; yes: boolean; baseUrl: string; tokenEnv: string },
+  runOpts: {
+    noPush: boolean;
+    interactive: boolean;
+    json: boolean;
+    yes: boolean;
+    baseUrl: string;
+    tokenEnv: string;
+    /** Another provider's discovery (Vercel, CAP-696) supplies the per-step import options itself; absent = the Dokploy options below, unchanged. */
+    importOptsFor?: (env: DiscoveryPlanEnv, projectName: string, folderPath: string) => ConnectOpts;
+  },
   /** CAP-673: this environment's Dokploy PROJECT name — already known from the plan's own `project.all` read, threaded through so `import()` never re-fetches it (see `ConnectOpts.dokployProjectName`'s doc). */
   projectName: string,
 ): Promise<ImportOutcome> {
@@ -1867,18 +1884,17 @@ async function importIntoBranchSafe(
   }
   const projectKey = projectKeyResult.value;
 
-  const localPlaintext: Record<string, string> = {};
-  for (const [k, v] of Object.entries(fm.readEnvFile())) {
-    if (!v.startsWith('capy:')) {
-      localPlaintext[k] = v;
-      continue;
-    }
-    try {
-      localPlaintext[k] = fm.decryptValue(v, projectKey);
-    } catch {
-      // Skip undecryptable.
-    }
-  }
+  const localPlaintext: Record<string, string> = Object.fromEntries(
+    Object.entries(fm.readEnvFile()).flatMap(([k, v]): ReadonlyArray<readonly [string, string]> => {
+      if (!v.startsWith('capy:')) return [[k, v]];
+      try {
+        return [[k, fm.decryptValue(v, projectKey)]];
+      } catch {
+        // Skip undecryptable.
+        return [];
+      }
+    }),
+  );
 
   const resolvedCtx: ResolvedContext = {
     pm,
@@ -1893,19 +1909,24 @@ async function importIntoBranchSafe(
     keep,
     localPlaintext,
   };
-  const importOpts: ConnectOpts = {
-    ...(env.serviceKind === 'application' ? { application: env.serviceId } : { compose: env.serviceId }),
+  const sharedImportOpts = {
     overwrite,
     noPush: runOpts.noPush,
     nonTty: !runOpts.interactive,
     json: runOpts.json,
     yes: runOpts.yes,
-    baseUrl: runOpts.baseUrl,
-    tokenEnv: runOpts.tokenEnv,
-    // CAP-673: already known from the plan — see `dokployProjectName`'s doc.
-    dokployProjectName: projectName,
-    dokployEnvironmentName: env.environmentName,
   };
+  const importOpts: ConnectOpts = runOpts.importOptsFor
+    ? { ...sharedImportOpts, ...runOpts.importOptsFor(env, projectName, path) }
+    : {
+        ...(env.serviceKind === 'application' ? { application: env.serviceId } : { compose: env.serviceId }),
+        ...sharedImportOpts,
+        baseUrl: runOpts.baseUrl,
+        tokenEnv: runOpts.tokenEnv,
+        // CAP-673: already known from the plan — see `dokployProjectName`'s doc.
+        dokployProjectName: projectName,
+        dokployEnvironmentName: env.environmentName,
+      };
 
   const outcome = await importFn(resolvedCtx, importOpts);
   if (!outcome.ok) return outcome;
@@ -1927,7 +1948,7 @@ async function importIntoBranchSafe(
  * — the discovery scan's own org/session, reused for every folder rather
  * than re-authenticating per folder.
  */
-function buildRealDiscoverySequenceDeps(
+export function buildRealDiscoverySequenceDeps(
   ctx: DiscoveryContext,
   importFn: (ctx: ResolvedContext, opts: ConnectOpts) => Promise<ImportOutcome>,
   runOpts: {
@@ -1937,6 +1958,7 @@ function buildRealDiscoverySequenceDeps(
     yes: boolean;
     baseUrl: string;
     tokenEnv: string;
+    importOptsFor?: (env: DiscoveryPlanEnv, projectName: string, folderPath: string) => ConnectOpts;
     askExistingOrNewProject: (existing: ReadonlyArray<{ id: string; name: string }>, defaultName: string) => Promise<string>;
     askProjectName: (defaultName: string) => Promise<string>;
     /**

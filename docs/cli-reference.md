@@ -619,13 +619,15 @@ capy connect [provider] [options]
 | `--base-url <url>` | dokploy import: dashboard URL |  |
 | `--application <id>` | dokploy import: Application id (mutually exclusive with --compose) |  |
 | `--compose <id>` | dokploy import: Compose service id (mutually exclusive with --application) |  |
-| `--token-env <name>` | dokploy import: env var holding the API token |  |
+| `--token-env <name>` | dokploy/vercel import: env var holding the API token |  |
+| `--project <project>` | vercel import: Vercel project id or name (under --discover: the project that wins a mapping collision) |  |
+| `--team <team>` | vercel import/discover: Vercel team slug or id (default: the token's only team) |  |
 | `--json` | emit machine-readable JSON instead of the human UI (import connectors) |  |
 | `--dry-run` | dokploy import/discover: preview the plan only — resolve settings + read Dokploy, write/push nothing |  |
-| `--discover` | dokploy: find every Dokploy service matching a repo under cwd, instead of one named --application/--compose |  |
+| `--discover` | dokploy/vercel: find every Dokploy service / Vercel project matching a repo under cwd, instead of one named --application/--compose/--project |  |
 | `-y, --yes` | dokploy import/discover: skip the confirmation prompt (import: --overwrite's clear/replace/import ask; discover: the real-run "proceed?" ask) — required non-interactively |  |
 | `--overwrite` | dokploy import: set the branch's vars to EXACTLY Dokploy's set — clear names not in Dokploy, replace differing values, import new ones |  |
-| `--environment <names>` | dokploy discover: restrict the plan to these Dokploy environment names, comma-separated (e.g. staging,preview) |  |
+| `--environment <names>` | dokploy/vercel discover: restrict the plan to these environment names, comma-separated (e.g. staging,preview); vercel import: which Vercel environment to read (default: the current branch's name) |  |
 
 JSON support: yes (`--json`)
 
@@ -732,6 +734,19 @@ Every refusal carries a stable `code` — branch on it, never on message text.
 - `CI_DEPLOY_TARGETS_RECORD_FAILED`
 - `DEPLOY_STALE_KEEP`
 - `DEPLOY_TOKEN_UNTRACKED`
+- `VERCEL_TOKEN_MISSING`
+- `VERCEL_CONNECTOR_KEY_MISSING`
+- `VERCEL_AUTH_FAILED`
+- `VERCEL_API_ERROR`
+- `VERCEL_RATE_LIMITED`
+- `VERCEL_TEAM_REQUIRED`
+- `VERCEL_TEAM_NOT_FOUND`
+- `VERCEL_PROJECT_REQUIRED`
+- `VERCEL_PROJECT_NOT_FOUND`
+- `VERCEL_ENVIRONMENT_REQUIRED`
+- `VERCEL_ENVIRONMENT_NOT_FOUND`
+- `VERCEL_CONFIRMATION_REQUIRED`
+- `VERCEL_MAPPING_COLLISION`
 
 ## Conventions
 

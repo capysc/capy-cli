@@ -1611,6 +1611,8 @@ export async function classifyImportCandidates(
     interactive: boolean;
     /** Names only — never the value on either side. */
     confirm: (message: string, defaultValue: boolean) => Promise<boolean>;
+    /** The provider the value comes from, for the replace prompt. Default `Dokploy` — every existing caller's wording is unchanged. */
+    providerLabel?: string;
   },
 ): Promise<ImportClassified> {
   return candidates.reduce<Promise<ImportClassified>>(async (accPromise, e) => {
@@ -1628,7 +1630,7 @@ export async function classifyImportCandidates(
     if (opts.interactive) {
       // COPY-FLAG: new user-facing string, minimal/neutral wording.
       const replace = await opts.confirm(
-        `${e.name} is already set locally with a different value. Replace it with the Dokploy value?`,
+        `${e.name} is already set locally with a different value. Replace it with the ${opts.providerLabel ?? 'Dokploy'} value?`,
         false,
       );
       return replace
