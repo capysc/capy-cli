@@ -30,7 +30,8 @@ import { resolveKeepOrigin } from '../config/keepOrigin';
 import { generateTransportKey, packTransportV3, sealTransportV3 } from '../crypto/transportPackV3';
 import type { PairingEntry } from '../crypto/pairingPayload';
 import { renderTerminalQr } from '../ui/terminalQr';
-import { printMaskedLinkBlock } from '../ui/maskedLinkPrompt';
+import { printMaskedLinkBlock, maskLink } from '../ui/maskedLinkPrompt';
+import { isFullScreenQrEligible, startFullScreenQrView, printMaskedLinkFooter } from '../ui/fullScreenQr';
 import { CapyError, ERROR_CODES } from '../types/index';
 import { refuseError } from './pairingRefusal';
 
@@ -69,6 +70,8 @@ function buildTransportIntro(): string {
     `  Why we do this: https://capy.sc/zero-trust`,
   ].join('\n');
 }
+
+const LINK_LABEL = 'Open on your other device:'; // COPY-FLAG
 
 export class TransportCommand {
   private apiUrl?: string;
@@ -124,17 +127,43 @@ export class TransportCommand {
         return;
       }
 
-      // The QR always encodes the FULL url (it has to — scanning it on a
-      // phone is how the other device gets the key material) even though
-      // the text link below is masked; only the printed text is masked.
-      const qr = renderTerminalQr(url);
       console.log('');
       console.log(buildTransportIntro());
+
+      // The QR always encodes the FULL url (it has to — scanning it on a
+      // phone is how the other device gets the key material) even though
+      // the text link is masked; only the printed text is masked.
+      const qr = renderTerminalQr(url);
+
+      // Full-screen centered QR (CAP-692 follow-up): only in a real
+      // interactive TTY, never under --json (already returned above) or
+      // NO_COLOR. Whenever this is eligible, `renderTerminalQr` above is
+      // guaranteed non-null too (the hard-skip conditions are the same or
+      // stricter), so `qr` is never null here in that branch.
+      if (isFullScreenQrEligible(false) && qr) {
+        const masked = maskLink(url, 'fragment');
+        const view = startFullScreenQrView({
+          fullUrl: url,
+          maskedUrl: masked,
+          label: LINK_LABEL,
+          qr,
+          extraFooterLines: [`Expires ${expires_at}`], // COPY-FLAG (same text as the non-full-screen path below)
+        });
+        await view.done;
+        printMaskedLinkFooter(process.stdout, {
+          fullUrl: url,
+          maskedUrl: masked,
+          label: LINK_LABEL,
+          extraLines: [`Expires ${expires_at}`], // COPY-FLAG (same text as the non-full-screen path below)
+        });
+        return;
+      }
+
       if (qr) {
         console.log(qr.text);
         if (qr.hint) console.log(qr.hint);
       }
-      const prompt = printMaskedLinkBlock({ fullUrl: url, kind: 'fragment', label: 'Open on your other device:' });
+      const prompt = printMaskedLinkBlock({ fullUrl: url, kind: 'fragment', label: LINK_LABEL });
       console.log(`  Expires ${expires_at}`); // COPY-FLAG
       console.log('');
       // Only set when both ends are a real TTY (see printMaskedLinkBlock) —

@@ -19,7 +19,8 @@ import { AuthService } from '../auth/authService';
 import { ServiceClient } from '../service/serviceClient';
 import { readLocalRoot, saveLocalRoot, writeOrgKeyFileRaw } from '../config/globalConfig';
 import { renderTerminalQr, type RenderedTerminalQr } from '../ui/terminalQr';
-import { printMaskedLinkBlock, type MaskedLinkPromptHandle } from '../ui/maskedLinkPrompt';
+import { printMaskedLinkBlock, maskLink, type MaskedLinkPromptHandle } from '../ui/maskedLinkPrompt';
+import { isFullScreenQrEligible, startFullScreenQrView, printMaskedLinkFooter } from '../ui/fullScreenQr';
 import { CapyError, ERROR_CODES } from '../types/index';
 import { refuseError } from './pairingRefusal';
 import type { PairingEntry } from '../crypto/pairingPayload';
@@ -61,20 +62,55 @@ function writeEntry(entry: PairingEntry, force: boolean): 'written' {
   return 'written';
 }
 
+const PAIR_LINK_LABEL = 'Approve on your other device:'; // COPY-FLAG
+
 /**
  * Prints the non-`--json` (human) link block: QR (always the full,
  * unmasked `deviceLink` — a phone scanning it needs the real `code` query
  * param) then the masked link, interactive on a real TTY. `--json`'s own
  * progress output (to stderr, unmasked, unchanged) is a separate branch in
  * `pairCommand` below — this function is never called under `--json`.
+ *
+ * Full-screen centered QR (CAP-692 follow-up, shared with `capy transport`
+ * via `fullScreenQr.ts`) only in a real interactive TTY, never under
+ * `NO_COLOR`. The returned handle's `done`/`stop()` behave identically
+ * either way, so the caller (`pairCommand` below) runs the device-token
+ * poll concurrently with either variant the exact same way, and calls
+ * `stop()` once the poll settles whether or not the user ever pressed a
+ * key — same contract `startMaskedLinkPrompt` has always had.
  */
 function printHumanPairBlock(deviceLink: string, qr: RenderedTerminalQr | null, userCode: string): MaskedLinkPromptHandle | null {
+  const masked = maskLink(deviceLink, 'query');
+
+  if (isFullScreenQrEligible(false) && qr) {
+    const view = startFullScreenQrView({
+      fullUrl: deviceLink,
+      maskedUrl: masked,
+      label: PAIR_LINK_LABEL,
+      qr,
+      extraFooterLines: [`Code: ${userCode}`], // COPY-FLAG (same text as the non-full-screen path below)
+    });
+    // Whenever the view closes — the user pressed q, or the surrounding
+    // poll's `finally { prompt?.stop() }` closed it for them — the masked
+    // link + code need to be left in scrollback, same as the non-full-screen
+    // path already leaves in place from its very first print.
+    void view.done.then(() => {
+      printMaskedLinkFooter(process.stdout, {
+        fullUrl: deviceLink,
+        maskedUrl: masked,
+        label: PAIR_LINK_LABEL,
+        extraLines: [`Code: ${userCode}`], // COPY-FLAG (same text as the non-full-screen path below)
+      });
+    });
+    return view;
+  }
+
   console.log('');
   if (qr) {
     console.log(qr.text);
     if (qr.hint) console.log(qr.hint);
   }
-  const prompt = printMaskedLinkBlock({ fullUrl: deviceLink, kind: 'query', label: 'Approve on your other device:' });
+  const prompt = printMaskedLinkBlock({ fullUrl: deviceLink, kind: 'query', label: PAIR_LINK_LABEL });
   console.log(`  Code: ${userCode}`); // COPY-FLAG
   console.log('');
   return prompt;
