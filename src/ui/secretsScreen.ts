@@ -20,133 +20,48 @@ import { formatRelativeTime } from './relativeTime';
 import { renderInlineValue } from './editScreen';
 import { hashValue } from '../commands/statusCommand';
 import { ACCENT } from './colors';
+import {
+  ESC,
+  CLEAR_EOL,
+  INVERSE,
+  RESET,
+  DIM,
+  BOLD,
+  TERMINAL_SCREEN_ANSI,
+  KEY_UP,
+  KEY_DOWN,
+  KEY_LEFT,
+  KEY_RIGHT,
+  KEY_HOME,
+  KEY_HOME2,
+  KEY_END,
+  KEY_END2,
+  KEY_PGUP,
+  KEY_PGDN,
+  KEY_SHIFT_TAB,
+  KEY_TAB,
+  KEY_ESC,
+  KEY_ESC_ESC,
+  KEY_CTRL_C,
+  KEY_BACKSPACE,
+  KEY_BACKSPACE2,
+  tokenizeKeys,
+} from './interactiveKeys';
 
 // ── ANSI (mirrors EditScreen's palette/look-and-feel) ───────────────────────
+//
+// The escape codes and the stdin tokenizer below moved to
+// `interactiveKeys.ts` (shared with `projectsScreen.ts`) — re-exported here
+// unchanged so this module's own public surface, and every test that
+// imports `tokenizeKeys`/`SECRETS_SCREEN_ANSI` from it, sees no difference.
 
-const ESC = '\x1b';
-const HIDE_CURSOR = `${ESC}[?25l`;
-const SHOW_CURSOR = `${ESC}[?25h`;
-const MOVE_HOME = `${ESC}[H`;
-const CLEAR_SCREEN = `${ESC}[2J`;
-const CLEAR_EOL = `${ESC}[K`;
-const ENTER_ALT_SCREEN = `${ESC}[?1049h`;
-const EXIT_ALT_SCREEN = `${ESC}[?1049l`;
-const INVERSE = `${ESC}[7m`;
-const RESET = `${ESC}[0m`;
-const DIM = `${ESC}[90m`;
-const BOLD = `${ESC}[1m`;
 const RED = `${ESC}[31m`;
 
-export const SECRETS_SCREEN_ANSI = {
-  ESC,
-  HIDE_CURSOR,
-  SHOW_CURSOR,
-  MOVE_HOME,
-  CLEAR_SCREEN,
-  CLEAR_EOL,
-  ENTER_ALT_SCREEN,
-  EXIT_ALT_SCREEN,
-} as const;
-
-const KEY_UP = `${ESC}[A`;
-const KEY_DOWN = `${ESC}[B`;
-const KEY_LEFT = `${ESC}[D`;
-const KEY_RIGHT = `${ESC}[C`;
-const KEY_HOME = `${ESC}[H`;
-const KEY_HOME2 = `${ESC}[1~`;
-const KEY_END = `${ESC}[F`;
-const KEY_END2 = `${ESC}[4~`;
-const KEY_PGUP = `${ESC}[5~`;
-const KEY_PGDN = `${ESC}[6~`;
-const KEY_SHIFT_TAB = `${ESC}[Z`;
-const KEY_TAB = '\t';
-const KEY_ESC = ESC;
-const KEY_ESC_ESC = `${ESC}${ESC}`;
-const KEY_CTRL_C = '\x03';
-const KEY_BACKSPACE = '\x7f';
-const KEY_BACKSPACE2 = '\b';
+export const SECRETS_SCREEN_ANSI = TERMINAL_SCREEN_ANSI;
+export { tokenizeKeys };
 
 const PAGE_SIZE = 10;
 const PAN_STEP = 8;
-
-// ── Chunk tokenizing ─────────────────────────────────────────────────────────
-//
-// A single stdin `data` event can carry more than one keypress — a paste, a
-// fast typist, or scripted/piped input can all deliver e.g. "APIFY\r" as one
-// chunk. `handleKey` only ever consumes one token at a time, so the driver
-// must split a chunk into tokens BEFORE feeding the reducer, in order, or
-// everything after the first character is silently dropped. This is that
-// split, kept pure and exported so it's testable on its own.
-
-/** A byte belongs to a CSI sequence's parameter/intermediate region (ECMA-48): digits, `;`, `?`, etc. */
-function isCsiParamByte(code: number): boolean {
-  return code >= 0x20 && code <= 0x3f;
-}
-
-/** A byte that terminates a CSI sequence (ECMA-48 final byte range). */
-function isCsiFinalByte(code: number): boolean {
-  return code >= 0x40 && code <= 0x7e;
-}
-
-/**
- * Scans a CSI sequence (`ESC [ params... final`) starting at `rest[start]`
- * (the byte right after `ESC [`). Consumes up through the final byte as one
- * token. If the chunk ends before a final byte appears (the sequence is
- * split across two `data` events, or the chunk is simply truncated — e.g. a
- * bracketed-paste marker like `ESC[200~` counts as an ordinary CSI sequence
- * here since bracketed paste isn't enabled on this screen), whatever was
- * scanned is still returned as ONE token rather than falling through to
- * per-character tokenizing — that would otherwise chop something like an
- * unrecognized `ESC[200~` into stray `[`, `2`, `0`, `0`, `~` characters that
- * would each get typed into the search bar.
- */
-function scanCsi(rest: string, start: number): { readonly token: string; readonly length: number } {
-  if (start >= rest.length) return { token: rest, length: rest.length };
-  const code = rest.charCodeAt(start);
-  if (isCsiFinalByte(code)) return { token: rest.slice(0, start + 1), length: start + 1 };
-  if (isCsiParamByte(code)) return scanCsi(rest, start + 1);
-  // A byte outside both ranges means this was never a well-formed CSI
-  // sequence — stop before it rather than consuming something unrelated.
-  return { token: rest.slice(0, start), length: start };
-}
-
-/** `rest` starts with `ESC`. Reads exactly one escape-rooted token: a CSI sequence, an SS3 sequence (`ESC O <byte>`), a double `ESC ESC` (some terminals double-emit one physical Escape keypress this way), or a lone `ESC`. */
-function readEscapeToken(rest: string): { readonly token: string; readonly length: number } {
-  if (rest.length === 1) return { token: ESC, length: 1 };
-  const second = rest[1];
-  if (second === ESC) return { token: `${ESC}${ESC}`, length: 2 };
-  if (second === '[') return scanCsi(rest, 2);
-  if (second === 'O') return rest.length >= 3 ? { token: rest.slice(0, 3), length: 3 } : { token: rest, length: rest.length };
-  // ESC followed by an ordinary character (e.g. an Alt+key combo some
-  // terminals send this way) — treat the ESC as its own token; the next
-  // character is tokenized on its own in the next recursive step.
-  return { token: ESC, length: 1 };
-}
-
-/**
- * Splits one raw stdin chunk into key tokens, in the order they arrived.
- * Everything that isn't an escape sequence is split one Unicode code point
- * at a time — via `codePointAt`/`fromCodePoint`, not raw indexing, so a
- * surrogate-pair character (an emoji, say) is one token, not two broken
- * halves. Pure; the driver's only job is to feed each returned token
- * through `handleKey` in order.
- */
-export function tokenizeKeys(chunk: string): readonly string[] {
-  return tokenizeFrom(chunk, 0);
-}
-
-function tokenizeFrom(chunk: string, index: number): readonly string[] {
-  if (index >= chunk.length) return [];
-
-  if (chunk[index] === ESC) {
-    const { token, length } = readEscapeToken(chunk.slice(index));
-    return [token, ...tokenizeFrom(chunk, index + length)];
-  }
-
-  const codePoint = chunk.codePointAt(index);
-  const char = codePoint === undefined ? chunk[index] : String.fromCodePoint(codePoint);
-  return [char, ...tokenizeFrom(chunk, index + char.length)];
-}
 
 // ── Column cycling ───────────────────────────────────────────────────────────
 

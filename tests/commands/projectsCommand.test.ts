@@ -6,13 +6,19 @@ import { CapyError, ERROR_CODES } from '../../src/types/index';
  * project, branches joined, protected ones marked), `--json` shape
  * (`{ok:true, projects:[...]}`), the reserved `_system` project staying
  * hidden even when the (fake) service returns it, an empty org rendering a
- * message instead of a table, and a service failure surfacing as a coded
- * error rather than a crash.
+ * message instead of a table, a service failure surfacing as a coded
+ * error rather than a crash, and (below, in a separate `describe`) the
+ * interactive-screen TTY gate added alongside the type-to-search view: both
+ * streams must be real TTYs AND `--json` must be absent, or the command
+ * falls straight through to the exact same static output asserted above —
+ * modeled on `secretsCommand.test.ts`'s own CAP-680 gate tests.
  *
  * `resolveOrgContext` (auth + org resolution) and the spinner are mocked —
  * neither is this file's concern. `excludeSystemProject` runs UNMOCKED (the
  * real module) so the `_system` case exercises the actual filter, not a
- * stand-in for it.
+ * stand-in for it. The interactive screen's own driver is mocked too (its
+ * behavior is covered by `tests/ui/projectsScreen.test.ts` and
+ * `tests/ui/projectsScreenDriver.test.ts`, not here).
  */
 
 interface FakeProject {
@@ -60,13 +66,28 @@ mock.module('../../src/core/orgContext', () => ({
   })),
 }));
 
+// The interactive screen's own dynamic import (`projectsCommand.ts` only
+// reaches this when it decides to go interactive) — mocked so a TTY-mode
+// test never actually takes over the terminal.
+const runProjectsScreenImpl = mock(async (..._args: unknown[]) => {});
+mock.module('../../src/ui/projectsScreenDriver', () => ({
+  runProjectsScreen: runProjectsScreenImpl,
+}));
+
 afterAll(() => mock.restore());
 
-let ProjectsCommand: typeof import('../../src/commands/projectsCommand').ProjectsCommand;
-const importCommand = async () => {
-  const mod = await import('../../src/commands/projectsCommand');
-  ProjectsCommand = mod.ProjectsCommand;
-};
+/** Sets BOTH `process.stdout.isTTY` and `process.stdin.isTTY` — the command only treats a run as "a real terminal" when both are true. Mirrors `secretsCommand.test.ts`'s own helper. */
+function setTTY(stdoutIsTty: boolean, stdinIsTty: boolean): void {
+  Object.defineProperty(process.stdout, 'isTTY', { value: stdoutIsTty, configurable: true });
+  Object.defineProperty(process.stdin, 'isTTY', { value: stdinIsTty, configurable: true });
+}
+
+// Top-level `await import` (not a lazily-assigned `let`, guarded per-test) —
+// every `mock.module(...)` call above already ran by the time this line
+// executes, so the mocks are in place before the real module (and its own
+// imports) resolve. `secretsCommand.test.ts` uses the same pattern for the
+// same reason.
+const { ProjectsCommand } = await import('../../src/commands/projectsCommand');
 
 /** Distinguishes the intentional `process.exit()` throw from a real bug, without parsing any message text. */
 class ExitSignal extends Error {
@@ -120,11 +141,15 @@ const branch = (id: string, name: string, isProtected: boolean): FakeBranch => (
 
 describe('ProjectsCommand', () => {
   beforeEach(async () => {
-    if (!ProjectsCommand) await importCommand();
     listProjectsImpl.mockReset();
     listBranchesImpl.mockReset();
     listProjectsImpl.mockImplementation(async () => []);
     listBranchesImpl.mockImplementation(async () => []);
+    runProjectsScreenImpl.mockClear();
+    // The bun test process itself is not a TTY on either stream, but a
+    // previous test may have flipped one — start every test from the same
+    // known-false baseline (same reasoning as `secretsCommand.test.ts`).
+    setTTY(false, false);
   });
 
   it('human output: one line per project, branches joined, protected marked', async () => {
@@ -220,5 +245,93 @@ describe('ProjectsCommand', () => {
     expect(exitCode).toBe(1);
     expect(stderr).toContain('Service unavailable');
     expect(stdout).toBe('');
+  });
+});
+
+describe('ProjectsCommand — interactive launch (type-to-search, matching capy secrets)', () => {
+  beforeEach(async () => {
+    listProjectsImpl.mockReset();
+    listBranchesImpl.mockReset();
+    listProjectsImpl.mockImplementation(async () => []);
+    listBranchesImpl.mockImplementation(async () => []);
+    runProjectsScreenImpl.mockClear();
+    setTTY(false, false);
+  });
+  afterAll(() => setTTY(false, false));
+
+  it('launches the interactive screen when BOTH stdout and stdin are TTYs', async () => {
+    setTTY(true, true);
+    listProjectsImpl.mockImplementation(async () => [project('p1', 'web')]);
+    listBranchesImpl.mockImplementation(async () => [branch('b1', 'production', true)]);
+
+    const { stdout, exitCode } = await capture(() => new ProjectsCommand().execute({}));
+
+    expect(exitCode).toBeUndefined();
+    expect(runProjectsScreenImpl).toHaveBeenCalledTimes(1);
+    // The screen owns the terminal — this command never itself console.logs
+    // anything once it hands off.
+    expect(stdout).toBe('');
+  });
+
+  it('does NOT launch the interactive screen when only ONE of stdout/stdin is a TTY — falls back to the static table instead', async () => {
+    setTTY(true, false);
+    listProjectsImpl.mockImplementation(async () => [project('p1', 'web')]);
+    listBranchesImpl.mockImplementation(async () => []);
+
+    const { stdout } = await capture(() => new ProjectsCommand().execute({}));
+
+    expect(runProjectsScreenImpl).not.toHaveBeenCalled();
+    expect(stdout).toContain('web');
+  });
+
+  it('does NOT launch the interactive screen when stdout is a TTY but stdin is not', async () => {
+    setTTY(false, true);
+    listProjectsImpl.mockImplementation(async () => [project('p1', 'web')]);
+
+    const { stdout } = await capture(() => new ProjectsCommand().execute({}));
+
+    expect(runProjectsScreenImpl).not.toHaveBeenCalled();
+    expect(stdout).toContain('web');
+  });
+
+  it('does NOT launch the interactive screen under --json, even on a full TTY — --json output is byte-for-byte identical to the non-TTY path', async () => {
+    setTTY(true, true);
+    listProjectsImpl.mockImplementation(async () => [project('p1', 'web')]);
+    listBranchesImpl.mockImplementation(async () => [branch('b1', 'production', true)]);
+
+    const ttyJson = await capture(() => new ProjectsCommand().execute({ json: true }));
+    setTTY(false, false);
+    const nonTtyJson = await capture(() => new ProjectsCommand().execute({ json: true }));
+
+    expect(runProjectsScreenImpl).not.toHaveBeenCalled();
+    expect(ttyJson.stdout).toBe(nonTtyJson.stdout);
+  });
+
+  it('passes the exact same ProjectSummary[] to the interactive screen that --json would have printed', async () => {
+    setTTY(true, true);
+    listProjectsImpl.mockImplementation(async () => [project('p1', 'web'), project('p2', 'api')]);
+    listBranchesImpl.mockImplementation(async (projectId: string) =>
+      projectId === 'p1' ? [branch('b1', 'production', true)] : [],
+    );
+
+    await capture(() => new ProjectsCommand().execute({}));
+
+    expect(runProjectsScreenImpl).toHaveBeenCalledTimes(1);
+    const passed = runProjectsScreenImpl.mock.calls[0]?.[0] as Array<{ name: string }> | undefined;
+    expect(passed?.map((p) => p.name)).toEqual(['web', 'api']);
+  });
+
+  it('service error while genuinely interactive (both streams TTYs, no --json): prose on stderr, exit 1, nothing on stdout', async () => {
+    setTTY(true, true);
+    listProjectsImpl.mockImplementation(async () => {
+      throw new CapyError('Service unavailable', ERROR_CODES.SERVICE_ERROR);
+    });
+
+    const { stderr, stdout, exitCode } = await capture(() => new ProjectsCommand().execute({}));
+
+    expect(exitCode).toBe(1);
+    expect(stderr).toContain('Service unavailable');
+    expect(stdout).toBe('');
+    expect(runProjectsScreenImpl).not.toHaveBeenCalled();
   });
 });

@@ -9,15 +9,15 @@ const DIM = '\x1b[90m';
 const RESET = '\x1b[0m';
 
 export interface ProjectBranchSummary {
-  id: string;
-  name: string;
-  protected: boolean;
+  readonly id: string;
+  readonly name: string;
+  readonly protected: boolean;
 }
 
 export interface ProjectSummary {
-  id: string;
-  name: string;
-  branches: ProjectBranchSummary[];
+  readonly id: string;
+  readonly name: string;
+  readonly branches: readonly ProjectBranchSummary[];
 }
 
 /**
@@ -34,6 +34,17 @@ export interface ProjectSummary {
  * here is the same belt-and-braces client-side guard `usersCommand`/
  * `inviteCommand` already apply, in case an older or misbehaving service ever
  * lets it through.
+ *
+ * Three output modes, same rule `secretsCommand.ts` (CAP-680) codified first:
+ *
+ * - `--json` → unchanged: the `{ok, projects}` payload, always, on any surface.
+ * - No `--json`, and BOTH stdout and stdin are TTYs → the interactive
+ *   type-to-search screen (`ui/projectsScreenDriver.ts`), with the same
+ *   loading spinner shown beforehand.
+ * - No `--json`, and it is NOT a full TTY (piped/CI/agent, or a real
+ *   terminal with piped stdin) → today's unchanged static human table — the
+ *   exact `render()` path this command always used before the interactive
+ *   screen existed.
  */
 export class ProjectsCommand {
   constructor(
@@ -43,6 +54,11 @@ export class ProjectsCommand {
 
   async execute(opts: { json?: boolean } = {}): Promise<void> {
     const json = opts.json === true;
+    // Interactive only when BOTH streams are real TTYs — an agent/CI caller,
+    // or a real terminal with piped stdin, falls straight through to the
+    // same static table this command has always printed in that case.
+    const isFullTty = process.stdout.isTTY === true && process.stdin.isTTY === true;
+    const interactive = !json && isFullTty;
     // Same CAP-273 contract as `usersCommand`/`listCommand`: under --json, no
     // progress output at all, so stdout stays pure JSON even on a TTY.
     const spinner = json ? null : new Spinner('Loading projects...');
@@ -52,6 +68,16 @@ export class ProjectsCommand {
       const { serviceClient } = await resolveOrgContext(this.apiUrl, this.devMode);
       const projects = await this.loadProjectSummaries(serviceClient);
 
+      if (interactive) {
+        // No "succeed" message — like `secretsScreen`'s launch, the screen
+        // takes over the terminal immediately, so there's nothing to leave
+        // behind on scroll-back.
+        spinner?.stop();
+        const { runProjectsScreen } = await import('../ui/projectsScreenDriver');
+        await runProjectsScreen(projects);
+        return;
+      }
+
       spinner?.succeed(`${projects.length} project${projects.length !== 1 ? 's' : ''}`);
       this.render(projects, json);
     } catch (err) {
@@ -60,7 +86,7 @@ export class ProjectsCommand {
     }
   }
 
-  private async loadProjectSummaries(serviceClient: ServiceClient): Promise<ProjectSummary[]> {
+  private async loadProjectSummaries(serviceClient: ServiceClient): Promise<readonly ProjectSummary[]> {
     const rawProjects = excludeSystemProject(await serviceClient.listProjects());
     // Concurrent per-project branch fetch — independent GETs, fine to fan out.
     return Promise.all(
@@ -76,7 +102,7 @@ export class ProjectsCommand {
     );
   }
 
-  private render(projects: ProjectSummary[], json: boolean): void {
+  private render(projects: readonly ProjectSummary[], json: boolean): void {
     if (json) {
       console.log(JSON.stringify({ ok: true, projects }, null, 2));
       return;
@@ -94,7 +120,7 @@ export class ProjectsCommand {
     console.log('');
   }
 
-  private formatBranches(branches: ProjectBranchSummary[]): string {
+  private formatBranches(branches: readonly ProjectBranchSummary[]): string {
     if (branches.length === 0) return `${DIM}(no branches)${RESET}`;
     return branches
       .map((b) => (b.protected ? `${b.name} ${DIM}(protected)${RESET}` : b.name))
