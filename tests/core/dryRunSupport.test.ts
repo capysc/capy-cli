@@ -176,7 +176,7 @@ describe('resolveDryRunSupport', () => {
     expect(resolveDryRunSupport('branch', { opts: {}, args: [] })).toBe('read_only');
   });
 
-  test('branch: -D is unsupported', () => {
-    expect(resolveDryRunSupport('branch', { opts: { D: 'some-branch' }, args: [] })).toBe('unsupported');
+  test('branch: -D previews (CAP-659 Phase 2 — index.ts reads --dry-run itself before any confirm/delete)', () => {
+    expect(resolveDryRunSupport('branch', { opts: { D: 'some-branch' }, args: [] })).toBe('preview');
   });
 });

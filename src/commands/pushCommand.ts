@@ -10,14 +10,23 @@ import {
   CapyError,
   ERROR_CODES,
   setSyncKeepHash,
+  KeepFile,
 } from '../types/index';
 import { resolveProjectKey, KeyServiceOps } from '../crypto/keyResolver';
 import { deriveResourceId } from '../crypto/resourceId';
 import { writeKeepCache, LOCAL_USER_ID } from '../config/globalConfig';
 import { isLocalOnly } from '../config/profileConfig';
 import { resolveLocalProjectKey } from '../core/localUnlock';
+import { hashValue } from './statusCommand';
+import { computePushDiff, pushPlan } from '../core/pushPlan';
+import { dryRunOk, dryRunRefused, dryRunExitCode, printDryRunResultHuman, printDryRunResultJson } from '../core/dryRun';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
+
+export interface PushOptions {
+  json?: boolean;
+  dryRun?: boolean;
+}
 
 export class PushCommand {
   private projectManager: ProjectManager;
@@ -40,6 +49,48 @@ export class PushCommand {
     debugLine(`push: ${msg}`, data);
   }
 
+  /** Prints a `DryRunResult` on the shared printer and exits per CAP-659's rule — never returns. */
+  private printDryRun(result: ReturnType<typeof dryRunRefused> | ReturnType<typeof dryRunOk>, json: boolean): never {
+    if (json) printDryRunResultJson(result);
+    else printDryRunResultHuman(result);
+    process.exit(dryRunExitCode(result));
+  }
+
+  /**
+   * `capy push --dry-run` — names that would be added/changed/removed,
+   * compared against the last-known (pinned) state in keep.lock. No
+   * network fetch: push only ever travels local → Keep, so the pinned
+   * hashes already on disk are exactly the baseline the real push diffs
+   * against (`SyncEngine.mergeWithKeep`). Never encrypts-and-writes, never
+   * POSTs — reading `.env` here is only to hash it for the diff, the same
+   * read `pushCommand`'s real run does before it ever reaches `Encryptor`.
+   */
+  private previewPush(keep: KeepFile, branch: string, encryptionKey: string, json: boolean): void {
+    const pinned: Record<string, string> = {};
+    for (const [varName, entries] of Object.entries(keep.variables)) {
+      const entry = entries.find((e) => e.branch === branch);
+      if (entry) pinned[varName] = entry.value_hash;
+    }
+
+    const rawLocal = this.fileManager.readEnvFile();
+    if (Object.keys(rawLocal).length === 0) {
+      // Mirrors the real run's own early-out (`pushSpinner.fail('No .env
+      // file to push'); return;`): an empty `.env` pushes nothing — it does
+      // NOT merge an empty set and remove every pinned variable.
+      this.printDryRun(dryRunOk('push', []), json);
+      return;
+    }
+    const localHashes = Object.fromEntries(
+      Object.entries(rawLocal).map(([key, value]) => {
+        const plaintext = value.startsWith('capy:') ? this.fileManager.decryptValue(value, encryptionKey) : value;
+        return [key, hashValue(plaintext)];
+      }),
+    );
+
+    const diffs = computePushDiff(pinned, localHashes);
+    this.printDryRun(dryRunOk('push', pushPlan(diffs)), json);
+  }
+
   private debugError(label: string, err: unknown): void {
     if (err instanceof CapyError) {
       this.debug(`${label}: CapyError`, {
@@ -55,9 +106,9 @@ export class PushCommand {
     }
   }
 
-  async execute(): Promise<void> {
+  async execute(options: PushOptions = {}): Promise<void> {
     try {
-      await this._execute();
+      await this._execute(options);
     } catch (error: any) {
       this.debugError('push execute caught', error);
       const { displayErrorAndExit } = await import('../ui/errorScreen');
@@ -65,7 +116,7 @@ export class PushCommand {
     }
   }
 
-  private async _execute(): Promise<void> {
+  private async _execute(options: PushOptions = {}): Promise<void> {
     this.debug('starting push command');
     this.debug('cwd', process.cwd());
 
@@ -98,13 +149,19 @@ export class PushCommand {
         this.authService.setSessionUserId(projectState.userId);
       }
 
-      // Authenticate — try silent first (scoped, then any session), then interactive.
+      // Authenticate — try silent first (scoped, then any session), then
+      // interactive. Under `--dry-run`, a preview never starts a new
+      // sign-in (that flow is owned by `fix/auth-needs-tty`) — only the
+      // silent attempts run, and a dry run with no usable session refuses
+      // with the SAME code the real run would eventually give if auth
+      // failed outright (AUTH_FAILED), rather than opening a browser.
       const spinner = ora('Authenticating...').start();
       const authResult = await (async () => {
         const scoped = await this.authService.authenticateSilent(projectState.organizationId);
         if (scoped.success) return scoped;
         const anySession = await this.authService.authenticateSilent();
         if (anySession.success) return anySession;
+        if (options.dryRun) return anySession;
         return this.authService.authenticate(projectState.organizationId);
       })();
       this.debug('authResult', {
@@ -114,6 +171,9 @@ export class PushCommand {
       });
       if (!authResult.success) {
         spinner.fail('Authentication failed');
+        if (options.dryRun) {
+          this.printDryRun(dryRunRefused('push', ERROR_CODES.AUTH_FAILED), options.json === true);
+        }
         throw new CapyError(authResult.error || 'Authentication failed', ERROR_CODES.AUTH_FAILED);
       }
 
@@ -152,6 +212,11 @@ export class PushCommand {
     if (!branch) {
       console.error('No active branch. Run capy to select a branch before pushing.');
       process.exit(1);
+    }
+
+    if (options.dryRun) {
+      this.previewPush(keep, branch, encryptionKey, options.json === true);
+      return;
     }
 
     // Read and encrypt .env file

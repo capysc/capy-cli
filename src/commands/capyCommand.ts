@@ -1,7 +1,7 @@
 import ora from '../ui/spinner';
 import { ProjectManager } from '../core/projectManager';
 import { FileManager } from '../files/fileManager';
-import { AuthService } from '../auth/authService';
+import { AuthService, silentAuthFailureMessage } from '../auth/authService';
 import { ServiceClient } from '../service/serviceClient';
 import { SyncEngine } from '../sync/syncEngine';
 import { PromptEngine } from '../ui/promptEngine';
@@ -46,6 +46,16 @@ import { cleanupOrgData } from '../cleanup/orgCleanup';
 import { compareSecrets, hashValue, formatSnippet } from './statusCommand';
 import { ACCENT } from '../ui/colors';
 import { installSyncHooks } from '../git/syncHooks';
+import {
+  DryRunChange,
+  DryRunUnanswered,
+  dryRunOk,
+  dryRunRefused,
+  dryRunExitCode,
+  printDryRunResultHuman,
+  printDryRunResultJson,
+} from '../core/dryRun';
+import { refuseNonInteractive } from '../ui/interactive';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -157,13 +167,17 @@ export class CapyCommand {
         } else if (isLocalOnly()) {
           // Local-only mode: bootstrap a project entirely on this machine
           // (synthetic org, generated projectId) instead of server onboarding.
+          if (this.options.dryRun) return this.dryRunLocalInit();
           await this.initializeProjectLocal();
           return;
         } else {
+          if (this.options.dryRun) return this.dryRunInit();
           await this.initializeProject();
           return;
         }
       }
+
+      if (this.options.dryRun) return this.dryRunSync(projectState);
 
       await this.syncProject(projectState);
       const { printExpiryWarnings } = await import('./connectors/shared');
@@ -173,6 +187,211 @@ export class CapyCommand {
       const { displayErrorAndExit } = await import('../ui/errorScreen');
       await displayErrorAndExit(error);
     }
+  }
+
+  /** Prints a `DryRunResult` on the shared printer and exits per CAP-659's rule — never returns. */
+  private printDryRun(result: ReturnType<typeof dryRunOk> | ReturnType<typeof dryRunRefused>): never {
+    // Bare `capy` has no `--json` of its own (CAP-412's whole command surface
+    // is prose) — always the human printer.
+    printDryRunResultHuman(result);
+    process.exit(dryRunExitCode(result));
+  }
+
+  /**
+   * `capy --dry-run` on a brand-new directory (CAP-412, CAP-659 Phase 2).
+   *
+   * The real first run is six-ish `inquirer` questions deep (organization,
+   * its name, the recovery phrase, redeem, project, project name, branch,
+   * encrypt) with no flag on bare `capy` that answers any of them — so a
+   * dry run here can only ever know ONE thing for certain: whether there is
+   * a session to continue with at all. Never starts a new sign-in (owned by
+   * `fix/auth-needs-tty`); with no usable session it refuses with the same
+   * code the real run would eventually give. With one, every question past
+   * it is reported `unanswered` (exit 3) rather than guessed — safe by
+   * construction: a dry run that cannot know what would happen says so
+   * instead of claiming a plan it never saw.
+   */
+  private async dryRunInit(): Promise<void> {
+    const authResult = await this.authService.authenticateSilent();
+    if (!authResult.success) {
+      // Same remedy-from-code convention every other terminal silent-auth
+      // site in this CLI uses — never a bare "auth failed".
+      console.error(silentAuthFailureMessage(authResult));
+      this.printDryRun(dryRunRefused('capy', ERROR_CODES.AUTH_FAILED));
+    }
+    const unanswered: DryRunUnanswered[] = [
+      { id: 'organization', flag: 'none yet — run capy interactively once, or capy --web' },
+    ];
+    this.printDryRun(dryRunOk('capy', [], unanswered));
+  }
+
+  /**
+   * `capy --dry-run` bootstrapping a LOCAL-ONLY project (no server, no
+   * auth) — the one concrete thing this run would do is create keep.lock
+   * and unlock/create the local project key. Everything downstream of that
+   * (the first sync) depends on keep.lock existing, so it is not in this
+   * plan — run `capy --dry-run` again once the real init has made keep.lock
+   * exist to preview the first sync.
+   */
+  private dryRunLocalInit(): void {
+    const changes: DryRunChange[] = [
+      { where: 'local_file', action: 'create project (local-only)', target: 'keep.lock', reversible: true },
+      { where: 'keychain', action: 'create or unlock the local project key', target: 'local key', reversible: true },
+    ];
+    this.printDryRun(dryRunOk('capy', changes));
+  }
+
+  /**
+   * `capy --dry-run` in an already-initialized directory — the sync plan.
+   *
+   * Never starts a new sign-in (same rule as `dryRunInit`): only the silent
+   * auth attempts run, and a dry run with no usable session refuses with
+   * the same `AUTH_FAILED` code the real sync would eventually throw.
+   * Branch resolution is LOCAL ONLY here — the `.env` header and
+   * `.capy/branch` cache, never the server fallback `resolveActiveBranch`
+   * uses, since that can write a freshly-picked branch to disk. A directory
+   * with no local branch signal yet is reported `unanswered` instead
+   * (exit 3) — true either way: the real run would have to ask too.
+   *
+   * Once a branch is known, this reads exactly what `status` already reads
+   * for the same report (pinned keep.lock hashes, local `.env`, remote via
+   * `fetchSecretsWithCache`) and reuses `compareSecrets` — all reads, no
+   * write. A genuine two-sided conflict is refused via the SAME
+   * `refuseNonInteractive` call the real sync's non-interactive conflict
+   * path already uses (CAP-659: "conflicts return today's coded refusals")
+   * — never rendered as a plan, because nobody can resolve it from a flag.
+   */
+  private async dryRunSync(projectState: ProjectState): Promise<void> {
+    const localMode = isLocalOnly();
+
+    const envMeta = this.fileManager.readEnvMeta(this.options.envPath);
+    const branch = envMeta.branch ?? this.projectManager.readActiveBranch() ?? undefined;
+    if (!branch) {
+      this.printDryRun(
+        dryRunOk('capy', [], [{ id: 'branch', flag: 'none yet — run capy interactively once to pick a branch' }]),
+      );
+    }
+
+    const authResult = localMode
+      ? { success: true as const, user_id: LOCAL_USER_ID }
+      : await (async () => {
+          if (projectState.userId) this.authService.setSessionUserId(projectState.userId);
+          const scoped = await this.authService.authenticateSilent(projectState.organizationId);
+          if (scoped.success) return scoped;
+          return this.authService.authenticateSilent();
+        })();
+    if (!authResult.success) {
+      // Same remedy-from-code convention every other terminal silent-auth
+      // site in this CLI uses — never a bare "auth failed".
+      console.error(silentAuthFailureMessage(authResult));
+      this.printDryRun(dryRunRefused('capy', ERROR_CODES.AUTH_FAILED));
+    }
+
+    const keyResult = await (async (): Promise<{ ok: true; key: string } | { ok: false; code: string }> => {
+      try {
+        const key = localMode
+          ? await resolveLocalProjectKey(projectState.projectId!)
+          : await resolveProjectKey(
+              projectState.organizationId!,
+              projectState.projectId!,
+              authResult.user_id!,
+              this.keyServiceOps(),
+            );
+        return { ok: true, key };
+      } catch (err: any) {
+        this.debugError('dryRunSync: key resolution failed', err);
+        // Same code the real sync would throw with (it rethrows this exact
+        // error from its own `encryptionKey` resolution) — never a generic
+        // fallback that would mask what actually failed.
+        return { ok: false, code: err instanceof CapyError ? err.code : ERROR_CODES.NETWORK_ERROR };
+      }
+    })();
+    if (!keyResult.ok) {
+      this.printDryRun(dryRunRefused('capy', keyResult.code));
+    }
+    const encryptionKey = keyResult.key;
+
+    const keep = this.projectManager.readKeepFile();
+    const pinned: Record<string, string> = Object.fromEntries(
+      Object.entries(keep?.variables ?? {})
+        .map(([varName, entries]) => [varName, entries.find((e) => e.branch === branch)?.value_hash])
+        .filter((pair): pair is [string, string] => pair[1] !== undefined),
+    );
+
+    const localHashes: Record<string, string> = ((): Record<string, string> => {
+      try {
+        const rawLocal = this.fileManager.readEnvFile(this.options.envPath);
+        return Object.fromEntries(
+          Object.entries(rawLocal).map(([key, value]) => [
+            key,
+            hashValue(value.startsWith('capy:') ? this.decryptLocalEnvValueForSync(key, value, encryptionKey) : value),
+          ]),
+        );
+      } catch (err) {
+        this.debugError('dryRunSync: .env read failed', err);
+        return {};
+      }
+    })();
+
+    const remoteHashes: Record<string, string> = await (async (): Promise<Record<string, string>> => {
+      if (localMode || !keep || Object.keys(pinned).length === 0) return {};
+      try {
+        const keepHash = SyncEngine.computeKeepHash(keep, branch);
+        const blob = await fetchSecretsWithCache(
+          this.serviceClient,
+          projectState.organizationId!,
+          projectState.projectId!,
+          keepHash,
+        );
+        if (!blob?.env_file) return {};
+        const encrypted = this.fileManager.parseEnvContent(blob.env_file);
+        return Object.fromEntries(
+          Object.entries(encrypted).flatMap(([key, value]) => {
+            try {
+              return [[key, hashValue(this.fileManager.decryptValue(value, encryptionKey))]] as const;
+            } catch {
+              return [];
+            }
+          }),
+        );
+      } catch (err) {
+        this.debugError('dryRunSync: remote fetch failed', err);
+        return {};
+      }
+    })();
+
+    const { diffs } = compareSecrets(pinned, localHashes, remoteHashes);
+
+    if (diffs.length === 0) {
+      // Mirrors the real run's own "Everything is up to date!" path, which
+      // still re-encrypts `.env` (same content, so the ciphertext bytes
+      // change even though no plaintext does) and installs/refreshes hooks
+      // on every single run — both real writes a dry run must name.
+      const changes: DryRunChange[] = [
+        { where: 'local_file', action: 're-encrypt .env (no content change)', target: '.env', reversible: true },
+        { where: 'git', action: 'install or refresh Capy-managed hooks', target: '.git/hooks', reversible: true },
+      ];
+      this.printDryRun(dryRunOk('capy', changes));
+    }
+
+    const conflicted = diffs.filter((d) => d.local !== d.pinned && d.remote !== d.pinned && d.local !== d.remote);
+    if (conflicted.length > 0) {
+      // Identical call (same reason, same hint, same exit 3) to the one
+      // `resolveIndividually` already makes for a non-interactive conflict
+      // — a dry run reaches the same refusal the real sync would, rather
+      // than a plan it has no flag to construct.
+      refuseNonInteractive(
+        `${conflicted.length} ${conflicted.length === 1 ? 'variable has' : 'variables have'} changed on both sides and need a decision`,
+        'Run `capy --web` to resolve them in a browser, or run `capy` in a terminal.',
+      );
+    }
+
+    const changes: DryRunChange[] = diffs.map((d): DryRunChange => {
+      const localDiffers = d.local !== d.pinned;
+      const action = localDiffers ? 'push to Keep' : 'pull from Keep into .env';
+      return { where: localDiffers ? 'capy_service' : 'local_file', action, target: d.variable, reversible: true };
+    });
+    this.printDryRun(dryRunOk('capy', changes));
   }
 
   /**

@@ -111,26 +111,16 @@ function snapshotHooks(dir: string): Record<string, string> {
   );
 }
 
-describe('bare `capy --dry-run` refuses (CAP-412)', () => {
-  test('--dry-run before any subcommand refuses with DRY_RUN_UNSUPPORTED, --json', () => {
-    const r = capy(['--dry-run', '--json']);
-    // Bare `capy` has no `--json` of its own; JSON is still decided purely
-    // by the guard's own check, which only looks for `--json` on commands
-    // that declare it. Assert via the human path instead — see the next
-    // test — and here just that it refuses rather than syncing for real.
-    expect(r.code).toBe(1);
-  });
-
-  test('--dry-run before any subcommand refuses, human stderr', () => {
+// CAP-659 Phase 2 (CAP-412): bare `capy --dry-run` now PREVIEWS instead of
+// refusing `DRY_RUN_UNSUPPORTED` — `CapyCommand.execute()` reads
+// `options.dryRun` itself and never writes. Covered in depth by
+// `tests/commands/dryRunCore.e2e.test.ts`; this file keeps only the
+// guard-level regression (the flag is actually read, not silently ignored).
+describe('bare `capy --dry-run` previews, never runs the real init/sync for real (CAP-412)', () => {
+  test('uninitialized directory: --dry-run never writes keep.lock', () => {
     const r = capy(['--dry-run']);
-    expect(r.code).toBe(1);
-    expect(r.stderr).toContain('DRY_RUN_UNSUPPORTED');
-    expect(r.stdout).toBe('');
-  });
-
-  test('positive control: bare `capy` without --dry-run does NOT hit this refusal (it runs the real sync/init path instead)', () => {
-    const r = capy([]);
     expect(r.stderr).not.toContain('DRY_RUN_UNSUPPORTED');
+    expect(existsSync(join(ROOT, 'keep.lock'))).toBe(false);
   });
 });
 
@@ -182,8 +172,8 @@ describe('cleanup — the CAP-659/CAP-412 regression repro', () => {
 const UNSUPPORTED_CASES: Array<{ path: string; argv: string[] }> = [
   { path: 'run', argv: ['run'] },
   { path: 'edit', argv: ['edit'] },
-  { path: 'checkout', argv: ['checkout', 'some-branch'] },
-  { path: 'push', argv: ['push'] },
+  // `checkout` and `push` moved to `preview` in CAP-659 Phase 2 — see
+  // `tests/commands/dryRunCore.e2e.test.ts` for their coverage.
   { path: 'deploy revoke', argv: ['deploy', 'revoke', 'deploy-id-x'] },
   { path: 'deploy targets-remove', argv: ['deploy', 'targets-remove', 'target-x'] },
   { path: 'logout', argv: ['logout'] },
@@ -305,12 +295,8 @@ describe('`branch` — list is read_only, -D refuses (CAP-659)', () => {
     expect(r.stderr).not.toContain('DRY_RUN_UNSUPPORTED');
   });
 
-  test('-D <name>: refuses with DRY_RUN_UNSUPPORTED, never reaches the real delete confirm', () => {
-    writeKeep(ROOT);
-    const r = capy(['branch', '-D', 'some-branch', '--dry-run']);
-    expect(r.code).toBe(1);
-    expect(r.stderr).toContain('DRY_RUN_UNSUPPORTED');
-  });
+  // `-D` moved to `preview` in CAP-659 Phase 2 (never reaches the real
+  // confirm or delete call either way) — see `dryRunCore.e2e.test.ts`.
 });
 
 describe('`read_only` commands still run, output unaffected by --dry-run', () => {

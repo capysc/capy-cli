@@ -662,6 +662,19 @@ export const ERROR_CODES = {
    * through to running the command for real.
    */
   DRY_RUN_UNSUPPORTED: 'DRY_RUN_UNSUPPORTED',
+  // --- CLI dry-run Phase 2/3 (CAP-659 continued) + non-TTY fixes (CAP-520) ---
+  /** `capy edit` is an interactive TUI (raw-mode keys) with no TTY and no `--web` — refused before the screen is drawn. */
+  EDIT_NEEDS_TTY: 'EDIT_NEEDS_TTY',
+  /** `capy branch -D <name>` needs a human (destructive confirm) and there is no TTY, and `--yes` wasn't passed. */
+  BRANCH_DELETE_NEEDS_TTY: 'BRANCH_DELETE_NEEDS_TTY',
+  /** `capy branch -D <name>` targets the branch this directory is currently on. */
+  BRANCH_DELETE_ACTIVE: 'BRANCH_DELETE_ACTIVE',
+  /** `capy branch` (no `-D`) would prompt to switch and there is no TTY to ask — pass `--json` for the listing instead. */
+  BRANCH_SWITCH_NEEDS_TTY: 'BRANCH_SWITCH_NEEDS_TTY',
+  /** `capy checkout -b <name>` needs a human (protected y/n) and there is no TTY, and neither `--protected` nor `--no-protected` was passed. */
+  CHECKOUT_PROTECTION_NEEDS_TTY: 'CHECKOUT_PROTECTION_NEEDS_TTY',
+  /** `capy status --json` hit an internal error (auth/network/read) — reported as `{ok:false, code}` rather than a silent `exit 0`. */
+  STATUS_FAILED: 'STATUS_FAILED',
 } as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES];

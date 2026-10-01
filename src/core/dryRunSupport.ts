@@ -59,9 +59,10 @@ export const KNOWN_ACTIONLESS_PARENT_PATHS: ReadonlySet<string> = new Set(['prof
  */
 export const COMMAND_DRY_RUN_SUPPORT: ReadonlyMap<string, DryRunSupportLevel> = new Map([
   // Bare `capy` — first run inits/adopts a project and pushes; later runs
-  // sync. Both are real writes today, and the flag is read nowhere
-  // (CAP-412). Refusing here is what stops that harm.
-  [ROOT_COMMAND_PATH, 'unsupported'],
+  // sync. CAP-659 Phase 2 (CAP-412): `CapyCommand.execute()` now reads
+  // `options.dryRun` itself and branches to a read-only init/sync preview
+  // before any write — see `capyCommand.ts`'s `dryRunInit`/`dryRunSync`.
+  [ROOT_COMMAND_PATH, 'preview'],
 
   // --- Group A (CAP-659): read-only today, dry run runs it as normal ---
   ['status', 'read_only'],
@@ -87,9 +88,17 @@ export const COMMAND_DRY_RUN_SUPPORT: ReadonlyMap<string, DryRunSupportLevel> = 
 
   // --- Everything else: unsupported for now (Phase 2/3 build real previews) ---
   ['run', 'unsupported'],
+  // Interactive TUI with no meaningful preview — refuses unsupported under
+  // `--dry-run` same as before; its own non-TTY gate (`EDIT_NEEDS_TTY`) is a
+  // separate fix, independent of this table.
   ['edit', 'unsupported'],
-  ['checkout', 'unsupported'],
-  ['push', 'unsupported'],
+  // CAP-659 Phase 2: `checkoutCommand.ts` now reads `options.dryRun` itself
+  // (both `-b` create and plain switch) and previews before any write.
+  ['checkout', 'preview'],
+  // CAP-659 Phase 2: `pushCommand.ts` now reads `options.dryRun` and previews
+  // the add/change/remove diff against the last-known (pinned) state before
+  // any encrypt/write/POST.
+  ['push', 'preview'],
   // Token path never reads `--dry-run` and can mint a live deploy token
   // (CAP-659). Target mode already threads the flag through safely — the
   // override below is what tells the two apart.
@@ -169,10 +178,12 @@ function resolveConnectSupport(ctx: DryRunOverrideContext): DryRunSupportLevel {
 /**
  * `branch` lists (Group A) — `branch -D <name>` deletes the branch and
  * every secret on it behind an inquirer confirm a person could mistake for
- * a preview (CAP-659). Tightens to `unsupported` whenever `-D` was given.
+ * a preview (CAP-659). CAP-659 Phase 2: `-D` now previews (which branch,
+ * `reversible: false`) via `src/index.ts`'s own `branch` action, which reads
+ * `--dry-run` itself before ever reaching the confirm or the delete call.
  */
 function resolveBranchSupport(ctx: DryRunOverrideContext): DryRunSupportLevel {
-  return ctx.opts.D ? 'unsupported' : 'read_only';
+  return ctx.opts.D ? 'preview' : 'read_only';
 }
 
 const OVERRIDES: ReadonlyMap<string, (ctx: DryRunOverrideContext) => DryRunSupportLevel> = new Map([

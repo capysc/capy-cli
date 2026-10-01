@@ -37,10 +37,12 @@ JSON support: yes (`--json`)
 Inspect and edit secrets in an interactive TUI
 
 ```
-capy edit
+capy edit [options]
 ```
 
-_No options._
+| Option | Description | Default |
+|---|---|---|
+| `--non-tty` | never render the TUI; fail fast with a coded refusal (agents/CI) |  |
 
 JSON support: no
 
@@ -55,7 +57,9 @@ capy branch [options]
 | Option | Description | Default |
 |---|---|---|
 | `-D <name>` | Delete a branch |  |
+| `-y, --yes` | skip the delete confirmation (required non-interactively) |  |
 | `--json` | emit machine-readable JSON instead of the human UI |  |
+| `--non-tty` | never prompt; resolve from flags or fail fast (agents/CI) |  |
 
 JSON support: yes (`--json`)
 
@@ -73,6 +77,7 @@ capy checkout <branch> [options]
 | `--protected` | Mark as a protected branch (invite-only) |  |
 | `--no-protected` | Create it open to the project |  |
 | `--json` | emit machine-readable JSON instead of the human UI |  |
+| `--non-tty` | never prompt; resolve from flags or fail fast (agents/CI) |  |
 
 JSON support: yes (`--json`)
 
@@ -81,12 +86,14 @@ JSON support: yes (`--json`)
 Push encrypted values to Keep
 
 ```
-capy push
+capy push [options]
 ```
 
-_No options._
+| Option | Description | Default |
+|---|---|---|
+| `--json` | emit machine-readable JSON instead of the human UI |  |
 
-JSON support: no
+JSON support: yes (`--json`)
 
 ## `capy deploy`
 
@@ -729,6 +736,12 @@ Every refusal carries a stable `code` — branch on it, never on message text.
 - `DEPLOY_STALE_KEEP`
 - `DEPLOY_TOKEN_UNTRACKED`
 - `DRY_RUN_UNSUPPORTED`
+- `EDIT_NEEDS_TTY`
+- `BRANCH_DELETE_NEEDS_TTY`
+- `BRANCH_DELETE_ACTIVE`
+- `BRANCH_SWITCH_NEEDS_TTY`
+- `CHECKOUT_PROTECTION_NEEDS_TTY`
+- `STATUS_FAILED`
 
 ## Conventions
 

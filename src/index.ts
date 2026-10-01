@@ -198,22 +198,36 @@ program
 program
   .command('edit')
   .description('Inspect and edit secrets in an interactive TUI')
-  .action(async (_options, command) => {
+  .option('--non-tty', 'never render the TUI; fail fast with a coded refusal (agents/CI)')
+  .action(async (options, command) => {
     const { EditCommand } = await import('./commands/editCommand');
     const cmd = new EditCommand();
-    await cmd.execute({ web: command.optsWithGlobals().web === true });
+    await cmd.execute({ web: command.optsWithGlobals().web === true, nonTty: options.nonTty });
   });
 
 program
   .command('branch')
   .description('List secret branches')
   .option('-D <name>', 'Delete a branch')
+  .option('-y, --yes', 'skip the delete confirmation (required non-interactively)')
   .option('--json', 'emit machine-readable JSON instead of the human UI')
+  .option('--non-tty', 'never prompt; resolve from flags or fail fast (agents/CI)')
   .action(async (options, command) => {
     assertNotLocalOnly('branch');
     const { AuthService } = await import('./auth/authService');
     const { ServiceClient } = await import('./service/serviceClient');
     const { ProjectManager } = await import('./core/projectManager');
+    const { isInteractive } = await import('./ui/interactive');
+    const { dryRunOk, dryRunRefused, dryRunExitCode, printDryRunResultHuman, printDryRunResultJson } = await import(
+      './core/dryRun'
+    );
+
+    const dryRun = command.optsWithGlobals().dryRun === true;
+    const printDryRun = (result: ReturnType<typeof dryRunOk> | ReturnType<typeof dryRunRefused>): never => {
+      if (options.json) printDryRunResultJson(result);
+      else printDryRunResultHuman(result);
+      process.exit(dryRunExitCode(result));
+    };
 
     const pm = new ProjectManager();
     const projectState = await pm.detectProjectState();
@@ -225,8 +239,15 @@ program
     const authService = new AuthService(undefined, false, projectState.userId);
     const serviceClient = new ServiceClient();
     serviceClient.setTokenProvider(() => authService.getValidToken());
-    const authResult = await authService.authenticate(projectState.organizationId);
+    // Under `--dry-run`, never start a new sign-in (owned by
+    // `fix/auth-needs-tty`) — only the silent attempt runs, and a dry run
+    // with no usable session refuses with the same code the real run would
+    // eventually give (AUTH_FAILED) instead of opening a browser.
+    const authResult = dryRun
+      ? await authService.authenticateSilent(projectState.organizationId)
+      : await authService.authenticate(projectState.organizationId);
     if (!authResult.success) {
+      if (dryRun) printDryRun(dryRunRefused('branch', ERROR_CODES.AUTH_FAILED));
       console.error('Authentication failed');
       process.exit(1);
     }
@@ -236,28 +257,56 @@ program
     // Delete branch
     if (options.D) {
       const deleteName = options.D;
+
+      // CAP-520: whether confirmation is even possible never depends on
+      // whether `deleteName` turns out to be a real branch — fail fast,
+      // before the network read below, rather than making that read only
+      // to refuse right after it. A dry run never confirms at all, so it
+      // skips this gate entirely (its own refusals, below, need the read).
+      if (!dryRun && !options.yes && !isInteractive(options.nonTty)) {
+        console.error(
+          // COPY-FLAG: wording pending approval; minimal/neutral until then.
+          `\n  ${ERROR_CODES.BRANCH_DELETE_NEEDS_TTY}: deleting "${deleteName}" needs confirmation — pass --yes or run this in a terminal.\n`,
+        );
+        process.exit(3);
+      }
+
       const branches = await serviceClient.listBranches(projectState.projectId!);
       const branch = branches.find(b => b.name === deleteName);
 
       if (!branch) {
+        if (dryRun) printDryRun(dryRunRefused('branch', ERROR_CODES.BRANCH_NOT_FOUND));
         console.log(`Branch "${deleteName}" not found`);
         process.exit(1);
       }
 
       if (branch.name === projectState.activeBranch) {
+        if (dryRun) printDryRun(dryRunRefused('branch', ERROR_CODES.BRANCH_DELETE_ACTIVE));
         console.log(`Cannot delete the current branch. Switch first with: ${B('capy checkout <other-branch>')}`);
         process.exit(1);
       }
 
-      const inquirer = (await import('inquirer')).default;
-      const { confirm } = await inquirer.prompt([{
-        type: 'confirm',
-        name: 'confirm',
-        message: `Delete branch "${deleteName}"? This will remove all its secrets.`,
-        default: false,
-      }]);
+      if (dryRun) {
+        printDryRun(
+          dryRunOk('branch', [
+            { where: 'capy_service', action: 'delete branch', target: deleteName, reversible: false },
+          ]),
+        );
+      }
 
-      if (!confirm) return;
+      if (!options.yes) {
+        // Reaching here means the gate above already confirmed either a TTY
+        // exists or `--yes` was passed — never re-checked, just acted on.
+        const inquirer = (await import('inquirer')).default;
+        const { confirm } = await inquirer.prompt([{
+          type: 'confirm',
+          name: 'confirm',
+          message: `Delete branch "${deleteName}"? This will remove all its secrets.`,
+          default: false,
+        }]);
+
+        if (!confirm) return;
+      }
 
       await serviceClient.deleteBranch(projectState.projectId!, branch.id);
 
@@ -304,13 +353,24 @@ program
     });
     console.log('');
 
+    // A dry run never prompts and never delegates to checkout's own write
+    // path — the listing above IS the whole preview for this command.
+    if (dryRun) return;
+
     // Prompt to switch
-    const inquirer = (await import('inquirer')).default;
     const choices = branches
       .filter(b => b.name !== activeBranch)
       .map(b => ({ name: b.name, value: b.name }));
 
     if (choices.length > 0) {
+      if (!isInteractive(options.nonTty)) {
+        console.error(
+          // COPY-FLAG: wording pending approval; minimal/neutral until then.
+          `\n  ${ERROR_CODES.BRANCH_SWITCH_NEEDS_TTY}: pass --json for the listing, or run this in a terminal to switch.\n`,
+        );
+        process.exit(3);
+      }
+      const inquirer = (await import('inquirer')).default;
       choices.push({ name: 'Stay on current branch', value: '__stay__' });
       const { selected } = await inquirer.prompt([{
         type: 'list',
@@ -325,7 +385,7 @@ program
         // `capy branch` hands its switch step to checkout, so the flag has to
         // travel with it — otherwise picking a branch here drops out of the
         // browser and into a TTY prompt halfway through the same run.
-        await cmd.execute(selected, { web: command.optsWithGlobals().web === true });
+        await cmd.execute(selected, { web: command.optsWithGlobals().web === true, nonTty: options.nonTty });
       }
     }
 
@@ -346,15 +406,20 @@ program
   .option('--protected', 'Mark as a protected branch (invite-only)')
   .option('--no-protected', 'Create it open to the project')
   .option('--json', 'emit machine-readable JSON instead of the human UI')
+  .option('--non-tty', 'never prompt; resolve from flags or fail fast (agents/CI)')
   .action(async (branch, options, command) => {
     assertNotLocalOnly('checkout');
+    const dryRun = command.optsWithGlobals().dryRun === true;
 
-    // `--json` on a create describes the route rather than travelling it: the
-    // same stop array the browser screen is served, so a headless caller can
-    // see which stops a flag already settled and which it would be asked
-    // about. Printed before any network call, because the plan is knowable
-    // without one — that is what makes it a plan.
-    if (options.json && options.create) {
+    // `--json` on a create (and NOT also `--dry-run`) describes the route
+    // rather than travelling it: the same stop array the browser screen is
+    // served, so a headless caller can see which stops a flag already
+    // settled and which it would be asked about. Printed before any
+    // network call, because the plan is knowable without one — that is
+    // what makes it a plan. `--dry-run` shares this same `branchCreatePlan`
+    // (CAP-659 Phase 2) but goes through `CheckoutCommand.previewCreate`
+    // below instead, so both surfaces stay one function.
+    if (options.json && options.create && !dryRun) {
       const { branchCreatePlan, unansweredStops } = await import('./core/branchCreatePlan');
       // Commander sets `protected` to false only when `--no-protected` was
       // typed; an untouched flag leaves it undefined, which is the difference
@@ -370,16 +435,20 @@ program
       create: options.create,
       protected: options.protected,
       web: command.optsWithGlobals().web === true,
+      dryRun,
+      json: options.json === true,
+      nonTty: options.nonTty,
     });
   });
 
 program
   .command('push')
   .description('Push encrypted values to Keep')
-  .action(async () => {
+  .option('--json', 'emit machine-readable JSON instead of the human UI')
+  .action(async (options, command) => {
     const { PushCommand } = await import('./commands/pushCommand');
     const cmd = new PushCommand();
-    await cmd.execute();
+    await cmd.execute({ json: options.json === true, dryRun: command.optsWithGlobals().dryRun === true });
   });
 
 // `capy deploy` is a single picker that surfaces both:

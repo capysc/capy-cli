@@ -158,9 +158,17 @@ export class StatusCommand {
   async execute(opts: { json?: boolean; web?: boolean } = {}): Promise<void> {
     try {
       await this._execute(opts);
-    } catch {
-      // Exit silently on any error (auth, network, etc.)
-      // Hooks must never block git operations
+    } catch (err) {
+      // Hooks must never block git operations — the non-JSON (terse/human)
+      // path keeps the old silent `exit 0`, whatever the error. `--json`
+      // is different: a caller parsing stdout for drift needs to tell "no
+      // drift" apart from "status itself failed" (CAP-520) — same
+      // `{ok:false, code}` shape every other coded refusal in this CLI uses,
+      // on stdout only, never a bare exit with nothing to parse.
+      if (opts.json) {
+        const code = err instanceof CapyError ? err.code : ERROR_CODES.STATUS_FAILED;
+        console.log(JSON.stringify({ ok: false, code }));
+      }
       process.exit(0);
     }
   }

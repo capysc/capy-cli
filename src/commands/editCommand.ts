@@ -12,9 +12,10 @@ import { EditScreen, EditRow, EditState, classifyLocalRow } from '../ui/editScre
 import { formatRelativeTime } from '../ui/relativeTime';
 import { Encryptor } from '../crypto/encryptor';
 import { deriveResourceId } from '../crypto/resourceId';
-import { setSyncKeepHash, KeepFile } from '../types/index';
+import { setSyncKeepHash, KeepFile, ERROR_CODES } from '../types/index';
 import { EditSaveRecord } from '../deploy/keepGate';
 import { concludeEditSession } from './editExitFlow';
+import { isInteractive } from '../ui/interactive';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -48,6 +49,8 @@ export interface EditOpts {
   web?: boolean;
   /** false when --no-open was passed: print the URL, do not open a browser. */
   open?: boolean;
+  /** Never prompt / never render the TUI; resolve from flags or fail fast (agents/CI). */
+  nonTty?: boolean;
 }
 
 export class EditCommand {
@@ -60,6 +63,21 @@ export class EditCommand {
   }
 
   async execute(opts: EditOpts = {}): Promise<void> {
+    // CAP-520: `edit` is an alternate-screen, raw-mode TUI with no 'end'
+    // handler on stdin — piped/closed stdin never resolves it, so a
+    // headless caller blocks forever (editScreen.ts has no TTY guard of its
+    // own). Refuse BEFORE anything is read or drawn — `--web` is the one
+    // escape hatch, since it renders the same editor as compiled browser
+    // screens instead of the TUI.
+    if (!opts.web && !isInteractive(opts.nonTty)) {
+      console.error(
+        // COPY-FLAG: wording pending approval; minimal/neutral until then.
+        `\n  ${ERROR_CODES.EDIT_NEEDS_TTY}: capy edit is an interactive TUI and there is no terminal to drive it.\n` +
+          '  Pass --web to drive it headlessly, or run it from a real terminal.\n',
+      );
+      process.exit(3);
+    }
+
     const pm = new ProjectManager();
     const projectState = await pm.detectProjectState();
 

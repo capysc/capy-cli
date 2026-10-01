@@ -9,6 +9,18 @@ import { resolveProjectKey, KeyServiceOps } from '../crypto/keyResolver';
 import { SyncEngine } from '../sync/syncEngine';
 import { hashValue } from './statusCommand';
 import { branchCreatePlan, unansweredStops } from '../core/branchCreatePlan';
+import { computePushDiff } from '../core/pushPlan';
+import {
+  dryRunOk,
+  dryRunRefused,
+  dryRunExitCode,
+  printDryRunResultHuman,
+  printDryRunResultJson,
+  type DryRunChange,
+  type DryRunResult,
+  type DryRunUnanswered,
+} from '../core/dryRun';
+import { isInteractive } from '../ui/interactive';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -148,6 +160,12 @@ export interface CheckoutOptions {
    * what is written to keep.lock or .env moves.
    */
   web?: boolean;
+  /** Preview only — see `previewCheckout`. Never writes, never prompts, never signs in. */
+  dryRun?: boolean;
+  /** `--json` on the real (non-dry-run) create path keeps its existing raw `{stops, unanswered}` shape; dry-run output always goes through the shared printer regardless of this flag. */
+  json?: boolean;
+  /** Never prompt; resolve from flags or fail fast (agents/CI). */
+  nonTty?: boolean;
 }
 
 export class CheckoutCommand {
@@ -165,6 +183,110 @@ export class CheckoutCommand {
     this.serviceClient = new ServiceClient(undefined, devMode);
 
     this.serviceClient.setTokenProvider(() => this.authService.getValidToken());
+  }
+
+  /** Prints a `DryRunResult` on the shared printer and exits per CAP-659's rule — never returns. */
+  private printDryRun(result: DryRunResult, json: boolean): never {
+    if (json) printDryRunResultJson(result);
+    else printDryRunResultHuman(result);
+    process.exit(dryRunExitCode(result));
+  }
+
+  /**
+   * `capy checkout -b <name> --dry-run` — shares `branchCreatePlan` with the
+   * existing `--create --json` route (CAP-659's own ask: one plan, two
+   * surfaces). Needs no auth and no network: whatever is outstanding is
+   * reported as `unanswered` (exit 3, same as a headless `--create --json`
+   * run with the same gaps); once name + protection are both known, the
+   * only knowable change is the create call itself plus the NAMES (never
+   * values) `.env` already holds, which `-b` would seed onto the new branch.
+   */
+  private previewCreate(branchName: string, isProtected: boolean | undefined, json: boolean): void {
+    const stops = branchCreatePlan({ branchName, isProtected });
+    const outstanding = unansweredStops(stops);
+    const unanswered: DryRunUnanswered[] = outstanding.map((id) => ({
+      id,
+      flag: id === 'name' ? 'argument: capy checkout -b <name>' : '--protected or --no-protected',
+    }));
+
+    if (unanswered.length > 0) {
+      this.printDryRun(dryRunOk('checkout', [], unanswered), json);
+      return;
+    }
+
+    const seedNames = ((): readonly string[] => {
+      try {
+        return Object.keys(this.fileManager.readEnvFile());
+      } catch {
+        return [];
+      }
+    })();
+
+    const changes: DryRunChange[] = [
+      { where: 'capy_service', action: 'create branch', target: branchName, reversible: true },
+      ...seedNames.map((name): DryRunChange => ({
+        where: 'local_file',
+        action: 'seed variable onto new branch (unpushed)',
+        target: name,
+        reversible: true,
+      })),
+    ];
+    this.printDryRun(dryRunOk('checkout', changes), json);
+  }
+
+  /**
+   * `capy checkout <branch> --dry-run` (switch mode, no `-b`) — which
+   * branch, and which variable NAMES in `.env` would change. Computed from
+   * keep.lock's own pins for both branches (the same local snapshot
+   * `countVariablesPerBranch` reads) — never a value, and never a fresh
+   * network fetch of either branch's actual secrets. `listBranches` is the
+   * one read this shares with the real run's own existence check.
+   */
+  private async previewSwitch(
+    projectState: Awaited<ReturnType<ProjectManager['detectProjectState']>>,
+    branchName: string,
+    encryptionKey: string,
+    json: boolean,
+  ): Promise<void> {
+    const branches = await this.serviceClient.listBranches(projectState.projectId!);
+    const branch = branches.find((b) => b.name === branchName);
+    if (!branch) {
+      this.printDryRun(dryRunRefused('checkout', ERROR_CODES.BRANCH_NOT_FOUND), json);
+      return;
+    }
+
+    const keep = this.projectManager.readKeepFile();
+    const currentBranch = projectState.activeBranch ?? undefined;
+    const pinnedFor = (branchName2: string): Record<string, string> =>
+      Object.fromEntries(
+        Object.entries(keep?.variables ?? {}).flatMap(([varName, entries]) => {
+          const entry = entries.find((e) => e.branch === branchName2);
+          return entry ? ([[varName, entry.value_hash]] as const) : [];
+        }),
+      );
+    const currentPinned = currentBranch ? pinnedFor(currentBranch) : {};
+    const targetPinned = pinnedFor(branchName);
+
+    // Reuses the same name/hash diff math `push` uses against keep.lock:
+    // absent from current, present on target → would be added to `.env`;
+    // present on current, absent from target → would be removed; present
+    // on both with a different hash → would change.
+    const diffs = computePushDiff(currentPinned, targetPinned);
+    const ACTION: Record<'add' | 'change' | 'remove', string> = {
+      add: 'add variable to .env',
+      change: 'change variable in .env',
+      remove: 'remove variable from .env',
+    };
+    const changes: DryRunChange[] = [
+      { where: 'local_file', action: 'switch active branch', target: branchName, reversible: true },
+      ...diffs.map((d): DryRunChange => ({
+        where: 'local_file',
+        action: ACTION[d.kind],
+        target: d.name,
+        reversible: true,
+      })),
+    ];
+    this.printDryRun(dryRunOk('checkout', changes), json);
   }
 
   async execute(branchName: string, options: CheckoutOptions = {}): Promise<void> {
@@ -192,18 +314,52 @@ export class CheckoutCommand {
       process.exit(1);
     }
 
+    if (options.create && options.dryRun) {
+      // Create mode needs no auth and no network at all: the plan is the
+      // name/protection stops plus the NAMES (never values) of whatever is
+      // currently in `.env` — that's all `-b` would seed onto the new,
+      // unpushed branch.
+      this.previewCreate(branchName, options.protected, options.json === true);
+      return;
+    }
+
+    // CAP-520: the one question `-b` can still ask (protected y/n) — refused
+    // BEFORE auth/key resolution, since every fact this needs (the flags)
+    // already came from argv. A `--web` run still answers it in the
+    // browser (which needs the key for its seed preview), so this only
+    // ever fires for the plain-TTY-less, no-`--web` case.
+    if (options.create && options.protected === undefined && !options.web && !isInteractive(options.nonTty)) {
+      console.error(
+        // COPY-FLAG: wording pending approval; minimal/neutral until then.
+        `\n  ${ERROR_CODES.CHECKOUT_PROTECTION_NEEDS_TTY}: "${branchName}" needs --protected or --no-protected.\n` +
+          '  Pass one of those flags, or run this in a terminal (or with --web).\n',
+      );
+      process.exit(3);
+    }
+
     // Load user-scoped session
     if (projectState.userId) {
       this.authService.setSessionUserId(projectState.userId);
     }
 
-    // Authenticate
+    // Authenticate. Under `--dry-run` (switch mode only — `-b` returned
+    // above before reaching here), never start a new sign-in: only the
+    // silent attempts run, and a dry run with no usable session refuses
+    // with the same code the real run would eventually give (AUTH_FAILED)
+    // rather than opening a browser.
     const spinner = ora('Authenticating...').start();
-    let authResult = await this.authService.authenticateSilent(projectState.organizationId);
-    if (!authResult.success) authResult = await this.authService.authenticateSilent();
-    if (!authResult.success) authResult = await this.authService.authenticate(projectState.organizationId);
+    const authResult = await (async () => {
+      const scoped = await this.authService.authenticateSilent(projectState.organizationId);
+      if (scoped.success) return scoped;
+      const anySession = await this.authService.authenticateSilent();
+      if (anySession.success || options.dryRun) return anySession;
+      return this.authService.authenticate(projectState.organizationId);
+    })();
     if (!authResult.success) {
       spinner.fail('Authentication failed');
+      if (options.dryRun) {
+        this.printDryRun(dryRunRefused('checkout', ERROR_CODES.AUTH_FAILED), options.json === true);
+      }
       throw new CapyError(authResult.error || 'Authentication failed', ERROR_CODES.AUTH_FAILED);
     }
 
@@ -222,6 +378,9 @@ export class CheckoutCommand {
     // Guard: block checkout if working tree is dirty (skip for branch creation)
     if (!options.create) {
       const issue = findDirtyBranchIssue(this.projectManager, this.fileManager, encryptionKey);
+      if (issue !== null && options.dryRun) {
+        this.printDryRun(dryRunRefused('checkout', issue.code), options.json === true);
+      }
       if (issue !== null && issue.code === 'UNCOMMITTED_CHANGES') {
         console.error(`You have uncommitted changes on "${issue.branch}" (${issue.varName}).`);
         console.error(`Run ${B('capy')} to commit before switching branches.`);
@@ -232,6 +391,15 @@ export class CheckoutCommand {
         console.error(`Run ${B('capy push')} before switching branches.`);
         process.exit(1);
       }
+    }
+
+    if (options.dryRun) {
+      // Switch mode preview: which branch, and which variable NAMES in
+      // `.env` would change — computed from keep.lock's own pins for both
+      // branches (never a value). `listBranches` is a read, same as the
+      // real run's own existence check just below.
+      await this.previewSwitch(projectState, branchName, encryptionKey, options.json === true);
+      return;
     }
 
     if (options.create) {
@@ -420,6 +588,12 @@ export class CheckoutCommand {
       isProtected = answer.isProtected;
     }
 
+    // The no-TTY, no-`--web`, protection-undecided case is refused earlier,
+    // in `_execute` — before auth/key resolution ever runs, since every
+    // fact that refusal needs (the name, `isProtected`, `web`, `nonTty`)
+    // comes straight from argv. Nothing new to decide here by the time
+    // this line can be reached: if we get this far with `isProtected`
+    // still undefined, there IS a TTY (or `--web` already answered it).
     if (isProtected === undefined) {
       const { protect } = await inquirer.prompt([{
         type: 'confirm',
