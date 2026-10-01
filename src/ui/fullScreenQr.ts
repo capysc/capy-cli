@@ -42,7 +42,7 @@ import {
 } from './maskedLinkPrompt';
 import { oscHyperlink } from './osc8';
 import { copyToClipboard } from './clipboard';
-import { layoutQrScreen, type TerminalSize } from './qrScreenLayout';
+import { layoutQrScreen, visibleWidth, type TerminalSize } from './qrScreenLayout';
 import type { RenderedTerminalQr } from './terminalQr';
 
 const HIDE_CURSOR = '\x1b[?25l';
@@ -60,6 +60,8 @@ export interface FullScreenQrOptions {
   readonly label: string;
   /** The already-rendered half-block QR (see `terminalQr.ts`). */
   readonly qr: RenderedTerminalQr;
+  /** Copy shown above the QR inside the full-screen view (word-wrapped to the terminal width). The alternate screen hides anything printed before it, so callers pass their intro here as well. */
+  readonly headerLines?: readonly string[];
   /** Extra lines centered under the key hint, e.g. `["Code: ABCD-EFGH"]` or `["Expires 2026-…"]`. Printed verbatim — callers own their own COPY-FLAGs. */
   readonly extraFooterLines?: readonly string[];
   readonly stdin?: KeyStdin;
@@ -101,13 +103,30 @@ function defaultGetSize(): TerminalSize {
   return { cols: process.stdout.columns || 80, rows: process.stdout.rows || 24 };
 }
 
+// Only stdout's 'resize': Node emits it from its own SIGWINCH handler, so
+// also subscribing to SIGWINCH ran every resize twice (and, because each run
+// starts a new generation, doubled the live generations on every resize).
 function defaultOnResize(cb: () => void): () => void {
   process.stdout.on('resize', cb);
-  process.on('SIGWINCH', cb);
   return () => {
     process.stdout.removeListener('resize', cb);
-    process.removeListener('SIGWINCH', cb);
   };
+}
+
+/** Word-wraps `line` to `width` visible columns (ANSI/OSC escapes don't count). A single word longer than `width` is left whole. */
+function wordWrap(line: string, width: number): readonly string[] {
+  const words = line.trim().split(/\s+/).filter((w) => w.length > 0);
+  if (words.length === 0) return [''];
+  return words.reduce<readonly string[]>((lines, word) => {
+    const last = lines[lines.length - 1];
+    if (last === undefined) return [word];
+    return visibleWidth(`${last} ${word}`) <= width ? [...lines.slice(0, -1), `${last} ${word}`] : [...lines, word];
+  }, []);
+}
+
+function wrapHeader(lines: readonly string[], cols: number): readonly string[] {
+  const width = Math.max(20, Math.min(cols - 4, 76));
+  return lines.flatMap((l) => wordWrap(l, width));
 }
 
 function wrapToWidth(text: string, width: number): readonly string[] {
@@ -164,16 +183,26 @@ export function startFullScreenQrView(opts: FullScreenQrOptions): FullScreenQrHa
     const size = getSize();
     const qrLines = opts.qr.text.split('\n').filter((l) => l.length > 0);
     const footer = opts.qr.hint ? [opts.qr.hint, ...buildFooterLines(opts, state, size)] : buildFooterLines(opts, state, size);
-    const layout = layoutQrScreen(size, qrLines, footer);
+    const header = opts.headerLines && opts.headerLines.length > 0 ? [...wrapHeader(opts.headerLines, size.cols), ''] : [];
+    const layout = layoutQrScreen(size, [...header, ...qrLines], footer);
+    // Never write more rows than the screen has: extra rows scroll the
+    // alternate screen and smear the next redraw.
+    const visible = layout.fits ? layout.lines : layout.lines.slice(0, Math.max(1, size.rows));
     out.write(CLEAR_AND_HOME);
-    out.write(layout.lines.join('\n'));
+    out.write(visible.join('\n'));
   }
 
   /** One "generation": draws at `state`, attaches its own key + resize listeners, and tears itself down (removing both, plus its `stop` listener) before any transition — reveal, resize, or close. */
   function run(state: ScreenState): void {
     draw(state);
 
+    // Ends this generation exactly once; any late callback from it (a
+    // resize or key event already queued) is ignored.
+    const generation = new AbortController();
+
     const teardownGen = (): void => {
+      if (generation.signal.aborted) return;
+      generation.abort();
       keyListener.stop();
       unsubResize();
       controlEmitter.removeListener('stop', onStop);
@@ -185,6 +214,7 @@ export function startFullScreenQrView(opts: FullScreenQrOptions): FullScreenQrHa
     };
 
     const handleAction = (action: MaskedLinkAction): void => {
+      if (generation.signal.aborted) return;
       if (action.kind === 'copy') {
         // Fire-and-forget, same as the non-full-screen prompt — never
         // awaited, never redraws (just appends a line below).
@@ -212,6 +242,7 @@ export function startFullScreenQrView(opts: FullScreenQrOptions): FullScreenQrHa
 
     const keyListener = attachMaskedLinkKeyListener(stdin, handleAction);
     const unsubResize = onResize(() => {
+      if (generation.signal.aborted) return;
       teardownGen();
       run(state);
     });

@@ -13,21 +13,20 @@
  *      `key.enc`), this refuses with a coded `TRANSPORT_KEY_FORMAT_UNSUPPORTED`
  *      BEFORE ever asking the service for a transport row, so nothing is
  *      wasted on a link that could never be produced.
- *   2. Mint a random 32-byte key S and hand it to the service AS the
- *      `POST /transports` `ciphertext` field (base64url) — the service
- *      stores only this one-time decryption key, never the key material
- *      itself, and hands back `{id, expires_at}`.
- *   3. Seal the packed plaintext under S with AAD bound to `id`
- *      (`sealTransportV3`), so sealing can only happen after step 2 — the
- *      AAD needs the id.
- *   4. Print a QR code + `.../transport#3.<id>.<blob>`. S is NEVER in the
- *      link; the link is useless without also authenticating as the right
- *      user to activate the row and get S back.
+ *   2. Mint a random 32-byte key S on this machine and seal the packed
+ *      plaintext under it (`sealTransportBlob`, AAD `capy:transport:v4`).
+ *   3. Hand the SEALED blob to the service as the `POST /transports`
+ *      `ciphertext` field; it hands back `{id, expires_at}`. The service
+ *      never sees S, so it can't open what it stores (zero trust).
+ *   4. Print a QR code + `.../transport#4.<id>.<S>` (`transportFragmentV4`).
+ *      The link carries only the id and S (~100 chars, so the QR stays
+ *      small); Keep activates the row as the signed-in user (which deletes
+ *      it and returns the blob) and decrypts it with S in the browser.
  */
 import { resolveOrgContext } from '../core/orgContext';
 import { readLocalRoot, readOrgKeyFileRaw } from '../config/globalConfig';
 import { resolveKeepOrigin } from '../config/keepOrigin';
-import { generateTransportKey, packTransportV3, sealTransportV3 } from '../crypto/transportPackV3';
+import { generateTransportKey, packTransportV3, sealTransportBlob, transportFragmentV4 } from '../crypto/transportPackV3';
 import type { PairingEntry } from '../crypto/pairingPayload';
 import { renderTerminalQr } from '../ui/terminalQr';
 import { printMaskedLinkBlock, maskLink } from '../ui/maskedLinkPrompt';
@@ -169,7 +168,7 @@ export class TransportCommand {
         key_enc: keyEnc,
       };
 
-      // v3 (CAP-692) is the only wire format — pack BEFORE ever calling the
+      // The packed layout (CAP-692) is the only format — pack BEFORE ever calling the
       // service, so an unpackable key.enc never burns a one-time transport
       // row for a link that was never going to exist.
       const packed = packTransportV3(entry);
@@ -180,12 +179,12 @@ export class TransportCommand {
         );
       }
 
+      // v4: the service stores the sealed blob; the link carries only the id
+      // and S. S never leaves this machine except inside the link.
       const key = generateTransportKey();
-      const { id, expires_at } = await serviceClient.createTransport(key.toString('base64url'));
-
-      // AAD binds to `id`, which only exists after the call above — sealing
-      // has to happen here, not before it.
-      const fragment = sealTransportV3(packed, key, id);
+      const blob = sealTransportBlob(packed, key);
+      const { id, expires_at } = await serviceClient.createTransport(blob);
+      const fragment = transportFragmentV4(id, key);
       const url = `${resolveKeepOrigin()}/transport#${fragment}`;
 
       if (json) {
@@ -213,6 +212,8 @@ export class TransportCommand {
           maskedUrl: masked,
           label: LINK_LABEL,
           qr,
+          // The alternate screen hides the intro printed above, so show it inside the view too.
+          headerLines: buildTransportIntro().split('\n'),
           extraFooterLines: [`Expires ${expires_at}`], // COPY-FLAG (same text as the non-full-screen path below)
         });
         const watch = await watchForRedemption({ serviceClient, id, expiresAt: expires_at, handle: view, awaitStop: true });

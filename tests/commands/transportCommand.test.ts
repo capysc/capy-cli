@@ -65,7 +65,7 @@ const mockRenderTerminalQr = jest.fn();
 mock.module('../../src/ui/terminalQr', () => ({ renderTerminalQr: mockRenderTerminalQr }));
 
 import { TransportCommand } from '../../src/commands/transportCommand';
-import { openTransportV3, unpackTransportV3 } from '../../src/crypto/transportPackV3';
+import { openTransportBlob, parseTransportFragmentV4, unpackTransportV3 } from '../../src/crypto/transportPackV3';
 
 const ORG_ID = '9f1c2b3a-0000-4000-8000-000000000001';
 const USER_ID = 'user_01ARZ3NDEKTSV4RRFFQ69G5FAV';
@@ -145,48 +145,36 @@ describe('TransportCommand', () => {
     const { stdout, stderr } = await withCapturedIo(() => new TransportCommand().execute({ json: true }));
     expect(stderr).toBe('');
     const parsed = JSON.parse(stdout);
-    // v3 fragment: `#3.<id as 16 bytes, base64url (22 chars)>.<blob>`.
-    expect(parsed.url).toMatch(/^https:\/\/keep\.capy\.sc\/transport#3\.[\w-]{22}\.\S+$/);
+    // v4 fragment: `#4.<id as 16 bytes, base64url (22 chars)>.<S as 32 bytes, base64url (43 chars)>`.
+    expect(parsed.url).toMatch(/^https:\/\/keep\.capy\.sc\/transport#4\.[\w-]{22}\.[\w-]{43}$/);
     expect(parsed.expires_at).toBe('2026-09-29T00:15:00.000Z');
     // No QR block leaked into stdout alongside the JSON.
     expect(stdout.trim().startsWith('{')).toBe(true);
   });
 
-  test('sends S (a fresh 32-byte key) as the transport ciphertext field — never the payload, never k_local/key.enc', async () => {
+  test('sends the SEALED blob as the transport ciphertext (never S, never plaintext k_local/key.enc)', async () => {
     const { stdout } = await withCapturedIo(() => new TransportCommand().execute({ json: true }));
     expect(mockCreateTransport).toHaveBeenCalledTimes(1);
     const ciphertextArg = mockCreateTransport.mock.calls[0][0];
-    // This argument IS the one-time key S itself (base64url), not a sealed
-    // envelope — assert its shape, and that it carries no trace of the
-    // plaintext k_local or key_enc content.
     expect(typeof ciphertextArg).toBe('string');
-    expect(Buffer.from(ciphertextArg, 'base64url').length).toBe(32);
+    // iv (12) + tag (16) + a packed entry: well over a bare 32-byte key.
+    expect(Buffer.from(ciphertextArg, 'base64url').length).toBeGreaterThan(12 + 16 + 74);
     expect(ciphertextArg).not.toContain(K_LOCAL.toString('base64url'));
     expect(ciphertextArg).not.toContain(MASTER_KEY_B64);
 
-    // The actual sealed payload (iv + ciphertext) lives only in the printed
-    // link's fragment — S itself never appears there.
-    const parsed = JSON.parse(stdout);
-    const fragment = parsed.url.split('#')[1];
-    expect(fragment.split('.')).toHaveLength(3);
-    expect(fragment).not.toContain(ciphertextArg);
+    // S lives only in the printed link; the service never receives it.
+    const fragment = JSON.parse(stdout).url.split('#')[1];
+    const { key } = parseTransportFragmentV4(fragment);
+    expect(ciphertextArg).not.toContain(key.toString('base64url'));
   });
 
-  test('the link fragment opens with S and the returned id, and fails with a different id (AAD binding)', async () => {
+  test('the server ciphertext opens with the S from the link, and the link carries the returned id', async () => {
     const { stdout } = await withCapturedIo(() => new TransportCommand().execute({ json: true }));
-
-    const parsed = JSON.parse(stdout);
-    const fragment = parsed.url.split('#')[1];
-
-    const key = Buffer.from(mockCreateTransport.mock.calls[0][0], 'base64url');
-    const { id, plaintext } = openTransportV3(fragment, key);
+    const fragment = JSON.parse(stdout).url.split('#')[1];
+    const { id, key } = parseTransportFragmentV4(fragment);
     expect(id).toBe(TRANSPORT_ID);
-    const entry = unpackTransportV3(plaintext);
+    const entry = unpackTransportV3(openTransportBlob(mockCreateTransport.mock.calls[0][0], key));
     expect(entry).toEqual({ org_id: ORG_ID, user_id: USER_ID, k_local: K_LOCAL.toString('base64url'), key_enc: KEY_ENC });
-
-    const otherId = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
-    const swapped = `3.${Buffer.from(otherId.replace(/-/g, ''), 'hex').toString('base64url')}.${fragment.split('.')[2]}`;
-    expect(() => openTransportV3(swapped, key)).toThrow();
   });
 
   // CAP-684 follow-up: `bun test`'s stdin is never a real TTY, so this
@@ -210,7 +198,7 @@ describe('TransportCommand', () => {
     await withCapturedIo(() => new TransportCommand().execute({}));
     expect(mockRenderTerminalQr).toHaveBeenCalledTimes(1);
     const [qrArg] = mockRenderTerminalQr.mock.calls[0] as [string];
-    expect(qrArg).toMatch(/^https:\/\/keep\.capy\.sc\/transport#3\.[\w-]{22}\.\S+$/);
+    expect(qrArg).toMatch(/^https:\/\/keep\.capy\.sc\/transport#4\.[\w-]{22}\.[\w-]{43}$/);
     expect(qrArg).not.toBe('https://keep.capy.sc/transport#…');
   });
 

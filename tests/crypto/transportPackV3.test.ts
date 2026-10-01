@@ -22,8 +22,10 @@ import { join } from 'node:path';
 import {
   packTransportV3,
   unpackTransportV3,
-  sealTransportV3,
-  openTransportV3,
+  sealTransportBlob,
+  openTransportBlob,
+  transportFragmentV4,
+  parseTransportFragmentV4,
 } from '../../src/crypto/transportPackV3';
 import type { PairingEntry } from '../../src/crypto/pairingPayload';
 import { buildTerminalQr } from '../../src/ui/terminalQr';
@@ -38,8 +40,9 @@ const VECTOR = {
     '{\n  "version": "2.0",\n  "org_id": "07f81eaa-d4fa-4dde-914f-49636a0e5d5a",\n  "encrypted_master_key": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0+P0BBQkNERUZHSElKS0xNTk9QUVJTVFVWV1hZWltcXV5fYGFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eHl6e3x9fn+AgYKDhIWGh4iJiouMjY6PkJGSk5SVlpeYmZqbnJ2en6ChoqOkpaanqKmqq6ytrq+wsbKztLW2t7i5uru8vb6/wMHCw8TFxsfIycrLzM3Oz9DR0tPU1dbX",\n  "wrapping_method": "local_root",\n  "created_at": "2026-09-29T17:52:03.123Z"\n}',
   S_b64url: 'IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI',
   iv_b64url: 'MzMzMzMzMzMzMzMz',
-  fragment:
-    '3.ITpvFEHgTlKeYijHhN-rUw.MzMzMzMzMzMzMzMzd8LBEmuGopJFMwo_XLJnnHj7aieBCJnLt2LwhNJHo3YZH75G4CrFlVa8JOPGv63bkYy4mOePrBCqQxXJqD8LCw7ObdXWbjvZumfkAFdAXQVKboetliFPBHetzsKAvWC3on4vZ4ZHtcq6l9RnZ95GA3jSo7cDuq5rI3VYmzfZOuVldBfxC5GW43TF9v_gw9GIVk-hkReZMQ7W3LbmtMcFs63Rx8VgDAaCyNnm-7TrbNrugtRW3q2p1ZhqVfPYV2iSpSvHXh5wl82lEV2J1ux1HpLB6RJQZpzmEK0YRrMQrBOdWA4iEYaPn-yj_56zV4oYvc2D0SeOw-zHUIRmnXEQlf-xCgRdLydHSg2rXUVZkQnZ6_LnC8C3Zrtd41GWSD5Wm_PDa-HEwaZbBsFRizjY_N2s',
+  ciphertext:
+    'MzMzMzMzMzMzMzMzd8LBEmuGopJFMwo_XLJnnHj7aieBCJnLt2LwhNJHo3YZH75G4CrFlVa8JOPGv63bkYy4mOePrBCqQxXJqD8LCw7ObdXWbjvZumfkAFdAXQVKboetliFPBHetzsKAvWC3on4vZ4ZHtcq6l9RnZ95GA3jSo7cDuq5rI3VYmzfZOuVldBfxC5GW43TF9v_gw9GIVk-hkReZMQ7W3LbmtMcFs63Rx8VgDAaCyNnm-7TrbNrugtRW3q2p1ZhqVfPYV2iSpSvHXh5wl82lEV2J1ux1HpLB6RJQZpzmEK0YRrMQrBOdWA4iEYaPn-yj_56zV4oYvc2D0SeOw-zHUIRmnXEQlf-xCgRdLydHSg2rXUVZkQnZ6_LnC8C3Zrtd41GWSD5Wm_Mi0tpvUx1yHXQGgp1jxUAi',
+  fragment: '4.ITpvFEHgTlKeYijHhN-rUw.IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI',
 };
 
 function vectorEntry(): PairingEntry {
@@ -52,19 +55,20 @@ function vectorEntry(): PairingEntry {
 }
 
 describe('shared test vector', () => {
-  test('sealing the vector inputs with its fixed S/iv reproduces the exact fragment', () => {
+  test('sealing the vector inputs with its fixed S/iv reproduces the exact server ciphertext and link fragment', () => {
     const packed = packTransportV3(vectorEntry());
     expect(packed).not.toBeNull();
     const S = Buffer.from(VECTOR.S_b64url, 'base64url');
     const iv = Buffer.from(VECTOR.iv_b64url, 'base64url');
-    const fragment = sealTransportV3(packed as Buffer, S, VECTOR.transport_id, iv);
-    expect(fragment).toBe(VECTOR.fragment);
+    expect(sealTransportBlob(packed as Buffer, S, iv)).toBe(VECTOR.ciphertext);
+    expect(transportFragmentV4(VECTOR.transport_id, S)).toBe(VECTOR.fragment);
   });
 
-  test('opening the vector fragment reproduces the exact inputs and key_enc_file string', () => {
-    const S = Buffer.from(VECTOR.S_b64url, 'base64url');
-    const { id, plaintext } = openTransportV3(VECTOR.fragment, S);
+  test('parsing the vector fragment and opening the ciphertext reproduces the exact inputs and key_enc_file string', () => {
+    const { id, key } = parseTransportFragmentV4(VECTOR.fragment);
     expect(id).toBe(VECTOR.transport_id);
+    expect(key.toString('base64url')).toBe(VECTOR.S_b64url);
+    const plaintext = openTransportBlob(VECTOR.ciphertext, key);
     const entry = unpackTransportV3(plaintext);
     expect(entry.org_id).toBe(VECTOR.org_id);
     expect(entry.user_id).toBe(VECTOR.user_id);
@@ -127,11 +131,10 @@ describe('real round trip (property, not shape)', () => {
 
       const S = randomBytes(32);
       const transportId = '213a6f14-41e0-4e52-9e62-28c784dfab53';
-      const fragment = sealTransportV3(packed as Buffer, S, transportId);
-
-      const opened = openTransportV3(fragment, S);
-      expect(opened.id).toBe(transportId);
-      const rebuiltEntry = unpackTransportV3(opened.plaintext);
+      const blob = sealTransportBlob(packed as Buffer, S);
+      const parsedLink = parseTransportFragmentV4(transportFragmentV4(transportId, S));
+      expect(parsedLink.id).toBe(transportId);
+      const rebuiltEntry = unpackTransportV3(openTransportBlob(blob, parsedLink.key));
 
       expect(rebuiltEntry.key_enc).toBe(rawFile);
       expect(rebuiltEntry.org_id).toBe(orgId);
@@ -233,43 +236,35 @@ describe('fallback to v2 (packTransportV3 returns null)', () => {
 // --- Tamper tests ---
 
 describe('tamper resistance', () => {
-  test('flipping a byte in the blob fails to open', () => {
+  test('flipping a byte in the server ciphertext fails to open', () => {
     const packed = packTransportV3(vectorEntry()) as Buffer;
     const S = randomBytes(32);
-    const id = '213a6f14-41e0-4e52-9e62-28c784dfab53';
-    const fragment = sealTransportV3(packed, S, id);
-    const [v, idPart, blobPart] = fragment.split('.');
-    const blobBytes = Buffer.from(blobPart, 'base64url');
-    blobBytes[blobBytes.length - 1] ^= 0xff;
-    const tampered = `${v}.${idPart}.${blobBytes.toString('base64url')}`;
-    expect(() => openTransportV3(tampered, S)).toThrow();
+    const blobBytes = Buffer.from(sealTransportBlob(packed, S), 'base64url');
+    const tampered = Buffer.from(blobBytes.map((b, i) => (i === blobBytes.length - 1 ? b ^ 0xff : b))).toString('base64url');
+    expect(() => openTransportBlob(tampered, S)).toThrow();
   });
 
-  test('using a different transport id fails to open (AAD binding)', () => {
+  test('a different one-time key fails to open (the server alone cannot read it)', () => {
     const packed = packTransportV3(vectorEntry()) as Buffer;
-    const S = randomBytes(32);
-    const id = '213a6f14-41e0-4e52-9e62-28c784dfab53';
-    const otherId = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
-    const fragment = sealTransportV3(packed, S, id);
-    const [, , blobPart] = fragment.split('.');
-    const otherIdBytes = Buffer.from(otherId.replace(/-/g, ''), 'hex').toString('base64url');
-    const swapped = `3.${otherIdBytes}.${blobPart}`;
-    expect(() => openTransportV3(swapped, S)).toThrow();
+    const blob = sealTransportBlob(packed, randomBytes(32));
+    expect(() => openTransportBlob(blob, randomBytes(32))).toThrow();
+  });
+
+  test('malformed fragments are refused', () => {
+    expect(() => parseTransportFragmentV4('3.abc.def')).toThrow();
+    expect(() => parseTransportFragmentV4(`4.${'A'.repeat(22)}.short`)).toThrow();
+    expect(() => parseTransportFragmentV4('4.only-two')).toThrow();
   });
 });
 
-// --- Size: a v3 URL fits a terminal ---
+// --- Size: the v4 link is tiny ---
 
-describe('size: v3 URL and QR fit a terminal', () => {
-  test('a realistic v3 URL is <= 520 chars and its QR is <= 42 rows', () => {
-    const packed = packTransportV3(vectorEntry()) as Buffer;
-    const S = randomBytes(32);
-    const id = '213a6f14-41e0-4e52-9e62-28c784dfab53';
-    const fragment = sealTransportV3(packed, S, id);
+describe('size: v4 URL and QR fit a small terminal', () => {
+  test('a v4 URL is <= 110 chars and its QR is <= 22 rows', () => {
+    const fragment = transportFragmentV4('213a6f14-41e0-4e52-9e62-28c784dfab53', randomBytes(32));
     const url = `https://keep.capy.sc/transport#${fragment}`;
-    expect(url.length).toBeLessThanOrEqual(520);
-
+    expect(url.length).toBeLessThanOrEqual(110);
     const qr = buildTerminalQr(url);
-    expect(qr.height).toBeLessThanOrEqual(42);
+    expect(qr.height).toBeLessThanOrEqual(22);
   });
 });

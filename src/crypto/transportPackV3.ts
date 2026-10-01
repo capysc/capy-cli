@@ -39,7 +39,7 @@ const IV_LENGTH = 12;
 const AUTH_TAG_LENGTH = 16;
 const S_LENGTH = 32;
 const K_LOCAL_LENGTH = 32;
-const AAD_PREFIX = 'capy:transport:v3:';
+const AAD_V4 = 'capy:transport:v4';
 const FORMAT_BYTE = 0x01;
 const WRAPPING_LOCAL_ROOT_BYTE = 0x01;
 const ULID_LENGTH = 26;
@@ -236,75 +236,67 @@ function assertKeyLength(key: Buffer): void {
 }
 
 /**
- * Seals `plaintext` (from {@link packTransportV3}) under `key` (S), bound
- * to `id` (the service's transport id) via AAD, and returns the full v3
- * fragment: `3.<id as 16 bytes, base64url>.<base64url(iv||ct||tag)>`. `iv`
- * is only ever passed by tests (the shared vector) — production always
- * mints a fresh random one.
+ * Transport link v4 (CAP-692): the SERVICE stores the sealed blob and the
+ * LINK carries only the transport id and the one-time key S. S is generated
+ * here and never sent to the service, so the stored blob is unreadable
+ * without the link (zero trust holds), and the link stays ~100 chars, so its
+ * QR stays small.
+ *
+ * Seals `plaintext` (from {@link packTransportV3}) under `key` (S) and
+ * returns base64url(iv || ciphertext || tag): the value POSTed as the
+ * transport's `ciphertext`. The AAD is a fixed domain label: the id can't
+ * be bound in because the service only mints it after this blob is stored,
+ * and S is fresh per transport, so a blob can't be opened under another
+ * row's key anyway. `iv` is only passed by tests (the shared vector).
  */
-export function sealTransportV3(plaintext: Buffer, key: Buffer, id: string, iv: Buffer = randomBytes(IV_LENGTH)): string {
+export function sealTransportBlob(plaintext: Buffer, key: Buffer, iv: Buffer = randomBytes(IV_LENGTH)): string {
   assertKeyLength(key);
-  const canonicalId = canonicalizeUuid(id);
-  const idBytes = uuidToBytes(canonicalId);
+  const cipher = createCipheriv(AES_ALGORITHM, key, iv, { authTagLength: AUTH_TAG_LENGTH });
+  cipher.setAAD(Buffer.from(AAD_V4, 'utf8'));
+  const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+  return Buffer.concat([iv, ciphertext, cipher.getAuthTag()]).toString('base64url');
+}
+
+/** Opens a blob from {@link sealTransportBlob} with `key` (S). `INVALID_FORMAT` if too short; `DECRYPT_KEY_MISMATCH` on a wrong key or tampering (GCM can't tell them apart). */
+export function openTransportBlob(blob: string, key: Buffer): Buffer {
+  assertKeyLength(key);
+  const bytes = Buffer.from(blob, 'base64url');
+  if (bytes.length < IV_LENGTH + AUTH_TAG_LENGTH) {
+    throw new CapyError('Malformed transport blob', ERROR_CODES.INVALID_FORMAT);
+  }
+  const iv = bytes.subarray(0, IV_LENGTH);
+  const ciphertext = bytes.subarray(IV_LENGTH, bytes.length - AUTH_TAG_LENGTH);
+  const tag = bytes.subarray(bytes.length - AUTH_TAG_LENGTH);
+  const decipher = createDecipheriv(AES_ALGORITHM, key, iv, { authTagLength: AUTH_TAG_LENGTH });
+  decipher.setAAD(Buffer.from(AAD_V4, 'utf8'));
+  decipher.setAuthTag(tag);
+  try {
+    return Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+  } catch {
+    throw new CapyError('Could not open transport blob: wrong key or tampered ciphertext', ERROR_CODES.DECRYPT_KEY_MISMATCH);
+  }
+}
+
+/** The v4 link fragment: `4.<id as 16 bytes, base64url>.<S as 32 bytes, base64url>`. */
+export function transportFragmentV4(id: string, key: Buffer): string {
+  assertKeyLength(key);
+  const idBytes = uuidToBytes(canonicalizeUuid(id));
   if (!idBytes) {
     throw new CapyError('Transport id is not a UUID', ERROR_CODES.INVALID_FORMAT);
   }
-
-  const cipher = createCipheriv(AES_ALGORITHM, key, iv, { authTagLength: AUTH_TAG_LENGTH });
-  cipher.setAAD(Buffer.from(`${AAD_PREFIX}${canonicalId}`, 'utf8'));
-  const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
-  const tag = cipher.getAuthTag();
-  const blob = Buffer.concat([iv, ciphertext, tag]).toString('base64url');
-
-  return `3.${idBytes.toString('base64url')}.${blob}`;
+  return `4.${idBytes.toString('base64url')}.${key.toString('base64url')}`;
 }
 
-/**
- * Opens a v3 fragment (the part after `#`) with `key` (S): parses the id
- * and blob, derives the AAD from the id carried IN the fragment itself
- * (there is nothing else to bind it to — same trust model as v2, where the
- * server-returned `id` is what AAD uses), and decrypts. Throws a coded
- * `INVALID_FORMAT` on a malformed fragment (wrong version marker, wrong
- * segment count, an id that isn't 16 bytes, a blob shorter than iv+tag) and
- * `DECRYPT_KEY_MISMATCH` on a wrong key or tampered ciphertext/id/iv — GCM
- * does not distinguish any of those.
- */
-export function openTransportV3(fragment: string, key: Buffer): { id: string; plaintext: Buffer } {
-  assertKeyLength(key);
+/** Parses a v4 fragment (the part after `#`) into the transport id and S. Structural checks only; `INVALID_FORMAT` otherwise. */
+export function parseTransportFragmentV4(fragment: string): { id: string; key: Buffer } {
   const parts = fragment.split('.');
-  if (parts.length !== 3 || parts[0] !== '3' || parts.some((p) => p.length === 0)) {
-    throw new CapyError('Malformed transport v3 link fragment', ERROR_CODES.INVALID_FORMAT);
+  if (parts.length !== 3 || parts[0] !== '4') {
+    throw new CapyError('Malformed transport link fragment', ERROR_CODES.INVALID_FORMAT);
   }
   const idBytes = Buffer.from(parts[1], 'base64url');
-  if (idBytes.length !== 16) {
-    throw new CapyError('Malformed transport v3 link fragment id', ERROR_CODES.INVALID_FORMAT);
+  const key = Buffer.from(parts[2], 'base64url');
+  if (idBytes.length !== 16 || key.length !== S_LENGTH) {
+    throw new CapyError('Malformed transport link fragment', ERROR_CODES.INVALID_FORMAT);
   }
-  const id = bytesToUuid(idBytes);
-
-  const blob = Buffer.from(parts[2], 'base64url');
-  if (blob.length < IV_LENGTH + AUTH_TAG_LENGTH) {
-    throw new CapyError('Malformed transport v3 link fragment blob', ERROR_CODES.INVALID_FORMAT);
-  }
-  const iv = blob.subarray(0, IV_LENGTH);
-  const ciphertext = blob.subarray(IV_LENGTH, blob.length - AUTH_TAG_LENGTH);
-  const tag = blob.subarray(blob.length - AUTH_TAG_LENGTH);
-
-  const decipher = createDecipheriv(AES_ALGORITHM, key, iv, { authTagLength: AUTH_TAG_LENGTH });
-  decipher.setAAD(Buffer.from(`${AAD_PREFIX}${id}`, 'utf8'));
-  decipher.setAuthTag(tag);
-  try {
-    const plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
-    return { id, plaintext };
-  } catch {
-    throw new CapyError(
-      'Could not open transport fragment v3 — wrong key, wrong transport id, or tampered ciphertext',
-      ERROR_CODES.DECRYPT_KEY_MISMATCH,
-    );
-  }
-}
-
-/** True when `fragment` is a v3 link (`3.<id>.<blob>`, 3 dot-separated parts with a literal `3` first segment) rather than a v2 one (`<id>.<iv>.<ct>`, whose first segment is the service's own id string, never literally `"3"`). */
-export function isTransportFragmentV3(fragment: string): boolean {
-  const parts = fragment.split('.');
-  return parts.length === 3 && parts[0] === '3';
+  return { id: bytesToUuid(idBytes), key };
 }
