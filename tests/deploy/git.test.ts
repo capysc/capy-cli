@@ -16,6 +16,7 @@ import {
   stashAllChanges,
   popStash,
   checkoutNewBranchFrom,
+  deployConfigToCommit,
 } from '../../src/deploy/git';
 import { writeFileSync as fsWrite } from 'fs';
 
@@ -185,5 +186,63 @@ describe('git helpers', () => {
     expect(deployHead).toBe(mainHead);
     // feat.txt should not exist on the deploy branch.
     expect(getStatus(ROOT)).toEqual([]);
+  });
+});
+
+// `capy deploy` commits .capy/deploy.json with keep.lock (target settings and
+// variable NAMES only; capy's .gitignore un-ignores it explicitly).
+describe('.capy/deploy.json is committed with keep.lock', () => {
+  const CAPY_GITIGNORE = ['.env', '!/.capy/', '/.capy/*', '!/.capy/deploy.json', ''].join('\n');
+
+  function withCapyGitignore(): void {
+    writeFileSync(join(ROOT, '.gitignore'), CAPY_GITIGNORE);
+    git(['add', '.gitignore'], ROOT);
+    git(['commit', '-q', '-m', 'gitignore'], ROOT);
+    mkdirSync(join(ROOT, '.capy'), { recursive: true });
+  }
+
+  test('deployConfigToCommit: null when there is no deploy.json', () => {
+    withCapyGitignore();
+    expect(deployConfigToCommit(ROOT)).toBeNull();
+  });
+
+  test('deployConfigToCommit: the path when deploy.json exists and is not ignored', () => {
+    withCapyGitignore();
+    writeFileSync(join(ROOT, '.capy', 'deploy.json'), '{"version":1,"targets":{}}');
+    writeFileSync(join(ROOT, '.capy', 'branch'), 'main');
+    expect(deployConfigToCommit(ROOT)).toBe('.capy/deploy.json');
+  });
+
+  test('deployConfigToCommit: null when an older .gitignore ignores all of .capy/', () => {
+    writeFileSync(join(ROOT, '.gitignore'), '.capy/\n');
+    mkdirSync(join(ROOT, '.capy'), { recursive: true });
+    writeFileSync(join(ROOT, '.capy', 'deploy.json'), '{}');
+    expect(deployConfigToCommit(ROOT)).toBeNull();
+  });
+
+  test('an untracked deploy.json is not "other changes" and is never stashed', () => {
+    withCapyGitignore();
+    writeFileSync(join(ROOT, '.capy', 'deploy.json'), '{"version":1,"targets":{}}');
+    writeFileSync(join(ROOT, 'keep.lock'), '{}');
+    expect(hasOtherChanges(ROOT)).toBe(false);
+    writeFileSync(join(ROOT, 'src.ts'), 'export {};');
+    const stash = stashOtherChanges(ROOT);
+    expect(stash.ok).toBe(true);
+    expect(stash.stashed).toBe(true);
+    expect(existsSync(join(ROOT, '.capy', 'deploy.json'))).toBe(true);
+    expect(existsSync(join(ROOT, 'src.ts'))).toBe(false);
+  });
+
+  test('stageAndCommit with keep.lock + deploy.json commits exactly those two files', () => {
+    withCapyGitignore();
+    writeFileSync(join(ROOT, '.capy', 'deploy.json'), '{"version":1,"targets":{}}');
+    writeFileSync(join(ROOT, '.capy', 'branch'), 'main');
+    writeFileSync(join(ROOT, 'keep.lock'), '{}');
+    const path = deployConfigToCommit(ROOT);
+    expect(path).toBe('.capy/deploy.json');
+    const r = stageAndCommit(ROOT, ['keep.lock', path as string], 'deploy');
+    expect(r.ok).toBe(true);
+    const files = git(['show', '--name-only', '--format=', 'HEAD'], ROOT).stdout.trim().split('\n').sort();
+    expect(files).toEqual(['.capy/deploy.json', 'keep.lock']);
   });
 });
