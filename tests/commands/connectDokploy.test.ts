@@ -1059,7 +1059,12 @@ describe('capy rotate refuses on a dokploy-managed var', () => {
     try {
       const { RotateCommand } = await import('../../src/commands/rotateCommand');
       await new RotateCommand(false)
-        .execute('IMPORTED_VAR', { nonTty: true } as never)
+        // `skipPrompts: true` (CAP-659/CAP-520): since rotate's Y/N plan gate
+        // now refuses outright with no `--yes` and no TTY, this is the
+        // `--non-tty --yes` shape a real CI/agent caller would send — which
+        // is what this test needs, so the import-only precheck INSIDE
+        // `rotateMany` (reached only after the gate) is still what it hits.
+        .execute('IMPORTED_VAR', { nonTty: true, skipPrompts: true } as never)
         .catch((err: unknown) => {
           const m = err instanceof Error ? err.message : String(err);
           if (!m.startsWith('__exit_')) throw err;

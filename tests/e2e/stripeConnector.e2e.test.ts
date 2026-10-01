@@ -127,7 +127,11 @@ describe('live-mode firewall (capy-dev)', () => {
 
     try {
       const { RotateCommand } = await import('../../src/commands/rotateCommand');
-      await new RotateCommand(true).execute('STRIPE_LIVE_KEY', {});
+      // `skipPrompts: true` (CAP-659/CAP-520): rotate's plan gate now refuses
+      // outright with no `--yes` and no TTY, so this sends the `--yes` a real
+      // capy-dev/agent caller would — the firewall below is what this test
+      // means to exercise, not the confirm gate.
+      await new RotateCommand(true).execute('STRIPE_LIVE_KEY', { skipPrompts: true });
     } catch (err: any) {
       if (!String(err.message).startsWith('__exit_')) throw err;
     }
@@ -159,7 +163,8 @@ describe('live-mode firewall (capy-dev)', () => {
 
     try {
       const { RotateCommand } = await import('../../src/commands/rotateCommand');
-      await new RotateCommand(true).execute(undefined, { all: true });
+      // `skipPrompts: true` (CAP-659/CAP-520) — see the test above.
+      await new RotateCommand(true).execute(undefined, { all: true, skipPrompts: true });
     } catch (err: any) {
       if (!String(err.message).startsWith('__exit_')) throw err;
     }

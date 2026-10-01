@@ -948,12 +948,16 @@ export class RotateCommand {
     renderRotationPlan(stops);
 
     // ── Confirm: single Y/N gate ─────────────────────────────────────────────
-    // The one approval the whole rotate → push → deploy chain has, and in the
-    // terminal `!opts.skipPrompts && isTTY` drops it the moment stdin is piped
-    // — which is every agent-driven run. Under `--web` it is asked of every
-    // caller, because a gate that disappears when nobody is watching is not a
-    // gate.
-    if (!opts.skipPrompts && web) {
+    // The one approval the whole rotate → push → deploy chain has. This has
+    // to be exhaustive over { skipPrompts, web, isTTY } — CAP-659/CAP-520:
+    // the old `if (!opts.skipPrompts && web) {…} else if (!opts.skipPrompts
+    // && isTTY) {…}` had no `else`, so a piped run with no `--yes` and no
+    // `--web` fell straight through to `rotateMany()` below with nothing
+    // ever having answered "Proceed?". `--non-tty` has to land here too —
+    // `isTTY` is already `isInteractive(opts.nonTty)`, so it does.
+    if (opts.skipPrompts) {
+      // --yes / --skip-prompts already answered this.
+    } else if (web) {
       const { confirmRotatePlanInBrowser } = await import('../ui/rotateScreens');
       const proceed = await confirmRotatePlanInBrowser({
         step: 'plan',
@@ -975,7 +979,7 @@ export class RotateCommand {
         console.log('\n  Cancelled.\n');
         return;
       }
-    } else if (!opts.skipPrompts && isTTY) {
+    } else if (isTTY) {
       const inquirer = (await import('inquirer')).default;
       const { proceed } = await inquirer.prompt([
         { type: 'confirm', name: 'proceed', message: 'Proceed?', default: true },
@@ -984,6 +988,16 @@ export class RotateCommand {
         console.log('\n  Cancelled.\n');
         return;
       }
+    } else {
+      // No `--yes`, no `--web`, no TTY (includes `--non-tty`): nobody is
+      // here to answer "Proceed?" and nothing else answered it for them.
+      // Refuse before rotateMany() touches a provider, writes .env, pushes
+      // or deploys — same shape as the other two non-interactive refusals
+      // in this file (the variable and integration pickers above).
+      refuseNonInteractive(
+        'rotate would change this credential with no terminal to confirm it', // COPY-FLAG
+        'Pass --yes to run unattended, or run this in a terminal.',
+      );
     }
 
     // ── Apply ────────────────────────────────────────────────────────────────

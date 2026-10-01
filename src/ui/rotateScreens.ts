@@ -3,10 +3,13 @@
 // This is the one command that already drew a route: `renderRotationPlan`
 // prints ● ○ ◌ joined by │ and ┊ and then asks `Proceed?`. What it could not
 // do is show that route to anyone who is not sitting at a TTY — and `Proceed?`
-// is gated on `isTTY`, so the only approval the whole rotate → push → deploy
-// chain has silently disappears on a piped run. An agent invoking `capy rotate
-// --all` today rotates every live credential in the project with nothing
-// asked. Under `--web` the gate exists for every caller.
+// used to be gated on `isTTY` alone with no `else`, so the only approval the
+// whole rotate → push → deploy chain has silently disappeared on a piped run
+// (CAP-659/CAP-520): `capy rotate --all` with no TTY, no `--web` and no
+// `--yes` rotated every live credential in the project with nothing asked.
+// `rotateCommand.ts`'s confirm block is now exhaustive — skipPrompts, web,
+// isTTY, or a coded refusal — so that caller is refused instead. Under
+// `--web` the gate exists for every caller.
 //
 // Three screens:
 //
@@ -221,11 +224,12 @@ export async function askRotateIntegrationInBrowser(
 /**
  * The single Y/N that authorises the whole chain.
  *
- * `!opts.skipPrompts && isTTY` drops this in the terminal the moment stdin is
- * piped, which is every agent-driven run — so the one approval gate the
- * destructive half of this command has vanishes exactly where nobody is
- * watching. Here it is asked of every caller, and closing the window is a
- * refusal rather than consent.
+ * The terminal's own gate used to be `!opts.skipPrompts && isTTY` with no
+ * `else`, which dropped it the moment stdin was piped — every agent-driven
+ * run — so the one approval gate the destructive half of this command has
+ * vanished exactly where nobody was watching (CAP-659/CAP-520; fixed by
+ * making `rotateCommand.ts`'s confirm block exhaustive). Here it is asked of
+ * every caller, and closing the window is a refusal rather than consent.
  */
 export async function confirmRotatePlanInBrowser(p: WebRotatePlanParams): Promise<boolean> {
   const out = await serveRotateStep(

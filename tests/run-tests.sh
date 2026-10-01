@@ -59,6 +59,7 @@ ISOLATED_FILES=(
   tests/ui/deployDeadline.test.ts
   tests/ui/secretsScreenSearchHashing.test.ts
   tests/commands/rotatePromotesThenRotates.test.ts
+  tests/commands/rotateConfirmGate.test.ts
   tests/system/systemStore.test.ts
   tests/system/systemStoreFreshStore.test.ts
   tests/commands/systemCommand.test.ts

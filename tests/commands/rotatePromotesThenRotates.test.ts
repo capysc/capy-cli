@@ -165,7 +165,11 @@ afterAll(() => {
 
 async function rotate(varName: string, opts: Record<string, unknown> = {}): Promise<void> {
   const { RotateCommand } = await import('../../src/commands/rotateCommand');
-  await new RotateCommand(false).execute(varName, { nonTty: true, ...opts } as never);
+  // `skipPrompts: true` (CAP-659/CAP-520): rotate's plan gate now refuses
+  // with no `--yes` and no TTY, so `nonTty: true` alone no longer reaches
+  // the join this file is actually testing — it has to send `--yes` too,
+  // same as any real non-interactive caller does post-fix.
+  await new RotateCommand(false).execute(varName, { nonTty: true, skipPrompts: true, ...opts } as never);
 }
 
 describe('promoting an unmanaged variable', () => {
