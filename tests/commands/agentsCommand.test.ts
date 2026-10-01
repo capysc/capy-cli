@@ -134,6 +134,26 @@ describe('agentsCommand', () => {
     });
   });
 
+  describe('dry run (apply = false)', () => {
+    it('write plan reports the change and writes nothing', async () => {
+      await withTempRoot((root) => {
+        const files = writeAgentsBlock(root, false);
+        expect(files).toEqual([{ path: 'AGENTS.md', action: 'created' }]);
+        expect(existsSync(join(root, 'AGENTS.md'))).toBe(false);
+      });
+    });
+
+    it('remove plan reports the removal and leaves the file byte-identical', async () => {
+      await withTempRoot((root) => {
+        writeAgentsBlock(root);
+        const before = readFileSync(join(root, 'AGENTS.md'), 'utf-8');
+        const files = removeAgentsBlockFromFiles(root, false);
+        expect(files).toEqual([{ path: 'AGENTS.md', action: 'removed' }]);
+        expect(readFileSync(join(root, 'AGENTS.md'), 'utf-8')).toBe(before);
+      });
+    });
+  });
+
   describe('writeAgentsBlock (file targeting)', () => {
     it('neither AGENTS.md nor CLAUDE.md exists: creates AGENTS.md only', async () => {
       await withTempRoot((root) => {

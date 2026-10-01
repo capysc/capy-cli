@@ -527,16 +527,21 @@ program
       '  capy agents --print\n' +
       '  capy agents --yes\n' +
       '  capy agents --remove --yes\n' +
-      '  capy agents --json --yes',
+      '  capy agents --json --yes\n' +
+      '  capy agents --dry-run\n' +
+      '  capy agents --remove --dry-run --json',
   )
-  .action(async (options) => {
+  .action(async (options, command) => {
     const { agentsCommand } = await import('./commands/agentsCommand');
+    // `--dry-run` is declared once on the root program; read it from the
+    // merged globals so `capy agents --dry-run` and `capy --dry-run agents` both work.
     await agentsCommand({
       print: options.print,
       remove: options.remove,
       json: options.json,
       yes: options.yes,
       nonTty: options.nonTty,
+      dryRun: command.optsWithGlobals().dryRun === true,
     });
   });
 

@@ -39,6 +39,8 @@ export interface AgentsCommandOpts {
   yes?: boolean;
   /** Same meaning as every other command's `--non-tty`: never prompt, even if stdin happens to be a TTY. */
   nonTty?: boolean;
+  /** Report what write / `--remove` would change; touch no file and never prompt. */
+  dryRun?: boolean;
 }
 
 export interface AgentsFileResult {
@@ -115,14 +117,14 @@ function malformedError(name: string): CapyError {
  * (each file's write is independent and idempotent, so a partial run is
  * always safe to re-run).
  */
-export function writeAgentsBlock(root: string): AgentsFileResult[] {
+export function writeAgentsBlock(root: string, apply = true): AgentsFileResult[] {
   return writeTargetFileNames(root).map((name) => {
     const path = join(root, name);
     assertInsideRoot(root, path, name);
     const existing = readIfExists(path);
     const result = upsertAgentsBlock(existing);
     if (!result.ok) throw malformedError(name);
-    if (result.action !== 'unchanged') {
+    if (apply && result.action !== 'unchanged') {
       writeFileSync(path, result.content, 'utf-8');
     }
     return { path: name, action: result.action };
@@ -139,14 +141,14 @@ export function writeAgentsBlock(root: string): AgentsFileResult[] {
  * Capy, and deleting a file on a fuzzy "looks blank" guess is not this
  * command's call to make.
  */
-export function removeAgentsBlockFromFiles(root: string): AgentsFileResult[] {
+export function removeAgentsBlockFromFiles(root: string, apply = true): AgentsFileResult[] {
   return existingAgentsFileNames(root).map((name) => {
     const path = join(root, name);
     assertInsideRoot(root, path, name);
     const existing = readFileSync(path, 'utf-8');
     const result = removeAgentsBlock(existing);
     if (!result.ok) throw malformedError(name);
-    if (result.action === 'removed') {
+    if (apply && result.action === 'removed') {
       if (result.content.length === 0) {
         unlinkSync(path);
       } else {
@@ -207,6 +209,41 @@ function reportHuman(files: AgentsFileResult[], removedVerb = 'Removed the Capy 
   }
   for (const file of files) {
     console.log(`${actionLabel(file.action, removedVerb)} ${file.path}`); // COPY-FLAG
+  }
+}
+
+function dryRunLabel(action: AgentsFileResult['action']): string {
+  if (action === 'created') return 'Would create';
+  if (action === 'updated') return 'Would update';
+  if (action === 'removed') return 'Would remove the Capy section from';
+  if (action === 'unchanged') return 'Already up to date:';
+  return 'No Capy section in';
+}
+
+/**
+ * `--dry-run`: runs the same plan as the real write / `--remove` (same files,
+ * same malformed-marker and symlink refusals) with `apply` off, so nothing is
+ * written or deleted. Never prompts, so it works without a TTY and without
+ * `--yes`.
+ */
+function previewChanges(root: string, remove: boolean, json: boolean): void {
+  try {
+    const files = remove ? removeAgentsBlockFromFiles(root, false) : writeAgentsBlock(root, false);
+    if (json) {
+      printJson({ ok: true, dry_run: true, files });
+      return;
+    }
+    if (files.length === 0) {
+      console.log('No AGENTS.md or CLAUDE.md found in this repo.'); // COPY-FLAG
+      return;
+    }
+    for (const file of files) {
+      console.log(`${dryRunLabel(file.action)} ${file.path}`); // COPY-FLAG
+    }
+    console.log('Dry run: nothing was changed.'); // COPY-FLAG
+  } catch (err) {
+    if (err instanceof CapyError) refuseCapyError(err, json);
+    throw err;
   }
 }
 
@@ -285,6 +322,11 @@ export async function agentsCommand(opts: AgentsCommandOpts): Promise<void> {
   }
 
   const root = resolveRepoRoot(process.cwd());
+
+  if (opts.dryRun) {
+    previewChanges(root, opts.remove === true, json);
+    return;
+  }
 
   if (opts.remove) {
     if (!opts.yes && !isInteractive(opts.nonTty)) refuseNeedsTty(json);
