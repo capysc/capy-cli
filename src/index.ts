@@ -11,6 +11,7 @@ import { setWebMode } from './ui/webMode';
 import { ACCENT } from './ui/colors';
 import { resolveDryRunSupport, ROOT_COMMAND_PATH, type DryRunOverrideContext } from './core/dryRunSupport';
 import { dryRunRefused, printDryRunResultHuman, printDryRunResultJson } from './core/dryRun';
+import { isInteractive, EXIT_NEEDS_INPUT } from './ui/interactive';
 
 // Prod talks to api.capy.sc and ~/.capy, full stop. Strip the environment's
 // attempts to move it before anything can read them — see config/prodPins.ts
@@ -411,6 +412,7 @@ const deploy = program
   .option('--env-name <name>', 'gh-actions: env name when --scope env')
   .option('--no-deploy', 'write and verify the target, but skip the platform deploy/redeploy (target mode)')
   .option('--json', 'describe the route (unanswered stops + any known branch problem) as JSON instead of travelling it')
+  .option('--non-tty', 'refuse rather than prompt when input is needed (for CI/agents)')
   .action(async (target: string | undefined, options: any, cmd: any) => {
     assertNotLocalOnly('deploy');
     // Top-level program also defines --dry-run; merge globals so either
@@ -434,6 +436,7 @@ const deploy = program
         // commander negates `--no-deploy` onto the positive `deploy` property.
         noDeploy: options.deploy === false,
         json: !!options.json,
+        nonTty: !!options.nonTty,
       });
       process.exit(code);
     }
@@ -453,6 +456,9 @@ const deploy = program
       envName: options.envName,
       yes: !!options.yes,
       force: !!options.force,
+      dryRun: options.dryRun ?? merged.dryRun,
+      json: !!options.json,
+      nonTty: !!options.nonTty,
     });
     await c.execute();
   });
@@ -460,46 +466,105 @@ const deploy = program
 deploy
   .command('revoke <deployId>')
   .description('Revoke a deploy token')
-  .action(async (deployId: string, _options, command) => {
+  .option('--dry-run', 'show which token would be revoked; revoke nothing')
+  .option('-y, --yes', 'skip the confirmation (CI)')
+  .option('--json', 'machine-readable output')
+  .option('--non-tty', 'refuse rather than prompt when input is needed (for CI/agents)')
+  .action(async (deployId: string, _options: any, command) => {
     assertNotLocalOnly('deploy revoke');
+    // Every one of this subcommand's own flags shares its name with one
+    // declared on the parent `deploy [target]` command (`--dry-run`,
+    // `--yes`, `--json`, `--non-tty`) — Commander resolves a name declared
+    // on an ancestor to THAT command's own option storage, so the local
+    // `options` object here never carries any of them (reproduced in
+    // isolation; `command.opts()` comes back empty for every shared name).
+    // `optsWithGlobals()` is the one call that sees them regardless of
+    // which level actually parsed the flag.
+    const merged = command.optsWithGlobals();
     const { DeployRevokeCommand } = await import('./commands/deployTokenCommand');
-    const cmd = new DeployRevokeCommand(undefined, false, { web: command.optsWithGlobals().web === true });
+    const cmd = new DeployRevokeCommand(undefined, false, {
+      web: merged.web === true,
+      dryRun: !!merged.dryRun,
+      yes: !!merged.yes,
+      json: !!merged.json,
+      nonTty: !!merged.nonTty,
+    });
     await cmd.execute(deployId);
   });
 
 deploy
   .command('list')
   .description('List deploy tokens for this project')
-  .action(async (_options, command) => {
+  .option('--json', 'machine-readable output')
+  .action(async (_options: any, command) => {
     assertNotLocalOnly('deploy list');
+    // `--json` shares its name with the parent `deploy` command's own
+    // option — same Commander resolution note as `deploy revoke` above.
+    const merged = command.optsWithGlobals();
     const { DeployListCommand } = await import('./commands/deployTokenCommand');
-    const cmd = new DeployListCommand(undefined, false, { web: command.optsWithGlobals().web === true });
+    const cmd = new DeployListCommand(undefined, false, {
+      web: merged.web === true,
+      json: !!merged.json,
+    });
     await cmd.execute();
   });
 
 deploy
   .command('targets')
   .description('List configured targets (target mode)')
-  .action(async (_options, command) => {
+  .option('--json', 'machine-readable output')
+  .action(async (_options: any, command) => {
     assertNotLocalOnly('deploy targets');
+    // Same name-collision note as `deploy list` above.
+    const merged = command.optsWithGlobals();
     const { deployList } = await import('./commands/deployCommand');
-    process.exit(await deployList(process.cwd(), { web: command.optsWithGlobals().web === true }));
+    process.exit(await deployList(process.cwd(), { web: merged.web === true, json: !!merged.json }));
   });
 
 deploy
   .command('targets-remove <name>')
   .description('Remove a configured target')
   .option('--no-deploy', 'strip the config but skip the redeploy that would apply the revert')
-  .action(async (name: string, options: any, command) => {
+  .option('--dry-run', 'show what would be stripped/revoked/removed; change nothing')
+  .option('-y, --yes', 'skip the confirmation (CI)')
+  .option('--json', 'machine-readable output (dry-run only)')
+  .option('--non-tty', 'refuse rather than prompt when input is needed (for CI/agents)')
+  .action(async (name: string, _options: any, command) => {
     assertNotLocalOnly('deploy targets-remove');
+    // `--no-deploy`, `--dry-run`, `--yes`, `--json` and `--non-tty` are ALL
+    // also declared on the parent `deploy [target]` command — same
+    // Commander ancestor-resolution note as `deploy revoke` above. Read
+    // every one of them off `optsWithGlobals()`, never off the local
+    // `options` object, which Commander leaves empty for every shared name.
+    const merged = command.optsWithGlobals();
     const { deployRemove } = await import('./commands/deployCommand');
-    process.exit(
-      await deployRemove(name, process.cwd(), {
-        web: command.optsWithGlobals().web === true,
-        // commander negates `--no-deploy` onto the positive `deploy` property.
-        noDeploy: options.deploy === false,
-      }),
-    );
+    const web = merged.web === true;
+    const dryRun = !!merged.dryRun;
+    // commander negates `--no-deploy` onto the positive `deploy` property.
+    const noDeploy = merged.deploy === false;
+
+    // CAP-659/CAP-520: the local removal is unconditional and irreversible-
+    // ish (no undo short of re-running the picker), so — outside a dry run
+    // and outside `--web` (which already carries its own typed-name confirm
+    // screen) — a human must say yes. No TTY and no `-y/--yes` refuses with
+    // a coded exit instead of silently removing.
+    if (!dryRun && !web && !merged.yes) {
+      if (!isInteractive(merged.nonTty) || merged.json) {
+        console.error(`\n  non-interactive: \`capy deploy targets-remove ${name}\` needs confirmation.`);
+        console.error(`  [${ERROR_CODES.DEPLOY_CONFIRM_NEEDS_TTY}] pass -y/--yes or run this in a terminal.\n`);
+        process.exit(EXIT_NEEDS_INPUT);
+      }
+      const inquirer = (await import('inquirer')).default;
+      const { yes } = await inquirer.prompt([
+        { type: 'confirm', name: 'yes', message: `Remove target "${name}"?`, default: false },
+      ]);
+      if (!yes) {
+        console.log('Cancelled.');
+        process.exit(0);
+      }
+    }
+
+    process.exit(await deployRemove(name, process.cwd(), { web, noDeploy, dryRun, json: !!merged.json }));
   });
 
 program
