@@ -18,7 +18,7 @@ import { authorizeDevice, pollDeviceToken } from '../auth/deviceGrant';
 import { AuthService } from '../auth/authService';
 import { ServiceClient } from '../service/serviceClient';
 import { readLocalRoot, saveLocalRoot, writeOrgKeyFileRaw } from '../config/globalConfig';
-import { renderTerminalQr } from '../ui/terminalQr';
+import { renderTerminalQr, type RenderedTerminalQr } from '../ui/terminalQr';
 import { printMaskedLinkBlock, type MaskedLinkPromptHandle } from '../ui/maskedLinkPrompt';
 import { CapyError, ERROR_CODES } from '../types/index';
 import { refuseError } from './pairingRefusal';
@@ -68,9 +68,12 @@ function writeEntry(entry: PairingEntry, force: boolean): 'written' {
  * progress output (to stderr, unmasked, unchanged) is a separate branch in
  * `pairCommand` below — this function is never called under `--json`.
  */
-function printHumanPairBlock(deviceLink: string, qr: string | null, userCode: string): MaskedLinkPromptHandle | null {
+function printHumanPairBlock(deviceLink: string, qr: RenderedTerminalQr | null, userCode: string): MaskedLinkPromptHandle | null {
   console.log('');
-  if (qr) console.log(qr);
+  if (qr) {
+    console.log(qr.text);
+    if (qr.hint) console.log(qr.hint);
+  }
   const prompt = printMaskedLinkBlock({ fullUrl: deviceLink, kind: 'query', label: 'Approve on your other device:' });
   console.log(`  Code: ${userCode}`); // COPY-FLAG
   console.log('');
@@ -99,7 +102,10 @@ export async function pairCommand(options: PairOptions = {}): Promise<void> {
     const prompt = json ? null : printHumanPairBlock(deviceLink, qr, authorize.user_code);
     if (json) {
       announce(true, '');
-      if (qr) announce(true, qr);
+      if (qr) {
+        announce(true, qr.text);
+        if (qr.hint) announce(true, qr.hint);
+      }
       announce(true, `  Approve on your other device: ${deviceLink}`); // COPY-FLAG
       announce(true, `  Code: ${authorize.user_code}`); // COPY-FLAG
       announce(true, '');

@@ -8,7 +8,7 @@
  * module.
  */
 import { describe, test, expect, afterEach } from 'bun:test';
-import { buildTerminalQr, readQrEnv, shouldRenderQr, renderTerminalQr, type QrEnv } from '../../src/ui/terminalQr';
+import { buildTerminalQr, readQrEnv, qrFit, renderTerminalQr, type QrEnv } from '../../src/ui/terminalQr';
 
 const PAIR_URL = 'https://keep.capy.sc/pair';
 
@@ -68,32 +68,36 @@ describe('buildTerminalQr', () => {
   });
 });
 
-describe('shouldRenderQr', () => {
+describe('qrFit', () => {
   const size = { width: 27, height: 14 };
   const fits: QrEnv = { isTTY: true, columns: 80, rows: 24, noColor: false };
 
-  test('renders on a real, wide-enough, colour-enabled TTY', () => {
-    expect(shouldRenderQr(fits, size)).toBe(true);
+  test('fits on a real, wide-enough, colour-enabled TTY', () => {
+    expect(qrFit(fits, size)).toBe('fits');
   });
 
-  test('skips when stdout is not a TTY (piped/redirected)', () => {
-    expect(shouldRenderQr({ ...fits, isTTY: false }, size)).toBe(false);
+  test('not_tty when stdout is not a TTY (piped/redirected) — hard skip even though it would fit', () => {
+    expect(qrFit({ ...fits, isTTY: false }, size)).toBe('not_tty');
   });
 
-  test('skips under a NO_COLOR-style opt-out even on a wide TTY', () => {
-    expect(shouldRenderQr({ ...fits, noColor: true }, size)).toBe(false);
+  test('no_color under a NO_COLOR-style opt-out even on a wide TTY — hard skip even though it would fit', () => {
+    expect(qrFit({ ...fits, noColor: true }, size)).toBe('no_color');
   });
 
-  test('skips when the terminal is narrower than the encoded block', () => {
-    expect(shouldRenderQr({ ...fits, columns: size.width - 1 }, size)).toBe(false);
+  // CAP-684 QR follow-up (2026-09-30): a too-small terminal used to be a
+  // silent skip (the exact bug report — a `capy transport` link's QR is
+  // ~123x62 and got dropped on any normal-size window). It's now
+  // `'too_small'`, a SOFT skip — `renderTerminalQr` still renders it.
+  test('too_small when the terminal is narrower than the encoded block (still a real TTY, still colour-enabled)', () => {
+    expect(qrFit({ ...fits, columns: size.width - 1 }, size)).toBe('too_small');
   });
 
-  test('skips when the terminal is shorter than the encoded block', () => {
-    expect(shouldRenderQr({ ...fits, rows: size.height - 1 }, size)).toBe(false);
+  test('too_small when the terminal is shorter than the encoded block (still a real TTY, still colour-enabled)', () => {
+    expect(qrFit({ ...fits, rows: size.height - 1 }, size)).toBe('too_small');
   });
 
-  test('renders when the terminal is EXACTLY the size of the block (no slack required)', () => {
-    expect(shouldRenderQr({ ...fits, columns: size.width, rows: size.height }, size)).toBe(true);
+  test('fits when the terminal is EXACTLY the size of the block (no slack required)', () => {
+    expect(qrFit({ ...fits, columns: size.width, rows: size.height }, size)).toBe('fits');
   });
 });
 
@@ -158,16 +162,16 @@ describe('renderTerminalQr — end to end', () => {
     else process.env.NO_COLOR = originalNoColor;
   });
 
-  test('renders the golden block on a real wide TTY', () => {
+  test('renders the golden block on a real wide TTY, with no hint', () => {
     process.stdout.isTTY = true;
     process.stdout.columns = 80;
     process.stdout.rows = 24;
     delete process.env.NO_COLOR;
 
-    expect(renderTerminalQr(PAIR_URL)).toBe(GOLDEN_PAIR_URL_QR);
+    expect(renderTerminalQr(PAIR_URL)).toEqual({ text: GOLDEN_PAIR_URL_QR });
   });
 
-  test('returns null when piped (isTTY undefined, spawned-process shape)', () => {
+  test('returns null when piped (isTTY undefined, spawned-process shape) — hard skip even though it would fit', () => {
     process.stdout.isTTY = undefined as unknown as true;
     process.stdout.columns = 80;
     process.stdout.rows = 24;
@@ -175,18 +179,46 @@ describe('renderTerminalQr — end to end', () => {
     expect(renderTerminalQr(PAIR_URL)).toBeNull();
   });
 
-  test('returns null on a narrow terminal even when it is a real TTY', () => {
+  // CAP-684 QR follow-up (2026-09-30): this used to assert `toBeNull()` —
+  // that was the exact silent-skip bug the user reported (a `capy
+  // transport` link's QR is big enough to routinely exceed a normal
+  // terminal window, and the QR just vanished with no indication). It now
+  // still renders, plus a hint to zoom the terminal out.
+  test('still renders on a narrow (too-small) real TTY, plus the zoom hint', () => {
     process.stdout.isTTY = true;
     process.stdout.columns = 20;
     process.stdout.rows = 24;
+    delete process.env.NO_COLOR;
+
+    const result = renderTerminalQr(PAIR_URL);
+    expect(result?.text).toBe(GOLDEN_PAIR_URL_QR);
+    expect(result?.hint).toBe('  Zoom out (⌘− or Ctrl−) until the whole code is visible, then scan it with your phone.');
+  });
+
+  test('still renders on a too-short real TTY, plus the zoom hint', () => {
+    process.stdout.isTTY = true;
+    process.stdout.columns = 80;
+    process.stdout.rows = 4;
+    delete process.env.NO_COLOR;
+
+    const result = renderTerminalQr(PAIR_URL);
+    expect(result?.text).toBe(GOLDEN_PAIR_URL_QR);
+    expect(result?.hint).toBeTruthy();
+  });
+
+  test('returns null under NO_COLOR even on a wide real TTY — hard skip even though it would fit', () => {
+    process.stdout.isTTY = true;
+    process.stdout.columns = 80;
+    process.stdout.rows = 24;
+    process.env.NO_COLOR = '1';
 
     expect(renderTerminalQr(PAIR_URL)).toBeNull();
   });
 
-  test('returns null under NO_COLOR even on a wide real TTY', () => {
+  test('NO_COLOR still wins over too_small — no QR, no hint', () => {
     process.stdout.isTTY = true;
-    process.stdout.columns = 80;
-    process.stdout.rows = 24;
+    process.stdout.columns = 20;
+    process.stdout.rows = 4;
     process.env.NO_COLOR = '1';
 
     expect(renderTerminalQr(PAIR_URL)).toBeNull();

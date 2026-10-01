@@ -114,7 +114,10 @@ export class TransportCommand {
       const qr = renderTerminalQr(url);
       console.log('');
       console.log(buildTransportIntro());
-      if (qr) console.log(qr);
+      if (qr) {
+        console.log(qr.text);
+        if (qr.hint) console.log(qr.hint);
+      }
       const prompt = printMaskedLinkBlock({ fullUrl: url, kind: 'fragment', label: 'Open on your other device:' });
       console.log(`  Expires ${expires_at}`); // COPY-FLAG
       console.log('');
