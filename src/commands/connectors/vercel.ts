@@ -21,6 +21,13 @@
  * `legacy_secret_unreadable`, `vercel_system`, `unsupported_type`,
  * `duplicate_key`, `empty_value`.
  *
+ * `--create-token` makes `_CONNECTOR_VERCEL_TOKEN` from the Vercel CLI's own
+ * sign-in (see `deploy/vercelCliToken.ts`) instead of a hand-made one. With
+ * `--project`/`--discover` the run goes on to import; alone it stops after
+ * saving the token. Interactively, a missing token offers the same thing next
+ * to the hidden prompt. Every refusal for a missing or rejected token carries
+ * the Vercel token page (`link`) and what to do (`remedy`).
+ *
  * Deploy targets: like Dokploy, a target is OFFERED only after a single
  * import, only interactively (never under `--json`, `--dry-run`, or
  * non-interactive). Discovery never saves one by itself.
@@ -52,12 +59,33 @@ import {
   resolveVercelToken,
   vercelSecretsMayPrompt,
 } from '../../deploy/vercelApi';
+import {
+  MintTarget,
+  TokenCreatedReport,
+  TokenFailure,
+  VercelCliDeps,
+  describeTokenCreated,
+  hasVercelCli,
+  mintTeamToken,
+  parseExpiryDays,
+} from '../../deploy/vercelCliToken';
+import { formatKeyHelp, keyHelpFields, vercelKeyHelp } from '../../deploy/keyHelp';
 import { ConnectorMetadata, ERROR_CODES } from '../../types/index';
 import { isInteractive } from '../../ui/interactive';
 import { listOrgProjectsOrUnavailable } from '../capyCommand';
 import { defaultDiscoveryCommitBranchName, snapshotPathStatus } from '../../git/discoveryCommit';
 import { fingerprint, ResolvedContext } from './shared';
-import { ConnectOpts, ConnectorModule, ConnectResult, ImportOutcome, ImportSkip, ImportWarning, RotateResult } from './registry';
+import {
+  ConnectFailure,
+  ConnectOpts,
+  ConnectorModule,
+  ConnectResult,
+  CreateTokenOutcome,
+  ImportOutcome,
+  ImportSkip,
+  ImportWarning,
+  RotateResult,
+} from './registry';
 import {
   CandidateRepo,
   DiscoveryCollision,
@@ -88,10 +116,11 @@ import {
   peekLocalKeepForFolder,
 } from './dokploy';
 import { buildVercelDiscoveryPlan, reportVercelDiscovery } from './vercelDiscovery';
+import { VERCEL_CONNECTOR_SECRET_NAME } from '../../deploy/vercelApi';
 
 const VERCEL_COMMIT_MESSAGE = 'chore(capy): import Vercel environments';
 
-type Failure = { ok: false; code: string; message: string };
+type Failure = ConnectFailure;
 
 // ── Prompts (real `inquirer`; every one is injectable) ──────────────────────
 
@@ -115,6 +144,24 @@ async function defaultPickTeam(teams: readonly VercelTeam[]): Promise<string> {
   const inquirer = (await import('inquirer')).default;
   const { picked } = await inquirer.prompt([
     { type: 'list', name: 'picked', message: 'Which Vercel team:', choices: teams.map((t) => ({ name: t.slug, value: t.id })) },
+  ]);
+  return picked;
+}
+
+// COPY-FLAG: new user-facing string, minimal/neutral wording.
+async function defaultAskCreateMethod(): Promise<'create' | 'paste'> {
+  const inquirer = (await import('inquirer')).default;
+  const { picked } = await inquirer.prompt([
+    {
+      type: 'list',
+      name: 'picked',
+      message: `${VERCEL_CONNECTOR_SECRET_NAME} is not set. How do you want to provide it:`,
+      choices: [
+        { name: 'Create one with the Vercel CLI sign-in', value: 'create' },
+        { name: 'Paste a token', value: 'paste' },
+      ],
+      default: 'create',
+    },
   ]);
   return picked;
 }
@@ -155,6 +202,18 @@ export interface VercelConnectorDeps {
    * singleton wires the real `system/systemStore.ts` lookup.
    */
   getConnectorSecret?: (name: string, opts: VercelSystemStoreCallOptions) => Promise<string | null>;
+  /** The Vercel CLI: how it is run and found. `env` is taken from `env` above. Tests inject a stub. */
+  cli?: Pick<VercelCliDeps, 'run' | 'hasBinary' | 'now'>;
+  /** Opens the org system store for `--create-token` (the same store the hidden prompt saves to). Defaults to the real one. */
+  openStore?: (orgId: string, opts: { devMode?: boolean }) => Promise<CreateTokenStore>;
+  /** Interactive: create the token with the Vercel CLI, or paste one. */
+  askCreateMethod?: () => Promise<'create' | 'paste'>;
+}
+
+/** The part of the system store `--create-token` uses. */
+export interface CreateTokenStore {
+  listNames(): readonly { name: string }[];
+  set(name: string, value: string): Promise<void>;
 }
 
 // ── Connector entry (keep.lock metadata) ────────────────────────────────────
@@ -353,13 +412,105 @@ export function createVercelConnector(deps: VercelConnectorDeps = {}): Connector
   const askDiscoveryProjectName = deps.askDiscoveryProjectName ?? defaultAskDiscoveryProjectName;
   const askDiscoveryCommitBranchName = deps.askDiscoveryCommitBranchName ?? defaultAskDiscoveryCommitBranchName;
 
+  // ── Vercel CLI token creation ──────────────────────────────────────────────
+
+  const cliDeps = (): VercelCliDeps => ({ env: env(), ...deps.cli });
+  const askCreateMethod = deps.askCreateMethod ?? defaultAskCreateMethod;
+  const openStore =
+    deps.openStore ??
+    (async (orgId: string, o: { devMode?: boolean }): Promise<CreateTokenStore> =>
+      (await import('../../system/systemStore')).openSystemStore({ orgId, devMode: o.devMode }));
+
+  /** A typed store error's code — never its message. */
+  const storeCodeOf = (err: unknown): string => {
+    const code = (err as { code?: unknown } | null)?.code;
+    return typeof code === 'string' && code !== '' ? code : ERROR_CODES.SERVICE_ERROR;
+  };
+
+  const tokenHelp = () => keyHelpFields(vercelKeyHelp(VERCEL_CONNECTOR_SECRET_NAME));
+
+  /** Opens the store BEFORE a token exists, so a caller who cannot save one is refused before one is made. */
+  const prepareStore =
+    (orgId: string, opts: ConnectOpts) =>
+    async (): Promise<MintTarget | TokenFailure> => {
+      try {
+        const store = await openStore(orgId, { devMode: opts.devMode });
+        return {
+          ok: true,
+          save: (value: string) => store.set(VERCEL_CONNECTOR_SECRET_NAME, value),
+          replacedExisting: store.listNames().some((n) => n.name === VERCEL_CONNECTOR_SECRET_NAME),
+        };
+      } catch (err) {
+        const code = storeCodeOf(err);
+        // COPY-FLAG: new user-facing string, minimal/neutral wording.
+        return { ok: false, code, message: `Could not open the org system store (${code}).`, ...tokenHelp() };
+      }
+    };
+
+  /** `--create-token`'s whole run: validate, open the store, create, check, save. */
+  const mintForRun = async (orgId: string, opts: ConnectOpts, promptable: boolean) => {
+    const expiry = parseExpiryDays(opts.tokenExpiresDays);
+    if (!expiry.ok) return expiry;
+    return mintTeamToken(cliDeps(), {
+      team: opts.team,
+      expiresDays: expiry.days,
+      pickTeam: promptable ? pickTeam : null,
+      prepare: prepareStore(orgId, opts),
+      askSignOut: promptable ? confirm : null,
+    });
+  };
+
+  /** A preview never creates or saves a key. */
+  const createTokenDryRunRefusal = (opts: ConnectOpts): Failure | null =>
+    opts.createToken && opts.dryRun
+      ? {
+          ok: false,
+          code: ERROR_CODES.VERCEL_CREATE_TOKEN_DRY_RUN,
+          // COPY-FLAG: new user-facing string, minimal/neutral wording.
+          message: 'A dry run never creates or saves a key. Drop --dry-run or --create-token.',
+        }
+      : null;
+
+  /** Interactive and the token is missing: offer the Vercel CLI route next to the hidden prompt. A failure is shown and falls back to the prompt. */
+  const offerCreateViaCli = (orgId: string, opts: ConnectOpts) => async (save: (value: string) => Promise<void>): Promise<string | null> => {
+    if ((await askCreateMethod()) !== 'create') return null;
+    const expiry = parseExpiryDays(opts.tokenExpiresDays);
+    const minted = expiry.ok
+      ? await mintTeamToken(cliDeps(), {
+          team: opts.team,
+          expiresDays: expiry.days,
+          pickTeam,
+          // The store is already open (the hidden prompt's own), so the admin rule has already applied.
+          prepare: async () => ({ ok: true as const, save, replacedExisting: false }),
+          askSignOut: confirm,
+        })
+      : expiry;
+    if (!minted.ok) {
+      console.error(`\n  ${minted.message}`);
+      console.error(formatKeyHelp({ link: minted.link ?? tokenHelp().link, remedy: minted.remedy ?? tokenHelp().remedy }) + '\n');
+      return null;
+    }
+    describeTokenCreated(minted.report).forEach((line) => console.log(line));
+    return minted.bearer;
+  };
+
   /** The token, then a client — or the coded refusal. Resolved BEFORE any Vercel request, so a missing token means zero requests. */
   const openClient = async (
     orgId: string,
     opts: ConnectOpts,
     interactive: boolean,
-  ): Promise<{ ok: true; client: VercelClient; tokenEnv: string } | Failure> => {
+  ): Promise<{ ok: true; client: VercelClient; tokenEnv: string; tokenCreated?: TokenCreatedReport } | Failure> => {
     const tokenEnv = opts.tokenEnv?.trim() || DEFAULT_VERCEL_TOKEN_ENV;
+    if (opts.createToken) {
+      const minted = await mintForRun(orgId, opts, interactive && !opts.json);
+      if (!minted.ok) return minted;
+      return {
+        ok: true,
+        tokenEnv,
+        client: createVercelClient(minted.bearer, { fetch: deps.fetch, sleep: deps.sleep }),
+        tokenCreated: minted.report,
+      };
+    }
     // `--web`, `--json` and `--dry-run` each suppress ONLY the system store's
     // hidden prompt: a raw terminal prompt must not hang a browser run, be
     // interleaved with machine output, or save a key as a preview's side effect.
@@ -371,10 +522,11 @@ export function createVercelConnector(deps: VercelConnectorDeps = {}): Connector
       orgId,
       devMode: opts.devMode,
       getConnectorSecret: deps.getConnectorSecret,
+      ...(mayPrompt && hasVercelCli(cliDeps()) ? { onMissing: offerCreateViaCli(orgId, opts) } : {}),
     });
     if (!resolved.ok) {
       const { reason } = describeVercelTokenProblem(resolved.code, tokenEnv);
-      return { ok: false, code: resolved.code, message: `${reason}.` };
+      return { ok: false, code: resolved.code, message: `${reason}.`, ...tokenHelp() };
     }
     return {
       ok: true,
@@ -502,6 +654,208 @@ export function createVercelConnector(deps: VercelConnectorDeps = {}): Connector
     };
   };
 
+  /** Everything after the client exists: read the source, plan, classify, return the outcome. */
+  const importFrom = async (ctx: ResolvedContext, opts: ConnectOpts, client: VercelClient, interactive: boolean): Promise<ImportOutcome> => {
+    // A dry run changes nothing; `--json` never has a prompt interleaved.
+    const dryRun = !!opts.dryRun;
+    const promptable = interactive && !opts.json;
+
+    const source = await readSource(client, ctx, opts, promptable);
+    if (!source.ok) return source;
+
+    const importSource: VercelImportSource = {
+      kind: 'vercel',
+      projectId: source.project.id,
+      projectName: source.project.name,
+      ...(source.teamId ? { teamId: source.teamId } : {}),
+      environment: source.environment.name,
+    };
+
+    if (opts.overwrite) {
+      return runOverwriteImport({ ctx, opts, source, importSource, client, promptable, dryRun });
+    }
+
+    const restrict = parseVarList(opts.var);
+    const restricted = source.importable.filter((r) => !restrict || restrict.includes(r.key));
+    const values = await guard(() => resolveEnvValues(client, source.project.id, source.teamId, restricted));
+    if (!values.ok) return values;
+    const candidates = values.value.entries.map((e) => ({ name: e.record.key, value: e.value }));
+
+    // A dry run previews the WHOLE plan rather than a hand-picked subset.
+    const selectedNames = restrict || !promptable || dryRun ? candidates.map((c) => c.name) : await selectVars(candidates.map((c) => c.name));
+    const selected = candidates.filter((c) => selectedNames.includes(c.name));
+
+    const { unchanged, skipped: conflictSkipped, toImport, wouldAsk } = await classifyImportCandidates(selected, ctx.localPlaintext, {
+      dryRun,
+      interactive: promptable,
+      confirm,
+      providerLabel: 'Vercel',
+    });
+
+    const importedAt = now().toISOString();
+    const createdAtSec = Math.floor(now().getTime() / 1000);
+    const recordByName = new Map(values.value.entries.map((e) => [e.record.key, e.record] as const));
+    const entryFor = (name: string, value: string) => importedEntry(recordByName.get(name)!, name, value, source, createdAtSec, importedAt);
+    const imported = toImport.map(({ name, value }) => entryFor(name, value));
+    // A re-import over a name whose value already matches still refreshes
+    // its connector metadata — never populated under a dry run.
+    const unchangedEntries = dryRun ? [] : unchanged.map((name) => entryFor(name, selected.find((c) => c.name === name)!.value));
+
+    const inScope = (name: string): boolean => !restrict || restrict.includes(name);
+    const skipped: readonly ImportSkip[] = [
+      ...[...source.skipped, ...values.value.empty].filter((s) => inScope(s.name)).map(toImportSkip),
+      ...conflictSkipped,
+    ];
+
+    const importedNames = [...imported.map((i) => i.varName), ...unchanged];
+    const deployTargetSaved =
+      !dryRun &&
+      (await maybeOfferDeployTarget({
+        importedNames,
+        project: source.project,
+        teamId: source.teamId,
+        environment: source.environment,
+        allTargets: await listTargetsAt(opts.projectDir ?? cwd()),
+        promptable,
+        dir: opts.projectDir ?? cwd(),
+        confirm,
+      }));
+
+    return {
+      ok: true,
+      source: importSource,
+      imported,
+      unchanged,
+      unchangedEntries,
+      skipped,
+      warnings: truncationWarnings(source),
+      deployTargetSaved,
+      ...(dryRun ? { wouldAsk } : {}),
+    };
+  };
+
+  /** Everything after the client exists: resolve the team, build the plan, apply it. */
+  const discoverFrom = async (
+    ctx: DiscoveryContext,
+    opts: ConnectOpts,
+    client: VercelClient,
+    tokenEnv: string,
+    interactive: boolean,
+  ): Promise<DiscoveryOutcome> => {
+    const dryRun = !!opts.dryRun;
+    const promptable = interactive && !opts.json;
+
+    const team = await chooseTeam(client, opts, promptable);
+    if (!team.ok) return team;
+
+    const scan = findCandidateReposResult(cwd());
+    const environmentFilter = parseVarList(opts.environment) ?? undefined;
+    const built = await guard(() =>
+      buildVercelDiscoveryPlan(
+        client,
+        team.teamId,
+        scan.repos as readonly CandidateRepo[],
+        { peekLocalKeep: peekLocalKeepForFolder, listServerBranches: (projectId) => ctx.serviceClient.listBranches(projectId) },
+        environmentFilter,
+      ),
+    );
+    if (!built.ok) return built;
+    const plan: DiscoveryPlan = {
+      ...built.value,
+      unreadableRepos: scan.unreadable,
+      ...(team.teamId ? { team: { id: team.teamId, ...(team.teamSlug ? { slug: team.teamSlug } : {}) } } : {}),
+    };
+
+    if (environmentFilter) {
+      const unknown = environmentFilter.filter((name) => !plan.allEnvironmentNames.includes(name));
+      if (unknown.length > 0) {
+        return {
+          ok: false,
+          code: ERROR_CODES.VERCEL_ENVIRONMENT_NOT_FOUND,
+          // COPY-FLAG: new user-facing string, minimal/neutral wording.
+          message: `No such environment(s): ${unknown.join(', ')}. Environments found: ${plan.allEnvironmentNames.join(', ') || '(none)'}.`,
+        };
+      }
+    }
+
+    if (dryRun) {
+      // A dry run never asks for a branch name either; the DEFAULT is what it previews.
+      const commits = commitPreviewForFolders(plan.folders, defaultDiscoveryCommitBranchName(new Date(), 'vercel'), VERCEL_COMMIT_MESSAGE);
+      return { ok: true, dryRun: true, plan, ...(commits.length > 0 ? { commits } : {}) };
+    }
+
+    // `--project` under `--discover` is the collision-winner hint (an id or a name), not an import source.
+    const preferredServiceId = preferredProjectId(plan, opts.project);
+    const resolution = await resolveCollisions(orderEnvironments(plan.collisions), {
+      preferredServiceId,
+      interactive: promptable,
+      askWinner: pickCollisionWinner,
+    });
+    if (!resolution.ok) {
+      return {
+        ok: false,
+        code: ERROR_CODES.VERCEL_MAPPING_COLLISION,
+        // COPY-FLAG: new user-facing string, minimal/neutral wording.
+        message: 'Several Vercel projects map to the same folder + branch. Pass --project to pick one, or run this interactively.',
+      };
+    }
+
+    const resolvedFolders = applyCollisionResolutions(plan.folders, resolution.resolutions);
+    if (resolvedFolders.length === 0) return { ok: true, dryRun: false, plan, applied: [] };
+
+    // A real run never writes without a yes: `--yes` skips the ask regardless of TTY.
+    if (promptable && !opts.yes) {
+      const proceed = await confirm(discoveryConfirmMessage(resolvedFolders, !!opts.overwrite, environmentFilter), false);
+      if (!proceed) return { ok: true, dryRun: false, plan, applied: [], cancelled: true };
+    } else if (!promptable && !opts.yes) {
+      // COPY-FLAG: new user-facing string, minimal/neutral wording.
+      return { ok: false, code: ERROR_CODES.VERCEL_CONFIRMATION_REQUIRED, message: 'Pass --yes to apply non-interactively, or run this interactively.' };
+    }
+
+    const commitBranchName =
+      promptable && !opts.yes
+        ? await askDiscoveryCommitBranchName(defaultDiscoveryCommitBranchName(new Date(), 'vercel'))
+        : defaultDiscoveryCommitBranchName(new Date(), 'vercel');
+
+    // Snapshotted BEFORE any write, per repo, so the commit step can tell
+    // "discovery made this change" from "already dirty before the run".
+    const beforeStatusByRepo = new Map(
+      [...new Set(resolvedFolders.map((f) => f.repoDir))].map((repoDir) => {
+        const paths = resolvedFolders.filter((f) => f.repoDir === repoDir).flatMap((f) => discoveryCommitPathsFor(f.folder));
+        return [repoDir, snapshotPathStatus(repoDir, paths)] as const;
+      }),
+    );
+
+    // Same snapshot-once rule as Dokploy's non-interactive `--yes` auto-create.
+    const existingProjectsSnapshot: ExistingProjectsSnapshot | undefined =
+      !promptable && !!opts.yes ? await listOrgProjectsOrUnavailable(ctx.serviceClient) : undefined;
+    const sameRunNameCollisions: ReadonlySet<string> = !promptable && !!opts.yes ? computeSameRunNameCollisions(resolvedFolders) : new Set();
+
+    const sequenceDeps = buildRealDiscoverySequenceDeps(ctx, connector.import!, {
+      noPush: !!opts.noPush,
+      interactive: promptable,
+      json: !!opts.json,
+      yes: !!opts.yes,
+      baseUrl: '',
+      tokenEnv,
+      importOptsFor: (env, projectName, folderPath) => ({
+        project: env.serviceId,
+        vercelProject: { id: env.serviceId, name: projectName, ...(env.gitBranch ? { productionBranch: env.gitBranch } : {}) },
+        vercelTeam: { id: team.teamId },
+        environment: env.environmentName,
+        tokenEnv,
+        projectDir: folderPath,
+      }),
+      askExistingOrNewProject,
+      askProjectName: askDiscoveryProjectName,
+      existingProjectsSnapshot,
+      sameRunNameCollisions,
+    });
+    const applied = await runDiscoverySequences(resolvedFolders, { overwrite: !!opts.overwrite }, sequenceDeps);
+    const commits = commitForAppliedRepos(applied, beforeStatusByRepo, commitBranchName, VERCEL_COMMIT_MESSAGE);
+    return { ok: true, dryRun: false, plan, applied, ...(commits.length > 0 ? { commits } : {}) };
+  };
+
   const connector: ConnectorModule = {
     name: 'vercel',
     // COPY-FLAG: new user-facing string, minimal/neutral wording.
@@ -518,87 +872,15 @@ export function createVercelConnector(deps: VercelConnectorDeps = {}): Connector
     },
 
     async import(ctx: ResolvedContext, opts: ConnectOpts): Promise<ImportOutcome> {
+      const refused = createTokenDryRunRefusal(opts);
+      if (refused) return refused;
       const interactive = isInteractive(opts.nonTty);
-      // A dry run changes nothing; `--json` never has a prompt interleaved.
-      const dryRun = !!opts.dryRun;
-      const promptable = interactive && !opts.json;
 
       const opened = await openClient(ctx.orgId, opts, interactive);
       if (!opened.ok) return opened;
-      const { client } = opened;
 
-      const source = await readSource(client, ctx, opts, promptable);
-      if (!source.ok) return source;
-
-      const importSource: VercelImportSource = {
-        kind: 'vercel',
-        projectId: source.project.id,
-        projectName: source.project.name,
-        ...(source.teamId ? { teamId: source.teamId } : {}),
-        environment: source.environment.name,
-      };
-
-      if (opts.overwrite) {
-        return runOverwriteImport({ ctx, opts, source, importSource, client, promptable, dryRun });
-      }
-
-      const restrict = parseVarList(opts.var);
-      const restricted = source.importable.filter((r) => !restrict || restrict.includes(r.key));
-      const values = await guard(() => resolveEnvValues(client, source.project.id, source.teamId, restricted));
-      if (!values.ok) return values;
-      const candidates = values.value.entries.map((e) => ({ name: e.record.key, value: e.value }));
-
-      // A dry run previews the WHOLE plan rather than a hand-picked subset.
-      const selectedNames = restrict || !promptable || dryRun ? candidates.map((c) => c.name) : await selectVars(candidates.map((c) => c.name));
-      const selected = candidates.filter((c) => selectedNames.includes(c.name));
-
-      const { unchanged, skipped: conflictSkipped, toImport, wouldAsk } = await classifyImportCandidates(selected, ctx.localPlaintext, {
-        dryRun,
-        interactive: promptable,
-        confirm,
-        providerLabel: 'Vercel',
-      });
-
-      const importedAt = now().toISOString();
-      const createdAtSec = Math.floor(now().getTime() / 1000);
-      const recordByName = new Map(values.value.entries.map((e) => [e.record.key, e.record] as const));
-      const entryFor = (name: string, value: string) => importedEntry(recordByName.get(name)!, name, value, source, createdAtSec, importedAt);
-      const imported = toImport.map(({ name, value }) => entryFor(name, value));
-      // A re-import over a name whose value already matches still refreshes
-      // its connector metadata — never populated under a dry run.
-      const unchangedEntries = dryRun ? [] : unchanged.map((name) => entryFor(name, selected.find((c) => c.name === name)!.value));
-
-      const inScope = (name: string): boolean => !restrict || restrict.includes(name);
-      const skipped: readonly ImportSkip[] = [
-        ...[...source.skipped, ...values.value.empty].filter((s) => inScope(s.name)).map(toImportSkip),
-        ...conflictSkipped,
-      ];
-
-      const importedNames = [...imported.map((i) => i.varName), ...unchanged];
-      const deployTargetSaved =
-        !dryRun &&
-        (await maybeOfferDeployTarget({
-          importedNames,
-          project: source.project,
-          teamId: source.teamId,
-          environment: source.environment,
-          allTargets: await listTargetsAt(opts.projectDir ?? cwd()),
-          promptable,
-          dir: opts.projectDir ?? cwd(),
-          confirm,
-        }));
-
-      return {
-        ok: true,
-        source: importSource,
-        imported,
-        unchanged,
-        unchangedEntries,
-        skipped,
-        warnings: truncationWarnings(source),
-        deployTargetSaved,
-        ...(dryRun ? { wouldAsk } : {}),
-      };
+      const outcome = await importFrom(ctx, opts, opened.client, interactive);
+      return withTokenHelp(withTokenCreated(outcome, opened.tokenCreated));
     },
 
     /**
@@ -608,123 +890,26 @@ export function createVercelConnector(deps: VercelConnectorDeps = {}): Connector
      * `vercelDiscovery.ts`.
      */
     async discover(ctx: DiscoveryContext, opts: ConnectOpts): Promise<DiscoveryOutcome> {
+      const refused = createTokenDryRunRefusal(opts);
+      if (refused) return refused;
       const interactive = isInteractive(opts.nonTty);
-      const dryRun = !!opts.dryRun;
-      const promptable = interactive && !opts.json;
 
       const opened = await openClient(ctx.orgId, opts, interactive);
       if (!opened.ok) return opened;
-      const { client, tokenEnv } = opened;
 
-      const team = await chooseTeam(client, opts, promptable);
-      if (!team.ok) return team;
+      const outcome = await discoverFrom(ctx, opts, opened.client, opened.tokenEnv, interactive);
+      return withTokenHelp(withTokenCreated(outcome, opened.tokenCreated));
+    },
 
-      const scan = findCandidateReposResult(cwd());
-      const environmentFilter = parseVarList(opts.environment) ?? undefined;
-      const built = await guard(() =>
-        buildVercelDiscoveryPlan(
-          client,
-          team.teamId,
-          scan.repos as readonly CandidateRepo[],
-          { peekLocalKeep: peekLocalKeepForFolder, listServerBranches: (projectId) => ctx.serviceClient.listBranches(projectId) },
-          environmentFilter,
-        ),
-      );
-      if (!built.ok) return built;
-      const plan: DiscoveryPlan = {
-        ...built.value,
-        unreadableRepos: scan.unreadable,
-        ...(team.teamId ? { team: { id: team.teamId, ...(team.teamSlug ? { slug: team.teamSlug } : {}) } } : {}),
-      };
-
-      if (environmentFilter) {
-        const unknown = environmentFilter.filter((name) => !plan.allEnvironmentNames.includes(name));
-        if (unknown.length > 0) {
-          return {
-            ok: false,
-            code: ERROR_CODES.VERCEL_ENVIRONMENT_NOT_FOUND,
-            // COPY-FLAG: new user-facing string, minimal/neutral wording.
-            message: `No such environment(s): ${unknown.join(', ')}. Environments found: ${plan.allEnvironmentNames.join(', ') || '(none)'}.`,
-          };
-        }
-      }
-
-      if (dryRun) {
-        // A dry run never asks for a branch name either; the DEFAULT is what it previews.
-        const commits = commitPreviewForFolders(plan.folders, defaultDiscoveryCommitBranchName(new Date(), 'vercel'), VERCEL_COMMIT_MESSAGE);
-        return { ok: true, dryRun: true, plan, ...(commits.length > 0 ? { commits } : {}) };
-      }
-
-      // `--project` under `--discover` is the collision-winner hint (an id or a name), not an import source.
-      const preferredServiceId = preferredProjectId(plan, opts.project);
-      const resolution = await resolveCollisions(orderEnvironments(plan.collisions), {
-        preferredServiceId,
-        interactive: promptable,
-        askWinner: pickCollisionWinner,
-      });
-      if (!resolution.ok) {
-        return {
-          ok: false,
-          code: ERROR_CODES.VERCEL_MAPPING_COLLISION,
-          // COPY-FLAG: new user-facing string, minimal/neutral wording.
-          message: 'Several Vercel projects map to the same folder + branch. Pass --project to pick one, or run this interactively.',
-        };
-      }
-
-      const resolvedFolders = applyCollisionResolutions(plan.folders, resolution.resolutions);
-      if (resolvedFolders.length === 0) return { ok: true, dryRun: false, plan, applied: [] };
-
-      // A real run never writes without a yes: `--yes` skips the ask regardless of TTY.
-      if (promptable && !opts.yes) {
-        const proceed = await confirm(discoveryConfirmMessage(resolvedFolders, !!opts.overwrite, environmentFilter), false);
-        if (!proceed) return { ok: true, dryRun: false, plan, applied: [], cancelled: true };
-      } else if (!promptable && !opts.yes) {
-        // COPY-FLAG: new user-facing string, minimal/neutral wording.
-        return { ok: false, code: ERROR_CODES.VERCEL_CONFIRMATION_REQUIRED, message: 'Pass --yes to apply non-interactively, or run this interactively.' };
-      }
-
-      const commitBranchName =
-        promptable && !opts.yes
-          ? await askDiscoveryCommitBranchName(defaultDiscoveryCommitBranchName(new Date(), 'vercel'))
-          : defaultDiscoveryCommitBranchName(new Date(), 'vercel');
-
-      // Snapshotted BEFORE any write, per repo, so the commit step can tell
-      // "discovery made this change" from "already dirty before the run".
-      const beforeStatusByRepo = new Map(
-        [...new Set(resolvedFolders.map((f) => f.repoDir))].map((repoDir) => {
-          const paths = resolvedFolders.filter((f) => f.repoDir === repoDir).flatMap((f) => discoveryCommitPathsFor(f.folder));
-          return [repoDir, snapshotPathStatus(repoDir, paths)] as const;
-        }),
-      );
-
-      // Same snapshot-once rule as Dokploy's non-interactive `--yes` auto-create.
-      const existingProjectsSnapshot: ExistingProjectsSnapshot | undefined =
-        !promptable && !!opts.yes ? await listOrgProjectsOrUnavailable(ctx.serviceClient) : undefined;
-      const sameRunNameCollisions: ReadonlySet<string> = !promptable && !!opts.yes ? computeSameRunNameCollisions(resolvedFolders) : new Set();
-
-      const sequenceDeps = buildRealDiscoverySequenceDeps(ctx, connector.import!, {
-        noPush: !!opts.noPush,
-        interactive: promptable,
-        json: !!opts.json,
-        yes: !!opts.yes,
-        baseUrl: '',
-        tokenEnv,
-        importOptsFor: (env, projectName, folderPath) => ({
-          project: env.serviceId,
-          vercelProject: { id: env.serviceId, name: projectName, ...(env.gitBranch ? { productionBranch: env.gitBranch } : {}) },
-          vercelTeam: { id: team.teamId },
-          environment: env.environmentName,
-          tokenEnv,
-          projectDir: folderPath,
-        }),
-        askExistingOrNewProject,
-        askProjectName: askDiscoveryProjectName,
-        existingProjectsSnapshot,
-        sameRunNameCollisions,
-      });
-      const applied = await runDiscoverySequences(resolvedFolders, { overwrite: !!opts.overwrite }, sequenceDeps);
-      const commits = commitForAppliedRepos(applied, beforeStatusByRepo, commitBranchName, VERCEL_COMMIT_MESSAGE);
-      return { ok: true, dryRun: false, plan, applied, ...(commits.length > 0 ? { commits } : {}) };
+    /** `--create-token` on its own: make and save the token, report it, import nothing. */
+    async createToken(opts: ConnectOpts, orgIdOf: () => Promise<string>): Promise<CreateTokenOutcome> {
+      const refused = createTokenDryRunRefusal(opts);
+      if (refused) return refused;
+      const expiry = parseExpiryDays(opts.tokenExpiresDays);
+      if (!expiry.ok) return expiry;
+      const promptable = isInteractive(opts.nonTty) && !opts.json;
+      const minted = await mintForRun(await orgIdOf(), opts, promptable);
+      return minted.ok ? { ok: true, tokenCreated: minted.report } : minted;
     },
 
     reportDiscovery: reportVercelDiscovery,
@@ -733,6 +918,18 @@ export function createVercelConnector(deps: VercelConnectorDeps = {}): Connector
 }
 
 // ── small helpers ───────────────────────────────────────────────────────────
+
+/** Adds a created-token report to an outcome (success or refusal) when the run made one. */
+function withTokenCreated<T extends { tokenCreated?: TokenCreatedReport }>(outcome: T, report: TokenCreatedReport | undefined): T {
+  return report ? { ...outcome, tokenCreated: report } : outcome;
+}
+
+/** A token Vercel rejected: say where to get another. (A missing token already carries it, from `openClient`.) */
+function withTokenHelp<T extends ImportOutcome | DiscoveryOutcome>(outcome: T): T {
+  if (outcome.ok || outcome.link || outcome.code !== ERROR_CODES.VERCEL_AUTH_FAILED) return outcome;
+  return { ...outcome, ...keyHelpFields(vercelKeyHelp(VERCEL_CONNECTOR_SECRET_NAME)) } as T;
+}
+
 
 async function listTargetsAt(dir: string): Promise<readonly TargetConfig[]> {
   const { listTargets } = await import('../../deploy/config');

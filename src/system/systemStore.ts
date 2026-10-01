@@ -48,6 +48,7 @@ import {
   setSyncKeepHash,
 } from '../types/index';
 import { SYSTEM_PROJECT_NAME } from './reservedProjectName';
+import { formatKeyHelp, keyHelpForName } from '../deploy/keyHelp';
 
 export { SYSTEM_PROJECT_NAME } from './reservedProjectName';
 
@@ -422,12 +423,30 @@ export async function openSystemStore(opts: OpenSystemStoreOptions = {}): Promis
   };
 }
 
+/**
+ * Runs when a secret is missing and a human can be asked, BEFORE the hidden
+ * prompt. `save` stores a value through the already-open store (so the
+ * admin-only rule has already been applied). Returns the value when the hook
+ * made and saved one itself, or `null` to carry on to the hidden prompt.
+ */
+export type OnMissingSecret = (save: (value: string) => Promise<void>) => Promise<string | null>;
+
 export interface GetConnectorSecretOptions {
   orgId?: string;
   apiUrl?: string;
   devMode?: boolean;
   /** No terminal → never prompts; a missing entry resolves to `null`. */
   interactive: boolean;
+  /** Where the caller's service lives (Dokploy's dashboard URL), so the key help can link to the page that makes the key. */
+  helpBaseUrl?: string;
+  /** See `OnMissingSecret`. */
+  onMissing?: OnMissingSecret;
+}
+
+/** Before a hidden key prompt: where to get that key, for the four known key names. Stderr, so it never mixes with machine output. */
+function printKeyHelpBeforePrompt(name: string, helpBaseUrl: string | undefined): void {
+  const help = keyHelpForName(name, helpBaseUrl);
+  if (help) console.error(formatKeyHelp(help));
 }
 
 /**
@@ -446,6 +465,10 @@ export async function getConnectorSecret(name: string, opts: GetConnectorSecretO
   const existing = getFrom(ctx, name);
   if (existing !== null) return existing;
   if (!opts.interactive) return null;
+
+  const fromHook = await opts.onMissing?.((v) => pushSystemEnv(ctx, { ...ctx.plaintextEnv, [name]: v }));
+  if (fromHook) return fromHook;
+  printKeyHelpBeforePrompt(name, opts.helpBaseUrl);
 
   const { value } = await inquirer.prompt([
     {
@@ -468,6 +491,10 @@ export interface GetDirectionalSecretOptions {
   devMode?: boolean;
   /** No terminal → never prompts; refuses instead when `fallbackName` has a value to offer (see below). */
   interactive: boolean;
+  /** Where the caller's service lives (Dokploy's dashboard URL), so the key help can link to the page that makes the key. */
+  helpBaseUrl?: string;
+  /** See `OnMissingSecret`. Runs only on the "make a new value" path, never when reusing the other direction's key. */
+  onMissing?: OnMissingSecret;
   /**
    * Code to refuse with when `primaryName` is missing, `fallbackName` DOES
    * have a value, and there is no terminal to ask which one the caller
@@ -562,6 +589,10 @@ export async function getDirectionalConnectorSecret(
     }
     // else "add new" — fall through to the same prompt case 2 uses.
   }
+
+  const fromHook = await opts.onMissing?.((v) => pushSystemEnv(ctx, { ...ctx.plaintextEnv, [primaryName]: v }));
+  if (fromHook) return fromHook;
+  printKeyHelpBeforePrompt(primaryName, opts.helpBaseUrl);
 
   const { value } = await inquirer.prompt([
     {

@@ -1,5 +1,7 @@
 import { resolveContext, writeAndSync, writeImportOutcome, listManagedKeys, ResolvedContext } from './connectors/shared';
-import { listProviders, loadProvider, ConnectOpts, ConnectorModule, ConnectResult } from './connectors/registry';
+import { listProviders, loadProvider, ConnectFailure, ConnectOpts, ConnectorModule, ConnectResult } from './connectors/registry';
+import { describeTokenCreated } from '../deploy/vercelCliToken';
+import { formatKeyHelp } from '../deploy/keyHelp';
 import { connectPlan } from './connectors/plans';
 import { isInteractive } from '../ui/interactive';
 import { ProjectManager } from '../core/projectManager';
@@ -14,6 +16,33 @@ import type {
 } from '../ui/screens/contract';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
+
+/**
+ * A refusal, in the terminal or as one JSON object. `link` + `remedy` (where to
+ * get a missing key, and what to do) and `tokenId` / `tokenCreated` are added
+ * only when the connector set them; without them the output is exactly what it
+ * has always been. Human text goes to stderr, never stdout.
+ */
+function printFailure(outcome: ConnectFailure, json: boolean): void {
+  if (json) {
+    console.log(
+      JSON.stringify({
+        ok: false,
+        code: outcome.code,
+        message: outcome.message,
+        ...(outcome.link ? { link: outcome.link } : {}),
+        ...(outcome.remedy ? { remedy: outcome.remedy } : {}),
+        ...(outcome.tokenId ? { tokenId: outcome.tokenId } : {}),
+        ...(outcome.tokenCreated ? { tokenCreated: outcome.tokenCreated } : {}),
+      }),
+    );
+    return;
+  }
+  console.error(`\n  ${outcome.message}\n`);
+  if (outcome.link && outcome.remedy) console.error(formatKeyHelp({ link: outcome.link, remedy: outcome.remedy }) + '\n');
+  else if (outcome.remedy) console.error(`  ${outcome.remedy}\n`);
+  if (outcome.tokenCreated) describeTokenCreated(outcome.tokenCreated).forEach((line) => console.error(line));
+}
 
 /** Browser paths honour this so a test never opens the developer's real browser. */
 const shouldOpen = (): boolean => !process.env.CAPY_WEB_NO_OPEN;
@@ -247,6 +276,12 @@ export class ConnectCommand {
     // which has (or needs) a keep.lock yet. Discovery gets its OWN, lighter
     // context instead: org + auth + serviceClient only, no project key, no
     // `.env` decrypt — see `resolveDiscoveryContext`'s own doc.
+    // `--create-token` alone (no project to import, nothing to discover): make
+    // and save the key, report it, stop. Needs the org only — no keep.lock.
+    if (effective.createToken && mod.createToken && !effective.discover && !effective.project) {
+      return await this.executeCreateToken(mod, provider, effective);
+    }
+
     if (effective.discover && mod.discover) {
       const discoveryCtx = await resolveDiscoveryContext(this.devMode);
       return await this.executeDiscovery(mod, provider, discoveryCtx, effective);
@@ -408,6 +443,33 @@ export class ConnectCommand {
   }
 
   /**
+   * `capy connect vercel --create-token` on its own. Names, ids and the team
+   * only — never the token's value.
+   */
+  private async executeCreateToken(
+    mod: ConnectorModule,
+    provider: string,
+    opts: ConnectOpts,
+    // Org + sign-in only, like discovery. A parameter so a test can name the org without a login.
+    orgIdOf: () => Promise<string> = async () => (await resolveDiscoveryContext(this.devMode)).orgId,
+  ): Promise<{ linked: boolean }> {
+    const outcome = await mod.createToken!(opts, orgIdOf);
+    if (!outcome.ok) {
+      printFailure(outcome, !!opts.json);
+      process.exitCode = 1;
+      return { linked: false };
+    }
+    if (opts.json) {
+      console.log(JSON.stringify({ ok: true, provider, tokenCreated: outcome.tokenCreated }));
+      return { linked: false };
+    }
+    console.log('');
+    describeTokenCreated(outcome.tokenCreated).forEach((line) => console.log(line));
+    console.log('');
+    return { linked: false };
+  }
+
+  /**
    * `capy connect <import-connector>` — pulls the provider's variables into
    * `.env` in one pass, then reports. No browser ending page exists for this
    * yet (no screen has been built for an import run); `--json` and the
@@ -429,11 +491,7 @@ export class ConnectCommand {
     const label = mod.displayName ?? 'Dokploy';
 
     if (!outcome.ok) {
-      if (opts.json) {
-        console.log(JSON.stringify({ ok: false, code: outcome.code, message: outcome.message }));
-      } else {
-        console.error(`\n  ${outcome.message}\n`);
-      }
+      printFailure(outcome, !!opts.json);
       process.exitCode = 1;
       return { linked: false };
     }
@@ -470,12 +528,14 @@ export class ConnectCommand {
           warnings: outcome.warnings,
           pushed,
           deployTargetSaved: outcome.deployTargetSaved,
+          ...(outcome.tokenCreated ? { tokenCreated: outcome.tokenCreated } : {}),
         }),
       );
       return { linked: wrote };
     }
 
     console.log('');
+    if (outcome.tokenCreated) describeTokenCreated(outcome.tokenCreated).forEach((line) => console.log(line));
     if (dryRun) console.log('  Dry run — nothing written.');
     if (!hasChange) {
       console.log(dryRun ? '  Nothing to import.' : '  Nothing new to import.');
@@ -538,11 +598,7 @@ export class ConnectCommand {
     const outcome = await mod.discover!(ctx, opts);
 
     if (!outcome.ok) {
-      if (opts.json) {
-        console.log(JSON.stringify({ ok: false, code: outcome.code, message: outcome.message }));
-      } else {
-        console.error(`\n  ${outcome.message}\n`);
-      }
+      printFailure(outcome, !!opts.json);
       process.exitCode = 1;
       return { linked: false };
     }

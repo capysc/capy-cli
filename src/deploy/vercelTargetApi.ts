@@ -41,6 +41,7 @@
  */
 import { createHash } from 'crypto';
 import { ERROR_CODES, ErrorCode } from '../types/index';
+import { keyHelpFields, vercelKeyHelp } from './keyHelp';
 
 // ── Token: system store, same shape as Dokploy's ───────────────────────────
 
@@ -143,6 +144,11 @@ export async function resolveVercelTargetToken(
   return outcome.kind === 'error'
     ? { ok: false, code: outcome.code }
     : { ok: false, code: ERROR_CODES.VERCEL_TOKEN_MISSING };
+}
+
+/** Where to get the deploy-side Vercel token: the `link` + `remedy` fields of a key refusal. */
+export function vercelTargetKeyHelp(): { link: { label: string; url: string }; remedy: string } {
+  return keyHelpFields(vercelKeyHelp(VERCEL_TARGET_SECRET_NAME));
 }
 
 /** A token refusal as a printable reason + hint. Names only, never a value. */
@@ -793,11 +799,11 @@ export function sortedNames(names: readonly string[]): string[] {
 export function describeVercelFailure(
   code: ErrorCode,
   status?: number,
-): { reason: string; hint?: string } {
+): { reason: string; hint?: string; link?: { label: string; url: string }; remedy?: string } {
   const http = status !== undefined ? ` (HTTP ${status})` : '';
   if (code === ERROR_CODES.VERCEL_TOKEN_REJECTED) {
     // COPY-FLAG
-    return { reason: `Vercel rejected the token${http}`, hint: `Replace it: capy system set ${VERCEL_TARGET_SECRET_NAME}` };
+    return { reason: `Vercel rejected the token${http}`, hint: `Replace it: capy system set ${VERCEL_TARGET_SECRET_NAME}`, ...vercelTargetKeyHelp() };
   }
   if (code === ERROR_CODES.VERCEL_NO_ACCESS) {
     // COPY-FLAG

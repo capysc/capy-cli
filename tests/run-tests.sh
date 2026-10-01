@@ -71,6 +71,7 @@ ISOLATED_FILES=(
   tests/commands/pairCommand.test.ts
   tests/commands/deployVercelApiMode.test.ts
   tests/deploy/vercelApiModeTokenStore.test.ts
+  tests/commands/systemSetKeyHelp.test.ts
 )
 
 # Build a grep pattern to exclude isolated files from the batch run

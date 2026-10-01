@@ -118,7 +118,8 @@ import { isReservedProjectName } from '../../system/reservedProjectName';
 import { KeepFile } from '../../types/index';
 import type { AuthService } from '../../auth/authService';
 import type { ServiceClient } from '../../service/serviceClient';
-import type { ImportOutcome } from './registry';
+import type { ConnectFailure, ImportOutcome } from './registry';
+import type { TokenCreatedReport } from '../../deploy/vercelCliToken';
 import type { DiscoveryCommitOutcome } from '../../git/discoveryCommit';
 
 /**
@@ -1204,10 +1205,7 @@ export type DiscoveryOutcome =
       cancelled?: boolean;
       /** One entry per repo touched by the plan (dry run: every repo the plan would touch) — see `DiscoveryRepoCommitResult`'s own doc. Absent only when nothing was ever going to be committed (no matched repos at all). */
       commits?: readonly DiscoveryRepoCommitResult[];
+      /** Vercel `--create-token` only: the token this run created and saved. Never its value. */
+      tokenCreated?: TokenCreatedReport;
     }
-  | {
-      ok: false;
-      /** Stable refusal code — branch on this, never on `message`. */
-      code: string;
-      message: string;
-    };
+  | ConnectFailure;

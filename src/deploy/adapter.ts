@@ -115,6 +115,10 @@ export interface PreflightResult {
    * set both.
    */
   code?: ErrorCode;
+  /** Where to get a missing or rejected API key (same shape as `Blocked.link`). Additive; set only by key refusals. */
+  link?: { label: string; url: string };
+  /** One plain instruction for the human that goes with `link`. */
+  remedy?: string;
   /** Non-blocking heads-up(s), shown whether or not ok is true. */
   warnings?: readonly DeployWarning[];
 }
@@ -127,6 +131,10 @@ export interface DeployStep {
   url?: string;
   /** Machine-readable companion to `detail` on a `'fail'` step — see `PreflightResult.code`'s own doc. */
   code?: ErrorCode;
+  /** Where to get a missing or rejected API key — see `PreflightResult.link`. */
+  link?: { label: string; url: string };
+  /** See `PreflightResult.remedy`. */
+  remedy?: string;
 }
 
 export interface DeployResult {

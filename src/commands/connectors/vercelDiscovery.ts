@@ -49,6 +49,7 @@ import {
   orderEnvironments,
 } from './dokployDiscovery';
 import type { ConnectOpts } from './registry';
+import { describeTokenCreated } from '../../deploy/vercelCliToken';
 
 /** `listProjects`/`listCustomEnvironments`/`listEnvs` only — the read-only surface planning needs. */
 export type VercelDiscoveryClient = Pick<VercelClient, 'listProjects' | 'listCustomEnvironments' | 'listEnvs'>;
@@ -293,11 +294,13 @@ export function reportVercelDiscovery(
         plan,
         ...(applied ? { applied } : {}),
         ...(commits ? { commits } : {}),
+        ...(outcome.tokenCreated ? { tokenCreated: outcome.tokenCreated } : {}),
       }),
     );
     return { linked };
   }
 
+  if (outcome.tokenCreated) describeTokenCreated(outcome.tokenCreated).forEach((l) => console.log(l));
   const lines = humanLines(outcome, plan, applied, commits);
   lines.forEach((l) => console.log(l));
   return { linked };

@@ -36,6 +36,7 @@
  * the NAME of the environment variable that holds it (default
  * DOKPLOY_API_KEY), read at deploy time.
  */
+import { dokployKeyHelp, keyHelpFields } from '../keyHelp';
 import {
   AdapterCallContext,
   DeployAdapter,
@@ -581,7 +582,7 @@ export function explainApiError(
   err: unknown,
   what: string,
   opts: DokployOptions,
-): { reason: string; hint?: string } {
+): { reason: string; hint?: string; link?: { label: string; url: string }; remedy?: string } {
   if (!(err instanceof DokployApiError)) {
     return { reason: `${what}: ${err instanceof Error ? err.message : String(err)}` };
   }
@@ -590,6 +591,7 @@ export function explainApiError(
       return {
         reason: `${what}: Dokploy rejected the API token in $${opts.tokenEnv} (HTTP ${err.status})`,
         hint: `Create an API token in the Dokploy dashboard and export it as ${opts.tokenEnv}.`,
+        ...keyHelpFields(dokployKeyHelp(DOKPLOY_TARGET_SECRET_NAME, opts.baseUrl)),
       };
     case 'not_found':
       return opts.composeId
@@ -1081,6 +1083,7 @@ export function createDokployAdapter(deps: DokployAdapterDeps = {}): DeployAdapt
           interactive: ctx.interactive ?? false,
           orgId: ctx.orgId,
           devMode: ctx.devMode,
+          helpBaseUrl: opts.baseUrl,
           storeName: DOKPLOY_TARGET_SECRET_NAME,
           deps: deps.getConnectorSecret ? { getConnectorSecret: deps.getConnectorSecret } : undefined,
         });
@@ -1114,7 +1117,7 @@ export function createDokployAdapter(deps: DokployAdapterDeps = {}): DeployAdapt
       const resolved = await resolveApiKeyFor(opts, ctx);
       if (!resolved.ok) {
         const { reason, hint } = describeDokployTokenProblem(resolved.code, opts.tokenEnv ?? DEFAULT_TOKEN_ENV, DOKPLOY_TARGET_SECRET_NAME);
-        return { ok: false, reason, hint };
+        return { ok: false, reason, hint, ...keyHelpFields(dokployKeyHelp(DOKPLOY_TARGET_SECRET_NAME, opts.baseUrl)) };
       }
       const client = createDokployClient(opts.baseUrl, resolved.value, deps.fetch);
       if (opts.composeId) {
@@ -1178,7 +1181,7 @@ export function createDokployAdapter(deps: DokployAdapterDeps = {}): DeployAdapt
       const resolved = await resolveApiKeyFor(opts, ctx);
       if (!resolved.ok) {
         const { reason } = describeDokployTokenProblem(resolved.code, opts.tokenEnv ?? DEFAULT_TOKEN_ENV, DOKPLOY_TARGET_SECRET_NAME);
-        return fail([], { label: 'dokploy auth', status: 'fail', detail: reason });
+        return fail([], { label: 'dokploy auth', status: 'fail', detail: reason, ...keyHelpFields(dokployKeyHelp(DOKPLOY_TARGET_SECRET_NAME, opts.baseUrl)) });
       }
       const client = createDokployClient(opts.baseUrl, resolved.value, deps.fetch);
 

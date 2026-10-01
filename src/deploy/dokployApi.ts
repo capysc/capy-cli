@@ -645,6 +645,8 @@ export interface DokploySystemStoreCallOptions {
   interactive: boolean;
   devMode?: boolean;
   apiUrl?: string;
+  /** The Dokploy dashboard URL, so the prompt can link to the page that makes the key. Absent = the docs link. */
+  helpBaseUrl?: string;
 }
 
 export interface ResolveDokployApiKeyDeps {
@@ -700,6 +702,8 @@ export interface ResolveDokployApiKeyOptions {
   orgId?: string;
   devMode?: boolean;
   apiUrl?: string;
+  /** The Dokploy dashboard URL, passed to the store so the key prompt can link to the page that makes the key. */
+  helpBaseUrl?: string;
   deps?: ResolveDokployApiKeyDeps;
   /**
    * Which system store entry to ask for (CAP-679 follow-up: deploy and
@@ -753,6 +757,7 @@ export async function resolveDokployApiKey(
       interactive: opts.interactive,
       devMode: opts.devMode,
       apiUrl: opts.apiUrl,
+      ...(opts.helpBaseUrl ? { helpBaseUrl: opts.helpBaseUrl } : {}),
     },
     opts.storeName ?? DOKPLOY_CONNECTOR_SECRET_NAME,
   );

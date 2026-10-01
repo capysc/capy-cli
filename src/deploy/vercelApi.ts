@@ -445,6 +445,8 @@ export interface VercelSystemStoreCallOptions {
   interactive: boolean;
   devMode?: boolean;
   apiUrl?: string;
+  /** `system/systemStore.ts#OnMissingSecret`: runs when the token is missing and a human can be asked, before the hidden prompt. */
+  onMissing?: (save: (value: string) => Promise<void>) => Promise<string | null>;
 }
 
 export interface ResolveVercelTokenOptions {
@@ -456,6 +458,8 @@ export interface ResolveVercelTokenOptions {
   orgId?: string;
   devMode?: boolean;
   apiUrl?: string;
+  /** See `VercelSystemStoreCallOptions.onMissing`. */
+  onMissing?: VercelSystemStoreCallOptions['onMissing'];
   /**
    * Reads (and, when missing + interactive + admin, prompts for and saves)
    * the org system store entry. Defaults to a function that never touches the
@@ -509,6 +513,7 @@ export async function resolveVercelToken(opts: ResolveVercelTokenOptions): Promi
     interactive: opts.interactive,
     devMode: opts.devMode,
     apiUrl: opts.apiUrl,
+    ...(opts.onMissing ? { onMissing: opts.onMissing } : {}),
   });
   if (storeOutcome.kind === 'value') return { ok: true, value: storeOutcome.value, source: 'system' };
 

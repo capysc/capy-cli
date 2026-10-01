@@ -34,6 +34,7 @@
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { TargetConfig } from '../../deploy/adapter';
+import { dokployKeyHelp, keyHelpFields } from '../../deploy/keyHelp';
 import { baseUrlProblem } from '../../deploy/adapters/dokploy';
 import {
   DEFAULT_TOKEN_ENV,
@@ -951,12 +952,13 @@ export function createDokployConnector(deps: DokployConnectorDeps = {}): Connect
         interactive: secretsInteractive,
         orgId: ctx.orgId,
         devMode: opts.devMode,
+        helpBaseUrl: baseUrl,
         storeName: DOKPLOY_CONNECTOR_SECRET_NAME,
         deps: deps.getConnectorSecret ? { getConnectorSecret: deps.getConnectorSecret } : undefined,
       });
       if (!resolved.ok) {
         const { reason } = describeDokployTokenProblem(resolved.code, tokenEnv, DOKPLOY_CONNECTOR_SECRET_NAME);
-        return { ok: false, code: resolved.code, message: `${reason}.` };
+        return { ok: false, code: resolved.code, message: `${reason}.`, ...keyHelpFields(dokployKeyHelp(DOKPLOY_CONNECTOR_SECRET_NAME, baseUrl)) };
       }
       const token = resolved.value;
 
@@ -965,7 +967,15 @@ export function createDokployConnector(deps: DokployConnectorDeps = {}): Connect
         source.kind === 'compose'
           ? await fetchComposeEnv(client, source.id)
           : await fetchApplicationEnv(client, source.id);
-      if (!envResult.ok) return { ok: false, code: envResult.code, message: envResult.message };
+      if (!envResult.ok) {
+        // A rejected key says where to get another.
+        return {
+          ok: false,
+          code: envResult.code,
+          message: envResult.message,
+          ...(envResult.code === 'DOKPLOY_AUTH_FAILED' ? keyHelpFields(dokployKeyHelp(DOKPLOY_CONNECTOR_SECRET_NAME, baseUrl)) : {}),
+        };
+      }
       const sourceEnv = envResult.env;
       // CAP-673: `service_name` is free (same response as `env`, above);
       // `dokploy_project`/`environment` are only known when the caller
@@ -1115,12 +1125,13 @@ export function createDokployConnector(deps: DokployConnectorDeps = {}): Connect
         interactive: secretsInteractive,
         orgId: ctx.orgId,
         devMode: opts.devMode,
+        helpBaseUrl: resolvedBaseUrl,
         storeName: DOKPLOY_CONNECTOR_SECRET_NAME,
         deps: deps.getConnectorSecret ? { getConnectorSecret: deps.getConnectorSecret } : undefined,
       });
       if (!resolved.ok) {
         const { reason } = describeDokployTokenProblem(resolved.code, tokenEnv, DOKPLOY_CONNECTOR_SECRET_NAME);
-        return { ok: false, code: resolved.code, message: `${reason}.` };
+        return { ok: false, code: resolved.code, message: `${reason}.`, ...keyHelpFields(dokployKeyHelp(DOKPLOY_CONNECTOR_SECRET_NAME, resolvedBaseUrl)) };
       }
 
       const client = createDokployClient(resolvedBaseUrl, resolved.value, deps.fetch);

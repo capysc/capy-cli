@@ -13,6 +13,7 @@
 import { existsSync, readFileSync, writeFileSync } from 'fs';
 import { join, basename } from 'path';
 import inquirer from 'inquirer';
+import { formatKeyHelp } from '../deploy/keyHelp';
 import { FileManager } from '../files/fileManager';
 import {
   DeployAdapter,
@@ -225,6 +226,7 @@ async function resolveDokployApiKeyOnce(
     interactive,
     orgId,
     devMode,
+    helpBaseUrl: (target.options as { baseUrl?: string }).baseUrl,
     storeName: DOKPLOY_TARGET_SECRET_NAME,
     deps: { getConnectorSecret },
   });
@@ -1971,6 +1973,11 @@ function renderPlan(target: TargetConfig, adapter: DeployAdapter): void {
   console.log('');
 }
 
+/** A key refusal says where to get a key and what to do (stderr). Prints nothing for any other refusal. */
+function printKeyHelp(r: { link?: { label: string; url: string }; remedy?: string }): void {
+  if (r.link && r.remedy) console.error('\n' + formatKeyHelp({ link: r.link, remedy: r.remedy }) + '\n');
+}
+
 function renderResult(result: DeployResult): void {
   console.log('');
   for (const step of result.steps) {
@@ -1979,6 +1986,7 @@ function renderResult(result: DeployResult): void {
     const detail = step.detail ? `  ${DIM(step.detail)}` : '';
     const url = step.url ? `  ${step.url}` : '';
     console.log(`  ${mark} ${step.label}${detail}${url}`);
+    if (step.status === 'fail') printKeyHelp(step);
   }
   // `result.warnings` (e.g. Dokploy's DOKPLOY_SHADOWED_VAR) is printed once,
   // right after preflight (see the `preflight.warnings` loop above this
@@ -3338,6 +3346,7 @@ export async function deployCommand(
     if (result.ok) return { ok: true, target: t, preflight: result };
     console.error(`${RED('✗')} preflight: ${result.reason}`);
     if (result.hint) console.error('\n' + result.hint);
+    printKeyHelp(result);
     if (!canFixInteractively) return { ok: false };
     // COPY-FLAG: minimal neutral wording, pending Vince's approval.
     const action = await keypressConfirm({ message: 'Preflight failed. Press e to edit this target, c to check again, esc to cancel.' });
@@ -3410,6 +3419,7 @@ export async function deployCommand(
         if (!recheck.ok) {
           console.error(`${RED('✗')} preflight: ${recheck.reason}`);
           if (recheck.hint) console.error('\n' + recheck.hint);
+          printKeyHelp(recheck);
           return 1;
         }
         // Loop back to confirm prompt with the edited target.

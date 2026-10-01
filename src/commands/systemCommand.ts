@@ -16,6 +16,7 @@ import inquirer from 'inquirer';
 import { isInteractive, EXIT_NEEDS_INPUT } from '../ui/interactive';
 import { openSystemStore, assertValidConnectorName } from '../system/systemStore';
 import { CapyError, ERROR_CODES } from '../types/index';
+import { formatKeyHelp, keyHelpForName } from '../deploy/keyHelp';
 
 export interface SystemCommandOpts {
   org?: string;
@@ -116,6 +117,10 @@ export async function systemSetCommand(name: string, opts: SystemCommandOpts): P
   // Before any network call — see docs/org-system-store.md Proof 3.
   requireValidName(name, json);
   requireTty(json, `\`capy system set\` needs a terminal to prompt for the value — there is no --value flag.`); // COPY-FLAG
+
+  // For the four known key names: where to get the key. Stderr, so `--json` stays pure.
+  const help = keyHelpForName(name);
+  if (help) console.error(formatKeyHelp(help));
 
   const value = await promptForHiddenValue(name, json);
 

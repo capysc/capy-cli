@@ -918,6 +918,11 @@ program
   .option('--token-env <name>', 'dokploy/vercel import: env var holding the API token')
   .option('--project <project>', 'vercel import: Vercel project id or name (under --discover: the project that wins a mapping collision)')
   .option('--team <team>', 'vercel import/discover: Vercel team slug or id (default: the token\'s only team)')
+  .option(
+    '--create-token',
+    'vercel: create the Vercel token from the Vercel CLI sign-in (team-scoped) and save it as _CONNECTOR_VERCEL_TOKEN; with --project/--discover the run then continues, alone it stops after saving. Not with --dry-run',
+  )
+  .option('--token-expires-days <days>', 'vercel --create-token: days until the created token expires (default: never)')
   .option('--json', 'emit machine-readable JSON instead of the human UI (import connectors)')
   .option(
     '--dry-run',
@@ -975,6 +980,8 @@ program
       environment: options.environment,
       project: options.project,
       team: options.team,
+      createToken: options.createToken === true,
+      tokenExpiresDays: options.tokenExpiresDays,
     });
   });
 
