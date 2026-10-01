@@ -135,6 +135,11 @@ function rebuildKeyEnc(fields: { org_id: string; encrypted_master_key: string; c
   );
 }
 
+/** Mints a fresh random 32-byte S — the one-time key the service stores (never the fragment). `capy transport`'s only caller of this; nothing else needs S. */
+export function generateTransportKey(): Buffer {
+  return randomBytes(S_LENGTH);
+}
+
 /**
  * Packs `entry` into the fixed-layout v3 plaintext, or returns `null` when
  * packing would not be lossless (see file header for the full gate). Pure —

@@ -1,27 +1,34 @@
 /**
- * `capy transport` "v2" (CAP-684, docs/basic-pair.md — updated 2026-09-30).
- * `capy redeem` is untouched: it shares only `crypto/inviteCrypto.ts`'s
- * parse/unwrap helpers, which this command never imports.
+ * `capy transport` (CAP-684, docs/basic-pair.md; CAP-692 for the wire
+ * format). `capy redeem` is untouched: it shares only
+ * `crypto/inviteCrypto.ts`'s parse/unwrap helpers, which this command never
+ * imports.
  *
  * Moves this machine's `local.key` + `key.enc` (for the project's org and
  * the current user) to another device, via Keep:
  *
- *   1. Mint a random 32-byte key S and hand it to the service AS the
+ *   1. Pack this machine's `key.enc` + `local.key` into the v3 fixed-layout
+ *      binary plaintext (`transportPackV3.ts`). There is no older link
+ *      format to fall back to — if packing isn't lossless (foreign/corrupt
+ *      `key.enc`), this refuses with a coded `TRANSPORT_KEY_FORMAT_UNSUPPORTED`
+ *      BEFORE ever asking the service for a transport row, so nothing is
+ *      wasted on a link that could never be produced.
+ *   2. Mint a random 32-byte key S and hand it to the service AS the
  *      `POST /transports` `ciphertext` field (base64url) — the service
  *      stores only this one-time decryption key, never the key material
  *      itself, and hands back `{id, expires_at}`.
- *   2. Seal the payload under S with AAD bound to `id` (`sealTransportPayload`),
- *      so sealing can only happen after step 1 — the AAD needs the id.
- *   3. Print a QR code + `.../transport#<id>.<iv>.<ct>`. S is NEVER in the
+ *   3. Seal the packed plaintext under S with AAD bound to `id`
+ *      (`sealTransportV3`), so sealing can only happen after step 2 — the
+ *      AAD needs the id.
+ *   4. Print a QR code + `.../transport#3.<id>.<blob>`. S is NEVER in the
  *      link; the link is useless without also authenticating as the right
  *      user to activate the row and get S back.
  */
 import { resolveOrgContext } from '../core/orgContext';
 import { readLocalRoot, readOrgKeyFileRaw } from '../config/globalConfig';
 import { resolveKeepOrigin } from '../config/keepOrigin';
-import { generateTransportKey, sealTransportPayload } from '../crypto/transportCrypto';
-import { packTransportV3, sealTransportV3 } from '../crypto/transportPackV3';
-import type { PairingEntry, TransportPayload } from '../crypto/pairingPayload';
+import { generateTransportKey, packTransportV3, sealTransportV3 } from '../crypto/transportPackV3';
+import type { PairingEntry } from '../crypto/pairingPayload';
 import { renderTerminalQr } from '../ui/terminalQr';
 import { printMaskedLinkBlock } from '../ui/maskedLinkPrompt';
 import { CapyError, ERROR_CODES } from '../types/index';
@@ -63,24 +70,6 @@ function buildTransportIntro(): string {
   ].join('\n');
 }
 
-/**
- * v3 (CAP-692) when `entry`'s `key.enc` packs losslessly, else the
- * unchanged v2 JSON-in-JSON fragment — see transportPackV3.ts for the gate.
- * Extracted so the seal only ever runs once per path (no reassigned
- * binding, no double-sealing with two different IVs).
- */
-function buildTransportFragment(args: {
-  entry: PairingEntry;
-  payload: TransportPayload;
-  key: Buffer;
-  id: string;
-}): string {
-  const packed = packTransportV3(args.entry);
-  if (packed) return sealTransportV3(packed, args.key, args.id);
-  const v2 = sealTransportPayload(args.payload, args.key, args.id);
-  return `${args.id}.${v2.iv}.${v2.ct}`;
-}
-
 export class TransportCommand {
   private apiUrl?: string;
   private devMode: boolean;
@@ -110,18 +99,24 @@ export class TransportCommand {
         k_local: kLocal.toString('base64url'),
         key_enc: keyEnc,
       };
-      const payload: TransportPayload = { v: 1, entries: [entry] };
+
+      // v3 (CAP-692) is the only wire format — pack BEFORE ever calling the
+      // service, so an unpackable key.enc never burns a one-time transport
+      // row for a link that was never going to exist.
+      const packed = packTransportV3(entry);
+      if (!packed) {
+        throw new CapyError(
+          "This machine's key file is in a format capy transport can't turn into a link.", // COPY-FLAG
+          ERROR_CODES.TRANSPORT_KEY_FORMAT_UNSUPPORTED,
+        );
+      }
 
       const key = generateTransportKey();
       const { id, expires_at } = await serviceClient.createTransport(key.toString('base64url'));
 
       // AAD binds to `id`, which only exists after the call above — sealing
-      // has to happen here, not before it, unlike v1's token-first order.
-      // v3 (CAP-692) packs the same entry into a fixed-layout binary
-      // plaintext so the QR fits a terminal — but only when doing so is
-      // lossless (see transportPackV3.ts). Any mismatch falls back to the
-      // unchanged v2 JSON-in-JSON link, never a thrown error.
-      const fragment = buildTransportFragment({ entry, payload, key, id });
+      // has to happen here, not before it.
+      const fragment = sealTransportV3(packed, key, id);
       const url = `${resolveKeepOrigin()}/transport#${fragment}`;
 
       if (json) {
