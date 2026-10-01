@@ -130,8 +130,6 @@ function buildTransportIntro(): string {
     '',
     `  Open or scan this link to activate your transport key and keep it in a browser you can always reach. We recommend your phone's browser. Sign in with the same account as this capy session, or activation won't work.`,
     '',
-    `  If you lose the device or browser that activated the key, run ${bold('capy transport')} on any device where Capy is set up. That creates a new transport key to activate in a new browser.`,
-    '',
     `  Why we do this: https://capy.sc/zero-trust`,
   ].join('\n');
 }

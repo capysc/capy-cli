@@ -268,11 +268,10 @@ describe('TransportCommand', () => {
   // CAP-684 follow-up (2026-09-30): the Vince-approved intro copy explaining
   // what `capy transport` is for, printed ahead of the QR/link.
   describe('intro copy', () => {
-    test('prints all four paragraphs, in order, before the link label', async () => {
+    test('prints all three paragraphs, in order, before the link label', async () => {
       const { stdout } = await withCapturedIo(() => new TransportCommand().execute({}));
       const paragraph1 = 'Transport works with';
       const paragraph2 = 'Open or scan this link to activate your transport key';
-      const paragraph3 = 'If you lose the device or browser that activated the key';
       const paragraph4 = 'Why we do this: https://capy.sc/zero-trust';
       const label = 'Open on your other device:';
 
@@ -281,19 +280,17 @@ describe('TransportCommand', () => {
       expect(stdout).toContain(paragraph2);
       expect(stdout).toContain("We recommend your phone's browser.");
       expect(stdout).toContain("Sign in with the same account as this capy session, or activation won't work.");
-      expect(stdout).toContain(paragraph3);
-      expect(stdout).toContain('That creates a new transport key to activate in a new browser.');
       expect(stdout).toContain(paragraph4);
 
       const idx1 = stdout.indexOf(paragraph1);
       const idx2 = stdout.indexOf(paragraph2);
-      const idx3 = stdout.indexOf(paragraph3);
       const idx4 = stdout.indexOf(paragraph4);
       const idxLabel = stdout.indexOf(label);
       expect(idx1).toBeGreaterThanOrEqual(0);
       expect(idx2).toBeGreaterThan(idx1);
-      expect(idx3).toBeGreaterThan(idx2);
-      expect(idx4).toBeGreaterThan(idx3);
+      expect(idx4).toBeGreaterThan(idx2);
+      // The lost-device paragraph was removed (Vince, 2026-10-01).
+      expect(stdout).not.toContain('If you lose the device');
       expect(idxLabel).toBeGreaterThan(idx4);
     });
 
@@ -305,13 +302,12 @@ describe('TransportCommand', () => {
       expect(stdout).not.toContain('Why we do this');
     });
 
-    test('with NO_COLOR set, "capy pair" and "capy transport" appear as plain text (no ANSI escapes)', async () => {
+    test('with NO_COLOR set, "capy pair" appears as plain text (no ANSI escapes)', async () => {
       const prevNoColor = process.env.NO_COLOR;
       process.env.NO_COLOR = '1';
       try {
         const { stdout } = await withCapturedIo(() => new TransportCommand().execute({}));
         expect(stdout).toContain('Transport works with capy pair to let you use Capy anywhere');
-        expect(stdout).toContain('run capy transport on any device where Capy is set up');
         expect(stdout).not.toContain('\x1b[1m');
       } finally {
         if (prevNoColor === undefined) delete process.env.NO_COLOR;
@@ -319,13 +315,12 @@ describe('TransportCommand', () => {
       }
     });
 
-    test('without NO_COLOR, "capy pair" and "capy transport" are wrapped in bold ANSI', async () => {
+    test('without NO_COLOR, "capy pair" is wrapped in bold ANSI', async () => {
       const prevNoColor = process.env.NO_COLOR;
       delete process.env.NO_COLOR;
       try {
         const { stdout } = await withCapturedIo(() => new TransportCommand().execute({}));
         expect(stdout).toContain('\x1b[1mcapy pair\x1b[0m');
-        expect(stdout).toContain('\x1b[1mcapy transport\x1b[0m');
       } finally {
         if (prevNoColor === undefined) delete process.env.NO_COLOR;
         else process.env.NO_COLOR = prevNoColor;
