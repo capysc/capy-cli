@@ -285,6 +285,8 @@ capy agents [options]
 |---|---|---|
 | `--print` | print the block to stdout without writing anything |  |
 | `--remove` | remove the block from AGENTS.md / CLAUDE.md |  |
+| `-y, --yes` | skip the confirmation prompt (required non-interactively) |  |
+| `--non-tty` | never prompt; resolve from flags or fail fast (agents/CI) |  |
 | `--json` | emit machine-readable JSON instead of the human UI |  |
 
 JSON support: yes (`--json`)

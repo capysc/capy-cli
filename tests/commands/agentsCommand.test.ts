@@ -19,6 +19,7 @@ import { mock, spyOn, describe, it, expect, beforeEach, afterEach, afterAll } fr
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
+import { Command } from 'commander';
 import { AGENTS_BLOCK, blockForNewline } from '../../src/core/agentsBlockPlan';
 
 const fakePrompt = mock(async (_questions: unknown) => ({ confirmed: false }));
@@ -465,6 +466,145 @@ describe('agentsCommand', () => {
         mkdirSync(join(root, 'AGENTS.md'));
         fakePrompt.mockImplementationOnce(async () => ({ confirmed: true }));
         await expect(offerAgentsSetupAfterInit()).resolves.toBeUndefined();
+      });
+    });
+  });
+
+  /**
+   * CAP-659 — `--yes` / `--non-tty`, exercised through a real Commander
+   * `Command` (the actual `commander` package, `parseAsync` with injected
+   * argv) rather than calling `agentsCommand()` directly, so the option
+   * parsing itself (short flag `-y`, `--non-tty`, `--json`) is covered, not
+   * just the handler. This subcommand's options mirror `src/index.ts`'s
+   * `agents` registration exactly (the same split `tests/core/cliHelpDoc.test.ts`
+   * already uses for its own hand-built trees) — `tests/commands/helpJsonCli.test.ts`
+   * is what proves the real BUILT `dist/index.js` registers the identical
+   * flags end to end.
+   */
+  describe('agents CLI wiring — real argument parser, non-TTY (CAP-659)', () => {
+    const ORIGINAL_HOME = process.env.HOME;
+
+    afterEach(() => {
+      if (ORIGINAL_HOME === undefined) delete process.env.HOME;
+      else process.env.HOME = ORIGINAL_HOME;
+    });
+
+    /** Mirrors the `agents` command registration in src/index.ts / src/index-dev.ts. */
+    function buildAgentsProgram(): Command {
+      const program = new Command();
+      program.exitOverride();
+      program
+        .command('agents')
+        .option('--print', 'print the block to stdout without writing anything')
+        .option('--remove', 'remove the block from AGENTS.md / CLAUDE.md')
+        .option('-y, --yes', 'skip the confirmation prompt (required non-interactively)')
+        .option('--non-tty', 'never prompt; resolve from flags or fail fast (agents/CI)')
+        .option('--json', 'emit machine-readable JSON instead of the human UI')
+        .action(async (options) => {
+          await agentsCommand({
+            print: options.print,
+            remove: options.remove,
+            json: options.json,
+            yes: options.yes,
+            nonTty: options.nonTty,
+          });
+        });
+      return program;
+    }
+
+    function runCli(args: readonly string[]): Promise<{ exitCode?: number; stdout: string; stderr: string }> {
+      return capture(() => buildAgentsProgram().parseAsync(['node', 'capy', ...args]));
+    }
+
+    /** `withTempRootAsCwd`, but also isolates `HOME` at the fixture root for the duration of `fn`. */
+    async function withIsolatedFixtureRepo(fn: (root: string) => Promise<void> | void): Promise<void> {
+      await withTempRootAsCwd(async (root) => {
+        process.env.HOME = root;
+        await fn(root);
+      });
+    }
+
+    it('--yes writes the block with no TTY, --json stdout is exactly one parseable JSON object, and a second run is idempotent', async () => {
+      await withIsolatedFixtureRepo(async (root) => {
+        setTTY(false);
+        const first = await runCli(['agents', '--json', '--yes']);
+        expect(first.exitCode).toBeUndefined();
+        expect(fakePrompt).not.toHaveBeenCalled();
+        const payload = JSON.parse(first.stdout.trim()); // throws if stdout carries anything but one JSON value
+        expect(payload).toEqual({ ok: true, files: [{ path: 'AGENTS.md', action: 'created' }] });
+        expect(existsSync(join(root, 'AGENTS.md'))).toBe(true);
+
+        const before = readFileSync(join(root, 'AGENTS.md'), 'utf-8');
+        const second = await runCli(['agents', '--json', '--yes']);
+        const secondPayload = JSON.parse(second.stdout.trim());
+        expect(secondPayload).toEqual({ ok: true, files: [{ path: 'AGENTS.md', action: 'unchanged' }] });
+        expect(readFileSync(join(root, 'AGENTS.md'), 'utf-8')).toBe(before);
+      });
+    });
+
+    it('human mode, --yes, write: reports "Created AGENTS.md" and the success message never says "Removed"', async () => {
+      await withIsolatedFixtureRepo(async () => {
+        setTTY(false);
+        const { stdout, exitCode } = await runCli(['agents', '--yes']);
+        expect(exitCode).toBeUndefined();
+        expect(stdout).toContain('Created AGENTS.md');
+        expect(stdout).not.toContain('Removed');
+      });
+    });
+
+    it('--remove --yes removes the (Capy-created) block with no TTY', async () => {
+      await withIsolatedFixtureRepo(async (root) => {
+        setTTY(false);
+        await runCli(['agents', '--yes']); // seed it, non-interactively
+        fakePrompt.mockClear();
+        const { exitCode } = await runCli(['agents', '--remove', '--yes']);
+        expect(exitCode).toBeUndefined();
+        expect(fakePrompt).not.toHaveBeenCalled();
+        expect(existsSync(join(root, 'AGENTS.md'))).toBe(false);
+      });
+    });
+
+    it('without --yes and no TTY: coded refusal naming --yes in `unanswered`, exit 3, file untouched', async () => {
+      await withIsolatedFixtureRepo(async (root) => {
+        setTTY(false);
+        const { exitCode, stdout } = await runCli(['agents', '--json']);
+        expect(exitCode).toBe(3);
+        const payload = JSON.parse(stdout);
+        expect(payload).toMatchObject({ ok: false, code: 'AGENTS_SETUP_NEEDS_TTY' });
+        expect(payload.unanswered).toEqual([{ id: 'confirm', flag: '--yes' }]);
+        expect(existsSync(join(root, 'AGENTS.md'))).toBe(false);
+      });
+    });
+
+    it('--remove without --yes and no TTY: coded refusal, pre-existing file byte-identical', async () => {
+      await withIsolatedFixtureRepo(async (root) => {
+        writeAgentsBlock(root);
+        const before = readFileSync(join(root, 'AGENTS.md'), 'utf-8');
+        setTTY(false);
+        const { exitCode, stdout } = await runCli(['agents', '--remove', '--json']);
+        expect(exitCode).toBe(3);
+        expect(JSON.parse(stdout)).toMatchObject({ ok: false, code: 'AGENTS_SETUP_NEEDS_TTY' });
+        expect(readFileSync(join(root, 'AGENTS.md'), 'utf-8')).toBe(before);
+      });
+    });
+
+    it('--non-tty forces the refusal even on a real TTY, without --yes', async () => {
+      await withIsolatedFixtureRepo(async (root) => {
+        setTTY(true);
+        const { exitCode } = await runCli(['agents', '--non-tty', '--json']);
+        expect(exitCode).toBe(3);
+        expect(fakePrompt).not.toHaveBeenCalled();
+        expect(existsSync(join(root, 'AGENTS.md'))).toBe(false);
+      });
+    });
+
+    it('--print is unchanged: still works with no TTY and no --yes, and writes nothing', async () => {
+      await withIsolatedFixtureRepo(async (root) => {
+        setTTY(false);
+        const { exitCode, stdout } = await runCli(['agents', '--print']);
+        expect(exitCode).toBeUndefined();
+        expect(stdout).toContain('<!-- capy:agents:begin -->');
+        expect(existsSync(join(root, 'AGENTS.md'))).toBe(false);
       });
     });
   });
