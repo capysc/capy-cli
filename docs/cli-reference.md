@@ -110,6 +110,7 @@ capy deploy [target] [options]
 | `--env-name <name>` | gh-actions: env name when --scope env |  |
 | `--no-deploy` | write and verify the target, but skip the platform deploy/redeploy (target mode) |  |
 | `--json` | describe the route (unanswered stops + any known branch problem) as JSON instead of travelling it |  |
+| `--non-tty` | refuse rather than prompt when input is needed (for CI/agents) |  |
 
 JSON support: yes (`--json`)
 
@@ -118,36 +119,45 @@ JSON support: yes (`--json`)
 Revoke a deploy token
 
 ```
-capy deploy revoke <deployId>
+capy deploy revoke <deployId> [options]
 ```
 
-_No options._
+| Option | Description | Default |
+|---|---|---|
+| `--dry-run` | show which token would be revoked; revoke nothing |  |
+| `-y, --yes` | skip the confirmation (CI) |  |
+| `--json` | machine-readable output |  |
+| `--non-tty` | refuse rather than prompt when input is needed (for CI/agents) |  |
 
-JSON support: no
+JSON support: yes (`--json`)
 
 ### `capy deploy list`
 
 List deploy tokens for this project
 
 ```
-capy deploy list
+capy deploy list [options]
 ```
 
-_No options._
+| Option | Description | Default |
+|---|---|---|
+| `--json` | machine-readable output |  |
 
-JSON support: no
+JSON support: yes (`--json`)
 
 ### `capy deploy targets`
 
 List configured targets (target mode)
 
 ```
-capy deploy targets
+capy deploy targets [options]
 ```
 
-_No options._
+| Option | Description | Default |
+|---|---|---|
+| `--json` | machine-readable output |  |
 
-JSON support: no
+JSON support: yes (`--json`)
 
 ### `capy deploy targets-remove`
 
@@ -160,8 +170,12 @@ capy deploy targets-remove <name> [options]
 | Option | Description | Default |
 |---|---|---|
 | `--no-deploy` | strip the config but skip the redeploy that would apply the revert |  |
+| `--dry-run` | show what would be stripped/revoked/removed; change nothing |  |
+| `-y, --yes` | skip the confirmation (CI) |  |
+| `--json` | machine-readable output (dry-run only) |  |
+| `--non-tty` | refuse rather than prompt when input is needed (for CI/agents) |  |
 
-JSON support: no
+JSON support: yes (`--json`)
 
 ## `capy logout`
 
@@ -729,6 +743,10 @@ Every refusal carries a stable `code` — branch on it, never on message text.
 - `DEPLOY_STALE_KEEP`
 - `DEPLOY_TOKEN_UNTRACKED`
 - `DRY_RUN_UNSUPPORTED`
+- `DEPLOY_PICKER_NEEDS_TTY`
+- `DEPLOY_MODE_INVALID`
+- `DEPLOY_PLATFORM_INVALID`
+- `DEPLOY_CONFIRM_NEEDS_TTY`
 
 ## Conventions
 
