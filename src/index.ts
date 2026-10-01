@@ -666,17 +666,18 @@ program
       expires: options.expires,
       json: options.json,
       nonTty: options.nonTty,
+      dryRun: command.optsWithGlobals().dryRun === true,
     });
   });
 
 program
   .command('redeem <code>')
   .description('Redeem an invite code to join an organization')
-  .action(async (code) => {
+  .action(async (code, _options, command) => {
     assertNotLocalOnly('redeem');
     const { RedeemCommand } = await import('./commands/redeemCommand');
     const cmd = new RedeemCommand();
-    await cmd.execute(code);
+    await cmd.execute(code, { dryRun: command.optsWithGlobals().dryRun === true });
   });
 
 program
@@ -704,11 +705,21 @@ program
 program
   .command('kick <email>')
   .description('Remove a teammate from this organization')
-  .action(async (email, _options, command) => {
+  .option('-y, --yes', 'skip the confirmation prompt (required non-interactively)')
+  .option('--non-tty', 'never prompt; resolve from flags or fail fast (agents/CI)')
+  .option('--json', 'emit machine-readable JSON instead of the human UI')
+  .action(async (email, options, command) => {
     assertNotLocalOnly('kick');
     const { KickCommand } = await import('./commands/kickCommand');
     const cmd = new KickCommand();
-    await cmd.execute(email, { web: command.optsWithGlobals().web === true });
+    const merged = command.optsWithGlobals();
+    await cmd.execute(email, {
+      web: merged.web === true,
+      yes: options.yes,
+      nonTty: options.nonTty,
+      json: options.json,
+      dryRun: merged.dryRun === true,
+    });
   });
 
 const systemCmd = program
@@ -743,10 +754,15 @@ systemCmd
   .option('--org <id>', 'org id, if you belong to more than one')
   .option('--yes', 'skip the confirmation prompt')
   .option('--json', 'emit machine-readable JSON instead of the human UI')
-  .action(async (name: string, options: any) => {
+  .action(async (name: string, options: any, command: Command) => {
     assertNotLocalOnly('system rm');
     const { systemRmCommand } = await import('./commands/systemCommand');
-    await systemRmCommand(name, { org: options.org, json: options.json, yes: options.yes });
+    await systemRmCommand(name, {
+      org: options.org,
+      json: options.json,
+      yes: options.yes,
+      dryRun: command.optsWithGlobals().dryRun === true,
+    });
   });
 
 program
@@ -825,21 +841,37 @@ program
 program
   .command('grant-branch <email> <project> <branch>')
   .description('Grant a member wildcard access to a protected branch')
-  .action(async (email: string, project: string, branch: string) => {
+  .option('-y, --yes', 'skip the confirmation prompt (required non-interactively)')
+  .option('--non-tty', 'never prompt; resolve from flags or fail fast (agents/CI)')
+  .option('--json', 'emit machine-readable JSON instead of the human UI')
+  .action(async (email: string, project: string, branch: string, options: any, command: Command) => {
     assertNotLocalOnly('grant-branch');
     const { UsersCommand } = await import('./commands/usersCommand');
     const cmd = new UsersCommand();
-    await cmd.grantBranch(email, project, branch);
+    await cmd.grantBranch(email, project, branch, {
+      yes: options.yes,
+      nonTty: options.nonTty,
+      json: options.json,
+      dryRun: command.optsWithGlobals().dryRun === true,
+    });
   });
 
 program
   .command('revoke-branch <email> <project> <branch>')
   .description("Revoke a member's wildcard access to a protected branch")
-  .action(async (email: string, project: string, branch: string) => {
+  .option('-y, --yes', 'skip the confirmation prompt (required non-interactively)')
+  .option('--non-tty', 'never prompt; resolve from flags or fail fast (agents/CI)')
+  .option('--json', 'emit machine-readable JSON instead of the human UI')
+  .action(async (email: string, project: string, branch: string, options: any, command: Command) => {
     assertNotLocalOnly('revoke-branch');
     const { UsersCommand } = await import('./commands/usersCommand');
     const cmd = new UsersCommand();
-    await cmd.revokeBranch(email, project, branch);
+    await cmd.revokeBranch(email, project, branch, {
+      yes: options.yes,
+      nonTty: options.nonTty,
+      json: options.json,
+      dryRun: command.optsWithGlobals().dryRun === true,
+    });
   });
 
 program
@@ -907,6 +939,7 @@ program
       noPush: options.push === false,
       force: merged.force,
       nonTty: options.nonTty,
+      dryRun: merged.dryRun === true,
     });
   });
 
@@ -916,7 +949,7 @@ program
   .option('-y, --yes', 'skip the confirmation prompt (required non-interactively)')
   .option('--json', 'emit machine-readable JSON instead of the human UI')
   .option('--non-tty', 'never prompt; resolve from flags or fail fast (agents/CI)')
-  .action(async (varNames, options) => {
+  .action(async (varNames, options, command) => {
     assertNotLocalOnly('remove');
     const { RemoveCommand } = await import('./commands/removeCommand');
     const cmd = new RemoveCommand();
@@ -924,6 +957,7 @@ program
       yes: options.yes,
       json: options.json,
       nonTty: options.nonTty,
+      dryRun: command.optsWithGlobals().dryRun === true,
     });
   });
 

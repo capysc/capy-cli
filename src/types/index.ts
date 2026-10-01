@@ -662,6 +662,13 @@ export const ERROR_CODES = {
    * through to running the command for real.
    */
   DRY_RUN_UNSUPPORTED: 'DRY_RUN_UNSUPPORTED',
+  // --- CAP-659 Phase 2/3: org commands (dry-run + non-TTY) ---
+  /** `capy kick` needs confirmation and there is no TTY, and `--yes` wasn't passed. */
+  KICK_NEEDS_TTY: 'KICK_NEEDS_TTY',
+  /** `capy grant-branch`/`capy revoke-branch` need confirmation and there is no TTY, and `--yes` wasn't passed. */
+  PROTECTED_BRANCH_NEEDS_TTY: 'PROTECTED_BRANCH_NEEDS_TTY',
+  /** No org member matches the given email (`kick`, `grant-branch`, `revoke-branch`). */
+  MEMBER_NOT_FOUND: 'MEMBER_NOT_FOUND',
 } as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES];

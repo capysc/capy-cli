@@ -104,21 +104,25 @@ export const COMMAND_DRY_RUN_SUPPORT: ReadonlyMap<string, DryRunSupportLevel> = 
   // `--dry-run`. Phase 1's headline fix.
   ['cleanup', 'unsupported'],
   ['agents', 'unsupported'],
-  ['invite', 'unsupported'],
-  ['redeem', 'unsupported'],
+  ['invite', 'preview'],
+  ['redeem', 'preview'],
   ['transport', 'unsupported'],
   ['pair', 'unsupported'],
-  ['kick', 'unsupported'],
+  ['kick', 'preview'],
   ['system set', 'unsupported'],
-  ['system rm', 'unsupported'],
+  ['system rm', 'preview'],
   ['org', 'unsupported'],
-  ['grant-branch', 'unsupported'],
-  ['revoke-branch', 'unsupported'],
+  ['grant-branch', 'preview'],
+  ['revoke-branch', 'preview'],
   ['decrypt', 'unsupported'],
   ['end-recover', 'unsupported'],
   ['recover', 'unsupported'],
-  ['add', 'unsupported'],
-  ['remove', 'unsupported'],
+  // --- Org group (CAP-659 Phase 2/3): flipped to `preview` as each one
+  // grew a real, no-write preview (see each command's own module for the
+  // plan it previews from). `system set` stays `unsupported` — the value
+  // is typed by design and there is nothing else to preview.
+  ['add', 'preview'],
+  ['remove', 'preview'],
   // Default mode pairs with a provider and may push — doesn't read
   // `--dry-run` at all outside the Dokploy import/discover path. The
   // override loosens to `read_only` only when no provider was given at

@@ -476,4 +476,120 @@ describe('InviteCommand', () => {
     expect(mockAskInBrowser).not.toHaveBeenCalled();
     expect(mockCreateInvite).not.toHaveBeenCalled();
   });
+
+  describe('CAP-659 dry-run preview', () => {
+    test('--role and --project given: nothing unanswered, no code minted, no master-key unwrap', async () => {
+      const cap = captureOutput();
+      try {
+        await new InviteCommand().execute('bob@example.com', {
+          dryRun: true, json: true, role: 'member', projects: ['storefront'],
+        });
+      } finally {
+        cap.restore();
+      }
+      expect(mockCreateInvite).not.toHaveBeenCalled();
+      expect(mockWrapOuterLayer).not.toHaveBeenCalled();
+      expect(mockAskInBrowser).not.toHaveBeenCalled();
+      const parsed = JSON.parse(cap.out());
+      expect(parsed).toEqual({
+        ok: true,
+        dry_run: true,
+        command: 'invite',
+        changes: [
+          {
+            where: 'capy_service',
+            action: 'create invite',
+            target: 'bob@example.com (role=member, projects=storefront, expires_in=12h)',
+            reversible: true,
+          },
+        ],
+        unanswered: [],
+      });
+      // process.exitCode, not process.exit — exit 0, no `process.exit` throw.
+      expect(mockExit).not.toHaveBeenCalled();
+      expect(process.exitCode).toBe(0);
+      process.exitCode = 0;
+    });
+
+    test('no --role, no --project, no existing membership: both reported unanswered with their flags', async () => {
+      const cap = captureOutput();
+      try {
+        await new InviteCommand().execute('new@example.com', { dryRun: true, json: true });
+      } finally {
+        cap.restore();
+      }
+      const parsed = JSON.parse(cap.out());
+      expect(parsed.unanswered).toEqual([
+        { id: 'role', flag: '--role <role>' },
+        { id: 'projects', flag: '--project <id|name>' },
+      ]);
+      expect(mockCreateInvite).not.toHaveBeenCalled();
+      process.exitCode = 0;
+    });
+
+    test('--role admin (org-wide): the projects stop is skipped, not unanswered', async () => {
+      const cap = captureOutput();
+      try {
+        await new InviteCommand().execute('admin-invite@example.com', { dryRun: true, json: true, role: 'admin' });
+      } finally {
+        cap.restore();
+      }
+      const parsed = JSON.parse(cap.out());
+      expect(parsed.unanswered).toEqual([]);
+      expect(parsed.changes[0].target).toContain('projects=all');
+      process.exitCode = 0;
+    });
+
+    test('an existing member with no --role reuses their role/projects, reports as "reissue"', async () => {
+      mockListMemberDetails.mockResolvedValue({
+        members: [{ email: 'existing@example.com', role: 'member', projects: [{ id: 'p1', name: 'storefront' }] }],
+      });
+      const cap = captureOutput();
+      try {
+        await new InviteCommand().execute('existing@example.com', { dryRun: true, json: true });
+      } finally {
+        cap.restore();
+      }
+      const parsed = JSON.parse(cap.out());
+      expect(parsed.changes[0].action).toBe('reissue invite');
+      expect(parsed.unanswered).toEqual([]);
+      process.exitCode = 0;
+    });
+
+    test('--web is never opened under a dry run, even when passed', async () => {
+      const cap = captureOutput();
+      try {
+        await new InviteCommand().execute('bob@example.com', { dryRun: true, json: true, web: true, role: 'member', projects: ['storefront'] });
+      } finally {
+        cap.restore();
+      }
+      expect(mockAskInBrowser).not.toHaveBeenCalled();
+      process.exitCode = 0;
+    });
+
+    test('a role this caller cannot grant is STILL refused under --dry-run (same check, same exit)', async () => {
+      mockGetOrgMe.mockResolvedValue({ role: 'project-admin', user_id: 'u-mike', admin_projects: ['p1'] });
+      const cap = captureOutput();
+      try {
+        await expect(
+          new InviteCommand().execute('bob@example.com', { dryRun: true, role: 'admin' }),
+        ).rejects.toThrow('process.exit');
+      } finally {
+        cap.restore();
+      }
+      expect(mockExit).toHaveBeenCalledWith(1);
+      expect(mockCreateInvite).not.toHaveBeenCalled();
+    });
+
+    test('inviting yourself is still a no-op (same early return), never reaches the preview', async () => {
+      const cap = captureOutput();
+      try {
+        await new InviteCommand().execute('mike@example.com', { dryRun: true, json: true });
+      } finally {
+        cap.restore();
+      }
+      expect(cap.out()).toContain('already a member');
+      expect(mockCreateInvite).not.toHaveBeenCalled();
+    });
+  });
 });

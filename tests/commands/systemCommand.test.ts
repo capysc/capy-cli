@@ -270,5 +270,53 @@ describe('systemCommand', () => {
       await capture(() => systemRmCommand('_CONNECTOR_FOO_KEY', { json: true }));
       expect(createPromptModuleCalls).toEqual([{ output: process.stderr }]);
     });
+
+    describe('CAP-659 dry-run preview', () => {
+      it('--dry-run with no --yes: confirm is unanswered, exit 3, never opens the store', async () => {
+        const { exitCode, stdout } = await capture(() =>
+          systemRmCommand('_CONNECTOR_FOO_KEY', { json: true, dryRun: true }),
+        );
+        expect(exitCode).toBe(3);
+        expect(removeCalls).toEqual([]);
+        expect(JSON.parse(stdout)).toEqual({
+          ok: true,
+          dry_run: true,
+          command: 'system rm',
+          changes: [],
+          unanswered: [{ id: 'confirm', flag: '-y, --yes' }],
+        });
+      });
+
+      it('--dry-run --yes: previews the removal, never calls store.remove()', async () => {
+        listReturn = [{ name: '_CONNECTOR_FOO_KEY' }];
+        const { exitCode, stdout } = await capture(() =>
+          systemRmCommand('_CONNECTOR_FOO_KEY', { json: true, dryRun: true, yes: true }),
+        );
+        expect(exitCode).toBe(0);
+        expect(removeCalls).toEqual([]);
+        expect(JSON.parse(stdout)).toEqual({
+          ok: true,
+          dry_run: true,
+          command: 'system rm',
+          changes: [{ where: 'capy_service', action: 'remove system store credential', target: '_CONNECTOR_FOO_KEY', reversible: false }],
+          unanswered: [],
+        });
+      });
+
+      it('--dry-run --yes on a name not currently set: says so, still never writes', async () => {
+        listReturn = [];
+        const { stdout } = await capture(() =>
+          systemRmCommand('_CONNECTOR_FOO_KEY', { json: true, dryRun: true, yes: true }),
+        );
+        expect(removeCalls).toEqual([]);
+        expect(JSON.parse(stdout).changes[0].target).toBe('_CONNECTOR_FOO_KEY (not currently set)');
+      });
+
+      it('a bad name still refuses before the dry-run branch runs', async () => {
+        const { exitCode, stdout } = await capture(() => systemRmCommand('nope', { json: true, dryRun: true }));
+        expect(exitCode).toBe(1);
+        expect(JSON.parse(stdout)).toMatchObject({ code: 'SYSTEM_STORE_BAD_NAME' });
+      });
+    });
   });
 });

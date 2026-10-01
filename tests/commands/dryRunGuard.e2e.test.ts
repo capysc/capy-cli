@@ -192,24 +192,65 @@ const UNSUPPORTED_CASES: Array<{ path: string; argv: string[] }> = [
   { path: 'profile remove', argv: ['profile', 'remove', 'profile-x'] },
   { path: 'cleanup', argv: ['cleanup'] },
   { path: 'agents', argv: ['agents'] },
-  { path: 'invite', argv: ['invite', 'a@example.com'] },
-  { path: 'redeem', argv: ['redeem', 'CODE123'] },
   { path: 'transport', argv: ['transport'] },
   { path: 'pair', argv: ['pair'] },
-  { path: 'kick', argv: ['kick', 'a@example.com'] },
   { path: 'system set', argv: ['system', 'set', '_CONNECTOR_X_Y'] },
-  { path: 'system rm', argv: ['system', 'rm', '_CONNECTOR_X_Y'] },
   { path: 'org', argv: ['org'] },
-  { path: 'grant-branch', argv: ['grant-branch', 'a@example.com', 'proj-x', 'branch-x'] },
-  { path: 'revoke-branch', argv: ['revoke-branch', 'a@example.com', 'proj-x', 'branch-x'] },
   { path: 'decrypt', argv: ['decrypt'] },
   { path: 'end-recover', argv: ['end-recover'] },
   { path: 'recover', argv: ['recover'] },
-  { path: 'add', argv: ['add', 'VAR_X'] },
-  { path: 'remove', argv: ['remove', 'VAR_X'] },
   { path: 'rotate', argv: ['rotate'] },
   { path: 'lock', argv: ['lock'] },
 ];
+
+// CAP-659 Phase 2/3 (org group): `invite`, `redeem`, `kick`, `system rm`,
+// `grant-branch`, `revoke-branch`, `add`, `remove` all grew a real, no-write
+// preview and moved OUT of `UNSUPPORTED_CASES` above — see each command's own
+// preview method (`previewInvite`, `previewKick`, `previewRemoval`, etc.) and
+// its own unit test file for the detailed shape. This block only re-proves
+// the guard-level contract for them: none is refused with
+// `DRY_RUN_UNSUPPORTED` any more, and none writes.
+const PREVIEW_CASES: Array<{ path: string; argv: string[] }> = [
+  { path: 'invite', argv: ['invite', 'a@example.com', '--json'] },
+  { path: 'redeem', argv: ['redeem', 'CODE123'] },
+  { path: 'kick', argv: ['kick', 'a@example.com', '--json'] },
+  { path: 'system rm', argv: ['system', 'rm', '_CONNECTOR_X_Y', '--yes', '--json'] },
+  { path: 'grant-branch', argv: ['grant-branch', 'a@example.com', 'proj-x', 'branch-x', '--yes', '--json'] },
+  { path: 'revoke-branch', argv: ['revoke-branch', 'a@example.com', 'proj-x', 'branch-x', '--yes', '--json'] },
+  { path: 'add', argv: ['add', 'VAR_X'] },
+  { path: 'remove', argv: ['remove', 'VAR_X', '--yes', '--json'] },
+];
+
+describe("CAP-659 Phase 2/3 — the org group's commands now preview instead of refusing", () => {
+  for (const { path, argv } of PREVIEW_CASES) {
+    test(`${path}: --dry-run is never DRY_RUN_UNSUPPORTED, and nothing changes`, () => {
+      writeKeep(ROOT);
+      const beforeKeep = readFileSync(join(ROOT, 'keep.lock'), 'utf-8');
+      const beforeEnv = readFileSync(join(ROOT, '.env'), 'utf-8');
+
+      const r = capy([...argv, '--dry-run']);
+      expect(r.stderr).not.toContain('DRY_RUN_UNSUPPORTED');
+      expect(r.stdout).not.toContain('DRY_RUN_UNSUPPORTED');
+
+      expect(readFileSync(join(ROOT, 'keep.lock'), 'utf-8')).toBe(beforeKeep);
+      expect(readFileSync(join(ROOT, '.env'), 'utf-8')).toBe(beforeEnv);
+    });
+  }
+
+  test('add --dry-run: no network, no auth needed — previews the names (value entry is unanswered without --web, exit 3)', () => {
+    writeKeep(ROOT);
+    const r = capy(['add', 'STRIPE_KEY', '--dry-run']);
+    expect(r.code).toBe(3);
+    expect(r.stdout).toContain('STRIPE_KEY');
+  });
+
+  test('add --dry-run --web: nothing unanswered, exits 0', () => {
+    writeKeep(ROOT);
+    const r = capy(['add', 'STRIPE_KEY', '--dry-run', '--web']);
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain('STRIPE_KEY');
+  });
+});
 
 describe('every `unsupported` command refuses, both --dry-run spellings', () => {
   for (const { path, argv } of UNSUPPORTED_CASES) {
@@ -237,18 +278,18 @@ describe('every `unsupported` command refuses, both --dry-run spellings', () => 
   }
 
   test('--json refusal is exactly one parseable object with the right code and command', () => {
-    // `invite` declares its own `--json` (unlike `kick`, which declares
-    // none at all — passing `--json` there is a Commander parse error, a
-    // different thing from what this test is checking).
-    const r = capy(['invite', 'a@example.com', '--dry-run', '--json']);
+    // `pair` declares its own `--json` and is still `unsupported` (CAP-659
+    // Phase 2/3 only flipped the org group — `invite`/`kick` moved to
+    // `preview`, see the describe block below).
+    const r = capy(['pair', '--dry-run', '--json']);
     expect(r.code).toBe(1);
     const parsed = JSON.parse(r.stdout);
-    expect(parsed).toEqual({ ok: false, dry_run: true, command: 'invite', code: 'DRY_RUN_UNSUPPORTED' });
+    expect(parsed).toEqual({ ok: false, dry_run: true, command: 'pair', code: 'DRY_RUN_UNSUPPORTED' });
     expect(r.stderr).toBe('');
   });
 
   test('without --json, refusal is a one-line stderr message and stdout is empty', () => {
-    const r = capy(['kick', 'a@example.com', '--dry-run']);
+    const r = capy(['transport', '--dry-run']);
     expect(r.code).toBe(1);
     expect(r.stdout).toBe('');
     expect(r.stderr.trim().split('\n').length).toBe(1);
@@ -256,10 +297,10 @@ describe('every `unsupported` command refuses, both --dry-run spellings', () => 
   });
 
   test('refusal parity: unsupported commands give the SAME exit code (1) whether or not an auth/service error would also apply', () => {
-    // `invite` with no keep.lock would normally refuse with its own coded
+    // `pair` with no keep.lock would normally refuse with its own coded
     // reason once it actually ran — the dry-run guard preempts it with
     // DRY_RUN_UNSUPPORTED at exit 1 either way, never a different code.
-    const r = capy(['invite', 'a@example.com', '--dry-run', '--json']);
+    const r = capy(['pair', '--dry-run', '--json']);
     const parsed = JSON.parse(r.stdout);
     expect(parsed.code).toBe('DRY_RUN_UNSUPPORTED');
   });

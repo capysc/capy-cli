@@ -2,6 +2,13 @@ import { CapyError, ERROR_CODES } from '../types';
 import { resolveContext, writeAndSync } from './connectors/shared';
 import { runWebIntake, parseVars, type SecretPair } from '../ui/secretIntakeScreen';
 import type { IntakeVar } from '../ui/screens/contract';
+import {
+  dryRunOk,
+  dryRunExitCode,
+  printDryRunResultHuman,
+  type DryRunChange,
+  type DryRunUnanswered,
+} from '../core/dryRun';
 
 // The intake moved to `ui/secretIntakeScreen.ts` with the compiled screen it
 // now serves. Re-exported here because this is where the flow is entered from
@@ -18,6 +25,7 @@ export interface AddOpts {
   noPush?: boolean;
   force?: boolean;
   nonTty?: boolean;
+  dryRun?: boolean;
 }
 
 const VAR_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -62,6 +70,25 @@ export class AddCommand {
       if (!VAR_RE.test(name)) {
         throw new CapyError(`"${name}" is not a valid environment variable name.`, ERROR_CODES.INVALID_FORMAT);
       }
+    }
+
+    // Decided before anything else opens a connection (CAP-659 Phase 2/3):
+    // a non-interactive caller with no --web has no way to answer the
+    // per-variable value prompt, and this used to only throw from inside the
+    // non-web branch below — AFTER `resolveContext()` already authenticated
+    // and, on a cold session, hung on interactive OAuth. Moving the same
+    // check here means a non-tty, non-web `add` refuses before any network
+    // call at all; sign-in's own non-tty gate is `fix/auth-needs-tty`'s.
+    if (opts.nonTty && !opts.web) {
+      throw new CapyError(
+        'Non-interactive add requires --web (browser intake). Re-run with --web.',
+        ERROR_CODES.INVALID_FORMAT,
+      );
+    }
+
+    if (opts.dryRun) {
+      this.previewAdd(names, opts);
+      return;
     }
 
     const ctx = await resolveContext({ devMode: this.devMode });
@@ -129,12 +156,9 @@ export class AddCommand {
       }
       savedNames = captured;
     } else {
-      if (opts.nonTty) {
-        throw new CapyError(
-          'Non-interactive add requires --web (browser intake). Re-run with --web.',
-          ERROR_CODES.INVALID_FORMAT,
-        );
-      }
+      // `opts.nonTty && !opts.web` already refused at the top of `execute()`,
+      // before any network call — by construction, reaching here means
+      // either a TTY is available or --web was requested (handled above).
       const inquirer = (await import('inquirer')).default;
       const pairs: SecretPair[] = [];
       for (const name of names) {
@@ -148,5 +172,37 @@ export class AddCommand {
 
     const where = push ? ` and synced to ${ctx.branch}` : ' (.env only — not pushed)';
     console.log(`✓ Saved ${savedNames.length} variable(s): ${savedNames.join(', ')}${where}.`);
+  }
+
+  /**
+   * CAP-659 preview: never authenticates, never reads `.env`, never touches
+   * the network — reports only what argv already settles: which names were
+   * requested, whether a browser page would open, and whether a push would
+   * follow. The value itself is never asked for or printed; without --web
+   * there is nowhere a dry run could get it from that isn't a live prompt,
+   * so that stop is always reported unanswered rather than guessed at.
+   */
+  private previewAdd(names: string[], opts: AddOpts): void {
+    const push = opts.noPush !== true;
+    const changes: DryRunChange[] = [
+      ...names.map((name): DryRunChange => ({
+        where: 'local_file',
+        action: 'write value to .env',
+        target: name,
+        reversible: true,
+      })),
+      ...(push
+        ? [{ where: 'capy_service', action: 'push to Capy', target: names.join(', '), reversible: true } as DryRunChange]
+        : []),
+      ...(opts.web
+        ? [{ where: 'browser', action: 'open local intake page', target: 'loopback browser tab', reversible: true } as DryRunChange]
+        : []),
+    ];
+    const unanswered: DryRunUnanswered[] = opts.web
+      ? []
+      : names.map((name) => ({ id: `value:${name}`, flag: '--web' }));
+    const result = dryRunOk('add', changes, unanswered);
+    printDryRunResultHuman(result);
+    process.exit(dryRunExitCode(result));
   }
 }

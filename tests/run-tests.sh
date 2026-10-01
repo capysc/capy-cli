@@ -27,6 +27,7 @@ ISOLATED_FILES=(
   tests/commands/capyCommand.test.ts
   tests/commands/readOnlyRun.e2e.test.ts
   tests/commands/kickCommand.test.ts
+  tests/commands/usersCommand.test.ts
   tests/commands/inviteCommand.test.ts
   tests/config/globalConfig.test.ts
   tests/core/projectManager.test.ts
@@ -69,6 +70,9 @@ ISOLATED_FILES=(
   tests/commands/agentsCommand.test.ts
   tests/commands/transportCommand.test.ts
   tests/commands/pairCommand.test.ts
+  tests/commands/redeemCommand.test.ts
+  tests/commands/listCommand.test.ts
+  tests/commands/infoCommand.test.ts
 )
 
 # Build a grep pattern to exclude isolated files from the batch run

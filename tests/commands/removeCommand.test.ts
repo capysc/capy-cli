@@ -32,6 +32,7 @@ import {
   confirmationMessage,
   pinnedHashesFor,
   proceedWithRemoval,
+  previewRemoval,
   RemoveCommand,
 } from '../../src/commands/removeCommand';
 import { removeAndSync, ResolvedContext } from '../../src/commands/connectors/shared';
@@ -429,6 +430,106 @@ describe('proceedWithRemoval', () => {
       logSpy.mockRestore();
       errSpy.mockRestore();
     }
+  });
+});
+
+// ── previewRemoval — CAP-659 dry-run half of proceedWithRemoval ─────────
+
+describe('previewRemoval', () => {
+  function ctxWith(over: Partial<ResolvedContext>): ResolvedContext {
+    const keep: KeepFile = { version: '3.0', org_id: 'o', project_id: 'p', project_name: 'demo', variables: {} };
+    return {
+      pm: { readSyncState: () => null },
+      fileManager: { writeKeepFile: () => {}, writeEncryptedEnvFile: () => {}, writeSyncState: () => {} },
+      serviceClient: { pushSecrets: async () => ({ keep_hash: 'h'.repeat(16) }) },
+      orgId: 'o',
+      projectId: 'p',
+      branch: 'development',
+      userId: 'u',
+      projectKey: 'test-key',
+      keep,
+      localPlaintext: {},
+      ...over,
+    } as unknown as ResolvedContext;
+  }
+
+  test('--yes: nothing unanswered (exit 0), one change per name, reversible:false', async () => {
+    const keep: KeepFile = {
+      version: '3.0', org_id: 'o', project_id: 'p', project_name: 'demo',
+      variables: { TARGET: [{ resource_id: 'r1', branch: 'development', value_hash: hashValue('v') }] },
+    };
+    const ctx = ctxWith({ keep, localPlaintext: { TARGET: 'v' } });
+
+    const r = await capture(() => previewRemoval(ctx, ['TARGET'], { json: true, yes: true, cwd: TEST_DIR }));
+    expect(r.exitCode).toBe(0);
+    expect(JSON.parse(r.stdout.trim())).toEqual({
+      ok: true,
+      dry_run: true,
+      command: 'remove',
+      changes: [{ where: 'capy_service', action: 'remove variable', target: 'TARGET (development)', reversible: false }],
+      unanswered: [],
+    });
+  });
+
+  test('no --yes: confirm is unanswered (exit 3), the change list is still populated', async () => {
+    const keep: KeepFile = {
+      version: '3.0', org_id: 'o', project_id: 'p', project_name: 'demo',
+      variables: { TARGET: [{ resource_id: 'r1', branch: 'development', value_hash: hashValue('v') }] },
+    };
+    const ctx = ctxWith({ keep, localPlaintext: { TARGET: 'v' } });
+
+    const r = await capture(() => previewRemoval(ctx, ['TARGET'], { json: true, yes: false, cwd: TEST_DIR }));
+    expect(r.exitCode).toBe(3);
+    const parsed = JSON.parse(r.stdout.trim());
+    expect(parsed.unanswered).toEqual([{ id: 'confirm', flag: '-y, --yes' }]);
+    expect(parsed.changes).toEqual([{ where: 'capy_service', action: 'remove variable', target: 'TARGET (development)', reversible: false }]);
+  });
+
+  test('never calls removeAndSync-equivalent writes (no fileManager/serviceClient write mock ever gets called)', async () => {
+    const writeKeepFile = () => { throw new Error('must not write keep.lock in a dry run'); };
+    const writeEncryptedEnvFile = () => { throw new Error('must not write .env in a dry run'); };
+    const pushSecrets = async () => { throw new Error('must not push in a dry run'); };
+    const keep: KeepFile = {
+      version: '3.0', org_id: 'o', project_id: 'p', project_name: 'demo',
+      variables: { TARGET: [{ resource_id: 'r1', branch: 'development', value_hash: hashValue('v') }] },
+    };
+    const ctx = ctxWith({
+      keep,
+      localPlaintext: { TARGET: 'v' },
+      fileManager: { writeKeepFile, writeEncryptedEnvFile, writeSyncState: () => {} },
+      serviceClient: { pushSecrets },
+    } as any);
+
+    const r = await capture(() => previewRemoval(ctx, ['TARGET'], { json: true, yes: true, cwd: TEST_DIR }));
+    expect(r.exitCode).toBe(0);
+  });
+
+  test('drift refusal fires exactly as it does for real — same code, same exit, same stream', async () => {
+    const keep: KeepFile = {
+      version: '3.0', org_id: 'o', project_id: 'p', project_name: 'demo',
+      variables: {
+        TARGET: [{ resource_id: 'r1', branch: 'development', value_hash: hashValue('target-value') }],
+        OTHER: [{ resource_id: 'r2', branch: 'development', value_hash: hashValue('old') }],
+      },
+    };
+    const ctx = ctxWith({ keep, localPlaintext: { TARGET: 'target-value', OTHER: 'new-unpushed' } });
+
+    const r = await capture(() => previewRemoval(ctx, ['TARGET'], { json: true, yes: true, cwd: TEST_DIR }));
+    expect(r.exitCode).toBe(1);
+    expect(JSON.parse(r.stdout.trim())).toEqual({ ok: false, code: 'REMOVE_LOCAL_DRIFT', error: expect.any(String), drifted: ['OTHER'] });
+  });
+
+  test('a deploy-target warning still prints to stderr, alongside the preview', async () => {
+    upsertTarget(TEST_DIR, baseTarget({ name: 'prod', vars: ['TARGET'] }));
+    const keep: KeepFile = {
+      version: '3.0', org_id: 'o', project_id: 'p', project_name: 'demo',
+      variables: { TARGET: [{ resource_id: 'r1', branch: 'development', value_hash: hashValue('v') }] },
+    };
+    const ctx = ctxWith({ keep, localPlaintext: { TARGET: 'v' } });
+
+    const r = await capture(() => previewRemoval(ctx, ['TARGET'], { json: false, yes: true, cwd: TEST_DIR }));
+    expect(r.exitCode).toBe(0);
+    expect(r.stderr).toContain('prod');
   });
 });
 

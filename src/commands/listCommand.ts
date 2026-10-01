@@ -1,9 +1,20 @@
 import { ProjectManager } from '../core/projectManager';
 import { listAllVarsOnBranch, listManagedKeys, findManagedConnector } from './connectors/shared';
+import { ERROR_CODES } from '../types/index';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 const DIM = '\x1b[90m';
 const RESET = '\x1b[0m';
+
+/** Coded JSON on stdout under --json, prose on stderr otherwise — same contract as the "no active branch" case below. */
+function refuseNoKeep(json: boolean | undefined, message: string): never {
+  if (json) {
+    console.log(JSON.stringify({ ok: false, code: ERROR_CODES.NO_KEEP_FILE, error: message }, null, 2));
+  } else {
+    console.error(message);
+  }
+  process.exit(1);
+}
 
 /**
  * `capy list` — variable NAMES + connector metadata for the active branch.
@@ -16,13 +27,11 @@ export class ListCommand {
     const pm = new ProjectManager();
     const projectState = await pm.detectProjectState();
     if (!projectState.initialized) {
-      console.error(`No keep.lock found. Run ${B('capy')} to initialize.`);
-      process.exit(1);
+      refuseNoKeep(opts.json, `No keep.lock found. Run ${B('capy')} to initialize.`);
     }
     const keep = pm.readKeepFile();
     if (!keep) {
-      console.error('Could not read keep.lock');
-      process.exit(1);
+      refuseNoKeep(opts.json, 'Could not read keep.lock');
     }
     const branch = projectState.activeBranch;
     if (!branch) {

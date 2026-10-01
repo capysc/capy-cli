@@ -354,12 +354,16 @@ JSON support: yes (`--json`)
 Remove a teammate from this organization
 
 ```
-capy kick <email>
+capy kick <email> [options]
 ```
 
-_No options._
+| Option | Description | Default |
+|---|---|---|
+| `-y, --yes` | skip the confirmation prompt (required non-interactively) |  |
+| `--non-tty` | never prompt; resolve from flags or fail fast (agents/CI) |  |
+| `--json` | emit machine-readable JSON instead of the human UI |  |
 
-JSON support: no
+JSON support: yes (`--json`)
 
 ## `capy system`
 
@@ -508,24 +512,32 @@ JSON support: yes (`--json`)
 Grant a member wildcard access to a protected branch
 
 ```
-capy grant-branch <email> <project> <branch>
+capy grant-branch <email> <project> <branch> [options]
 ```
 
-_No options._
+| Option | Description | Default |
+|---|---|---|
+| `-y, --yes` | skip the confirmation prompt (required non-interactively) |  |
+| `--non-tty` | never prompt; resolve from flags or fail fast (agents/CI) |  |
+| `--json` | emit machine-readable JSON instead of the human UI |  |
 
-JSON support: no
+JSON support: yes (`--json`)
 
 ## `capy revoke-branch`
 
 Revoke a member's wildcard access to a protected branch
 
 ```
-capy revoke-branch <email> <project> <branch>
+capy revoke-branch <email> <project> <branch> [options]
 ```
 
-_No options._
+| Option | Description | Default |
+|---|---|---|
+| `-y, --yes` | skip the confirmation prompt (required non-interactively) |  |
+| `--non-tty` | never prompt; resolve from flags or fail fast (agents/CI) |  |
+| `--json` | emit machine-readable JSON instead of the human UI |  |
 
-JSON support: no
+JSON support: yes (`--json`)
 
 ## `capy decrypt`
 
@@ -729,6 +741,9 @@ Every refusal carries a stable `code` — branch on it, never on message text.
 - `DEPLOY_STALE_KEEP`
 - `DEPLOY_TOKEN_UNTRACKED`
 - `DRY_RUN_UNSUPPORTED`
+- `KICK_NEEDS_TTY`
+- `PROTECTED_BRANCH_NEEDS_TTY`
+- `MEMBER_NOT_FOUND`
 
 ## Conventions
 

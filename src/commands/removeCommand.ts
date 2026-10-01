@@ -19,11 +19,20 @@ import { hashValue } from './statusCommand';
 import { isInteractive, EXIT_NEEDS_INPUT } from '../ui/interactive';
 import { listTargets } from '../deploy/config';
 import { CapyError, ERROR_CODES, KeepFile } from '../types/index';
+import {
+  dryRunOk,
+  dryRunExitCode,
+  printDryRunResultHuman,
+  printDryRunResultJson,
+  type DryRunChange,
+  type DryRunUnanswered,
+} from '../core/dryRun';
 
 export interface RemoveOpts {
   yes?: boolean;
   json?: boolean;
   nonTty?: boolean;
+  dryRun?: boolean;
 }
 
 /** Pure JSON refusal on stdout — never on stderr, so `--json` output stays parseable. */
@@ -158,6 +167,50 @@ export async function proceedWithRemoval(
   }
 }
 
+/**
+ * CAP-659 preview half of `proceedWithRemoval` — same drift check (same
+ * refusal code), same deploy-target warnings, but never calls
+ * `removeAndSync`. Split out, rather than threading a `dryRun` flag through
+ * `proceedWithRemoval` itself, so the function that writes never has a path
+ * through it that doesn't.
+ */
+export async function previewRemoval(
+  ctx: ResolvedContext,
+  names: readonly string[],
+  opts: { json: boolean; yes: boolean; cwd: string },
+): Promise<void> {
+  const pinned = pinnedHashesFor(ctx.keep, ctx.branch);
+  const drifted = computeDrift(pinned, ctx.localPlaintext, names);
+  if (drifted.length > 0) {
+    refuse(
+      opts.json,
+      new CapyError(
+        `${drifted.join(', ')} ${drifted.length === 1 ? 'has' : 'have'} unpushed local changes. Push or revert them before removing.`, // COPY-FLAG
+        ERROR_CODES.REMOVE_LOCAL_DRIFT,
+        { drifted },
+      ),
+    );
+  }
+
+  const warnings = deployTargetWarnings(opts.cwd, names);
+  // A removal cannot be undone by this CLI (the value is gone unless the
+  // caller kept it elsewhere) — verified, not guessed, so `reversible: false`.
+  const changes: DryRunChange[] = names.map((name) => ({
+    where: 'capy_service',
+    action: 'remove variable',
+    target: `${name} (${ctx.branch})`,
+    reversible: false,
+  }));
+  const unanswered: DryRunUnanswered[] = opts.yes ? [] : [{ id: 'confirm', flag: '-y, --yes' }];
+  const result = dryRunOk('remove', changes, unanswered);
+  if (opts.json) printDryRunResultJson(result);
+  else printDryRunResultHuman(result);
+  for (const w of warnings) {
+    console.error(formatDeployWarning(w));
+  }
+  process.exit(dryRunExitCode(result));
+}
+
 export class RemoveCommand {
   constructor(private readonly devMode: boolean = false) {}
 
@@ -193,6 +246,17 @@ export class RemoveCommand {
     }
 
     const removingAll = allVars.length === names.length && allVars.every((v) => names.includes(v));
+
+    // CAP-659 preview: never prompts (the confirm is reported `unanswered`
+    // instead, same as the json/non-tty refusal below would be for real),
+    // never calls `removeAndSync`. The drift refusal — the one real check
+    // between here and the write — still runs, with the same code/exit the
+    // real run would give.
+    if (opts.dryRun) {
+      const ctx = await resolveContext({ devMode: this.devMode });
+      await previewRemoval(ctx, names, { json, yes: opts.yes === true, cwd: process.cwd() });
+      return;
+    }
 
     if (!opts.yes) {
       if (json || !isInteractive(opts.nonTty)) {

@@ -98,7 +98,7 @@ describe('KickCommand', () => {
     });
 
     const cmd = new KickCommand();
-    await cmd.execute('alice@acme.com');
+    await cmd.execute('alice@acme.com', { yes: true });
 
     expect(mockListMemberDetails).toHaveBeenCalledWith('org-123');
     expect(mockKickMember).toHaveBeenCalledWith('org-123', 'mem-alice-2');
@@ -120,7 +120,7 @@ describe('KickCommand', () => {
     });
 
     const cmd = new KickCommand();
-    await cmd.execute('bob@acme.com');
+    await cmd.execute('bob@acme.com', { yes: true });
 
     expect(mockKickMember).toHaveBeenCalledWith('org-123', 'mem-bob-3');
   });
@@ -141,9 +141,101 @@ describe('KickCommand', () => {
     });
 
     const cmd = new KickCommand();
-    await expect(cmd.execute('nobody@acme.com')).rejects.toThrow('process.exit');
+    await expect(cmd.execute('nobody@acme.com', { yes: true })).rejects.toThrow('process.exit');
     expect(mockExit).toHaveBeenCalledWith(1);
     expect(mockKickMember).not.toHaveBeenCalled();
+  });
+
+  describe('CAP-659 Phase 2/3 — non-interactive and --json', () => {
+    it('no TTY, no --yes, no --web: refuses KICK_NEEDS_TTY, exit 3, never calls the service', async () => {
+      const cmd = new KickCommand();
+      await expect(cmd.execute('alice@acme.com')).rejects.toThrow('process.exit');
+      expect(mockExit).toHaveBeenCalledWith(3);
+      expect(mockListMemberDetails).not.toHaveBeenCalled();
+      expect(mockKickMember).not.toHaveBeenCalled();
+    });
+
+    it('--non-tty without --yes also refuses KICK_NEEDS_TTY', async () => {
+      const cmd = new KickCommand();
+      await expect(cmd.execute('alice@acme.com', { nonTty: true })).rejects.toThrow('process.exit');
+      expect(mockExit).toHaveBeenCalledWith(3);
+    });
+
+    it('--json refusal is coded, pure JSON on stdout', async () => {
+      const log = spyOn(console, 'log').mockImplementation((() => {}) as any);
+      try {
+        const cmd = new KickCommand();
+        await expect(cmd.execute('alice@acme.com', { json: true })).rejects.toThrow('process.exit');
+        const printed = log.mock.calls.map((c) => c[0]).find((s) => typeof s === 'string' && s.includes('KICK_NEEDS_TTY'));
+        expect(JSON.parse(printed!)).toEqual({ ok: false, code: 'KICK_NEEDS_TTY', error: expect.any(String) });
+      } finally {
+        log.mockRestore();
+      }
+    });
+
+    it('--yes skips the gate and the prompt entirely, and --json reports the kick', async () => {
+      mockListMemberDetails.mockResolvedValue({
+        members: [
+          { membershipId: 'mem-alice-2', userId: 'user-uuid-alice', email: 'alice@acme.com', role: 'member', status: 'active', createdAt: '2025-02-01T00:00:00Z', projects: [] },
+        ],
+      });
+      const log = spyOn(console, 'log').mockImplementation((() => {}) as any);
+      try {
+        const cmd = new KickCommand();
+        await cmd.execute('alice@acme.com', { yes: true, json: true });
+        expect(mockPromptFn).not.toHaveBeenCalled();
+        expect(mockKickMember).toHaveBeenCalledWith('org-123', 'mem-alice-2');
+        const printed = log.mock.calls.map((c) => c[0]).find((s) => typeof s === 'string' && s.includes('"ok"'));
+        expect(JSON.parse(printed!)).toEqual({ ok: true, email: 'alice@acme.com', membershipId: 'mem-alice-2' });
+      } finally {
+        log.mockRestore();
+      }
+    });
+  });
+
+  describe('CAP-659 dry-run preview', () => {
+    beforeEach(() => {
+      mockListMemberDetails.mockResolvedValue({
+        members: [
+          { membershipId: 'mem-alice-2', userId: 'user-uuid-alice', email: 'alice@acme.com', role: 'member', status: 'active', createdAt: '2025-02-01T00:00:00Z', projects: [] },
+        ],
+      });
+    });
+
+    it('finds the member, never calls kickMember, never prompts', async () => {
+      const cmd = new KickCommand();
+      await expect(cmd.execute('alice@acme.com', { dryRun: true, yes: true })).rejects.toThrow('process.exit');
+      expect(mockListMemberDetails).toHaveBeenCalledWith('org-123');
+      expect(mockKickMember).not.toHaveBeenCalled();
+      expect(mockPromptFn).not.toHaveBeenCalled();
+      expect(mockExit).toHaveBeenCalledWith(0);
+    });
+
+    it('without --yes, the confirm is unanswered — exit 3, --json shape is exact', async () => {
+      const log = spyOn(console, 'log').mockImplementation((() => {}) as any);
+      try {
+        const cmd = new KickCommand();
+        await expect(cmd.execute('alice@acme.com', { dryRun: true, json: true })).rejects.toThrow('process.exit');
+        expect(mockExit).toHaveBeenCalledWith(3);
+        const printed = JSON.parse(log.mock.calls[log.mock.calls.length - 1][0] as string);
+        expect(printed).toEqual({
+          ok: true,
+          dry_run: true,
+          command: 'kick',
+          changes: [{ where: 'capy_service', action: 'kick member', target: 'alice@acme.com (membership mem-alice-2)', reversible: false }],
+          unanswered: [{ id: 'confirm', flag: '-y, --yes' }],
+        });
+      } finally {
+        log.mockRestore();
+      }
+    });
+
+    it('unknown member still refuses MEMBER_NOT_FOUND under dry-run (same check the real run does)', async () => {
+      const cmd = new KickCommand();
+      await expect(cmd.execute('nobody@acme.com', { dryRun: true, yes: true })).rejects.toThrow('process.exit');
+      expect(mockExit).toHaveBeenCalledWith(1);
+      expect(mockKickMember).not.toHaveBeenCalled();
+    });
   });
 
   describe('--web', () => {
@@ -212,10 +304,19 @@ describe('KickCommand', () => {
       }
     });
 
-    it('leaves the terminal confirm alone without the flag', async () => {
+    it('leaves the terminal confirm alone without the flag, on a real TTY', async () => {
       mockPromptFn.mockResolvedValue({ confirm: true });
-
-      await new KickCommand().execute('alice@acme.com');
+      // CAP-659 Phase 2/3: a non-interactive caller with no --yes/--web now
+      // refuses before ever reaching the prompt (see the dedicated describe
+      // block above) — simulate a real terminal here so this test still
+      // exercises the terminal confirm path it is named for.
+      const wasTTY = process.stdin.isTTY;
+      (process.stdin as any).isTTY = true;
+      try {
+        await new KickCommand().execute('alice@acme.com');
+      } finally {
+        (process.stdin as any).isTTY = wasTTY;
+      }
 
       expect(mockConfirmInBrowser).not.toHaveBeenCalled();
       expect(mockPromptFn).toHaveBeenCalled();

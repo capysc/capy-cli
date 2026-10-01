@@ -7,8 +7,14 @@ import { wrapAndSaveMasterKey, hasOrgKey } from '../crypto/keyResolver';
 import { FileManager } from '../files/fileManager';
 import { isMembershipRevokedError } from '../errors/membershipRevoked';
 import { cleanupOrgData } from '../cleanup/orgCleanup';
+import { dryRunOk, dryRunExitCode, printDryRunResultHuman, type DryRunChange, type DryRunUnanswered } from '../core/dryRun';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
+
+export interface RedeemOpts {
+  /** CAP-659: preview only — parse the code, check expiry, resolve the target org via a SILENT session only; never co-decrypt, never consume the code, never write keys. */
+  dryRun?: boolean;
+}
 
 export class RedeemCommand {
   private apiUrl?: string;
@@ -19,7 +25,12 @@ export class RedeemCommand {
     this.devMode = devMode;
   }
 
-  async execute(code: string): Promise<void> {
+  async execute(code: string, opts: RedeemOpts = {}): Promise<void> {
+    if (opts.dryRun) {
+      await this.previewRedeem(code);
+      return;
+    }
+
     // 1. Parse redeem code → T + target org + double-wrapped ciphertext + expiry
     let token: Buffer;
     let ciphertext: string;
@@ -158,6 +169,81 @@ export class RedeemCommand {
     console.log(`  You now have access to ${B(orgName)}.`);
     console.log(`  Run ${B('capy')} to sync secrets.`);
     console.log('');
+  }
+
+  /**
+   * CAP-659 preview: parses the code and checks expiry exactly like the real
+   * run (same refusal codes), resolves the target org from a SILENT session
+   * only — never the interactive OAuth fallback, which would open a browser
+   * — and reports what WOULD change. Never calls co-decrypt (would consume
+   * the code's one server-side check) and never writes a key.
+   */
+  private async previewRedeem(code: string): Promise<void> {
+    const parsed = this.parseCodeOrExit(code);
+    const { orgId: targetOrgId, notAfter } = parsed;
+
+    if (notAfter <= Date.now()) {
+      console.error(`\n  This invite expired ${new Date(notAfter).toISOString()}.`);
+      console.error('  Ask the inviter for a fresh code.\n');
+      process.exit(1);
+    }
+
+    const authService = new AuthService(this.apiUrl, this.devMode);
+    const forTarget = await authService.authenticateSilent(targetOrgId);
+    const session = forTarget.success ? forTarget : await authService.authenticateSilent();
+    const landedOnTarget = session.success && session.organization_id === targetOrgId;
+
+    // Signing in for real (the interactive fallback the real run uses) is
+    // the one thing a dry run must never do — no browser, no new session —
+    // so an unresolved org is reported as a stop a flag can't answer either;
+    // rerunning `capy` once interactively settles it for every later run.
+    const unanswered: DryRunUnanswered[] = landedOnTarget
+      ? []
+      : [{ id: 'sign-in', flag: '(run `capy` once interactively first, then retry)' }];
+
+    const changes: DryRunChange[] = [
+      { where: 'local_file', action: 'update sync state to point at this org', target: targetOrgId, reversible: true },
+      ...(this.wouldDeleteStaleKeepLock(targetOrgId)
+        ? [{ where: 'local_file' as const, action: 'delete stale keep.lock', target: 'keep.lock', reversible: true }]
+        : []),
+      { where: 'capy_service', action: 'verify current membership (co-decrypt)', target: `org ${targetOrgId}`, reversible: true },
+      ...(landedOnTarget && session.user_id && !hasOrgKey(targetOrgId, session.user_id)
+        ? [
+            {
+              where: 'capy_service' as const,
+              action: "unwrap and store this org's master key locally",
+              target: `org ${targetOrgId}`,
+              reversible: true,
+            },
+          ]
+        : []),
+    ];
+
+    const result = dryRunOk('redeem', changes, unanswered);
+    printDryRunResultHuman(result);
+    process.exit(dryRunExitCode(result));
+  }
+
+  /** Same parse + exit-1-on-failure the real run does, wrapped so a preview can call it without duplicating the try/catch. */
+  private parseCodeOrExit(code: string): ReturnType<typeof parseRedeemCode> {
+    try {
+      return parseRedeemCode(code);
+    } catch (err: any) {
+      console.error(`Invalid redeem code: ${err.message}`);
+      process.exit(1);
+    }
+  }
+
+  /** Read-only: whether a keep.lock in cwd points at a different org than `targetOrgId` — same check `switchLocalContext` deletes on. */
+  private wouldDeleteStaleKeepLock(targetOrgId: string): boolean {
+    const keepPath = join(process.cwd(), 'keep.lock');
+    if (!existsSync(keepPath)) return false;
+    try {
+      const keepContent = JSON.parse(readFileSync(keepPath, 'utf-8'));
+      return keepContent.org_id !== targetOrgId;
+    } catch {
+      return true; // invalid JSON — the real run deletes it too
+    }
   }
 
   /**

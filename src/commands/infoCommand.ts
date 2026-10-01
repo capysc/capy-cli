@@ -1,6 +1,7 @@
 import { AuthService } from '../auth/authService';
 import { ProjectManager } from '../core/projectManager';
 import { ServiceClient } from '../service/serviceClient';
+import { AuthResult, ERROR_CODES } from '../types/index';
 
 const DIM = '\x1b[90m';
 const RESET = '\x1b[0m';
@@ -24,6 +25,41 @@ export class InfoCommand {
     this.devMode = devMode;
   }
 
+  /** Silent (this org, then any cached session) before falling back to interactive OAuth — only when a keep.lock is actually present to authenticate for. */
+  private async resolveAuthResult(
+    authService: AuthService,
+    organizationId: string | undefined,
+    hasKeep: boolean,
+  ): Promise<AuthResult> {
+    const forThisOrg = await authService.authenticateSilent(organizationId);
+    if (forThisOrg.success) return forThisOrg;
+    const anyCached = await authService.authenticateSilent();
+    if (anyCached.success) return anyCached;
+    if (hasKeep) return authService.authenticate(organizationId!);
+    return anyCached;
+  }
+
+  /** The caller's role in the active org, best effort — `—`/`null` on any failure or when there is nothing to look up yet. */
+  private async resolveRole(
+    activeOrgId: string | undefined,
+    authService: AuthService,
+    authResult: AuthResult,
+  ): Promise<{ roleLabel: string; roleSlug: string | null }> {
+    if (!(activeOrgId && authService.getToken() && authResult.user_id)) {
+      return { roleLabel: '—', roleSlug: null };
+    }
+    try {
+      const serviceClient = new ServiceClient(this.apiUrl, this.devMode);
+      serviceClient.setTokenProvider(() => authService.getValidToken());
+      const { members } = await serviceClient.listMembers(activeOrgId);
+      const me = members.find((m: any) => m.userId === authResult.user_id);
+      const slug = me?.role?.slug;
+      return slug ? { roleLabel: ROLE_LABELS[slug] || slug, roleSlug: slug } : { roleLabel: '—', roleSlug: null };
+    } catch {
+      return { roleLabel: '—', roleSlug: null };
+    }
+  }
+
   async execute(opts: { json?: boolean } = {}): Promise<void> {
     const pm = new ProjectManager();
     const projectState = await pm.detectProjectState();
@@ -34,12 +70,12 @@ export class InfoCommand {
     // belong to, etc. Fall through to a session-only view when there's no
     // keep.lock instead of forcing the user to init a project first.
     const authService = new AuthService(this.apiUrl, this.devMode, projectState.userId);
-    let authResult = await authService.authenticateSilent(projectState.organizationId);
-    if (!authResult.success) authResult = await authService.authenticateSilent();
-    if (!authResult.success && hasKeep) {
-      authResult = await authService.authenticate(projectState.organizationId!);
-    }
+    const authResult = await this.resolveAuthResult(authService, projectState.organizationId, hasKeep);
     if (!authResult.success) {
+      if (opts.json) {
+        console.log(JSON.stringify({ ok: false, code: ERROR_CODES.AUTH_FAILED, error: 'Not signed in.' }, null, 2));
+        process.exit(1);
+      }
       console.error(`Not signed in. Run ${B('capy')} to authenticate.`);
       process.exit(1);
     }
@@ -57,23 +93,7 @@ export class InfoCommand {
     const branch = projectState.activeBranch;
 
     // Resolve the user's role in the active org (best effort).
-    let roleLabel = '—';
-    let roleSlug: string | null = null;
-    if (activeOrgId && authService.getToken() && authResult.user_id) {
-      try {
-        const serviceClient = new ServiceClient(this.apiUrl, this.devMode);
-        serviceClient.setTokenProvider(() => authService.getValidToken());
-        const { members } = await serviceClient.listMembers(activeOrgId);
-        const me = members.find((m: any) => m.userId === authResult.user_id);
-        const slug = me?.role?.slug;
-        if (slug) {
-          roleLabel = ROLE_LABELS[slug] || slug;
-          roleSlug = slug;
-        }
-      } catch {
-        // leave as —
-      }
-    }
+    const { roleLabel, roleSlug } = await this.resolveRole(activeOrgId, authService, authResult);
 
     if (opts.json) {
       console.log(

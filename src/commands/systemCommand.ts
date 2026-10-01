@@ -16,6 +16,7 @@ import inquirer from 'inquirer';
 import { isInteractive, EXIT_NEEDS_INPUT } from '../ui/interactive';
 import { openSystemStore, assertValidConnectorName } from '../system/systemStore';
 import { CapyError, ERROR_CODES } from '../types/index';
+import { dryRunOk, dryRunExitCode, printDryRunResultHuman, printDryRunResultJson, type DryRunChange } from '../core/dryRun';
 
 export interface SystemCommandOpts {
   org?: string;
@@ -26,6 +27,7 @@ export interface SystemCommandOpts {
 
 export interface SystemRmOpts extends SystemCommandOpts {
   yes?: boolean;
+  dryRun?: boolean;
 }
 
 /** Pure JSON refusal on stdout — never on stderr, so `--json` output stays parseable. */
@@ -171,6 +173,43 @@ export async function systemRmCommand(name: string, opts: SystemRmOpts): Promise
 
   // Before any network call — see docs/org-system-store.md Proof 3.
   requireValidName(name, json);
+
+  // CAP-659 preview: never prompts — a dry run with no --yes reports the
+  // confirm itself as unanswered (exit 3) rather than asking, even on a
+  // real TTY. With --yes it opens the store (read-only: `listNames()`) to
+  // say what WOULD be removed, and never calls `store.remove()`.
+  if (opts.dryRun) {
+    if (!opts.yes) {
+      const result = dryRunOk('system rm', [], [{ id: 'confirm', flag: '-y, --yes' }]);
+      if (json) printDryRunResultJson(result);
+      else printDryRunResultHuman(result);
+      process.exit(dryRunExitCode(result));
+    }
+    // The `try` covers only the store read — never a call that itself exits
+    // (e.g. `process.exit`), so a mocked exit in a test can't be caught here
+    // and mistaken for a store failure.
+    const result = await (async (): Promise<ReturnType<typeof dryRunOk>> => {
+      try {
+        const store = await openSystemStore({ orgId: opts.org, apiUrl: opts.apiUrl, devMode: opts.devMode });
+        const exists = store.listNames().some((e) => e.name === name);
+        const changes: DryRunChange[] = [
+          {
+            where: 'capy_service',
+            action: 'remove system store credential',
+            target: exists ? name : `${name} (not currently set)`,
+            reversible: false,
+          },
+        ];
+        return dryRunOk('system rm', changes, []);
+      } catch (err) {
+        refuseError(err, json);
+      }
+    })();
+    if (json) printDryRunResultJson(result);
+    else printDryRunResultHuman(result);
+    process.exit(dryRunExitCode(result));
+  }
+
   if (!opts.yes) {
     requireTty(json, `\`capy system rm\` needs confirmation — pass --yes or run this in a terminal.`); // COPY-FLAG
   }

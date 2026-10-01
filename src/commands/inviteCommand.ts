@@ -24,6 +24,7 @@ import {
 } from '../core/invitePlan';
 import type { InviteTeammateStop } from '../ui/screens/contract';
 import type { WebInviteParams } from '../ui/memberScreens';
+import { dryRunOk, dryRunExitCode, printDryRunResultHuman, printDryRunResultJson, type DryRunChange, type DryRunUnanswered } from '../core/dryRun';
 
 const ROLES = [
   { name: 'Member', value: 'member' },
@@ -54,6 +55,8 @@ export interface InviteOpts {
    * through — the same seam `capy checkout` is waiting on.
    */
   web?: boolean;
+  /** CAP-659: preview the role/projects/expiry route only — never mints a code. */
+  dryRun?: boolean;
 }
 
 /** Parse "30s"/"10m"/"2h"/"12h" or bare seconds → ms. Exits on invalid input. */
@@ -215,11 +218,13 @@ export class InviteCommand {
         process.exit(1);
       }
 
-      const masterKey = await this.unwrapMasterKeyOrExit(orgId, userId, serviceClient);
-
       // If this email already belongs to an org member, reuse their role and
       // project assignments instead of prompting. Re-inviting an existing
       // member is how admins re-issue a wrapped key (e.g., new machine).
+      // Read BEFORE unwrapping the master key — the two reads are independent,
+      // and a dry run needs `existingMember` for its route but must never
+      // reach `unwrapMasterKeyOrExit`, which can re-wrap (write) a legacy
+      // local key blob as a side effect.
       const { members } = await serviceClient.listMemberDetails(orgId);
       const existingMember = members.find(
         (m) => m.email && m.email.toLowerCase() === email.toLowerCase(),
@@ -236,6 +241,10 @@ export class InviteCommand {
       // whether to open a browser at all, and what `--json` prints all come off
       // one call. `canAskExpiry` is `--web`: `resolveNotAfter` never prompts, so
       // a terminal run's expiry is settled before the command starts.
+      //
+      // A DRY RUN forces `canAskExpiry: false` — it never opens a browser, so
+      // the expiry stop can never be answered there either; it falls back to
+      // the same env/default the real terminal path would use.
       const inheritedRole = existingMember && !opts.role ? existingMember.role : undefined;
       const inheritedProjectNames =
         existingMember && !opts.role ? (existingMember.projects || []).map((p) => p.name) : [];
@@ -250,9 +259,26 @@ export class InviteCommand {
         expiry: settledExpiry(opts),
         envTtl: envTtl(),
         defaultTtl: envTtl() ?? '12h',
-        canAskExpiry: opts.web === true,
+        canAskExpiry: !opts.dryRun && opts.web === true,
       };
       const plan = invitePlan(planInput);
+
+      if (opts.dryRun) {
+        // Same check `resolveInviteeRole` would make on the real run — this
+        // branch is reached BEFORE that function runs, so it would otherwise
+        // never fire under `--dry-run`, and an invalid `--role` would preview
+        // cleanly instead of refusing like the real run does.
+        if (opts.role && !invitable.includes(opts.role as typeof ROLES[number]['value'])) {
+          console.error(
+            `\n  Your role (${me.role}) can't grant "${opts.role}". Allowed: ${invitable.join(', ')}.\n`,
+          );
+          process.exit(1);
+        }
+        this.previewInvite(email, plan, reissuing, opts.json === true);
+        return;
+      }
+
+      const masterKey = await this.unwrapMasterKeyOrExit(orgId, userId, serviceClient);
 
       /** Everything the browser needs, gathered once so both pages share it. */
       const webParams = opts.web
@@ -442,6 +468,50 @@ export class InviteCommand {
       const { displayErrorAndExit } = await import('../ui/errorScreen');
       await displayErrorAndExit(error);
     }
+  }
+
+  /**
+   * CAP-659 preview: the route `invitePlan` already computed from argv + any
+   * existing membership — role, projects, expiry — with no code minted, no
+   * master key unwrapped, no browser opened. An unsettled stop (the plan's
+   * `unansweredInviteStops`) is reported rather than asked, same as the
+   * real run would have to ask it; everything else is `done` and shown with
+   * what settled it.
+   */
+  private previewInvite(email: string, plan: InviteTeammateStop[], reissuing: boolean, json: boolean): void {
+    // `process.exitCode`, never `process.exit` — this runs inside `execute()`'s
+    // own try, whose catch routes any thrown error through
+    // `displayErrorAndExit` (which always ends in its OWN `process.exit(1)`,
+    // overwriting whatever code a dry run meant to report). Setting the code
+    // and returning normally is also the correct idiom in production: Node
+    // delivers it once the event loop drains, same as every read-only command
+    // that ends by just returning.
+    const stopValue = (id: string): string | undefined => plan.find((s) => s.id === id && s.state === 'done')?.answer;
+    const descriptor = [
+      stopValue('role') ? `role=${stopValue('role')}` : undefined,
+      plan.find((s) => s.id === 'projects')?.state === 'skipped'
+        ? 'projects=all'
+        : stopValue('projects')
+          ? `projects=${stopValue('projects')}`
+          : undefined,
+      stopValue('expiry') ? `expires_in=${stopValue('expiry')}` : undefined,
+    ].filter(Boolean).join(', ');
+    const changes: DryRunChange[] = [
+      {
+        where: 'capy_service',
+        action: reissuing ? 'reissue invite' : 'create invite',
+        target: `${email}${descriptor ? ` (${descriptor})` : ''}`,
+        reversible: true,
+      },
+    ];
+    const unanswered: DryRunUnanswered[] = unansweredInviteStops(plan).map((id) => ({
+      id,
+      flag: id === 'role' ? '--role <role>' : id === 'projects' ? '--project <id|name>' : '--ttl <duration>',
+    }));
+    const result = dryRunOk('invite', changes, unanswered);
+    if (json) printDryRunResultJson(result);
+    else printDryRunResultHuman(result);
+    process.exitCode = dryRunExitCode(result);
   }
 
   /** Reads and unwraps the org master key (double-wrapped: KMS outer + K_local inner). Exits on failure. */
