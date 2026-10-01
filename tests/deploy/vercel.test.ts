@@ -141,6 +141,33 @@ describe('vercel — preflight', () => {
     const r = await vercelAdapter.preflight(baseTarget(), { cwd: ROOT });
     expect(r.ok).toBe(true);
   });
+
+  // CAP-659 Phase 2: under --dry-run, an unlinked project must never be
+  // linked for real — that write (`.vercel/project.json`) and the
+  // interactive `vercel link` wizard are both real side effects a preview
+  // must not perform. Reported as a warning instead, and preflight still
+  // passes (nothing here is a refusal — a real run just has one more thing
+  // to do first).
+  test('--dry-run on an unlinked project: passes, warns, never writes .vercel/project.json', async () => {
+    const dir = join(ROOT, 'web');
+    writePkg(dir, { next: '^16.0.0' });
+    // no link() — missing .vercel/project.json, and no VERCEL_PROJECT_ID/
+    // VERCEL_ORG_ID env either, so the real (non-dry-run) path above would
+    // either hard-fail (non-interactive) or run the linking flow.
+    const r = await vercelAdapter.preflight(baseTarget(), { cwd: ROOT, dryRun: true });
+    expect(r.ok).toBe(true);
+    expect(r.warnings?.some((w) => w.code === 'VERCEL_NOT_LINKED')).toBe(true);
+    expect(existsSync(join(dir, '.vercel', 'project.json'))).toBe(false);
+  });
+
+  test('--dry-run on an ALREADY-linked project: passes with no warning (nothing to report)', async () => {
+    const dir = join(ROOT, 'web');
+    writePkg(dir, { next: '^16.0.0' });
+    link(dir);
+    const r = await vercelAdapter.preflight(baseTarget(), { cwd: ROOT, dryRun: true });
+    expect(r.ok).toBe(true);
+    expect(r.warnings ?? []).toEqual([]);
+  });
 });
 
 describe('vercel — deploy', () => {

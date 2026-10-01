@@ -36,6 +36,7 @@ import { basename, join } from 'path';
 import inquirer from 'inquirer';
 import { LIST_THEME } from '../../ui/promptStyle';
 import {
+  AdapterCallContext,
   DeployAdapter,
   DeployContext,
   DeployResult,
@@ -398,7 +399,7 @@ export const vercelAdapter: DeployAdapter = {
     };
   },
 
-  async preflight(config: TargetConfig, ctx: { cwd: string }): Promise<PreflightResult> {
+  async preflight(config: TargetConfig, ctx: { cwd: string } & AdapterCallContext): Promise<PreflightResult> {
     // CI-only: no vendor checks at all (no vercel binary, project linkage, or
     // login) — the build runs in the user's CI when the deploy PR merges. We
     // only validate that the config is coherent and there's something to ship.
@@ -449,6 +450,23 @@ export const vercelAdapter: DeployAdapter = {
     const hasEnvIds =
       !!process.env.VERCEL_PROJECT_ID && !!process.env.VERCEL_ORG_ID;
     if (!linked.projectId && !hasEnvIds) {
+      if (ctx.dryRun) {
+        // CAP-659: a dry run must never WRITE `.vercel/project.json` or spawn
+        // the interactive `vercel link` wizard — both are real local side
+        // effects, not a check. Report the link as a change a real deploy
+        // would make instead of making it here.
+        return {
+          ok: true,
+          warnings: [
+            {
+              code: 'VERCEL_NOT_LINKED',
+              names: [],
+              // COPY-FLAG
+              message: `${opts.projectDir} is not linked to a Vercel project yet — a real deploy would run \`vercel link\` (writes .vercel/project.json) before pushing vars.`,
+            },
+          ],
+        };
+      }
       const interactive = !!process.stdin.isTTY && !!process.stdout.isTTY;
       if (!interactive) {
         return {
