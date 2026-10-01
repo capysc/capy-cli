@@ -7,6 +7,7 @@ import { wrapAndSaveMasterKey, hasOrgKey } from '../crypto/keyResolver';
 import { FileManager } from '../files/fileManager';
 import { isMembershipRevokedError } from '../errors/membershipRevoked';
 import { cleanupOrgData } from '../cleanup/orgCleanup';
+import { withAuthNeedsTtyExit } from '../auth/authGate';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -47,8 +48,9 @@ export class RedeemCommand {
     const authService = new AuthService(this.apiUrl, this.devMode);
     let authResult = await authService.authenticateSilent(targetOrgId);
     if (!authResult.success) {
-      // No cached session — need interactive auth
-      authResult = await authService.authenticate(targetOrgId);
+      // No cached session — need interactive auth. No --json on `redeem` —
+      // always a stderr refusal.
+      authResult = await withAuthNeedsTtyExit(() => authService.authenticate(targetOrgId), false);
       if (!authResult.success) {
         console.error(`Authentication failed. You need a ${B('Capy')} account to redeem an invite.`);
         process.exit(1);
@@ -64,7 +66,7 @@ export class RedeemCommand {
       const switched = await authService.authenticateSilent(targetOrgId);
       if (!switched.success) {
         // Silent refresh failed — try full OAuth scoped to the target org
-        const oauthResult = await authService.authenticate(targetOrgId);
+        const oauthResult = await withAuthNeedsTtyExit(() => authService.authenticate(targetOrgId), false);
         if (!oauthResult.success) {
           console.error('Failed to authenticate for the invited organization. You may not have access.');
           process.exit(1);

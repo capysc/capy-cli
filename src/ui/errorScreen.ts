@@ -1,5 +1,7 @@
 import { CapyError, ERROR_CODES } from '../types/index';
 import { isMembershipRevokedError } from '../errors/membershipRevoked';
+import { isAuthNeedsTty, AUTH_NEEDS_TTY_HINT } from '../auth/authGate';
+import { EXIT_NEEDS_INPUT } from './interactive';
 
 const grey = (s: string) => `\x1b[90m${s}\x1b[0m`;
 const bold = (s: string) => `\x1b[1m${s}\x1b[0m`;
@@ -98,6 +100,18 @@ export async function displayErrorAndExit(
 ): Promise<never> {
   if (error?.name === 'ExitPromptError') {
     process.exit(0);
+  }
+
+  // CAP-520/CAP-659: `AuthService#authenticate()` refused to open a browser
+  // non-interactively. This is the ONE catch-all most commands' top-level
+  // try/catch funnels every error through, so it is the backstop for every
+  // caller that doesn't check `isAuthNeedsTty()` itself — exit 3 (not the
+  // generic 1 below), hint on stderr only, nothing on stdout. A command that
+  // also supports `--json` checks this BEFORE reaching here (see
+  // `withAuthNeedsTtyExit`), so its JSON refusal still lands on stdout.
+  if (isAuthNeedsTty(error)) {
+    console.error(AUTH_NEEDS_TTY_HINT);
+    process.exit(EXIT_NEEDS_INPUT);
   }
 
   const output = renderError(error, context);

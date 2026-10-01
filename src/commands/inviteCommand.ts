@@ -11,6 +11,7 @@ import {
   MAX_INVITE_TTL_MS,
 } from '../crypto/inviteCrypto';
 import { isInteractive, refuseNonInteractive } from '../ui/interactive';
+import { withAuthNeedsTtyExit } from '../auth/authGate';
 import { excludeSystemProject } from '../system/reservedProjectName';
 import {
   invitePlan,
@@ -187,7 +188,10 @@ export class InviteCommand {
   async execute(email: string, opts: InviteOpts = {}): Promise<void> {
     const interactive = isInteractive(opts.nonTty);
     try {
-      const { orgId, userId, userEmail, authService, serviceClient } = await resolveOrgContext(this.apiUrl, this.devMode);
+      const { orgId, userId, userEmail, authService, serviceClient } = await withAuthNeedsTtyExit(
+        () => resolveOrgContext(this.apiUrl, this.devMode, opts.nonTty),
+        opts.json === true,
+      );
 
       // Check if inviting yourself or an existing member
       if (userEmail && userEmail.toLowerCase() === email.toLowerCase()) {

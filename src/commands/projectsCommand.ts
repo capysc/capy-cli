@@ -3,6 +3,7 @@ import { resolveOrgContext } from '../core/orgContext';
 import { excludeSystemProject } from '../system/reservedProjectName';
 import { Spinner } from '../ui/spinner';
 import { CapyError, ERROR_CODES } from '../types/index';
+import { withAuthNeedsTtyExit } from '../auth/authGate';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 const DIM = '\x1b[90m';
@@ -49,7 +50,10 @@ export class ProjectsCommand {
     spinner?.start();
 
     try {
-      const { serviceClient } = await resolveOrgContext(this.apiUrl, this.devMode);
+      const { serviceClient } = await withAuthNeedsTtyExit(
+        () => resolveOrgContext(this.apiUrl, this.devMode),
+        json,
+      );
       const projects = await this.loadProjectSummaries(serviceClient);
 
       spinner?.succeed(`${projects.length} project${projects.length !== 1 ? 's' : ''}`);

@@ -96,15 +96,18 @@ export class OAuthServer {
 
   async startAuthFlow(authUrl: string): Promise<string> {
     return new Promise((resolve, reject) => {
-      console.log(`🔐 Starting OAuth authentication...`);
+      // This whole block is prose for a human watching the terminal, never
+      // data for a caller to parse — stderr, so `--json` stdout stays pure
+      // and so this can never be mistaken for machine output (CAP-520/CAP-659).
+      console.error(`🔐 Starting OAuth authentication...`);
 
       // Always print the URL up front so it's available even if the browser
       // never opens (no TTY, headless, --web driven through the MCP, or `open`
       // silently failing). The auto-open below is a best-effort convenience.
-      console.log('');
-      console.log(`  If the browser doesn't open, visit:`);
-      console.log(`  ${authUrl}`);
-      console.log('');
+      console.error('');
+      console.error(`  If the browser doesn't open, visit:`);
+      console.error(`  ${authUrl}`);
+      console.error('');
 
       // `handoff`, and it is the ONLY handoff in the CLI: sign-in is the one
       // page we do not serve. The person needs the address bar to check where
@@ -114,7 +117,7 @@ export class OAuthServer {
       // behind CAPY_WEB_NO_OPEN for the first time; before, a suite or CI run
       // that reached authentication opened the developer's own browser.
       void openScreen(authUrl, { kind: 'handoff' }).then((plan) => {
-        if (plan.via !== 'suppressed') console.log(`✓ Opened browser for authentication`);
+        if (plan.via !== 'suppressed') console.error(`✓ Opened browser for authentication`);
       });
 
       const timeout = setTimeout(() => {

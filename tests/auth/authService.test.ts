@@ -43,7 +43,7 @@ afterAll(() => { mock.restore(); });
 import { existsSync, unlinkSync } from 'fs';
 import { AuthService } from '../../src/auth/authService';
 import { OAuthServer } from '../../src/auth/oauthServer';
-import { SessionStore } from '../../src/types/index';
+import { SessionStore, ERROR_CODES } from '../../src/types/index';
 
 const mockExistsSync = existsSync as any;
 const MockOAuthServer = OAuthServer as any;
@@ -97,6 +97,7 @@ function makeSession(overrides: Partial<SessionStore> = {}): SessionStore {
 
 describe('AuthService', () => {
   let originalEnv: NodeJS.ProcessEnv;
+  let originalStdinIsTTY: boolean | undefined;
 
   beforeEach(() => {
     originalEnv = { ...process.env };
@@ -107,9 +108,18 @@ describe('AuthService', () => {
     mockGetAuthSessionPath.mockReturnValue('/home/test/.capy/auth/session.json');
     mockReadAuthSession.mockReturnValue(null);
     mockExistsSync.mockReturnValue(false);
+
+    // Every test in this file above predates the CAP-520/CAP-659 non-interactive
+    // refusal and exercises `authenticate()`'s OAuth path assuming a human is
+    // watching — `bun test`'s own stdin is never a TTY, so without this they'd
+    // all hit the new `AUTH_NEEDS_TTY` throw instead of the OAuth mock. The
+    // refusal itself gets its own dedicated tests below, which override this.
+    originalStdinIsTTY = process.stdin.isTTY;
+    (process.stdin as any).isTTY = true;
   });
 
   afterEach(() => {
+    (process.stdin as any).isTTY = originalStdinIsTTY;
     process.env = originalEnv;
   });
 
@@ -774,6 +784,72 @@ describe('AuthService', () => {
 
       expect(result.success).toBe(true);
       expect(service.getLastRefreshFailure()).toBeNull();
+    });
+  });
+
+  // ── Non-interactive auth gate (CAP-520 / CAP-659) ───────────────────────
+  // `authenticate()` is the one choke point every command falls through to
+  // for interactive sign-in. These tests run with the file's own TTY shim
+  // turned back off (or overridden by `nonTty`), so they exercise the real
+  // non-interactive path rather than the simulated-TTY one every test above
+  // uses.
+
+  describe('authenticate — AUTH_NEEDS_TTY', () => {
+    test('refuses interactive OAuth when stdin is not a TTY, and never starts the OAuth server', async () => {
+      (process.stdin as any).isTTY = false;
+      const service = new AuthService();
+
+      await expect(service.authenticate('org-123')).rejects.toMatchObject({
+        name: 'CapyError',
+        code: ERROR_CODES.AUTH_NEEDS_TTY,
+      });
+
+      // No browser, no local callback server — the whole point of the gate.
+      expect(mockOAuthServerConstructor).not.toHaveBeenCalled();
+    });
+
+    test('`nonTty: true` forces the refusal even when stdin IS a TTY', async () => {
+      (process.stdin as any).isTTY = true;
+      const service = new AuthService();
+
+      await expect(service.authenticate('org-123', true)).rejects.toMatchObject({
+        code: ERROR_CODES.AUTH_NEEDS_TTY,
+      });
+      expect(mockOAuthServerConstructor).not.toHaveBeenCalled();
+    });
+
+    test('still tries silent refresh before refusing — a cached, refreshable session succeeds headless, no OAuth', async () => {
+      (process.stdin as any).isTTY = false;
+      const session = makeSession({
+        sessions: {
+          'org-123': { access_token: fakeJwt({ org_id: 'workos-org-123' }), expires_at: Date.now() - 1000 },
+        },
+      });
+      mockReadAuthSession.mockReturnValue(session);
+      mockFetch.mockResolvedValueOnce(mockFetchResponse({
+        access_token: fakeJwt({ org_id: 'workos-org-123' }),
+        refresh_token: 'new-refresh',
+        expires_in: 3600,
+      }));
+
+      const service = new AuthService(undefined, false, 'user-456');
+      const result = await service.authenticate('org-123');
+
+      expect(result.success).toBe(true);
+      expect(result._auth_method).toBe('refreshed');
+      expect(mockOAuthServerConstructor).not.toHaveBeenCalled();
+    });
+
+    test('a still-valid cached session succeeds headless, no OAuth', async () => {
+      (process.stdin as any).isTTY = false;
+      mockReadAuthSession.mockReturnValue(makeSession());
+
+      const service = new AuthService(undefined, false, 'user-456');
+      const result = await service.authenticate('org-123');
+
+      expect(result.success).toBe(true);
+      expect(result._auth_method).toBe('cached');
+      expect(mockOAuthServerConstructor).not.toHaveBeenCalled();
     });
   });
 });

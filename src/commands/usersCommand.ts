@@ -5,6 +5,7 @@ import { InteractiveTable } from '../ui/interactiveTable';
 import { Spinner } from '../ui/spinner';
 import { excludeSystemProject } from '../system/reservedProjectName';
 import { AuthResult } from '../types/index';
+import { withAuthNeedsTtyExit } from '../auth/authGate';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -41,7 +42,10 @@ export class UsersCommand {
     serviceClient.setTokenProvider(() => authService.getValidToken());
     let authResult = await authService.authenticateSilent(orgId);
     if (!authResult.success) authResult = await authService.authenticateSilent();
-    if (!authResult.success) authResult = await authService.authenticate(orgId);
+    if (!authResult.success) {
+      // No --json on `grant-branch`/`revoke-branch` — always a stderr refusal.
+      authResult = await withAuthNeedsTtyExit(() => authService.authenticate(orgId), false);
+    }
     if (!authResult.success) {
       console.error('Authentication failed');
       process.exit(1);
@@ -98,12 +102,12 @@ export class UsersCommand {
   }
 
   /** Silent (this org, then any cached session) before falling back to interactive OAuth. Exits on failure. */
-  private async authenticateForUsersOrExit(authService: AuthService, orgId: string): Promise<AuthResult> {
+  private async authenticateForUsersOrExit(authService: AuthService, orgId: string, json: boolean): Promise<AuthResult> {
     const forThisOrg = await authService.authenticateSilent(orgId);
     if (forThisOrg.success) return forThisOrg;
     const anyCached = await authService.authenticateSilent();
     if (anyCached.success) return anyCached;
-    const interactive = await authService.authenticate(orgId);
+    const interactive = await withAuthNeedsTtyExit(() => authService.authenticate(orgId), json);
     if (interactive.success) return interactive;
     console.error('Authentication failed');
     process.exit(1);
@@ -147,7 +151,7 @@ export class UsersCommand {
     const authService = new AuthService(this.apiUrl, this.devMode, projectState.userId);
     const serviceClient = new ServiceClient(this.apiUrl, this.devMode);
     serviceClient.setTokenProvider(() => authService.getValidToken());
-    await this.authenticateForUsersOrExit(authService, orgId);
+    await this.authenticateForUsersOrExit(authService, orgId, opts.json === true);
 
     // Fetch member details. In --json mode emit NO progress at all so stdout stays
     // pure JSON even on a TTY (the Spinner already routes to stderr when piped; this

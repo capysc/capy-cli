@@ -15,6 +15,7 @@ import { deriveResourceId } from '../crypto/resourceId';
 import { setSyncKeepHash, KeepFile } from '../types/index';
 import { EditSaveRecord } from '../deploy/keepGate';
 import { concludeEditSession } from './editExitFlow';
+import { withAuthNeedsTtyExit } from '../auth/authGate';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -108,7 +109,10 @@ export class EditCommand {
       serviceClient.setTokenProvider(() => authService!.getValidToken());
       let authResult = await authService.authenticateSilent(orgId);
       if (!authResult.success) authResult = await authService.authenticateSilent();
-      if (!authResult.success) authResult = await authService.authenticate(orgId);
+      if (!authResult.success) {
+        // `edit` has no --json (it's a TUI) — always a stderr refusal.
+        authResult = await withAuthNeedsTtyExit(() => authService!.authenticate(orgId), false);
+      }
       if (!authResult.success || !authResult.user_id) {
         console.error('Authentication failed');
         process.exit(1);

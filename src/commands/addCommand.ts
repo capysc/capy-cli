@@ -2,6 +2,7 @@ import { CapyError, ERROR_CODES } from '../types';
 import { resolveContext, writeAndSync } from './connectors/shared';
 import { runWebIntake, parseVars, type SecretPair } from '../ui/secretIntakeScreen';
 import type { IntakeVar } from '../ui/screens/contract';
+import { withAuthNeedsTtyExit } from '../auth/authGate';
 
 // The intake moved to `ui/secretIntakeScreen.ts` with the compiled screen it
 // now serves. Re-exported here because this is where the flow is entered from
@@ -64,7 +65,23 @@ export class AddCommand {
       }
     }
 
-    const ctx = await resolveContext({ devMode: this.devMode });
+    // Moved ahead of `resolveContext()` (CAP-520/CAP-659 audit): non-interactive
+    // add always needs --web, regardless of session state — checking it only
+    // after authenticating meant a non-tty, session-less run would reach
+    // interactive OAuth (hang/open a browser) before ever getting to this
+    // refusal. The later, identical check in the non-web branch below is now
+    // unreachable dead code and has been removed.
+    if (opts.nonTty && !opts.web) {
+      throw new CapyError(
+        'Non-interactive add requires --web (browser intake). Re-run with --web.',
+        ERROR_CODES.INVALID_FORMAT,
+      );
+    }
+
+    const ctx = await withAuthNeedsTtyExit(
+      () => resolveContext({ devMode: this.devMode, nonTty: opts.nonTty }),
+      false, // no --json on `add`
+    );
     const push = opts.noPush !== true;
 
     const existing = names.filter((n) => n in ctx.localPlaintext);
@@ -129,12 +146,9 @@ export class AddCommand {
       }
       savedNames = captured;
     } else {
-      if (opts.nonTty) {
-        throw new CapyError(
-          'Non-interactive add requires --web (browser intake). Re-run with --web.',
-          ERROR_CODES.INVALID_FORMAT,
-        );
-      }
+      // `opts.nonTty && !opts.web` was already refused above, before
+      // `resolveContext()` — this branch only runs with `!opts.web`, so
+      // reaching here means `opts.nonTty` is falsy.
       const inquirer = (await import('inquirer')).default;
       const pairs: SecretPair[] = [];
       for (const name of names) {

@@ -14,6 +14,7 @@ import { CapyError, ConnectorMetadata, ERROR_CODES, KeepFile } from '../types/in
 import { TargetConfig } from '../deploy/adapter';
 import { staleTargets } from '../deploy/targetsGate';
 import { isInteractive, refuseNonInteractive } from '../ui/interactive';
+import { withAuthNeedsTtyExit } from '../auth/authGate';
 import { confirmLiveActionInBrowser } from '../ui/connectScreens';
 import type {
   RotateAdvisory,
@@ -563,7 +564,11 @@ export class RotateCommand {
       return { succeeded: [], keys: [...keysAfterLiveFilter], stopped: true };
     }
 
-    const ctx = await resolveContext({ devMode: this.devMode });
+    // No --json on `rotate` — a refusal always goes to stderr.
+    const ctx = await withAuthNeedsTtyExit(
+      () => resolveContext({ devMode: this.devMode, nonTty: opts.nonTty }),
+      false,
+    );
 
     const result = await this.rotateSequentially(toRotate, ctx, opts, web, {
       succeeded: [],

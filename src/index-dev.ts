@@ -12,6 +12,7 @@ import { CliOptions } from './types/index';
 import { version as CLI_VERSION } from '../package.json';
 import { setWebMode } from './ui/webMode';
 import { ACCENT } from './ui/colors';
+import { withAuthNeedsTtyExit } from './auth/authGate';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -152,7 +153,16 @@ program
     const authService = new AuthService(undefined, true, projectState.userId);
     const serviceClient = new ServiceClient(undefined, true);
     serviceClient.setTokenProvider(() => authService.getValidToken());
-    const authResult = await authService.authenticate(projectState.organizationId);
+    // Silent first, same as every other command — see index.ts's `branch`
+    // for why (CAP-520/CAP-659).
+    let authResult = await authService.authenticateSilent(projectState.organizationId);
+    if (!authResult.success) authResult = await authService.authenticateSilent();
+    if (!authResult.success) {
+      authResult = await withAuthNeedsTtyExit(
+        () => authService.authenticate(projectState.organizationId),
+        options.json === true,
+      );
+    }
     if (!authResult.success) {
       console.error('Authentication failed');
       process.exit(1);

@@ -2,6 +2,7 @@ import { SecretIndexRow, SecretIndexSkipped } from '../service/serviceClient';
 import { resolveOrgContext } from '../core/orgContext';
 import { Spinner } from '../ui/spinner';
 import { CapyError, ERROR_CODES } from '../types/index';
+import { withAuthNeedsTtyExit } from '../auth/authGate';
 
 export interface SecretsOpts {
   json?: boolean;
@@ -67,7 +68,10 @@ export class SecretsCommand {
     spinner?.start();
 
     try {
-      const { orgId, userId, serviceClient } = await resolveOrgContext(this.apiUrl, this.devMode);
+      const { orgId, userId, serviceClient } = await withAuthNeedsTtyExit(
+        () => resolveOrgContext(this.apiUrl, this.devMode),
+        emitJson,
+      );
       const index = await serviceClient.getSecretIndex(orgId);
       const rows = this.filterRows(index.rows, opts);
 

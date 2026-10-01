@@ -46,7 +46,12 @@ function refuse(json: boolean, code: string, message: string, exitCode: number):
 }
 
 function exitCodeFor(code: string): number {
-  return code === ERROR_CODES.SYSTEM_STORE_NEEDS_TTY ? EXIT_NEEDS_INPUT : 1;
+  // SYSTEM_STORE_NEEDS_TTY is this command's own "needs a human" refusal;
+  // AUTH_NEEDS_TTY (CAP-520/CAP-659) is the auth layer's — both mean the
+  // same thing to a caller (exit 3, try again with a terminal or --yes).
+  return code === ERROR_CODES.SYSTEM_STORE_NEEDS_TTY || code === ERROR_CODES.AUTH_NEEDS_TTY
+    ? EXIT_NEEDS_INPUT
+    : 1;
 }
 
 /** Every refusal a store operation can throw, coded and routed to the right stream. */

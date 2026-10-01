@@ -1,4 +1,5 @@
 import { resolveOrgContext } from '../core/orgContext';
+import { withAuthNeedsTtyExit } from '../auth/authGate';
 
 export interface KickOpts {
   /**
@@ -23,7 +24,11 @@ export class KickCommand {
   }
 
   async execute(email: string, opts: KickOpts = {}): Promise<void> {
-    const { orgId, authService, serviceClient } = await resolveOrgContext(this.apiUrl, this.devMode);
+    // No --json flag on `kick` — a refusal always goes to stderr.
+    const { orgId, authService, serviceClient } = await withAuthNeedsTtyExit(
+      () => resolveOrgContext(this.apiUrl, this.devMode),
+      false,
+    );
 
     // Find the membership by email
     let membershipId: string;

@@ -6,6 +6,7 @@ import { OAuthServer } from './oauthServer';
 import { saveAuthSession, readAuthSession, getAuthSessionPath, getGlobalCapyDir, consumeForceLoginMarker } from '../config/globalConfig';
 import { resolveActiveUrl } from '../config/profileConfig';
 import { debug } from '../ui/debug';
+import { isInteractive } from '../ui/interactive';
 
 export class HttpStatusError extends Error {
   status: number;
@@ -167,7 +168,23 @@ export class AuthService {
     this.loadSession(); // Reload from the user-scoped file
   }
 
-  async authenticate(organizationId?: string): Promise<AuthResult> {
+  /**
+   * Full auth: cached/refreshed session if one works, else interactive
+   * OAuth (or, in dev, test password auth).
+   *
+   * `nonTty` forces the non-interactive refusal below even on a real TTY —
+   * callers with a `--non-tty` flag thread it through so the flag always
+   * wins. Without it, the refusal still fires whenever `process.stdin` isn't
+   * a TTY (see `isInteractive`), which is the actual CAP-520/CAP-659 bug:
+   * every caller used to fall through to `startOAuthFlow()` unconditionally,
+   * opening a browser and blocking on its local callback server for up to 5
+   * minutes with no terminal to show it on. This is the ONE place that
+   * decision is made — every command that can reach interactive auth goes
+   * through this method (directly, or via `resolveContext()` /
+   * `resolveOrgContext()`), so the gate can't be bypassed by adding a new
+   * caller that forgets to check `isInteractive()` itself.
+   */
+  async authenticate(organizationId?: string, nonTty?: boolean): Promise<AuthResult> {
     try {
       // If we have a session and a specific org is requested, try to use/refresh it
       if (this.session && organizationId) {
@@ -207,9 +224,27 @@ export class AuthService {
       const pwResult = await this.tryPasswordAuth(organizationId);
       if (pwResult) return pwResult;
 
+      // Nothing cached/refreshable worked. The only thing left is interactive
+      // OAuth — a browser window plus a local callback server that blocks for
+      // up to 5 minutes. Refuse instead of starting it when there's no human
+      // to show it to. See this method's own doc.
+      if (!isInteractive(nonTty)) {
+        throw new CapyError(
+          'Sign-in requires a browser and a terminal. Run `capy` in a terminal to sign in.', // COPY-FLAG
+          ERROR_CODES.AUTH_NEEDS_TTY,
+        );
+      }
+
       // Full OAuth flow
       return await this.startOAuthFlow(organizationId);
     } catch (error: any) {
+      // AUTH_NEEDS_TTY is a decision, not a failed attempt — every caller
+      // needs to tell it apart from an ordinary auth failure (coded exit 3
+      // vs. a generic message), so it is rethrown rather than flattened into
+      // the same `{success:false}` shape as everything else below.
+      if (error instanceof CapyError && error.code === ERROR_CODES.AUTH_NEEDS_TTY) {
+        throw error;
+      }
       return {
         success: false,
         error: error.message || 'Authentication failed'

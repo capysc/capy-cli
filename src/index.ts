@@ -9,6 +9,7 @@ import { assertNotLocalOnly } from './core/localGate';
 import { version as CLI_VERSION } from '../package.json';
 import { setWebMode } from './ui/webMode';
 import { ACCENT } from './ui/colors';
+import { withAuthNeedsTtyExit } from './auth/authGate';
 
 // Prod talks to api.capy.sc and ~/.capy, full stop. Strip the environment's
 // attempts to move it before anything can read them — see config/prodPins.ts
@@ -175,7 +176,19 @@ program
     const authService = new AuthService(undefined, false, projectState.userId);
     const serviceClient = new ServiceClient();
     serviceClient.setTokenProvider(() => authService.getValidToken());
-    const authResult = await authService.authenticate(projectState.organizationId);
+    // Silent first (this org, then any cached session) before the
+    // interactive fallback — same pattern every other command uses, and the
+    // CAP-520/CAP-659 gate inside `authenticate()` means that fallback
+    // refuses with a coded exit instead of opening a browser when there's
+    // no terminal to show it on.
+    let authResult = await authService.authenticateSilent(projectState.organizationId);
+    if (!authResult.success) authResult = await authService.authenticateSilent();
+    if (!authResult.success) {
+      authResult = await withAuthNeedsTtyExit(
+        () => authService.authenticate(projectState.organizationId),
+        options.json === true,
+      );
+    }
     if (!authResult.success) {
       console.error('Authentication failed');
       process.exit(1);

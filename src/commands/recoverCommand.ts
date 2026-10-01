@@ -13,6 +13,8 @@ import {
   CURRENT_KDF_VERSION,
 } from '../crypto/keyManager';
 import { excludeSystemProject } from '../system/reservedProjectName';
+import { exitAuthNeedsTty } from '../auth/authGate';
+import { isInteractive } from '../ui/interactive';
 
 /** A piece of this org's ciphertext, and a way to test a key against it. */
 interface CiphertextOracle {
@@ -177,6 +179,13 @@ export class RecoverCommand {
 
     let authResult = await authService.authenticateSilent();
     if (!authResult.success) {
+      // "Launching browser" is only true when there IS a terminal to launch
+      // one on — check first (CAP-520/CAP-659), so a non-interactive run
+      // never prints that promise on stdout and then refuses instead of
+      // keeping it. No --json on `recover`, so the refusal is a stderr hint.
+      if (!isInteractive()) {
+        exitAuthNeedsTty(false);
+      }
       console.log(`\n  No active session. Launching browser to sign in...\n`);
       authResult = await authService.authenticate();
     }

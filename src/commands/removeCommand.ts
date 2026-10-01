@@ -19,6 +19,7 @@ import { hashValue } from './statusCommand';
 import { isInteractive, EXIT_NEEDS_INPUT } from '../ui/interactive';
 import { listTargets } from '../deploy/config';
 import { CapyError, ERROR_CODES, KeepFile } from '../types/index';
+import { withAuthNeedsTtyExit } from '../auth/authGate';
 
 export interface RemoveOpts {
   yes?: boolean;
@@ -215,7 +216,10 @@ export class RemoveCommand {
     // Everything above is local-only — no auth, no network. Only now do we
     // authenticate and decrypt `.env`, which the drift check and the push
     // both need.
-    const ctx = await resolveContext({ devMode: this.devMode });
+    const ctx = await withAuthNeedsTtyExit(
+      () => resolveContext({ devMode: this.devMode, nonTty: opts.nonTty }),
+      json,
+    );
     await proceedWithRemoval(ctx, names, { json, cwd: process.cwd() });
   }
 }

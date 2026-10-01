@@ -25,6 +25,7 @@ import { renderTerminalQr } from '../ui/terminalQr';
 import { printMaskedLinkBlock } from '../ui/maskedLinkPrompt';
 import { CapyError, ERROR_CODES } from '../types/index';
 import { refuseError } from './pairingRefusal';
+import { withAuthNeedsTtyExit } from '../auth/authGate';
 
 export interface TransportOptions {
   json?: boolean;
@@ -42,7 +43,10 @@ export class TransportCommand {
   async execute(options: TransportOptions = {}): Promise<void> {
     const json = options.json === true;
     try {
-      const { orgId, userId, serviceClient } = await resolveOrgContext(this.apiUrl, this.devMode);
+      const { orgId, userId, serviceClient } = await withAuthNeedsTtyExit(
+        () => resolveOrgContext(this.apiUrl, this.devMode),
+        json,
+      );
 
       const kLocal = readLocalRoot(orgId, userId);
       const keyEnc = readOrgKeyFileRaw(orgId, userId);

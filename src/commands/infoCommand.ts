@@ -1,6 +1,7 @@
 import { AuthService } from '../auth/authService';
 import { ProjectManager } from '../core/projectManager';
 import { ServiceClient } from '../service/serviceClient';
+import { withAuthNeedsTtyExit } from '../auth/authGate';
 
 const DIM = '\x1b[90m';
 const RESET = '\x1b[0m';
@@ -37,7 +38,10 @@ export class InfoCommand {
     let authResult = await authService.authenticateSilent(projectState.organizationId);
     if (!authResult.success) authResult = await authService.authenticateSilent();
     if (!authResult.success && hasKeep) {
-      authResult = await authService.authenticate(projectState.organizationId!);
+      authResult = await withAuthNeedsTtyExit(
+        () => authService.authenticate(projectState.organizationId!),
+        opts.json === true,
+      );
     }
     if (!authResult.success) {
       console.error(`Not signed in. Run ${B('capy')} to authenticate.`);

@@ -30,8 +30,15 @@ export interface ResolvedContext {
  * Run the standard "I'm an interactive command that needs to encrypt + push"
  * setup. Mirrors the front half of editCommand.ts. Exits the process on
  * unrecoverable errors (no keep.lock, auth fail, key resolution fail).
+ *
+ * `opts.nonTty` forces `authenticate()`'s non-interactive refusal
+ * (CAP-520/CAP-659) even on a real TTY — threaded through from callers that
+ * have a `--non-tty` flag. On that refusal `authenticate()` throws a
+ * `CapyError(AUTH_NEEDS_TTY)` instead of returning a failure; it propagates
+ * out of this function uncaught, same as every other exception a caller
+ * might see here — callers wrap their own call with `withAuthNeedsTtyExit()`.
  */
-export async function resolveContext(opts: { apiUrl?: string; devMode?: boolean } = {}): Promise<ResolvedContext> {
+export async function resolveContext(opts: { apiUrl?: string; devMode?: boolean; nonTty?: boolean } = {}): Promise<ResolvedContext> {
   const pm = new ProjectManager();
   const projectState = await pm.detectProjectState();
 
@@ -61,7 +68,7 @@ export async function resolveContext(opts: { apiUrl?: string; devMode?: boolean 
 
   let authResult = await authService.authenticateSilent(orgId);
   if (!authResult.success) authResult = await authService.authenticateSilent();
-  if (!authResult.success) authResult = await authService.authenticate(orgId);
+  if (!authResult.success) authResult = await authService.authenticate(orgId, opts.nonTty);
   if (!authResult.success || !authResult.user_id) {
     console.error('Authentication failed');
     process.exit(1);

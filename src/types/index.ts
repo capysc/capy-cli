@@ -653,6 +653,16 @@ export const ERROR_CODES = {
    * to clean it up manually.
    */
   DEPLOY_TOKEN_UNTRACKED: 'DEPLOY_TOKEN_UNTRACKED',
+  // --- Non-interactive auth gate (CAP-520 / CAP-659) ---
+  /**
+   * `AuthService#authenticate()` would otherwise start an interactive
+   * browser sign-in (OAuth with a local callback server, up to 5 minutes),
+   * but there is no TTY to show it on (or `--non-tty` forced the refusal).
+   * Silent refresh was already tried and failed — this is the ONE place
+   * that decides "needs a human" for every command that falls through to
+   * interactive auth, so it is never re-derived per command.
+   */
+  AUTH_NEEDS_TTY: 'AUTH_NEEDS_TTY',
 } as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES];

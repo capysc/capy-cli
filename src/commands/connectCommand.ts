@@ -2,6 +2,7 @@ import { resolveContext, writeAndSync, writeImportOutcome, listManagedKeys, Reso
 import { listProviders, loadProvider, ConnectOpts, ConnectorModule, ConnectResult } from './connectors/registry';
 import { connectPlan } from './connectors/plans';
 import { isInteractive } from '../ui/interactive';
+import { withAuthNeedsTtyExit } from '../auth/authGate';
 import { ProjectManager } from '../core/projectManager';
 import { resolveOrgContext } from '../core/orgContext';
 import { confirmLiveActionInBrowser } from '../ui/connectScreens';
@@ -92,8 +93,11 @@ export function pushOutcomeFor(outcome: ConnectOutcome): 'landed' | 'failed' | '
  * resolves its own project key during APPLY, once that folder's project is
  * known to exist (see `DiscoveryApplyDeps.ensureProject`).
  */
-async function resolveDiscoveryContext(devMode: boolean): Promise<DiscoveryContext> {
-  const { orgId, userId, authService, serviceClient } = await resolveOrgContext(undefined, devMode);
+async function resolveDiscoveryContext(devMode: boolean, nonTty: boolean | undefined, json: boolean): Promise<DiscoveryContext> {
+  const { orgId, userId, authService, serviceClient } = await withAuthNeedsTtyExit(
+    () => resolveOrgContext(undefined, devMode, nonTty),
+    json,
+  );
   return { orgId, userId, authService, serviceClient };
 }
 
@@ -248,11 +252,14 @@ export class ConnectCommand {
     // context instead: org + auth + serviceClient only, no project key, no
     // `.env` decrypt — see `resolveDiscoveryContext`'s own doc.
     if (effective.discover && mod.discover) {
-      const discoveryCtx = await resolveDiscoveryContext(this.devMode);
+      const discoveryCtx = await resolveDiscoveryContext(this.devMode, opts.nonTty, opts.json === true);
       return await this.executeDiscovery(mod, provider, discoveryCtx, effective);
     }
 
-    const ctx = await resolveContext({ devMode: this.devMode });
+    const ctx = await withAuthNeedsTtyExit(
+      () => resolveContext({ devMode: this.devMode, nonTty: opts.nonTty }),
+      opts.json === true,
+    );
 
     // Import-kind connectors (CAP-662: `dokploy`) pull MANY variables in one
     // run rather than linking one existing one, so they skip the var-picking
