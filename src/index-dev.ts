@@ -301,12 +301,29 @@ program
   });
 
 program
-  .command('edit')
-  .description('Inspect and edit secrets in an interactive TUI')
-  .action(async (_options, command) => {
+  .command('edit [name]')
+  // COPY-FLAG — minimal-neutral; names the two modes.
+  .description('Inspect and edit secrets in an interactive TUI, or set one variable from a piped value')
+  .option('--no-push', 'piped value: write .env only; do not push to Capy')
+  .option('--json', 'emit machine-readable JSON instead of the human UI (piped value)')
+  .option('--non-tty', 'treat stdin as not a terminal; never prompt (agents/CI)')
+  .addHelpText(
+    'after',
+    // COPY-FLAG
+    '\n' +
+      'With a name and a piped value, sets that one variable. The value is read from stdin only:\n' +
+      '  <cmd> | capy-dev edit NAME --json\n',
+  )
+  .action(async (name, options, command) => {
     const { EditCommand } = await import('./commands/editCommand');
     const cmd = new EditCommand(process.env.CAPY_API_URL, true);
-    await cmd.execute({ web: command.optsWithGlobals().web === true });
+    await cmd.execute({
+      web: command.optsWithGlobals().web === true,
+      name,
+      json: options.json,
+      noPush: options.push === false,
+      nonTty: options.nonTty,
+    });
   });
 
 const deploy = program

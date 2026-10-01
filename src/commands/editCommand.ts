@@ -8,13 +8,16 @@ import { fetchSecretsWithCache, readKeepCache, writeKeepCache, readSecretsLocal,
 import { isLocalOnly } from '../config/profileConfig';
 import { resolveLocalProjectKey } from '../core/localUnlock';
 import { hashValue } from './statusCommand';
-import { EditScreen, EditRow, EditState, classifyLocalRow } from '../ui/editScreen';
+import { EditScreen, EditRow, EditState, classifyLocalRow, focusedOn } from '../ui/editScreen';
 import { formatRelativeTime } from '../ui/relativeTime';
 import { Encryptor } from '../crypto/encryptor';
 import { deriveResourceId } from '../crypto/resourceId';
 import { setSyncKeepHash, KeepFile } from '../types/index';
 import { EditSaveRecord } from '../deploy/keepGate';
 import { concludeEditSession } from './editExitFlow';
+import { decideEditMode, editPipedCommand, refuseEditNeedsTty } from './editPiped';
+import { refuseInvalidName } from './pipedValue';
+import { isValidVarName } from './pipedWrite';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -36,6 +39,113 @@ function classifyStatus(
   return 'in sync';
 }
 
+/**
+ * Decrypts `.env`. A value this profile holds no key for is skipped (and named
+ * in `undecryptableKeys`); plaintext values pass through.
+ */
+function decryptLocalEnv(
+  fileManager: FileManager,
+  projectKey: string,
+): { localPlaintext: Record<string, string>; undecryptableKeys: string[] } {
+  const decrypted = Object.entries(fileManager.readEnvFile()).map(([key, value]) => {
+    if (!value.startsWith('capy:')) return { key, plain: value as string | undefined };
+    try {
+      return { key, plain: fileManager.decryptValue(value, projectKey) as string | undefined };
+    } catch {
+      return { key, plain: undefined }; // Skip values we can't decrypt
+    }
+  });
+  return {
+    localPlaintext: Object.fromEntries(
+      decrypted.flatMap(({ key, plain }) => (plain === undefined ? [] : [[key, plain] as const])),
+    ),
+    undecryptableKeys: decrypted.filter(({ plain }) => plain === undefined).map(({ key }) => key),
+  };
+}
+
+/**
+ * Why there is no other copy to compare against, when there is none. The
+ * terminal renders all three the same way — `{n} ? / remote unavailable` —
+ * so an offline run, a project nobody has pushed and a cold local cache are
+ * indistinguishable. Minted where the condition is actually known.
+ */
+type RemoteGap = 'never_pushed' | 'fetch_failed' | 'local_mode';
+
+interface Baseline {
+  remotePlaintext: Record<string, string>;
+  remoteAvailable: boolean;
+  remoteGap: RemoteGap | undefined;
+  /**
+   * Whether the comparison ran against the on-disk cache rather than the
+   * service. A warm cache computes the whole status column while offline with
+   * nothing on screen to say so.
+   */
+  remoteFromCache: boolean;
+}
+
+function baselineUnavailable(localMode: boolean, remoteFromCache: boolean): Baseline {
+  // Remote fetch failed (server mode) — fall back to pinned-only.
+  return {
+    remotePlaintext: {},
+    remoteAvailable: false,
+    remoteGap: localMode ? 'local_mode' : 'fetch_failed',
+    remoteFromCache,
+  };
+}
+
+async function loadBaseline(args: {
+  localMode: boolean;
+  serviceClient: ServiceClient | undefined;
+  fileManager: FileManager;
+  projectKey: string;
+  keep: KeepFile;
+  branch: string;
+  orgId: string;
+  projectId: string;
+}): Promise<Baseline> {
+  const { localMode, serviceClient, fileManager, projectKey, keep, branch, orgId, projectId } = args;
+  const keepHash = SyncEngine.computeKeepHash(keep, branch);
+  const remoteFromCache = probeCache(localMode, orgId, projectId, keepHash);
+  if (remoteFromCache === undefined) return baselineUnavailable(localMode, false);
+  try {
+    const blob = localMode
+      ? readSecretsLocal(orgId, projectId, keepHash)
+      : await fetchSecretsWithCache(serviceClient!, orgId, projectId, keepHash);
+    if (!blob?.env_file) {
+      return {
+        remotePlaintext: {},
+        remoteAvailable: false,
+        remoteGap: localMode ? 'local_mode' : 'never_pushed',
+        remoteFromCache,
+      };
+    }
+    const encrypted = fileManager.parseEnvContent(blob.env_file);
+    const remotePlaintext = Object.fromEntries(
+      Object.entries(encrypted).flatMap(([key, value]) => {
+        try {
+          return [[key, fileManager.decryptValue(value, projectKey)] as const];
+        } catch {
+          return []; // Skip values we can't decrypt
+        }
+      }),
+    );
+    // Remote column only applies to server mode; local mode uses the
+    // committed baseline with local-mode wording instead.
+    return { remotePlaintext, remoteAvailable: !localMode, remoteGap: undefined, remoteFromCache };
+  } catch {
+    return baselineUnavailable(localMode, remoteFromCache);
+  }
+}
+
+/** Whether the keep cache already holds this keep hash; `undefined` when the probe itself threw. */
+function probeCache(localMode: boolean, orgId: string, projectId: string, keepHash: string): boolean | undefined {
+  try {
+    return localMode ? false : readKeepCache(orgId, projectId, keepHash) !== null;
+  } catch {
+    return undefined;
+  }
+}
+
 export interface EditOpts {
   /**
    * Render the variable table and the value editor as compiled screens in a
@@ -48,6 +158,18 @@ export interface EditOpts {
   web?: boolean;
   /** false when --no-open was passed: print the URL, do not open a browser. */
   open?: boolean;
+  /**
+   * The variable to work on (`capy edit NAME`). With a terminal: the TUI opens
+   * with the cursor on it, and an unknown name opens its new-variable entry.
+   * Without one: the value is read from stdin (piped mode).
+   */
+  name?: string;
+  /** Piped mode: pure JSON on stdout. */
+  json?: boolean;
+  /** Piped mode: write `.env` only, do not push. */
+  noPush?: boolean;
+  /** Treat stdin as not a terminal even when it is one. */
+  nonTty?: boolean;
 }
 
 export class EditCommand {
@@ -59,7 +181,72 @@ export class EditCommand {
     this.devMode = devMode;
   }
 
+  /** Auth — silent first, then interactive (mirrors usersCommand pattern). Exits when it cannot. */
+  private async authenticate(
+    orgId: string,
+    sessionUserId: string | undefined,
+  ): Promise<{ serviceClient: ServiceClient; userId: string }> {
+    const authService = new AuthService(this.apiUrl, this.devMode, sessionUserId);
+    const serviceClient = new ServiceClient(this.apiUrl, this.devMode);
+    serviceClient.setTokenProvider(() => authService.getValidToken());
+    const forOrg = await authService.authenticateSilent(orgId);
+    const silent = forOrg.success ? forOrg : await authService.authenticateSilent();
+    const authResult = silent.success ? silent : await authService.authenticate(orgId);
+    if (!authResult.success || !authResult.user_id) {
+      console.error('Authentication failed');
+      process.exit(1);
+    }
+    return { serviceClient, userId: authResult.user_id };
+  }
+
+  /** The project key, or `undefined` after the error screen was shown (the caller returns). */
+  private async resolveKey(args: {
+    localMode: boolean;
+    orgId: string;
+    projectId: string;
+    userId: string;
+    serviceClient: ServiceClient | undefined;
+    keep: KeepFile;
+    branch: string;
+  }): Promise<string | undefined> {
+    const { localMode, orgId, projectId, userId, serviceClient, keep, branch } = args;
+    try {
+      if (localMode) return await resolveLocalProjectKey(projectId);
+      const { resolveProjectKey } = await import('../crypto/keyResolver');
+      const keyOps = {
+        coDecrypt: (oid: string, ct: string) => serviceClient!.coDecrypt(oid, ct).then((r) => r.plaintext),
+        wrapOuterLayer: (oid: string, pt: string) => serviceClient!.wrapOuterLayer(oid, pt).then((r) => r.ciphertext),
+      };
+      return await resolveProjectKey(orgId, projectId, userId, keyOps);
+    } catch (err: any) {
+      const { displayErrorAndExit } = await import('../ui/errorScreen');
+      await displayErrorAndExit(err, {
+        projectName: keep.project_name,
+        projectId: keep.project_id,
+        branch,
+      });
+      return undefined;
+    }
+  }
+
   async execute(opts: EditOpts = {}): Promise<void> {
+    // Decided first: before anything is drawn, and before any auth or network call.
+    const mode = decideEditMode({
+      hasName: opts.name !== undefined,
+      web: opts.web === true,
+      stdinIsTTY: process.stdin.isTTY === true,
+      nonTty: opts.nonTty === true,
+    });
+    if (mode === 'refuse') return refuseEditNeedsTty(opts.json === true);
+    if (opts.name !== undefined && !isValidVarName(opts.name)) return refuseInvalidName(opts.json === true);
+    if (mode === 'piped' && opts.name !== undefined) {
+      return editPipedCommand(opts.name, {
+        json: opts.json === true,
+        push: opts.noPush !== true,
+        devMode: this.devMode,
+      });
+    }
+
     const pm = new ProjectManager();
     const projectState = await pm.detectProjectState();
 
@@ -84,11 +271,12 @@ export class EditCommand {
     const fileManager = new FileManager();
 
     // Pinned hashes for the active branch
-    const pinned: Record<string, string> = {};
-    for (const [varName, entries] of Object.entries(keep.variables)) {
-      const entry = entries.find((e) => e.branch === branch);
-      if (entry) pinned[varName] = entry.value_hash;
-    }
+    const pinned: Record<string, string> = Object.fromEntries(
+      Object.entries(keep.variables).flatMap(([varName, entries]) => {
+        const entry = entries.find((e) => e.branch === branch);
+        return entry ? [[varName, entry.value_hash] as const] : [];
+      }),
+    );
 
     // Local-only mode: no auth, no server. Identity is synthetic; the key is
     // unwrapped from the passphrase session. No AuthService/ServiceClient is
@@ -96,116 +284,34 @@ export class EditCommand {
     // accidental server use).
     const localMode = isLocalOnly();
 
-    let authService: AuthService | undefined;
-    let serviceClient: ServiceClient | undefined;
-    let userId: string;
-    if (localMode) {
-      userId = LOCAL_USER_ID;
-    } else {
-      // Auth — silent first, then interactive (mirrors usersCommand pattern)
-      authService = new AuthService(this.apiUrl, this.devMode, projectState.userId);
-      serviceClient = new ServiceClient(this.apiUrl, this.devMode);
-      serviceClient.setTokenProvider(() => authService!.getValidToken());
-      let authResult = await authService.authenticateSilent(orgId);
-      if (!authResult.success) authResult = await authService.authenticateSilent();
-      if (!authResult.success) authResult = await authService.authenticate(orgId);
-      if (!authResult.success || !authResult.user_id) {
-        console.error('Authentication failed');
-        process.exit(1);
-      }
-      userId = authResult.user_id;
-    }
+    const authed = localMode ? undefined : await this.authenticate(orgId, projectState.userId);
+    const serviceClient = authed?.serviceClient;
+    const userId = authed?.userId ?? LOCAL_USER_ID;
 
-    let projectKey: string;
-    try {
-      if (localMode) {
-        projectKey = await resolveLocalProjectKey(projectId);
-      } else {
-        const { resolveProjectKey } = await import('../crypto/keyResolver');
-        const keyOps = {
-          coDecrypt: (oid: string, ct: string) => serviceClient!.coDecrypt(oid, ct).then((r) => r.plaintext),
-          wrapOuterLayer: (oid: string, pt: string) => serviceClient!.wrapOuterLayer(oid, pt).then((r) => r.ciphertext),
-        };
-        projectKey = await resolveProjectKey(
-          orgId,
-          projectId,
-          userId,
-          keyOps,
-        );
-      }
-    } catch (err: any) {
-      const { displayErrorAndExit } = await import('../ui/errorScreen');
-      await displayErrorAndExit(err, {
-        projectName: keep.project_name,
-        projectId: keep.project_id,
-        branch,
-      });
-      return;
-    }
+    const projectKey = await this.resolveKey({ localMode, orgId, projectId, userId, serviceClient, keep, branch });
+    if (projectKey === undefined) return;
 
-    // Decrypt local .env values
-    const localPlaintext: Record<string, string> = {};
-    // Local ciphertext this profile does not hold the key for. The TUI drops
-    // these on the floor and says nothing, and the next commit then deletes
-    // their pins — so the browser table names them.
-    const undecryptableKeys: string[] = [];
-    const rawLocal = fileManager.readEnvFile();
-    for (const [key, value] of Object.entries(rawLocal)) {
-      if (value.startsWith('capy:')) {
-        try {
-          localPlaintext[key] = fileManager.decryptValue(value, projectKey);
-        } catch {
-          // Skip values we can't decrypt
-          undecryptableKeys.push(key);
-        }
-      } else {
-        localPlaintext[key] = value;
-      }
-    }
+    // Decrypt local .env values. `undecryptableKeys`: local ciphertext this
+    // profile does not hold the key for. The TUI drops these on the floor and
+    // says nothing, and the next commit then deletes their pins — so the
+    // browser table names them.
+    const { localPlaintext, undecryptableKeys } = decryptLocalEnv(fileManager, projectKey);
 
     // Baseline the working copy is compared against:
     //  - remote mode: the latest committed blob fetched from the server.
     //  - local mode:  the committed blob from the local keep cache (no server).
     // In both cases it lands in `remotePlaintext` so the TUI's reclassify can
     // compare working-vs-baseline.
-    const remotePlaintext: Record<string, string> = {};
-    let remoteAvailable = false;
-    // Why there is no other copy to compare against, when there is none. The
-    // terminal renders all three the same way — `{n} ? / remote unavailable` —
-    // so an offline run, a project nobody has pushed and a cold local cache are
-    // indistinguishable. Minted here, where the condition is actually known.
-    let remoteGap: 'never_pushed' | 'fetch_failed' | 'local_mode' | undefined;
-    // Whether the comparison ran against the on-disk cache rather than the
-    // service. A warm cache computes the whole status column while offline with
-    // nothing on screen to say so.
-    let remoteFromCache = false;
-    {
-      const keepHash = SyncEngine.computeKeepHash(keep, branch);
-      try {
-        if (!localMode) remoteFromCache = readKeepCache(orgId, projectId, keepHash) !== null;
-        const blob = localMode
-          ? readSecretsLocal(orgId, projectId, keepHash)
-          : await fetchSecretsWithCache(serviceClient!, orgId, projectId, keepHash);
-        if (blob?.env_file) {
-          const encrypted = fileManager.parseEnvContent(blob.env_file);
-          for (const [key, value] of Object.entries(encrypted)) {
-            try {
-              remotePlaintext[key] = fileManager.decryptValue(value, projectKey);
-            } catch {
-              // Skip values we can't decrypt
-            }
-          }
-          // Remote column only applies to server mode; local mode uses the
-          // committed baseline with local-mode wording instead.
-          if (!localMode) remoteAvailable = true;
-        } else {
-          remoteGap = localMode ? 'local_mode' : 'never_pushed';
-        }
-      } catch {
-        // Remote fetch failed (server mode) — fall back to pinned-only.
-        remoteGap = localMode ? 'local_mode' : 'fetch_failed';
-      }
-    }
+    const { remotePlaintext, remoteAvailable, remoteGap, remoteFromCache } = await loadBaseline({
+      localMode,
+      serviceClient,
+      fileManager,
+      projectKey,
+      keep,
+      branch,
+      orgId,
+      projectId,
+    });
 
     // Build rows for every variable known to any source
     const allKeys = new Set<string>([
@@ -214,47 +320,49 @@ export class EditCommand {
       ...Object.keys(remotePlaintext),
     ]);
 
-    const rows: EditRow[] = [];
-    for (const key of Array.from(allKeys).sort()) {
+    // Sorting a copy that was built one line above is construction, not mutation.
+    const rows: EditRow[] = [...allKeys].sort().map((key) => {
       const localVal = localPlaintext[key];
       const remoteVal = remotePlaintext[key];
       const pinnedHash = pinned[key];
       const localHash = localVal !== undefined ? hashValue(localVal) : undefined;
       const remoteHash = remoteVal !== undefined ? hashValue(remoteVal) : undefined;
 
-      let status: EditRow['status'];
-      let updatedLabel: string;
       // Server-assigned changed_at for this branch — drives the UPDATED
       // column's recency label ("5 hours ago"). Absent in local mode and for
       // entries that predate rotation tracking.
       const changedAt = keep.variables[key]?.find((e) => e.branch === branch)?.changed_at;
-      if (localMode) {
-        // committed-vs-working, via the shared classifier so the initial build
-        // and the in-TUI reclassify can't drift. `remoteVal` holds the
-        // committed value from the local keep cache.
-        ({ status, updatedLabel } = classifyLocalRow(localVal, remoteVal));
-      } else {
-        status = classifyStatus(pinnedHash, localHash, remoteHash, remoteAvailable);
-        updatedLabel = changedAt ? formatRelativeTime(changedAt) : '—';
-      }
+      // Local mode: committed-vs-working, via the shared classifier so the
+      // initial build and the in-TUI reclassify can't drift. `remoteVal` holds
+      // the committed value from the local keep cache.
+      const { status, updatedLabel } = localMode
+        ? classifyLocalRow(localVal, remoteVal)
+        : {
+            status: classifyStatus(pinnedHash, localHash, remoteHash, remoteAvailable),
+            updatedLabel: changedAt ? formatRelativeTime(changedAt) : '—',
+          };
 
-      rows.push({
+      return {
         key,
         localValue: localVal,
         remoteValue: remoteVal,
         status,
         updatedLabel,
         changedAt,
-      });
-    }
+      };
+    });
 
-    const state: EditState = {
+    const baseState: EditState = {
       projectName: keep.project_name,
       branch,
       rows,
       remoteAvailable,
       localMode,
     };
+    // `capy edit NAME` on a terminal: the cursor starts on NAME (a new name opens
+    // its value entry). `--web` opens the browser editor unfocused: focusing it
+    // needs a change to the compiled Keep screen, which is not part of this work.
+    const state = opts.name !== undefined && !opts.web ? focusedOn(baseState, opts.name) : baseState;
 
     const screen = new EditScreen();
     const printExpiryAfter = async () => {

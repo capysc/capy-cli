@@ -56,6 +56,38 @@ export interface EditState {
    * committed/uncommitted instead of remote-drift wording.
    */
   localMode?: boolean;
+  /**
+   * `capy edit NAME`: the cursor starts on this row. A key with no row is
+   * ignored (the cursor stays at the top).
+   */
+  focusKey?: string;
+  /**
+   * `capy edit NAME` for a name that does not exist yet: the value entry for
+   * this key opens straight away (its row was added by {@link withNewEntryRow}).
+   */
+  entryKey?: string;
+}
+
+/**
+ * The state for `capy edit NAME` on a terminal.
+ *
+ * A name that has a row puts the cursor on it. A name with no row is a NEW
+ * variable: a placeholder row (no value yet) is added in sorted position and its
+ * value entry opens, so the person types the value for exactly the name they
+ * asked for. Nothing is written until they commit it, same as any other edit.
+ */
+export function focusedOn(state: EditState, name: string): EditState {
+  if (state.rows.some((r) => r.key === name)) return { ...state, focusKey: name };
+  const placeholder: EditRow = {
+    key: name,
+    localValue: undefined,
+    remoteValue: undefined,
+    status: state.localMode || state.remoteAvailable ? 'local' : 'unknown',
+    updatedLabel: state.localMode ? 'uncommitted' : NO_VALUE,
+  };
+  // The spread is a fresh array, so sorting it is construction (no `toSorted` below ES2023).
+  const rows = [...state.rows, placeholder].sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+  return { ...state, rows, focusKey: name, entryKey: name };
 }
 
 export interface EditContext {
@@ -172,15 +204,17 @@ export class EditScreen {
   run(state: EditState, ctx: EditContext): Promise<void> {
     this.state = state;
     this.ctx = ctx;
-    this.cursorIndex = 0;
+    const focusIndex = state.rows.findIndex((r) => r.key === state.focusKey);
+    this.cursorIndex = Math.max(0, focusIndex);
     this.revealed.clear();
-    this.editing = null;
+    const entering = state.entryKey !== undefined && state.rows.some((r) => r.key === state.entryKey);
+    this.editing = entering && state.entryKey !== undefined ? { key: state.entryKey, buffer: '' } : null;
     this.statusMessage = null;
     this.scrollOffset = 0;
     this.cleanedUp = false;
     this.pendingEdits.clear();
     this.quitPrompt = null;
-    this.popupOpen = false;
+    this.popupOpen = entering;
     this.popupPanOffset = 0;
 
     return new Promise<void>((resolve) => {
