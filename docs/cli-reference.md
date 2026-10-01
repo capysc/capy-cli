@@ -2,7 +2,7 @@
 
 # capy CLI reference
 
-Version `0.9.6`. Generated from `capy help --json`.
+Version `0.9.7`. Generated from `capy help --json`.
 
 ## Commands
 
@@ -285,6 +285,8 @@ capy agents [options]
 |---|---|---|
 | `--print` | print the block to stdout without writing anything |  |
 | `--remove` | remove the block from AGENTS.md / CLAUDE.md |  |
+| `-y, --yes` | skip the confirmation prompt (required non-interactively) |  |
+| `--non-tty` | never prompt; resolve from flags or fail fast (agents/CI) |  |
 | `--json` | emit machine-readable JSON instead of the human UI |  |
 
 JSON support: yes (`--json`)
@@ -716,6 +718,8 @@ Every refusal carries a stable `code` — branch on it, never on message text.
 - `DOKPLOY_URL_INVALID`
 - `DOKPLOY_SERVICE_NOT_FOUND`
 - `TRANSPORT_NO_LOCAL_KEY`
+- `TRANSPORT_KEY_FORMAT_UNSUPPORTED`
+- `TRANSPORT_EXPIRED`
 - `TRANSPORT_NOT_FOUND`
 - `PAIRING_NOT_FOUND`
 - `PAIRING_WRONG_USER`

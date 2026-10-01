@@ -332,4 +332,77 @@ describe('ServiceClient', () => {
     });
   });
 
+  // CAP-692 follow-up: `capy transport`'s redemption poll. Decided only on
+  // status + the response body's `code` field (never message text) —
+  // every case here asserts the resulting typed `TransportStatusResult`,
+  // never a raw status/code pair leaking through.
+  describe('getTransportStatus', () => {
+    test('200 {state: "pending", expires_at} -> pending', async () => {
+      mockFetch.mockResolvedValue(mockFetchResponse({ state: 'pending', expires_at: '2026-10-01T00:15:00.000Z' }));
+      const result = await serviceClient.getTransportStatus('transport-1');
+      expect(result).toEqual({ kind: 'pending', expiresAt: '2026-10-01T00:15:00.000Z' });
+    });
+
+    test('404 with code TRANSPORT_NOT_FOUND -> redeemed', async () => {
+      mockFetch.mockResolvedValue(mockFetchResponse({ error: 'not found', code: 'TRANSPORT_NOT_FOUND' }, false, 404));
+      const result = await serviceClient.getTransportStatus('transport-1');
+      expect(result).toEqual({ kind: 'redeemed' });
+    });
+
+    test('404 WITHOUT the TRANSPORT_NOT_FOUND code -> unknown, never redeemed', async () => {
+      // e.g. an older service with no /transports/:id route yet, returning
+      // a bare 404 with no body or an unrelated one.
+      mockFetch.mockResolvedValue(mockFetchResponse({}, false, 404));
+      const result = await serviceClient.getTransportStatus('transport-1');
+      expect(result).toEqual({ kind: 'unknown' });
+    });
+
+    test('410 with code TRANSPORT_EXPIRED -> expired', async () => {
+      mockFetch.mockResolvedValue(mockFetchResponse({ error: 'expired', code: 'TRANSPORT_EXPIRED' }, false, 410));
+      const result = await serviceClient.getTransportStatus('transport-1');
+      expect(result).toEqual({ kind: 'expired' });
+    });
+
+    test('400 INVALID_FORMAT (bad id) -> unknown', async () => {
+      mockFetch.mockResolvedValue(mockFetchResponse({ error: 'bad id', code: 'INVALID_FORMAT' }, false, 400));
+      const result = await serviceClient.getTransportStatus('not-an-id');
+      expect(result).toEqual({ kind: 'unknown' });
+    });
+
+    test('429 (mutation limiter) -> unknown, same as any other non-decisive answer', async () => {
+      mockFetch.mockResolvedValue(mockFetchResponse({ error: 'rate limited' }, false, 429));
+      const result = await serviceClient.getTransportStatus('transport-1');
+      expect(result).toEqual({ kind: 'unknown' });
+    });
+
+    test('401 -> unknown (never treated as redeemed/expired)', async () => {
+      mockFetch.mockResolvedValue(mockFetchResponse({ error: 'unauthorized' }, false, 401));
+      const result = await serviceClient.getTransportStatus('transport-1');
+      expect(result).toEqual({ kind: 'unknown' });
+    });
+
+    test('5xx -> unknown', async () => {
+      mockFetch.mockResolvedValue(mockFetchResponse({ error: 'boom' }, false, 500));
+      const result = await serviceClient.getTransportStatus('transport-1');
+      expect(result).toEqual({ kind: 'unknown' });
+    });
+
+    test('a network error -> unknown', async () => {
+      const networkError = new Error('Network Error');
+      (networkError as any).code = 'ECONNREFUSED';
+      mockFetch.mockRejectedValue(networkError);
+      const result = await serviceClient.getTransportStatus('transport-1');
+      expect(result).toEqual({ kind: 'unknown' });
+    });
+
+    test('requests GET /transports/:id with the id URL-encoded', async () => {
+      mockFetch.mockResolvedValue(mockFetchResponse({ state: 'pending', expires_at: 'x' }));
+      await serviceClient.getTransportStatus('abc/def');
+      expect(mockFetch).toHaveBeenCalledWith(
+        `${defaultServiceUrl}/transports/${encodeURIComponent('abc/def')}`,
+        expect.objectContaining({ method: 'GET' }),
+      );
+    });
+  });
+
 });

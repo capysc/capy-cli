@@ -1,5 +1,6 @@
 /**
- * `capy transport` (CAP-684) at the command level.
+ * `capy transport` (CAP-684; CAP-692 for the v3-only wire format) at the
+ * command level.
  *
  * `--json` must print pure JSON on stdout (`{url, expires_at}`, no QR) and
  * every refusal must be coded — never a bare `process.exit` with prose only.
@@ -8,6 +9,14 @@
  * local-key reads only, everything else stays real (`mock.module` is
  * process-wide — spreading the real module keeps every other export intact,
  * which is also why this file is in run-tests.sh's isolated list).
+ *
+ * v3 is the only link format (no v2 fallback) — every happy-path test's
+ * mock `key.enc`/org id/user id/transport id is shaped so `packTransportV3`
+ * actually succeeds (a real UUID org id, a `user_`+ULID user id, canonical
+ * base64, ms-precision `created_at`, and the exact pretty-JSON shape
+ * `saveMasterKey` writes), so these tests exercise the real v3 fragment,
+ * not a synthetic shortcut. The "can't pack" path has its own dedicated
+ * test below using a key.enc shaped like the OLD (now-removed) v2 fixture.
  */
 import { mock, jest, describe, test, expect, beforeEach, spyOn } from 'bun:test';
 
@@ -56,9 +65,29 @@ const mockRenderTerminalQr = jest.fn();
 mock.module('../../src/ui/terminalQr', () => ({ renderTerminalQr: mockRenderTerminalQr }));
 
 import { TransportCommand } from '../../src/commands/transportCommand';
+import { openTransportBlob, parseTransportFragmentV4, unpackTransportV3 } from '../../src/crypto/transportPackV3';
 
+const ORG_ID = '9f1c2b3a-0000-4000-8000-000000000001';
+const USER_ID = 'user_01ARZ3NDEKTSV4RRFFQ69G5FAV';
+const TRANSPORT_ID = '11111111-1111-4111-8111-111111111111';
 const K_LOCAL = Buffer.alloc(32, 5);
-const KEY_ENC = JSON.stringify({ version: '2.0', org_id: 'org-123', encrypted_master_key: 'blob', wrapping_method: 'local_root', created_at: '2026-09-29T00:00:00.000Z' });
+// A canonical (round-trips through base64 unchanged) 60-byte blob — the
+// same shape a real local_root `encrypted_master_key` has (iv[12] ||
+// ciphertext || tag[16]). Its content doesn't matter to packTransportV3;
+// only its canonical-base64-ness and the surrounding JSON shape do.
+const MASTER_KEY_B64 = 'F1GCcyi5YK/rsiuuDSH5OBg0BBV9Jc1bEt4AvuUjVTDrFglY4dinuE6hOAW+u797pFxHxc7/NmBg4aa3';
+const CREATED_AT = '2026-09-29T00:00:00.000Z';
+// Exact shape `saveMasterKey` (globalConfig.ts) writes — pretty-printed,
+// this field order, `version: '2.0'`, `wrapping_method: 'local_root'`.
+const KEY_ENC = JSON.stringify(
+  { version: '2.0', org_id: ORG_ID, encrypted_master_key: MASTER_KEY_B64, wrapping_method: 'local_root', created_at: CREATED_AT },
+  null,
+  2,
+);
+// The OLD v2 fixture shape (single-line JSON, non-UUID org id) — v2 is
+// gone, so this now exercises the "can't pack losslessly, refuse" path
+// instead of a fallback.
+const UNPACKABLE_KEY_ENC = JSON.stringify({ version: '2.0', org_id: 'org-123', encrypted_master_key: 'blob', wrapping_method: 'local_root', created_at: '2026-09-29T00:00:00.000Z' });
 
 /**
  * Reads back what `console.log`/`console.error` were called with straight
@@ -98,17 +127,17 @@ describe('TransportCommand', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
-    mockDetectProjectState.mockResolvedValue({ organizationId: 'org-123', userId: 'user-456' });
+    mockDetectProjectState.mockResolvedValue({ organizationId: ORG_ID, userId: USER_ID });
     mockAuthenticateSilent.mockResolvedValue({
       success: true,
-      user_id: 'user-456',
+      user_id: USER_ID,
       user_email: 'mike@example.com',
-      organization_id: 'org-123',
-      organizations: [{ id: 'org-123', name: 'Acme' }],
+      organization_id: ORG_ID,
+      organizations: [{ id: ORG_ID, name: 'Acme' }],
     });
     mockReadLocalRoot.mockReturnValue(K_LOCAL);
     mockReadOrgKeyFileRaw.mockReturnValue(KEY_ENC);
-    mockCreateTransport.mockResolvedValue({ id: 'transport-1', expires_at: '2026-09-29T00:15:00.000Z' });
+    mockCreateTransport.mockResolvedValue({ id: TRANSPORT_ID, expires_at: '2026-09-29T00:15:00.000Z' });
     mockRenderTerminalQr.mockReturnValue(null);
   });
 
@@ -116,48 +145,36 @@ describe('TransportCommand', () => {
     const { stdout, stderr } = await withCapturedIo(() => new TransportCommand().execute({ json: true }));
     expect(stderr).toBe('');
     const parsed = JSON.parse(stdout);
-    expect(parsed.url).toMatch(/^https:\/\/keep\.capy\.sc\/transport#transport-1\./);
+    // v4 fragment: `#4.<id as 16 bytes, base64url (22 chars)>.<S as 32 bytes, base64url (43 chars)>`.
+    expect(parsed.url).toMatch(/^https:\/\/keep\.capy\.sc\/transport#4\.[\w-]{22}\.[\w-]{43}$/);
     expect(parsed.expires_at).toBe('2026-09-29T00:15:00.000Z');
     // No QR block leaked into stdout alongside the JSON.
     expect(stdout.trim().startsWith('{')).toBe(true);
   });
 
-  test('sends S (a fresh 32-byte key) as the transport ciphertext field — never the payload, never k_local/key.enc', async () => {
+  test('sends the SEALED blob as the transport ciphertext (never S, never plaintext k_local/key.enc)', async () => {
     const { stdout } = await withCapturedIo(() => new TransportCommand().execute({ json: true }));
     expect(mockCreateTransport).toHaveBeenCalledTimes(1);
     const ciphertextArg = mockCreateTransport.mock.calls[0][0];
-    // "v2": this argument IS the one-time key S itself (base64url), not a
-    // sealed envelope — assert its shape, and that it carries no trace of
-    // the plaintext k_local or key_enc content.
     expect(typeof ciphertextArg).toBe('string');
-    expect(Buffer.from(ciphertextArg, 'base64url').length).toBe(32);
+    // iv (12) + tag (16) + a packed entry: well over a bare 32-byte key.
+    expect(Buffer.from(ciphertextArg, 'base64url').length).toBeGreaterThan(12 + 16 + 74);
     expect(ciphertextArg).not.toContain(K_LOCAL.toString('base64url'));
-    expect(ciphertextArg).not.toContain('blob');
+    expect(ciphertextArg).not.toContain(MASTER_KEY_B64);
 
-    // The actual sealed payload (iv + ciphertext) lives only in the printed
-    // link's fragment — S itself never appears there.
-    const parsed = JSON.parse(stdout);
-    const fragment = parsed.url.split('#')[1];
-    expect(fragment.split('.')).toHaveLength(3);
-    expect(fragment).not.toContain(ciphertextArg);
+    // S lives only in the printed link; the service never receives it.
+    const fragment = JSON.parse(stdout).url.split('#')[1];
+    const { key } = parseTransportFragmentV4(fragment);
+    expect(ciphertextArg).not.toContain(key.toString('base64url'));
   });
 
-  test('the link fragment opens with S and the returned id, and fails with a different id (AAD binding)', async () => {
+  test('the server ciphertext opens with the S from the link, and the link carries the returned id', async () => {
     const { stdout } = await withCapturedIo(() => new TransportCommand().execute({ json: true }));
-    const { openTransportFragment, parseTransportFragment } = await import('../../src/crypto/transportCrypto');
-
-    const parsed = JSON.parse(stdout);
-    const fragment = parseTransportFragment(parsed.url.split('#')[1]);
-    expect(fragment.id).toBe('transport-1');
-
-    const key = Buffer.from(mockCreateTransport.mock.calls[0][0], 'base64url');
-    const opened = openTransportFragment({ iv: fragment.iv, ct: fragment.ct }, key, fragment.id);
-    expect(opened).toEqual({
-      v: 1,
-      entries: [{ org_id: 'org-123', user_id: 'user-456', k_local: K_LOCAL.toString('base64url'), key_enc: KEY_ENC }],
-    });
-
-    expect(() => openTransportFragment({ iv: fragment.iv, ct: fragment.ct }, key, 'transport-someone-elses')).toThrow();
+    const fragment = JSON.parse(stdout).url.split('#')[1];
+    const { id, key } = parseTransportFragmentV4(fragment);
+    expect(id).toBe(TRANSPORT_ID);
+    const entry = unpackTransportV3(openTransportBlob(mockCreateTransport.mock.calls[0][0], key));
+    expect(entry).toEqual({ org_id: ORG_ID, user_id: USER_ID, k_local: K_LOCAL.toString('base64url'), key_enc: KEY_ENC });
   });
 
   // CAP-684 follow-up: `bun test`'s stdin is never a real TTY, so this
@@ -173,7 +190,7 @@ describe('TransportCommand', () => {
     expect(stdout).toContain('Run with --json to print the full link.');
     expect(stdout).toContain('2026-09-29T00:15:00.000Z');
     // The fragment (encrypted key material) must never appear in plain text.
-    expect(stdout).not.toContain('transport-1.');
+    expect(stdout).not.toContain(`3.${Buffer.from(TRANSPORT_ID.replace(/-/g, ''), 'hex').toString('base64url')}.`);
     expect(stdout).not.toMatch(/#[^…\s]/);
   });
 
@@ -181,7 +198,7 @@ describe('TransportCommand', () => {
     await withCapturedIo(() => new TransportCommand().execute({}));
     expect(mockRenderTerminalQr).toHaveBeenCalledTimes(1);
     const [qrArg] = mockRenderTerminalQr.mock.calls[0] as [string];
-    expect(qrArg).toMatch(/^https:\/\/keep\.capy\.sc\/transport#transport-1\.\S+\.\S+$/);
+    expect(qrArg).toMatch(/^https:\/\/keep\.capy\.sc\/transport#4\.[\w-]{22}\.[\w-]{43}$/);
     expect(qrArg).not.toBe('https://keep.capy.sc/transport#…');
   });
 
@@ -220,5 +237,94 @@ describe('TransportCommand', () => {
     });
     const parsed = JSON.parse(stdout);
     expect(parsed.code).toBe('SERVICE_ERROR');
+  });
+
+  // CAP-692: v3 is the only link format now — there is no v2 to fall back
+  // to, so an unpackable key.enc refuses outright, coded, and (the point of
+  // checking BEFORE calling the service) never burns a one-time transport
+  // row for a link that could never be produced.
+  test('refuses with a coded TRANSPORT_KEY_FORMAT_UNSUPPORTED when key.enc cannot be packed losslessly (no v2 fallback) — under --json', async () => {
+    mockReadOrgKeyFileRaw.mockReturnValue(UNPACKABLE_KEY_ENC);
+    const { stdout, stderr } = await withCapturedIo(async () => {
+      await expect(new TransportCommand().execute({ json: true })).rejects.toThrow();
+    });
+    expect(stderr).toBe('');
+    const parsed = JSON.parse(stdout);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.code).toBe('TRANSPORT_KEY_FORMAT_UNSUPPORTED');
+    expect(mockCreateTransport).not.toHaveBeenCalled();
+  });
+
+  test('refuses with a coded TRANSPORT_KEY_FORMAT_UNSUPPORTED under human mode too — prose on stderr, nothing on stdout', async () => {
+    mockReadOrgKeyFileRaw.mockReturnValue(UNPACKABLE_KEY_ENC);
+    const { stdout, stderr } = await withCapturedIo(async () => {
+      await expect(new TransportCommand().execute({})).rejects.toThrow();
+    });
+    expect(stdout).toBe('');
+    expect(stderr.length).toBeGreaterThan(0);
+    expect(mockCreateTransport).not.toHaveBeenCalled();
+  });
+
+  // CAP-684 follow-up (2026-09-30): the Vince-approved intro copy explaining
+  // what `capy transport` is for, printed ahead of the QR/link.
+  describe('intro copy', () => {
+    test('prints all three paragraphs, in order, before the link label', async () => {
+      const { stdout } = await withCapturedIo(() => new TransportCommand().execute({}));
+      const paragraph1 = 'Transport works with';
+      const paragraph2 = 'Open or scan this link to activate your transport key';
+      const paragraph4 = 'Why we do this: https://capy.sc/zero-trust';
+      const label = 'Open on your other device:';
+
+      expect(stdout).toContain(paragraph1);
+      expect(stdout).toContain('to let you use Capy anywhere: your other devices, sandboxes, and cloud AI sessions.');
+      expect(stdout).toContain(paragraph2);
+      expect(stdout).toContain("We recommend your phone's browser.");
+      expect(stdout).toContain("Sign in with the same account as this capy session, or activation won't work.");
+      expect(stdout).toContain(paragraph4);
+
+      const idx1 = stdout.indexOf(paragraph1);
+      const idx2 = stdout.indexOf(paragraph2);
+      const idx4 = stdout.indexOf(paragraph4);
+      const idxLabel = stdout.indexOf(label);
+      expect(idx1).toBeGreaterThanOrEqual(0);
+      expect(idx2).toBeGreaterThan(idx1);
+      expect(idx4).toBeGreaterThan(idx2);
+      // The lost-device paragraph was removed (Vince, 2026-10-01).
+      expect(stdout).not.toContain('If you lose the device');
+      expect(idxLabel).toBeGreaterThan(idx4);
+    });
+
+    test('--json stdout stays pure JSON with only url and expires_at — no intro copy leaks in', async () => {
+      const { stdout } = await withCapturedIo(() => new TransportCommand().execute({ json: true }));
+      const parsed = JSON.parse(stdout);
+      expect(Object.keys(parsed).sort()).toEqual(['expires_at', 'url']);
+      expect(stdout).not.toContain('Transport works with');
+      expect(stdout).not.toContain('Why we do this');
+    });
+
+    test('with NO_COLOR set, "capy pair" appears as plain text (no ANSI escapes)', async () => {
+      const prevNoColor = process.env.NO_COLOR;
+      process.env.NO_COLOR = '1';
+      try {
+        const { stdout } = await withCapturedIo(() => new TransportCommand().execute({}));
+        expect(stdout).toContain('Transport works with capy pair to let you use Capy anywhere');
+        expect(stdout).not.toContain('\x1b[1m');
+      } finally {
+        if (prevNoColor === undefined) delete process.env.NO_COLOR;
+        else process.env.NO_COLOR = prevNoColor;
+      }
+    });
+
+    test('without NO_COLOR, "capy pair" is wrapped in bold ANSI', async () => {
+      const prevNoColor = process.env.NO_COLOR;
+      delete process.env.NO_COLOR;
+      try {
+        const { stdout } = await withCapturedIo(() => new TransportCommand().execute({}));
+        expect(stdout).toContain('\x1b[1mcapy pair\x1b[0m');
+      } finally {
+        if (prevNoColor === undefined) delete process.env.NO_COLOR;
+        else process.env.NO_COLOR = prevNoColor;
+      }
+    });
   });
 });

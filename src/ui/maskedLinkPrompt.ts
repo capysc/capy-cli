@@ -70,12 +70,12 @@ export function handleMaskedLinkKey(key: string): MaskedLinkAction {
 
 const DIM = (s: string) => `\x1b[90m${s}\x1b[0m`;
 const KEY = (s: string) => `\x1b[1;97m${s}\x1b[0m`;
-/** COPY-FLAG */
-const HINT_LINE = `${KEY('c')} ${DIM('copy')}   ${KEY('r')} ${DIM('reveal')}   ${KEY('q')} ${DIM('done')}`;
-/** COPY-FLAG */
-const COPIED_LINE = '✓ Copied to clipboard';
-/** COPY-FLAG */
-const COPY_FAILED_LINE = 'Could not access clipboard — press r to print the full link instead.';
+/** COPY-FLAG. Exported: the full-screen QR view (`fullScreenQr.ts`) prints the exact same hint line rather than inventing its own copy. */
+export const HINT_LINE = `${KEY('c')} ${DIM('copy')}   ${KEY('r')} ${DIM('reveal')}   ${KEY('q')} ${DIM('done')}`;
+/** COPY-FLAG. Exported for the same reason as {@link HINT_LINE}. */
+export const COPIED_LINE = '✓ Copied to clipboard';
+/** COPY-FLAG. Exported for the same reason as {@link HINT_LINE}. */
+export const COPY_FAILED_LINE = 'Could not access clipboard — press r to print the full link instead.';
 /** COPY-FLAG */
 const JSON_HINT_LINE = 'Run with --json to print the full link.';
 
@@ -114,12 +114,50 @@ export interface MaskedLinkPromptHandle {
   readonly stop: () => void;
 }
 
+export interface KeyListenerHandle {
+  /** Restores raw mode and detaches the `data` listener. Idempotent. */
+  readonly stop: () => void;
+}
+
+/**
+ * Shared stdin plumbing for a `c`/`r`/`q`/Enter/Esc/Ctrl-C key prompt: puts
+ * `stdin` into raw mode (on a real TTY), listens on its own `data` EVENT
+ * (never a blocking read, so a concurrent async operation like
+ * `pollDeviceToken` keeps running while this listens), maps every chunk
+ * through {@link handleMaskedLinkKey}, and calls `onAction` for every
+ * action except `ignore`. `stop()` restores raw mode and detaches the
+ * listener — idempotent (safe to call more than once, and whether or not
+ * an action ever fired).
+ *
+ * Shared by {@link startMaskedLinkPrompt} (the plain masked-link prompt)
+ * and the full-screen QR view (`fullScreenQr.ts`) — both key off the exact
+ * same byte-level reducer, never off any human-readable prose (cardinal
+ * Rule 5), and this is the one place the stdin raw-mode dance is written.
+ */
+export function attachMaskedLinkKeyListener(stdin: KeyStdin, onAction: (action: MaskedLinkAction) => void): KeyListenerHandle {
+  const cleanup = (): void => {
+    if (stdin.isTTY && stdin.setRawMode) stdin.setRawMode(false);
+    stdin.pause();
+    stdin.removeListener('data', onData);
+  };
+
+  function onData(chunk: string): void {
+    const action = handleMaskedLinkKey(chunk);
+    if (action.kind !== 'ignore') onAction(action);
+  }
+
+  if (stdin.isTTY && stdin.setRawMode) stdin.setRawMode(true);
+  stdin.resume();
+  stdin.setEncoding('utf8');
+  stdin.on('data', onData);
+
+  return { stop: cleanup };
+}
+
 /**
  * Prints `label` + a masked OSC 8 hyperlink (full `fullUrl` as the click
  * target, `maskedUrl` as the visible text) plus a one-line key hint, then
- * listens on `stdin` for `c`/`r`/`q`/Enter/Esc/Ctrl-C — entirely through
- * `stdin`'s own `data` EVENT, never a blocking read, so a concurrent async
- * operation (e.g. `pollDeviceToken`) keeps running while this listens.
+ * listens for `c`/`r`/`q`/Enter/Esc/Ctrl-C via {@link attachMaskedLinkKeyListener}.
  */
 export function startMaskedLinkPrompt(opts: MaskedLinkPromptOptions): MaskedLinkPromptHandle {
   const stdin = opts.stdin ?? (process.stdin as unknown as KeyStdin);
@@ -132,14 +170,19 @@ export function startMaskedLinkPrompt(opts: MaskedLinkPromptOptions): MaskedLink
 
   const emitter = new EventEmitter();
 
-  const cleanup = (): void => {
-    if (stdin.isTTY && stdin.setRawMode) stdin.setRawMode(false);
-    stdin.pause();
-    stdin.removeListener('data', onData);
+  // Detaches the listener and resolves `done` — the `q`/Enter/Esc path and
+  // the externally-exposed `stop()` both funnel through this, so a caller
+  // that closes the prompt itself (e.g. a concurrent redemption poll that
+  // decided the link is already redeemed — see transportPoll.ts) gets the
+  // exact same `done` signal a keypress would have produced. Idempotent:
+  // `emitter.emit('done')` on an already-settled `once` listener is a
+  // harmless no-op (no listener left to react).
+  const close = (): void => {
+    listener.stop();
+    emitter.emit('done');
   };
 
-  function onData(chunk: string): void {
-    const action = handleMaskedLinkKey(chunk);
+  const listener = attachMaskedLinkKeyListener(stdin, (action) => {
     if (action.kind === 'copy') {
       // Fire-and-forget: never awaited here, so a slow/hanging clipboard
       // helper can never stall the listener (or, for `capy pair`, the
@@ -154,23 +197,17 @@ export function startMaskedLinkPrompt(opts: MaskedLinkPromptOptions): MaskedLink
       return;
     }
     if (action.kind === 'done') {
-      cleanup();
-      emitter.emit('done');
+      close();
       return;
     }
     if (action.kind === 'exit') {
-      cleanup();
+      listener.stop();
       process.exit(130);
     }
-  }
-
-  if (stdin.isTTY && stdin.setRawMode) stdin.setRawMode(true);
-  stdin.resume();
-  stdin.setEncoding('utf8');
-  stdin.on('data', onData);
+  });
 
   const done = once(emitter, 'done').then(() => undefined);
-  return { done, stop: cleanup };
+  return { done, stop: close };
 }
 
 /** Whether both ends of the terminal are real TTYs — the bar for a clickable masked link + interactive key prompt, rather than a plain masked line with a `--json` hint. */

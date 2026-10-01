@@ -513,10 +513,36 @@ program
   .description('Tell AI coding agents in this repo how to use Capy (writes AGENTS.md / CLAUDE.md)')
   .option('--print', 'print the block to stdout without writing anything')
   .option('--remove', 'remove the block from AGENTS.md / CLAUDE.md')
+  .option('-y, --yes', 'skip the confirmation prompt (required non-interactively)')
+  .option('--non-tty', 'never prompt; resolve from flags or fail fast (agents/CI)')
   .option('--json', 'emit machine-readable JSON instead of the human UI')
-  .action(async (options) => {
+  .addHelpText(
+    'after',
+    // COPY-FLAG — minimal-neutral; names what the block contains
+    // structurally rather than any approved marketing wording.
+    '\n' +
+      'The block tells an AI coding agent to run `capy help --json` and branch on error codes, never on message text.\n' +
+      '\n' +
+      'Examples:\n' +
+      '  capy agents --print\n' +
+      '  capy agents --yes\n' +
+      '  capy agents --remove --yes\n' +
+      '  capy agents --json --yes\n' +
+      '  capy agents --dry-run\n' +
+      '  capy agents --remove --dry-run --json',
+  )
+  .action(async (options, command) => {
     const { agentsCommand } = await import('./commands/agentsCommand');
-    await agentsCommand({ print: options.print, remove: options.remove, json: options.json });
+    // `--dry-run` is declared once on the root program; read it from the
+    // merged globals so `capy agents --dry-run` and `capy --dry-run agents` both work.
+    await agentsCommand({
+      print: options.print,
+      remove: options.remove,
+      json: options.json,
+      yes: options.yes,
+      nonTty: options.nonTty,
+      dryRun: command.optsWithGlobals().dryRun === true,
+    });
   });
 
 program

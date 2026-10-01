@@ -8,6 +8,15 @@
  * This is local-only file work — no org, no team, no server — so it is
  * deliberately NOT in LOCAL_ONLY_DISABLED_COMMANDS (see src/core/localGate.ts)
  * and works the same whether or not the active profile has an organization.
+ *
+ * Non-interactive (CAP-659): write and `--remove` both confirm before
+ * touching a file, and without a TTY there is no way to answer that prompt —
+ * `--yes` is the flag that answers it, the same convention as `capy remove`
+ * and `capy system rm`. `--non-tty` is accepted too (same meaning as every
+ * other command's flag of that name: never prompt, even on a real TTY).
+ * Without either, the refusal is coded `AGENTS_SETUP_NEEDS_TTY`, exits
+ * `EXIT_NEEDS_INPUT` (3), and under `--json` names the flag that would answer
+ * it via `unanswered`.
  */
 import { existsSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from 'fs';
 import { join, sep } from 'path';
@@ -26,6 +35,12 @@ export interface AgentsCommandOpts {
   print?: boolean;
   remove?: boolean;
   json?: boolean;
+  /** Skip the confirm prompt for write/`--remove` — required to run either headless. */
+  yes?: boolean;
+  /** Same meaning as every other command's `--non-tty`: never prompt, even if stdin happens to be a TTY. */
+  nonTty?: boolean;
+  /** Report what write / `--remove` would change; touch no file and never prompt. */
+  dryRun?: boolean;
 }
 
 export interface AgentsFileResult {
@@ -102,14 +117,14 @@ function malformedError(name: string): CapyError {
  * (each file's write is independent and idempotent, so a partial run is
  * always safe to re-run).
  */
-export function writeAgentsBlock(root: string): AgentsFileResult[] {
+export function writeAgentsBlock(root: string, apply = true): AgentsFileResult[] {
   return writeTargetFileNames(root).map((name) => {
     const path = join(root, name);
     assertInsideRoot(root, path, name);
     const existing = readIfExists(path);
     const result = upsertAgentsBlock(existing);
     if (!result.ok) throw malformedError(name);
-    if (result.action !== 'unchanged') {
+    if (apply && result.action !== 'unchanged') {
       writeFileSync(path, result.content, 'utf-8');
     }
     return { path: name, action: result.action };
@@ -126,14 +141,14 @@ export function writeAgentsBlock(root: string): AgentsFileResult[] {
  * Capy, and deleting a file on a fuzzy "looks blank" guess is not this
  * command's call to make.
  */
-export function removeAgentsBlockFromFiles(root: string): AgentsFileResult[] {
+export function removeAgentsBlockFromFiles(root: string, apply = true): AgentsFileResult[] {
   return existingAgentsFileNames(root).map((name) => {
     const path = join(root, name);
     assertInsideRoot(root, path, name);
     const existing = readFileSync(path, 'utf-8');
     const result = removeAgentsBlock(existing);
     if (!result.ok) throw malformedError(name);
-    if (result.action === 'removed') {
+    if (apply && result.action === 'removed') {
       if (result.content.length === 0) {
         unlinkSync(path);
       } else {
@@ -148,10 +163,21 @@ function printJson(payload: unknown): void {
   console.log(JSON.stringify(payload, null, 2));
 }
 
+/**
+ * `unanswered` names the one stop a flag could have settled — `--yes` — in
+ * the same shape `capy remove`/`capy system rm` spread onto a coded refusal
+ * (`CapyError`'s `details`), so an agent parsing this refusal finds the exact
+ * flag to retry with instead of guessing from the prose.
+ */
 function refuseNeedsTty(json: boolean): never {
-  const message = '`capy agents` needs a terminal to confirm a write. Run `capy agents --print` to see the block without writing anything.'; // COPY-FLAG
+  const message = '`capy agents` needs a terminal to confirm a write. Pass --yes to skip the prompt, or run `capy agents --print` to see the block without writing anything.'; // COPY-FLAG
   if (json) {
-    printJson({ ok: false, code: ERROR_CODES.AGENTS_SETUP_NEEDS_TTY, error: message });
+    printJson({
+      ok: false,
+      code: ERROR_CODES.AGENTS_SETUP_NEEDS_TTY,
+      error: message,
+      unanswered: [{ id: 'confirm', flag: '--yes' }],
+    });
   } else {
     console.error(`\n  ${message}\n`);
   }
@@ -176,13 +202,48 @@ function actionLabel(action: AgentsFileResult['action'], removedVerb: string): s
   return 'No Capy section in';
 }
 
-function reportHuman(files: AgentsFileResult[], removedVerb: string): void {
+function reportHuman(files: AgentsFileResult[], removedVerb = 'Removed the Capy section from'): void {
   if (files.length === 0) {
     console.log('No AGENTS.md or CLAUDE.md found in this repo.'); // COPY-FLAG
     return;
   }
   for (const file of files) {
     console.log(`${actionLabel(file.action, removedVerb)} ${file.path}`); // COPY-FLAG
+  }
+}
+
+function dryRunLabel(action: AgentsFileResult['action']): string {
+  if (action === 'created') return 'Would create';
+  if (action === 'updated') return 'Would update';
+  if (action === 'removed') return 'Would remove the Capy section from';
+  if (action === 'unchanged') return 'Already up to date:';
+  return 'No Capy section in';
+}
+
+/**
+ * `--dry-run`: runs the same plan as the real write / `--remove` (same files,
+ * same malformed-marker and symlink refusals) with `apply` off, so nothing is
+ * written or deleted. Never prompts, so it works without a TTY and without
+ * `--yes`.
+ */
+function previewChanges(root: string, remove: boolean, json: boolean): void {
+  try {
+    const files = remove ? removeAgentsBlockFromFiles(root, false) : writeAgentsBlock(root, false);
+    if (json) {
+      printJson({ ok: true, dry_run: true, files });
+      return;
+    }
+    if (files.length === 0) {
+      console.log('No AGENTS.md or CLAUDE.md found in this repo.'); // COPY-FLAG
+      return;
+    }
+    for (const file of files) {
+      console.log(`${dryRunLabel(file.action)} ${file.path}`); // COPY-FLAG
+    }
+    console.log('Dry run: nothing was changed.'); // COPY-FLAG
+  } catch (err) {
+    if (err instanceof CapyError) refuseCapyError(err, json);
+    throw err;
   }
 }
 
@@ -243,7 +304,10 @@ export async function offerAgentsSetupAfterInit(): Promise<void> {
     const confirmed = await confirmWrite(false);
     if (!confirmed) return;
     const files = writeAgentsBlock(root);
-    reportHuman(files, 'Removed');
+    // Write-path actions are only ever 'created' | 'updated' | 'unchanged'
+    // (see UpsertAction in agentsBlockPlan.ts) — actionLabel's 'removed'
+    // branch never fires here, so no removedVerb override is needed.
+    reportHuman(files);
   } catch {
     // Best-effort: init already succeeded: never let this follow-up fail the command.
   }
@@ -259,9 +323,14 @@ export async function agentsCommand(opts: AgentsCommandOpts): Promise<void> {
 
   const root = resolveRepoRoot(process.cwd());
 
+  if (opts.dryRun) {
+    previewChanges(root, opts.remove === true, json);
+    return;
+  }
+
   if (opts.remove) {
-    if (!isInteractive()) refuseNeedsTty(json);
-    const confirmed = await confirmRemove(json);
+    if (!opts.yes && !isInteractive(opts.nonTty)) refuseNeedsTty(json);
+    const confirmed = opts.yes === true || (await confirmRemove(json));
     if (!confirmed) {
       if (json) printJson({ ok: false, code: ERROR_CODES.CANCELLED, error: 'Cancelled.' });
       else console.log('Cancelled.'); // COPY-FLAG
@@ -282,8 +351,8 @@ export async function agentsCommand(opts: AgentsCommandOpts): Promise<void> {
   }
 
   // Default mode: write/update.
-  if (!isInteractive()) refuseNeedsTty(json);
-  const confirmed = await confirmWrite(json);
+  if (!opts.yes && !isInteractive(opts.nonTty)) refuseNeedsTty(json);
+  const confirmed = opts.yes === true || (await confirmWrite(json));
   if (!confirmed) {
     if (json) printJson({ ok: false, code: ERROR_CODES.CANCELLED, error: 'Cancelled.' });
     else console.log('Cancelled.'); // COPY-FLAG
@@ -295,7 +364,9 @@ export async function agentsCommand(opts: AgentsCommandOpts): Promise<void> {
       printJson({ ok: true, files });
       return;
     }
-    reportHuman(files, 'Removed');
+    // See the write-path note above offerAgentsSetupAfterInit's own write:
+    // action here is never 'removed', so no removedVerb override is needed.
+    reportHuman(files);
   } catch (err) {
     if (err instanceof CapyError) refuseCapyError(err, json);
     throw err;
