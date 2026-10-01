@@ -22,6 +22,12 @@
  *                    Required for preview targets — deployCommand heals
  *                    targets saved before `options.gitBranch` existed by
  *                    prompting once and persisting.
+ *
+ * API MODE (CAP-696): a target whose options carry a `projectId` skips the
+ * `vercel` binary, the CLI login and `.vercel/project.json` entirely and talks
+ * to Vercel's REST API with the token in the org system store
+ * (`_TARGET_VERCEL_TOKEN`) — see `../vercelTargetApi.ts`. Targets without a
+ * `projectId` take the CLI path above, unchanged.
  */
 import {
   appendFileSync,
@@ -31,11 +37,13 @@ import {
   writeFileSync,
 } from 'fs';
 import { spawnSync, spawn } from 'child_process';
+import { text as streamText } from 'stream/consumers';
 import { homedir } from 'os';
 import { basename, join } from 'path';
 import inquirer from 'inquirer';
 import { LIST_THEME } from '../../ui/promptStyle';
 import {
+  AdapterCallContext,
   DeployAdapter,
   DeployContext,
   DeployResult,
@@ -44,6 +52,33 @@ import {
   PreflightResult,
   TargetConfig,
 } from '../adapter';
+import { ERROR_CODES } from '../../types/index';
+import {
+  ApplyResult,
+  FetchLike,
+  GetVercelStoreSecret,
+  ResolveVercelTokenResult,
+  VarPlan,
+  VercelApiOptions,
+  VercelClient,
+  applyPlans,
+  asKnownErrorCode,
+  checkVercelTarget,
+  createVercelClient,
+  describeScope,
+  describeVercelFailure,
+  describeVercelTokenProblem,
+  dryRunSummary,
+  failureOf,
+  getVercelTargetSecretFromStore,
+  isVercelApiMode,
+  parseVercelApiOptions,
+  planAll,
+  resolveEnvScope,
+  resolveVercelTargetToken,
+  sortedNames,
+  verifyApplied,
+} from '../vercelTargetApi';
 
 type VercelEnv = 'production' | 'preview';
 
@@ -74,9 +109,17 @@ function setVercelEnv(
   gitBranch: string | undefined,
   cwd: string,
 ): { ok: boolean; error?: string } {
-  const args = ['env', 'add', name, vercelEnv];
-  if (vercelEnv === 'preview' && gitBranch) args.push(gitBranch);
-  args.push('--force', '--yes', '--cwd', cwd);
+  const args = [
+    'env',
+    'add',
+    name,
+    vercelEnv,
+    ...(vercelEnv === 'preview' && gitBranch ? [gitBranch] : []),
+    '--force',
+    '--yes',
+    '--cwd',
+    cwd,
+  ];
   const r = spawnSync('vercel', args, { input: value, stdio: ['pipe', 'pipe', 'pipe'], encoding: 'utf-8' });
   if (r.status !== 0) {
     return { ok: false, error: extractVercelError(r.stderr, r.stdout) };
@@ -96,7 +139,7 @@ function extractVercelError(stderr: string, stdout: string): string {
     .map((l) => l.trim())
     .filter((l) => l && !/^[╭╰│─╮╯\s]+$/.test(l));
   const errLine = lines.find((l) => /error/i.test(l));
-  return errLine ?? lines.pop() ?? 'vercel env add failed';
+  return errLine ?? lines[lines.length - 1] ?? 'vercel env add failed';
 }
 
 function readPackageJson(dir: string): any | null {
@@ -147,12 +190,9 @@ function spawnAsync(
       env: { ...process.env, ...env },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
-    let stdout = '';
-    let stderr = '';
-    child.stdout.on('data', (d) => (stdout += d.toString()));
-    child.stderr.on('data', (d) => (stderr += d.toString()));
-    child.on('close', (code) =>
-      resolve({ stdout, stderr, code: code ?? 1 }),
+    const closed = new Promise<number>((done) => child.on('close', (code) => done(code ?? 1)));
+    void Promise.all([streamText(child.stdout), streamText(child.stderr), closed]).then(
+      ([stdout, stderr, code]) => resolve({ stdout, stderr, code }),
     );
   });
 }
@@ -280,21 +320,28 @@ type PickerOutcome =
   /** The user asked for the wizard. */
   | { kind: 'declined' };
 
+/** The user's projects, or why they could not be listed — a try/catch as a value. */
+async function tryListAllVercelProjects(
+  token: string,
+): Promise<{ ok: true; projects: PickableProject[] } | { ok: false; detail: string }> {
+  try {
+    return { ok: true, projects: await listAllVercelProjects(token) };
+  } catch (e) {
+    return { ok: false, detail: e instanceof Error ? e.message : String(e) };
+  }
+}
+
 async function linkByProjectPicker(projectDir: string): Promise<PickerOutcome> {
   const token = readVercelCliToken();
   if (!token) return { kind: 'no-token' };
 
-  let projects: PickableProject[];
-  try {
-    projects = await listAllVercelProjects(token);
-  } catch (e) {
-    return { kind: 'api-error', detail: e instanceof Error ? e.message : String(e) };
-  }
-  if (projects.length === 0) return { kind: 'no-projects' };
+  const listed = await tryListAllVercelProjects(token);
+  if (!listed.ok) return { kind: 'api-error', detail: listed.detail };
+  if (listed.projects.length === 0) return { kind: 'no-projects' };
 
   // Best guess first: a project named like the directory it lives in.
   const dirName = basename(projectDir);
-  projects.sort((a, b) => {
+  const projects = Array.from(listed.projects).sort((a, b) => {
     const aMatch = a.projectName === dirName;
     const bMatch = b.projectName === dirName;
     if (aMatch !== bMatch) return aMatch ? -1 : 1;
@@ -364,58 +411,274 @@ async function runVercelLink(projectDir: string): Promise<boolean> {
   });
 }
 
-export const vercelAdapter: DeployAdapter = {
-  id: 'vercel',
-  label: 'Vercel',
-  description: 'Pushes plaintext env vars; opens a keep.lock PR Vercel CI deploys on merge',
-  // Vercel's env store is consumed at both build and runtime, so we treat it
-  // as runtime ("push to Vercel") for picker copy, but pre-select ALL vars via
-  // presumeVars below — public-prefixed ones still get inlined by Vercel itself.
-  varKind: 'runtime',
-  // CI-only for CODE: capy never runs `vercel deploy`. The deploy PR is the
-  // deploy signal; Vercel's git integration builds and ships when it merges.
-  // (We do use the `vercel` CLI here, but only to set env vars, not to deploy.)
-  defaultMode: 'ci',
-  ciOnly: true,
-  // Pre-check every var: Vercel's single env store holds both build-time public
-  // vars (Vercel inlines them into the bundle by prefix) and runtime secrets.
-  presumeVars: (cls) => [...cls.buildTime, ...cls.runtime].sort(),
-  requires: {
-    // Code deploy is CI (the PR), but we push the env vars via the vercel CLI.
-    binaries: ['vercel'],
-    env: [],
-  },
+// ── CLI mode (legacy: the `vercel` binary + .vercel/project.json) ──────────
 
-  async detect(cwd: string): Promise<DetectedDefaults> {
-    const projectDir = findProjectDir(cwd);
-    if (!projectDir) return {};
-    const pkg = readPackageJson(projectDir);
-    const framework = detectFramework(pkg);
-    const rel = projectDir === cwd ? '.' : projectDir.slice(cwd.length + 1);
+async function legacyPreflight(config: TargetConfig, ctx: { cwd: string }): Promise<PreflightResult> {
+  // CI-only: no vendor checks at all (no vercel binary, project linkage, or
+  // login) — the build runs in the user's CI when the deploy PR merges. We
+  // only validate that the config is coherent and there's something to ship.
+  const opts = config.options as Partial<VercelOptions>;
+  if (!opts.projectDir) {
     return {
-      options: { projectDir: rel },
-      summary: framework ? `${framework} app in ${rel}` : `app in ${rel}`,
+      ok: false,
+      reason: 'vercel target missing projectDir',
+      hint: `Run \`capy deploy --edit ${config.name}\` to fix.`,
     };
-  },
+  }
+  const projectDir = join(ctx.cwd, opts.projectDir);
+  if (!existsSync(projectDir)) {
+    return {
+      ok: false,
+      reason: `project directory ${opts.projectDir} not found`,
+    };
+  }
+  if (config.vars.length === 0) {
+    return {
+      ok: false,
+      reason: 'vercel target has no vars to push',
+      hint: 'Re-run with `--edit` and select at least one var.',
+    };
+  }
+  if (opts.vercelEnv !== 'production' && opts.vercelEnv !== 'preview') {
+    return {
+      ok: false,
+      reason: `vercel target missing vercelEnv (got ${JSON.stringify(opts.vercelEnv)})`,
+      hint: `Set options.vercelEnv to "production" or "preview" (run \`capy deploy --edit ${config.name}\`).`,
+    };
+  }
+  if (opts.vercelEnv === 'preview' && !opts.gitBranch) {
+    return {
+      ok: false,
+      reason: 'vercel preview target missing options.gitBranch',
+      hint:
+        `Preview env vars are scoped to a GIT branch Vercel knows about ` +
+        `(not a capy branch). Run \`capy deploy --edit ${config.name}\` to pick one.`,
+    };
+  }
+  // Linkage: either .vercel/project.json exists OR VERCEL_PROJECT_ID +
+  // VERCEL_ORG_ID are in env (CI). Either is sufficient. If neither holds
+  // AND we're sitting at an interactive TTY, auto-run `vercel link` so the
+  // user doesn't have to break flow. In CI/non-TTY we keep the original
+  // hard fail with the install hint.
+  const alreadyLinked = readVercelProjectId(projectDir);
+  const hasEnvIds =
+    !!process.env.VERCEL_PROJECT_ID && !!process.env.VERCEL_ORG_ID;
+  if (alreadyLinked.projectId || hasEnvIds) return { ok: true };
 
-  async preflight(config: TargetConfig, ctx: { cwd: string }): Promise<PreflightResult> {
-    // CI-only: no vendor checks at all (no vercel binary, project linkage, or
-    // login) — the build runs in the user's CI when the deploy PR merges. We
-    // only validate that the config is coherent and there's something to ship.
-    const opts = config.options as Partial<VercelOptions>;
-    if (!opts.projectDir) {
-      return {
-        ok: false,
-        reason: 'vercel target missing projectDir',
-        hint: `Run \`capy deploy --edit ${config.name}\` to fix.`,
-      };
-    }
-    const projectDir = join(ctx.cwd, opts.projectDir);
-    if (!existsSync(projectDir)) {
-      return {
-        ok: false,
-        reason: `project directory ${opts.projectDir} not found`,
-      };
+  const interactive = !!process.stdin.isTTY && !!process.stdout.isTTY;
+  if (!interactive) {
+    return {
+      ok: false,
+      reason: `${opts.projectDir} is not linked to a Vercel project`,
+      hint:
+        `Link the project once:\n` +
+        `  cd ${opts.projectDir} && vercel link\n` +
+        `Or in CI, set VERCEL_PROJECT_ID + VERCEL_ORG_ID + VERCEL_TOKEN.`,
+    };
+  }
+  // List the user's Vercel projects and ask which one this is, writing
+  // .vercel/project.json directly — the whole of what linking produces.
+  //
+  // `vercel link` is reached only where it can do something this cannot:
+  // create a project. Its wizard offers to pull the project's environment
+  // variables into `.env.local`, and capy owns those, so escalating every
+  // failure to it — which is what this used to do — risked that pull for
+  // reasons the wizard could not have fixed anyway. A missing credential
+  // and a failing API break `vercel link` in exactly the same way.
+  const picked = await linkByProjectPicker(projectDir);
+  if (picked.kind === 'no-token') {
+    return {
+      ok: false,
+      reason: 'not signed in to Vercel',
+      hint:
+        `Sign in once, then re-run:\n` +
+        `  vercel login\n` +
+        `Or set VERCEL_TOKEN in the environment.`,
+    };
+  }
+  if (picked.kind === 'api-error') {
+    return {
+      ok: false,
+      reason: `could not list your Vercel projects (${picked.detail})`,
+      hint:
+        `Usually transient — re-run. If it persists, your saved Vercel\n` +
+        `credential may have expired: vercel login`,
+    };
+  }
+  // Nothing to pick, or the user asked for the wizard. Creating a project
+  // is the one thing the picker cannot do.
+  const linkOk = picked.kind === 'linked' || (await runVercelLink(projectDir));
+  if (!linkOk) {
+    return {
+      ok: false,
+      reason: 'vercel link did not complete',
+      hint: `Re-run, or link manually: cd ${opts.projectDir} && vercel link`,
+    };
+  }
+  if (!readVercelProjectId(projectDir).projectId) {
+    return {
+      ok: false,
+      reason: `${opts.projectDir} is still not linked after vercel link`,
+      hint: `Try again: cd ${opts.projectDir} && vercel link`,
+    };
+  }
+  return { ok: true };
+}
+
+async function legacyDeploy(config: TargetConfig, ctx: DeployContext): Promise<DeployResult> {
+  const opts = config.options as Partial<VercelOptions>;
+  const vercelEnv = opts.vercelEnv as VercelEnv;
+  // Preview scope = the git branch the Preview env is wired to. Always the
+  // explicit per-target option — preflight rejects preview targets without
+  // it, because the old fallback (the capy branch name) is not a git branch
+  // and made `vercel env add` fail with "Branch not found".
+  const gitBranch = vercelEnv === 'preview' ? opts.gitBranch : undefined;
+  const projectDir = join(ctx.cwd, opts.projectDir ?? '.');
+  const scope = vercelEnv === 'preview' ? `preview · branch=${gitBranch}` : 'production';
+
+  if (ctx.dryRun) {
+    return {
+      ok: true,
+      steps: [
+        {
+          label: 'set Vercel env',
+          status: 'skip',
+          detail: `dry-run — would push ${config.vars.length} var(s) to ${scope}, then open the deploy PR`,
+        },
+      ],
+    };
+  }
+
+  // Push each declared var as a plaintext Vercel Environment Variable, scoped
+  // to the chosen Vercel env. Filter the decrypted branch env to the declared
+  // names; fail loudly if any are missing rather than pushing a partial set.
+  const filtered: ReadonlyArray<readonly [string, string]> = config.vars
+    .filter((name) => name in ctx.env)
+    .map((name) => [name, ctx.env[name]] as const);
+  const missing = config.vars.filter((name) => !(name in ctx.env));
+  if (missing.length > 0) {
+    return {
+      ok: false,
+      steps: [
+        {
+          label: 'set Vercel env',
+          status: 'fail',
+          detail: `missing in branch ${config.branch}: ${missing.join(', ')}`,
+        },
+      ],
+    };
+  }
+
+  const failed = filtered
+    .map(([name, value]) => ({ name, r: setVercelEnv(name, value, vercelEnv, gitBranch, projectDir) }))
+    .filter((x) => !x.r.ok)
+    .map((x) => `${x.name} (${x.r.error})`);
+
+  if (failed.length > 0) {
+    return {
+      ok: false,
+      steps: [
+        {
+          label: 'set Vercel env',
+          status: 'fail',
+          detail: `${scope}: ${failed.join(', ')}`,
+        },
+      ],
+    };
+  }
+  // Code ships via the keep.lock PR (opened by deployCommand); Vercel's git
+  // CI builds on merge and reads these env vars natively — no `capy run`.
+  return {
+    ok: true,
+    steps: [
+      {
+        label: 'set Vercel env',
+        status: 'ok',
+        detail: `${filtered.length} var(s) pushed to ${scope}`,
+      },
+      {
+        label: 'vercel build + deploy',
+        status: 'skip',
+        detail: 'CI mode — Vercel builds and deploys when the deploy PR merges',
+      },
+    ],
+  };
+}
+
+// ── API mode (CAP-696) ─────────────────────────────────────────────────────
+
+export interface VercelAdapterDeps {
+  fetch?: FetchLike;
+  sleep?: (ms: number) => Promise<void>;
+  now?: () => number;
+  env?: Record<string, string | undefined>;
+  /** Reads the org system store. Defaults to a getter that never touches it (env-only), so tests and bare callers stay offline. */
+  getTargetSecret?: GetVercelStoreSecret;
+}
+
+const SET_ENV_LABEL = 'set Vercel env';
+const VERIFY_LABEL = 'verify Vercel env';
+
+function failResult(step: DeployStep): DeployResult {
+  return { ok: false, steps: [step] };
+}
+
+function countOf(applied: ApplyResult['applied'], outcome: string): number {
+  return applied.filter((a) => a.outcome === outcome).length;
+}
+
+function writeSummary(applied: ApplyResult['applied']): string {
+  return (
+    `created ${countOf(applied, 'created')}, updated ${countOf(applied, 'updated')}, ` +
+    `split from a shared record ${countOf(applied, 'split')}, unchanged ${countOf(applied, 'unchanged')}`
+  );
+}
+
+function verifyStep(results: ReadonlyArray<{ name: string; state: string }>): DeployStep {
+  const names = (state: string) => sortedNames(results.filter((r) => r.state === state).map((r) => r.name));
+  const mismatched = names('mismatch');
+  if (mismatched.length > 0) {
+    return {
+      label: VERIFY_LABEL,
+      status: 'fail',
+      code: ERROR_CODES.VERCEL_VERIFY_MISMATCH,
+      detail: `Vercel holds a different value than was sent for: ${mismatched.join(', ')}`, // COPY-FLAG
+    };
+  }
+  const unverified = names('unverified');
+  const verifiedCount = names('verified').length;
+  return {
+    label: VERIFY_LABEL,
+    status: 'ok',
+    detail:
+      unverified.length > 0
+        ? `${verifiedCount} verified; written but not readable back: ${unverified.join(', ')}` // COPY-FLAG
+        : `${verifiedCount} verified`, // COPY-FLAG
+  };
+}
+
+export function createVercelAdapter(deps: VercelAdapterDeps = {}): DeployAdapter {
+  const clientDeps = { fetch: deps.fetch, sleep: deps.sleep, now: deps.now };
+
+  /** The Vercel token for one call: the caller's single pre-resolution wins; else resolve here. */
+  const resolveToken = (ctx: AdapterCallContext): Promise<ResolveVercelTokenResult> =>
+    ctx.resolvedVercelToken
+      ? Promise.resolve(ctx.resolvedVercelToken)
+      : resolveVercelTargetToken({
+          env: deps.env ?? process.env,
+          interactive: ctx.interactive ?? false,
+          orgId: ctx.orgId,
+          devMode: ctx.devMode,
+          getSecret: deps.getTargetSecret,
+        });
+
+  const clientFor = (token: string, opts: VercelApiOptions): VercelClient =>
+    createVercelClient(token, opts.projectId, opts.teamId, clientDeps);
+
+  async function apiPreflight(config: TargetConfig, ctx: { cwd: string } & AdapterCallContext): Promise<PreflightResult> {
+    const parsed = parseVercelApiOptions(config.options);
+    if (!parsed.ok) {
+      return { ok: false, reason: parsed.reason, hint: parsed.hint, code: ERROR_CODES.VERCEL_OPTIONS_INVALID };
     }
     if (config.vars.length === 0) {
       return {
@@ -424,161 +687,180 @@ export const vercelAdapter: DeployAdapter = {
         hint: 'Re-run with `--edit` and select at least one var.',
       };
     }
-    if (opts.vercelEnv !== 'production' && opts.vercelEnv !== 'preview') {
-      return {
-        ok: false,
-        reason: `vercel target missing vercelEnv (got ${JSON.stringify(opts.vercelEnv)})`,
-        hint: `Set options.vercelEnv to "production" or "preview" (run \`capy deploy --edit ${config.name}\`).`,
-      };
+    const token = await resolveToken(ctx);
+    if (!token.ok) {
+      const { reason, hint } = describeVercelTokenProblem(token.code);
+      return { ok: false, reason, hint, code: asKnownErrorCode(token.code) };
     }
-    if (opts.vercelEnv === 'preview' && !opts.gitBranch) {
-      return {
-        ok: false,
-        reason: 'vercel preview target missing options.gitBranch',
-        hint:
-          `Preview env vars are scoped to a GIT branch Vercel knows about ` +
-          `(not a capy branch). Run \`capy deploy --edit ${config.name}\` to pick one.`,
-      };
-    }
-    // Linkage: either .vercel/project.json exists OR VERCEL_PROJECT_ID +
-    // VERCEL_ORG_ID are in env (CI). Either is sufficient. If neither holds
-    // AND we're sitting at an interactive TTY, auto-run `vercel link` so the
-    // user doesn't have to break flow. In CI/non-TTY we keep the original
-    // hard fail with the install hint.
-    let linked = readVercelProjectId(projectDir);
-    const hasEnvIds =
-      !!process.env.VERCEL_PROJECT_ID && !!process.env.VERCEL_ORG_ID;
-    if (!linked.projectId && !hasEnvIds) {
-      const interactive = !!process.stdin.isTTY && !!process.stdout.isTTY;
-      if (!interactive) {
-        return {
-          ok: false,
-          reason: `${opts.projectDir} is not linked to a Vercel project`,
-          hint:
-            `Link the project once:\n` +
-            `  cd ${opts.projectDir} && vercel link\n` +
-            `Or in CI, set VERCEL_PROJECT_ID + VERCEL_ORG_ID + VERCEL_TOKEN.`,
-        };
-      }
-      // List the user's Vercel projects and ask which one this is, writing
-      // .vercel/project.json directly — the whole of what linking produces.
-      //
-      // `vercel link` is reached only where it can do something this cannot:
-      // create a project. Its wizard offers to pull the project's environment
-      // variables into `.env.local`, and capy owns those, so escalating every
-      // failure to it — which is what this used to do — risked that pull for
-      // reasons the wizard could not have fixed anyway. A missing credential
-      // and a failing API break `vercel link` in exactly the same way.
-      const picked = await linkByProjectPicker(projectDir);
-      if (picked.kind === 'no-token') {
-        return {
-          ok: false,
-          reason: 'not signed in to Vercel',
-          hint:
-            `Sign in once, then re-run:\n` +
-            `  vercel login\n` +
-            `Or set VERCEL_TOKEN in the environment.`,
-        };
-      }
-      if (picked.kind === 'api-error') {
-        return {
-          ok: false,
-          reason: `could not list your Vercel projects (${picked.detail})`,
-          hint:
-            `Usually transient — re-run. If it persists, your saved Vercel\n` +
-            `credential may have expired: vercel login`,
-        };
-      }
-      // Nothing to pick, or the user asked for the wizard. Creating a project
-      // is the one thing the picker cannot do.
-      const linkOk = picked.kind === 'linked' || (await runVercelLink(projectDir));
-      if (!linkOk) {
-        return {
-          ok: false,
-          reason: 'vercel link did not complete',
-          hint: `Re-run, or link manually: cd ${opts.projectDir} && vercel link`,
-        };
-      }
-      linked = readVercelProjectId(projectDir);
-      if (!linked.projectId) {
-        return {
-          ok: false,
-          reason: `${opts.projectDir} is still not linked after vercel link`,
-          hint: `Try again: cd ${opts.projectDir} && vercel link`,
-        };
-      }
+    const checked = await checkVercelTarget(clientFor(token.value, parsed.options), parsed.options);
+    if (!checked.ok) {
+      return { ok: false, ...describeVercelFailure(checked.code, checked.status), code: checked.code };
     }
     return { ok: true };
-  },
+  }
 
-  async deploy(config: TargetConfig, ctx: DeployContext): Promise<DeployResult> {
-    const steps: DeployStep[] = [];
-    const opts = config.options as Partial<VercelOptions>;
-    const vercelEnv = opts.vercelEnv as VercelEnv;
-    // Preview scope = the git branch the Preview env is wired to. Always the
-    // explicit per-target option — preflight rejects preview targets without
-    // it, because the old fallback (the capy branch name) is not a git branch
-    // and made `vercel env add` fail with "Branch not found".
-    const gitBranch = vercelEnv === 'preview' ? opts.gitBranch : undefined;
-    const projectDir = join(ctx.cwd, opts.projectDir ?? '.');
-    const scope = vercelEnv === 'preview' ? `preview · branch=${gitBranch}` : 'production';
-
-    if (ctx.dryRun) {
-      steps.push({
-        label: 'set Vercel env',
-        status: 'skip',
-        detail: `dry-run — would push ${config.vars.length} var(s) to ${scope}, then open the deploy PR`,
-      });
-      return { ok: true, steps };
+  async function apiDryRun(config: TargetConfig, ctx: DeployContext, opts: VercelApiOptions): Promise<DeployResult> {
+    // Reads only — a dry run makes no write call of any kind.
+    const token = await resolveToken(ctx);
+    if (!token.ok) {
+      const { reason } = describeVercelTokenProblem(token.code);
+      return failResult({ label: 'vercel auth', status: 'fail', detail: reason, code: asKnownErrorCode(token.code) });
     }
-
-    // Push each declared var as a plaintext Vercel Environment Variable, scoped
-    // to the chosen Vercel env. Filter the decrypted branch env to the declared
-    // names; fail loudly if any are missing rather than pushing a partial set.
-    const filtered: Array<[string, string]> = [];
-    const missing: string[] = [];
-    for (const name of config.vars) {
-      if (name in ctx.env) filtered.push([name, ctx.env[name]]);
-      else missing.push(name);
+    const client = clientFor(token.value, opts);
+    const scope = await resolveEnvScope(client, opts);
+    if (!scope.ok) {
+      return failResult({ label: SET_ENV_LABEL, status: 'fail', code: scope.code, detail: describeVercelFailure(scope.code, scope.status).reason });
     }
+    const listed = await client.listEnvs().then(
+      (records) => ({ ok: true as const, records }),
+      (err) => failureOf(err),
+    );
+    if (!listed.ok) {
+      return failResult({ label: SET_ENV_LABEL, status: 'fail', code: listed.code, detail: describeVercelFailure(listed.code, listed.status).reason });
+    }
+    const plan = dryRunSummary(config.vars, listed.records, scope.scope);
+    const names = (xs: readonly string[]) => (xs.length > 0 ? ` [${sortedNames(xs).join(', ')}]` : '');
+    return {
+      ok: true,
+      steps: [
+        {
+          label: SET_ENV_LABEL,
+          status: 'skip',
+          // COPY-FLAG: names and counts only.
+          detail:
+            `dry-run — would push ${config.vars.length} var(s) to ${describeScope(scope.scope)}: ` +
+            `create ${plan.create.length}${names(plan.create)}, ` +
+            `update ${plan.update.length}${names(plan.update)}, ` +
+            `split from a shared record ${plan.split.length}${names(plan.split)}; then open the deploy PR`,
+        },
+      ],
+    };
+  }
+
+  async function apiDeploy(config: TargetConfig, ctx: DeployContext): Promise<DeployResult> {
+    const parsed = parseVercelApiOptions(config.options);
+    if (!parsed.ok) {
+      return failResult({ label: SET_ENV_LABEL, status: 'fail', code: ERROR_CODES.VERCEL_OPTIONS_INVALID, detail: parsed.reason });
+    }
+    if (ctx.dryRun) return apiDryRun(config, ctx, parsed.options);
+
+    const missing = config.vars.filter((name) => !(name in ctx.env));
     if (missing.length > 0) {
-      steps.push({
-        label: 'set Vercel env',
+      return failResult({
+        label: SET_ENV_LABEL,
         status: 'fail',
         detail: `missing in branch ${config.branch}: ${missing.join(', ')}`,
       });
-      return { ok: false, steps };
+    }
+    const token = await resolveToken(ctx);
+    if (!token.ok) {
+      const { reason } = describeVercelTokenProblem(token.code);
+      return failResult({ label: 'vercel auth', status: 'fail', detail: reason, code: asKnownErrorCode(token.code) });
+    }
+    const client = clientFor(token.value, parsed.options);
+    const scope = await resolveEnvScope(client, parsed.options);
+    if (!scope.ok) {
+      return failResult({ label: SET_ENV_LABEL, status: 'fail', code: scope.code, detail: describeVercelFailure(scope.code, scope.status).reason });
+    }
+    const where = describeScope(scope.scope);
+    const listed = await client.listEnvs().then(
+      (records) => ({ ok: true as const, records }),
+      (err) => failureOf(err),
+    );
+    if (!listed.ok) {
+      return failResult({ label: SET_ENV_LABEL, status: 'fail', code: listed.code, detail: describeVercelFailure(listed.code, listed.status).reason });
     }
 
-    const failed: string[] = [];
-    for (const [name, value] of filtered) {
-      const r = setVercelEnv(name, value, vercelEnv, gitBranch, projectDir);
-      if (!r.ok) failed.push(`${name} (${r.error})`);
-    }
-
-    if (failed.length > 0) {
-      steps.push({
-        label: 'set Vercel env',
+    const pairs = config.vars.map((name) => [name, ctx.env[name]] as const);
+    const plans: readonly VarPlan[] = planAll(pairs, listed.records, scope.scope);
+    const applied = await applyPlans(client, plans, scope.scope);
+    if (!applied.ok) {
+      return failResult({
+        label: SET_ENV_LABEL,
         status: 'fail',
-        detail: `${scope}: ${failed.join(', ')}`,
+        code: applied.code,
+        // COPY-FLAG: names and counts only — never a value.
+        detail: `${where}: stopped at ${applied.name} (${describeVercelFailure(applied.code, applied.status).reason}); ${applied.applied.length} var(s) written before it`,
       });
-      return { ok: false, steps };
     }
-    steps.push({
-      label: 'set Vercel env',
+
+    const verified = await verifyApplied(client, applied.applied, ctx.env);
+    const writeStep: DeployStep = {
+      label: SET_ENV_LABEL,
       status: 'ok',
-      detail: `${filtered.length} var(s) pushed to ${scope}`,
-    });
-    // Code ships via the keep.lock PR (opened by deployCommand); Vercel's git
-    // CI builds on merge and reads these env vars natively — no `capy run`.
-    steps.push({
+      detail: `${config.vars.length} var(s) pushed to ${where} (${writeSummary(applied.applied)})`,
+    };
+    if (!verified.ok) {
+      return {
+        ok: false,
+        steps: [
+          writeStep,
+          { label: VERIFY_LABEL, status: 'fail', code: verified.code, detail: describeVercelFailure(verified.code, verified.status).reason },
+        ],
+      };
+    }
+    const vStep = verifyStep(verified.results);
+    const buildStep: DeployStep = {
       label: 'vercel build + deploy',
       status: 'skip',
       detail: 'CI mode — Vercel builds and deploys when the deploy PR merges',
-    });
-    return { ok: true, steps };
-  },
-};
+    };
+    return vStep.status === 'fail'
+      ? { ok: false, steps: [writeStep, vStep] }
+      : { ok: true, steps: [writeStep, vStep, buildStep] };
+  }
+
+  return {
+    id: 'vercel',
+    label: 'Vercel',
+    description: 'Pushes plaintext env vars; opens a keep.lock PR Vercel CI deploys on merge',
+    // Vercel's env store is consumed at both build and runtime, so we treat it
+    // as runtime ("push to Vercel") for picker copy, but pre-select ALL vars via
+    // presumeVars below — public-prefixed ones still get inlined by Vercel itself.
+    varKind: 'runtime',
+    // CI-only for CODE: capy never runs `vercel deploy`. The deploy PR is the
+    // deploy signal; Vercel's git integration builds and ships when it merges.
+    // (CLI mode uses the `vercel` CLI here, but only to set env vars, not to deploy.)
+    defaultMode: 'ci',
+    ciOnly: true,
+    // Pre-check every var: Vercel's single env store holds both build-time public
+    // vars (Vercel inlines them into the bundle by prefix) and runtime secrets.
+    presumeVars: (cls) => sortedNames([...cls.buildTime, ...cls.runtime]),
+    requires: {
+      // CLI mode pushes the env vars via the vercel CLI. API-mode targets (a
+      // `projectId` in options) never spawn it — nothing in the deploy flow
+      // reads this list to refuse a run, so the static declaration is
+      // unchanged for existing callers and tests.
+      binaries: ['vercel'],
+      env: [],
+    },
+
+    async detect(cwd: string): Promise<DetectedDefaults> {
+      const projectDir = findProjectDir(cwd);
+      if (!projectDir) return {};
+      const pkg = readPackageJson(projectDir);
+      const framework = detectFramework(pkg);
+      const rel = projectDir === cwd ? '.' : projectDir.slice(cwd.length + 1);
+      return {
+        options: { projectDir: rel },
+        summary: framework ? `${framework} app in ${rel}` : `app in ${rel}`,
+      };
+    },
+
+    async preflight(config: TargetConfig, ctx: { cwd: string } & AdapterCallContext): Promise<PreflightResult> {
+      return isVercelApiMode(config.options) ? apiPreflight(config, ctx) : legacyPreflight(config, ctx);
+    },
+
+    async deploy(config: TargetConfig, ctx: DeployContext): Promise<DeployResult> {
+      return isVercelApiMode(config.options) ? apiDeploy(config, ctx) : legacyDeploy(config, ctx);
+    },
+  };
+}
+
+/** The registry's instance: API mode reads the real org system store. */
+export const vercelAdapter: DeployAdapter = createVercelAdapter({
+  getTargetSecret: getVercelTargetSecretFromStore,
+});
 
 function detectFramework(pkg: any): string | null {
   if (!pkg?.dependencies && !pkg?.devDependencies) return null;
