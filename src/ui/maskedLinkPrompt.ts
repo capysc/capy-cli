@@ -170,6 +170,18 @@ export function startMaskedLinkPrompt(opts: MaskedLinkPromptOptions): MaskedLink
 
   const emitter = new EventEmitter();
 
+  // Detaches the listener and resolves `done` — the `q`/Enter/Esc path and
+  // the externally-exposed `stop()` both funnel through this, so a caller
+  // that closes the prompt itself (e.g. a concurrent redemption poll that
+  // decided the link is already redeemed — see transportPoll.ts) gets the
+  // exact same `done` signal a keypress would have produced. Idempotent:
+  // `emitter.emit('done')` on an already-settled `once` listener is a
+  // harmless no-op (no listener left to react).
+  const close = (): void => {
+    listener.stop();
+    emitter.emit('done');
+  };
+
   const listener = attachMaskedLinkKeyListener(stdin, (action) => {
     if (action.kind === 'copy') {
       // Fire-and-forget: never awaited here, so a slow/hanging clipboard
@@ -185,8 +197,7 @@ export function startMaskedLinkPrompt(opts: MaskedLinkPromptOptions): MaskedLink
       return;
     }
     if (action.kind === 'done') {
-      listener.stop();
-      emitter.emit('done');
+      close();
       return;
     }
     if (action.kind === 'exit') {
@@ -196,7 +207,7 @@ export function startMaskedLinkPrompt(opts: MaskedLinkPromptOptions): MaskedLink
   });
 
   const done = once(emitter, 'done').then(() => undefined);
-  return { done, stop: listener.stop };
+  return { done, stop: close };
 }
 
 /** Whether both ends of the terminal are real TTYs — the bar for a clickable masked link + interactive key prompt, rather than a plain masked line with a `--json` hint. */

@@ -32,8 +32,74 @@ import type { PairingEntry } from '../crypto/pairingPayload';
 import { renderTerminalQr } from '../ui/terminalQr';
 import { printMaskedLinkBlock, maskLink } from '../ui/maskedLinkPrompt';
 import { isFullScreenQrEligible, startFullScreenQrView, printMaskedLinkFooter } from '../ui/fullScreenQr';
+import { pollTransportRedemption } from './transportPoll';
+import type { TransportStatusResult } from '../service/serviceClient';
 import { CapyError, ERROR_CODES } from '../types/index';
 import { refuseError } from './pairingRefusal';
+
+/**
+ * `/transports/:id` sits behind the service's mutation limiter (30
+ * requests/min per IP) — 5s keeps this well under budget even alongside
+ * whatever else the same machine is doing.
+ */
+const REDEMPTION_POLL_INTERVAL_MS = 5000;
+
+const TRANSPORT_REDEEMED_MESSAGE = '  Activated. Your transport key is stored in that browser.'; // COPY-FLAG
+const TRANSPORT_EXPIRED_MESSAGE = 'This transport link expired. Run capy transport again.'; // COPY-FLAG
+
+/** Minimal shape `watchForRedemption` needs off `serviceClient` — easier to fake in tests than the full `ServiceClient` class. */
+interface TransportStatusSource {
+  getTransportStatus(id: string): Promise<TransportStatusResult>;
+}
+
+/** Either handle shape (`MaskedLinkPromptHandle` or `FullScreenQrHandle`) — both are structurally `{done, stop}`. */
+interface ClosablePrompt {
+  readonly done: Promise<void>;
+  readonly stop: () => void;
+}
+
+/**
+ * Watches `GET /transports/:id` (CAP-692 follow-up) while `handle`
+ * (the masked-link prompt or the full-screen view) is open, so the
+ * command quits on its own once the link is redeemed elsewhere instead of
+ * sitting there after the job is already done — see transportPoll.ts for
+ * the actual poll/race logic, which treats `handle.done` (resolves on
+ * q/Enter/Esc, same for either handle shape) as the "stop, nothing
+ * happened" signal.
+ *
+ * Returns `'quit-by-user'` when `handle.done` won the race on its own
+ * (the caller should fall through to its normal "print the link footer"
+ * ending); returns normally after printing the done message on
+ * redemption; throws the coded `TRANSPORT_EXPIRED` refusal on expiry —
+ * either way, `handle.stop()` (restoring the terminal) always runs first.
+ */
+export async function watchForRedemption(args: {
+  serviceClient: TransportStatusSource;
+  id: string;
+  expiresAt: string;
+  handle: ClosablePrompt;
+  /** True for the full-screen view, where `stop()`'s terminal restoration needs one more microtask tick to complete; false for the plain masked-link prompt, where `stop()` is fully synchronous. */
+  awaitStop: boolean;
+}): Promise<'quit-by-user' | void> {
+  const outcome = await pollTransportRedemption({
+    getStatus: () => args.serviceClient.getTransportStatus(args.id),
+    sleep: (ms) => new Promise<void>((resolve) => setTimeout(resolve, ms)),
+    intervalMs: REDEMPTION_POLL_INTERVAL_MS,
+    stopSignal: args.handle.done,
+    now: () => Date.now(),
+    localExpiresAtMs: Date.parse(args.expiresAt),
+  });
+  if (outcome === null) return 'quit-by-user';
+
+  args.handle.stop();
+  if (args.awaitStop) await args.handle.done;
+
+  if (outcome === 'redeemed') {
+    console.log(TRANSPORT_REDEEMED_MESSAGE);
+    return;
+  }
+  throw new CapyError(TRANSPORT_EXPIRED_MESSAGE, ERROR_CODES.TRANSPORT_EXPIRED);
+}
 
 export interface TransportOptions {
   json?: boolean;
@@ -149,7 +215,8 @@ export class TransportCommand {
           qr,
           extraFooterLines: [`Expires ${expires_at}`], // COPY-FLAG (same text as the non-full-screen path below)
         });
-        await view.done;
+        const watch = await watchForRedemption({ serviceClient, id, expiresAt: expires_at, handle: view, awaitStop: true });
+        if (watch !== 'quit-by-user') return; // redeemed (printed) or expired (thrown) above.
         printMaskedLinkFooter(process.stdout, {
           fullUrl: url,
           maskedUrl: masked,
@@ -167,10 +234,11 @@ export class TransportCommand {
       console.log(`  Expires ${expires_at}`); // COPY-FLAG
       console.log('');
       // Only set when both ends are a real TTY (see printMaskedLinkBlock) —
-      // blocks until q/Enter/Esc; the link stays valid for 15 minutes
-      // either way, so there's no harm in just returning if the caller's
-      // own process is torn down (e.g. piped into something else) first.
-      if (prompt) await prompt.done;
+      // watches for redemption concurrently with the key listener (q/Enter/Esc);
+      // the link stays valid for 15 minutes either way, so there's no harm
+      // in just returning if the caller's own process is torn down (e.g.
+      // piped into something else) first.
+      if (prompt) await watchForRedemption({ serviceClient, id, expiresAt: expires_at, handle: prompt, awaitStop: false });
     } catch (err) {
       refuseError(err, json);
     }

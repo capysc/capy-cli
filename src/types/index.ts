@@ -609,6 +609,8 @@ export const ERROR_CODES = {
    * this refuses instead of silently shipping a broken or lossy link.
    */
   TRANSPORT_KEY_FORMAT_UNSUPPORTED: 'TRANSPORT_KEY_FORMAT_UNSUPPORTED',
+  /** `capy transport`: the link expired (server `GET /transports/:id` 410 `TRANSPORT_EXPIRED`, or the local clock passed `expires_at`) while still waiting for it to be activated. */
+  TRANSPORT_EXPIRED: 'TRANSPORT_EXPIRED',
   /** Keep `/transport`'s activate: the transport row is missing, already used, expired, or belongs to a different user — one code for all four, so nobody can probe which (the transport id travels in a plain link). */
   TRANSPORT_NOT_FOUND: 'TRANSPORT_NOT_FOUND',
   /** `capy pair`'s pickup: the `device_pairings` row is missing or already used. */

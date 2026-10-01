@@ -717,6 +717,7 @@ Every refusal carries a stable `code` — branch on it, never on message text.
 - `DOKPLOY_SERVICE_NOT_FOUND`
 - `TRANSPORT_NO_LOCAL_KEY`
 - `TRANSPORT_KEY_FORMAT_UNSUPPORTED`
+- `TRANSPORT_EXPIRED`
 - `TRANSPORT_NOT_FOUND`
 - `PAIRING_NOT_FOUND`
 - `PAIRING_WRONG_USER`
