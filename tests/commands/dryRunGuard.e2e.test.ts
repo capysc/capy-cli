@@ -184,8 +184,6 @@ const UNSUPPORTED_CASES: Array<{ path: string; argv: string[] }> = [
   { path: 'edit', argv: ['edit'] },
   { path: 'checkout', argv: ['checkout', 'some-branch'] },
   { path: 'push', argv: ['push'] },
-  { path: 'deploy revoke', argv: ['deploy', 'revoke', 'deploy-id-x'] },
-  { path: 'deploy targets-remove', argv: ['deploy', 'targets-remove', 'target-x'] },
   { path: 'logout', argv: ['logout'] },
   { path: 'byoc', argv: ['byoc'] },
   { path: 'use', argv: ['use', 'profile-x'] },
@@ -265,11 +263,34 @@ describe('every `unsupported` command refuses, both --dry-run spellings', () => 
   });
 });
 
-describe('`deploy` — token path refuses, target mode keeps previewing (CAP-659)', () => {
-  test('no --target/--connect/positional (token path): refuses', () => {
+describe('`deploy` — both the token picker and target mode preview (CAP-659 Phase 2)', () => {
+  test('no --target/--connect/positional (token path), no --platform: not refused by the guard; the command itself reports the unanswered platform question, exit 3', () => {
+    writeKeep(ROOT);
     const r = capy(['deploy', '--dry-run', '--json']);
-    expect(r.code).toBe(1);
-    expect(JSON.parse(r.stdout)).toEqual({ ok: false, dry_run: true, command: 'deploy', code: 'DRY_RUN_UNSUPPORTED' });
+    expect(r.stderr).not.toContain('DRY_RUN_UNSUPPORTED');
+    expect(r.code).toBe(3);
+    expect(JSON.parse(r.stdout)).toEqual({
+      ok: true,
+      dry_run: true,
+      command: 'deploy',
+      changes: [],
+      unanswered: [{ id: 'platform', flag: '--platform' }],
+    });
+  });
+
+  test('token path with --platform: previews the mint, no network, exit 0', () => {
+    writeKeep(ROOT);
+    const r = capy(['deploy', '--platform', 'heroku', '--dry-run', '--json']);
+    expect(r.stderr).not.toContain('DRY_RUN_UNSUPPORTED');
+    expect(r.code).toBe(0);
+    const parsed = JSON.parse(r.stdout);
+    expect(parsed).toEqual({
+      ok: true,
+      dry_run: true,
+      command: 'deploy',
+      changes: [{ where: 'capy_service', action: 'mint deploy token', target: 'heroku', reversible: true }],
+      unanswered: [],
+    });
   });
 
   test('a positional target: NOT refused by the guard (reaches deploy\'s own, already-safe preview path)', () => {
@@ -281,6 +302,35 @@ describe('`deploy` — token path refuses, target mode keeps previewing (CAP-659
   test('--target: NOT refused by the guard', () => {
     const r = capy(['deploy', '--target', 'cf-worker', '--yes', '--dry-run']);
     expect(r.stderr).not.toContain('DRY_RUN_UNSUPPORTED');
+  });
+});
+
+describe('`deploy revoke` / `deploy targets-remove` — both preview now (CAP-659 Phase 2)', () => {
+  test('deploy revoke --dry-run: NOT refused by the guard; previews (reversible: false), changes nothing', () => {
+    writeKeep(ROOT);
+    const before = readFileSync(join(ROOT, 'keep.lock'), 'utf-8');
+
+    const r = capy(['deploy', 'revoke', 'deploy-id-x', '--dry-run', '--json']);
+    expect(r.stderr).not.toContain('DRY_RUN_UNSUPPORTED');
+    const parsed = JSON.parse(r.stdout);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.dry_run).toBe(true);
+    expect(parsed.changes).toEqual([
+      { where: 'capy_service', action: 'revoke deploy token', target: 'deploy-id-x', reversible: false },
+    ]);
+
+    expect(readFileSync(join(ROOT, 'keep.lock'), 'utf-8')).toBe(before);
+  });
+
+  test('deploy targets-remove --dry-run: NOT refused by the guard; no target configured, refuses the same way the real run would, changes nothing', () => {
+    writeKeep(ROOT);
+    const before = readFileSync(join(ROOT, 'keep.lock'), 'utf-8');
+
+    const r = capy(['deploy', 'targets-remove', 'target-x', '--dry-run']);
+    expect(r.stderr).not.toContain('DRY_RUN_UNSUPPORTED');
+    expect(r.code).toBe(1);
+
+    expect(readFileSync(join(ROOT, 'keep.lock'), 'utf-8')).toBe(before);
   });
 });
 

@@ -21,6 +21,15 @@ import { hashValue } from '../deploy/keepGate';
 import { stripTargetsForDeployId } from '../deploy/targetsGate';
 import { ERROR_CODES } from '../types/index';
 import type { ProjectState } from '../types/index';
+import { isInteractive, EXIT_NEEDS_INPUT } from '../ui/interactive';
+import {
+  dryRunOk,
+  dryRunRefused,
+  dryRunExitCode,
+  printDryRunResultHuman,
+  printDryRunResultJson,
+  type DryRunChange,
+} from '../core/dryRun';
 
 /**
  * `deploy revoke <id>` (CAP-679): strip every `targets` element carrying
@@ -388,6 +397,22 @@ export interface DeployCommandOptions {
    * minted, written to `.capy/config`, or handed to the connector moves.
    */
   web?: boolean;
+  /**
+   * CAP-659 Phase 2: describe the platform/mode route and what a mint would
+   * do — never authenticate, never prompt, never write `.capy/config`, never
+   * mint. See `DeployCommand#execute`'s own doc for the full contract.
+   */
+  dryRun?: boolean;
+  /**
+   * Describe the route as JSON instead of travelling it — same "never
+   * prompts, never authenticates" contract as `dryRun`, but always exits 0
+   * (a description, not a decision). When BOTH `json` and `dryRun` are set,
+   * the canonical `{ok, dry_run:true, ...}` shape wins (CAP-659's shared
+   * printer) over this simpler one.
+   */
+  json?: boolean;
+  /** CAP-520: refuse rather than prompt when input is needed, even with a TTY. */
+  nonTty?: boolean;
 }
 
 export class DeployCommand {
@@ -408,7 +433,12 @@ export class DeployCommand {
       const projectState = await pm.detectProjectState();
 
       if (!projectState.initialized || !projectState.organizationId || !projectState.projectId) {
-        console.error(`No keep.lock file found. Run ${B('capy')} first to initialize.`);
+        const message = `No keep.lock file found. Run ${B('capy')} first to initialize.`;
+        if (this.options.json) {
+          console.log(JSON.stringify({ ok: false, code: ERROR_CODES.NO_KEEP_FILE, error: message }));
+        } else {
+          console.error(message);
+        }
         process.exit(1);
       }
 
@@ -416,19 +446,55 @@ export class DeployCommand {
       const projectId = projectState.projectId;
       const projectRoot = process.cwd();
 
-      // Authenticate
+      // `authService`/`serviceClient` are cheap to construct (no network) —
+      // only `ensureUserId()` below actually authenticates, and it's called
+      // lazily, on first need. CAP-659: a dry run or `--json` describes the
+      // platform/mode route and stops BEFORE that point — never a new
+      // sign-in. The non-gh-actions connector dispatch further down
+      // (`deployCommand()`) never calls `ensureUserId` at all — it
+      // authenticates itself.
       const authService = new AuthService(this.apiUrl, this.devMode, projectState.userId);
       const serviceClient = new ServiceClient(this.apiUrl, this.devMode);
       serviceClient.setTokenProvider(() => authService.getValidToken());
-      let authResult = await authService.authenticateSilent(orgId);
-      if (!authResult.success) authResult = await authService.authenticateSilent();
-      if (!authResult.success) authResult = await authService.authenticate(orgId);
-      if (!authResult.success) {
-        console.error('Authentication failed');
+      let cachedUserId: string | undefined;
+      const ensureUserId = async (): Promise<string> => {
+        if (cachedUserId) return cachedUserId;
+        let authResult = await authService.authenticateSilent(orgId);
+        if (!authResult.success) authResult = await authService.authenticateSilent();
+        if (!authResult.success) authResult = await authService.authenticate(orgId);
+        if (!authResult.success) {
+          console.error('Authentication failed');
+          process.exit(1);
+        }
+        cachedUserId = authResult.user_id!;
+        return cachedUserId;
+      };
+
+      const json = !!this.options.json;
+      const dryRun = !!this.options.dryRun;
+      // CAP-659: neither flag ever prompts — a dry run must list what's
+      // unanswered rather than ask, and plain `--json` describes the route
+      // the same way target mode's own `--json` does (never travels it).
+      const describeOnly = json || dryRun;
+      const nonInteractive = !isInteractive(this.options.nonTty);
+
+      // CAP-659/CAP-520: `--mode` is validated up front, context-free — an
+      // unknown value must never silently fall through to the token+docs
+      // flow (the old behaviour: anything that wasn't literally "connector"
+      // took the token path with no warning at all).
+      if (
+        this.options.mode !== undefined &&
+        this.options.mode !== 'connector' &&
+        this.options.mode !== 'token'
+      ) {
+        const message = `--mode must be "target" or "token" (got ${JSON.stringify(this.options.mode)}).`;
+        if (json) {
+          console.log(JSON.stringify({ ok: false, code: ERROR_CODES.DEPLOY_MODE_INVALID, error: message }));
+        } else {
+          console.error(`  [${ERROR_CODES.DEPLOY_MODE_INVALID}] ${message}`);
+        }
         process.exit(1);
       }
-
-      const userId = authResult.user_id!;
 
       // Steps 1 and 2: where this project deploys, and — for the five
       // platforms with a connector — whether Capy drives the deploy or just
@@ -493,10 +559,34 @@ export class DeployCommand {
         }
       } else if (flagPlatform !== undefined) {
         if (badPlatformFlag) {
-          console.error(`  --platform must be one of: ${PLATFORMS.map(p => p.value).join(', ')}`);
+          const message = `--platform must be one of: ${PLATFORMS.map(p => p.value).join(', ')}`;
+          if (json) {
+            console.log(JSON.stringify({ ok: false, code: ERROR_CODES.DEPLOY_PLATFORM_INVALID, error: message }));
+          } else {
+            console.error(`  [${ERROR_CODES.DEPLOY_PLATFORM_INVALID}] ${message}`);
+          }
           process.exit(1);
         }
         platform = flagPlatform;
+      } else if (describeOnly || nonInteractive) {
+        // CAP-659/CAP-520: no --platform, and this run must either never
+        // prompt (dry-run/json describe the route instead of travelling it)
+        // or there is no TTY to answer an inquirer list with. Refused/
+        // reported BEFORE any prompt and before `ensureUserId()` is ever
+        // called — no sign-in, no network, nothing written.
+        if (dryRun) {
+          const result = dryRunOk('deploy', [], [{ id: 'platform', flag: '--platform' }]);
+          if (json) printDryRunResultJson(result);
+          else printDryRunResultHuman(result);
+          process.exit(dryRunExitCode(result));
+        }
+        if (json) {
+          console.log(JSON.stringify({ platform: null, mode: null, connector: null, unanswered: ['platform'] }, null, 2));
+          process.exit(0);
+        }
+        console.error(`\n  non-interactive: \`capy deploy\` needs a human to pick where this project deploys.`);
+        console.error(`  [${ERROR_CODES.DEPLOY_PICKER_NEEDS_TTY}] pass --platform <id> or run this in a terminal.\n`);
+        process.exit(EXIT_NEEDS_INPUT);
       } else {
         // Show "Other..." at the top as a ready-made escape hatch, with a
         // non-selectable Separator between it and the alphabetical list so
@@ -516,7 +606,7 @@ export class DeployCommand {
         }]);
         platform = answer.platform;
       }
-      if (platform !== config.platform) {
+      if (platform !== config.platform && !describeOnly) {
         config.platform = platform;
         writeConfig(projectRoot, config);
       }
@@ -541,6 +631,26 @@ export class DeployCommand {
         } else if (webMode) {
           // Already answered on the second stop of the destination route.
           mode = webMode;
+        } else if (describeOnly || nonInteractive) {
+          // CAP-659/CAP-520: same reasoning as the platform gate above —
+          // never prompt under dry-run/json, never prompt with no TTY.
+          if (dryRun) {
+            const result = dryRunOk('deploy', [], [{ id: 'mode', flag: '--mode' }]);
+            if (json) printDryRunResultJson(result);
+            else printDryRunResultHuman(result);
+            process.exit(dryRunExitCode(result));
+          }
+          if (json) {
+            console.log(
+              JSON.stringify({ platform, mode: null, connector: connectorId, unanswered: ['mode'] }, null, 2),
+            );
+            process.exit(0);
+          }
+          console.error(
+            `\n  non-interactive: \`capy deploy\` needs a human to choose how ${PLATFORMS.find(p => p.value === platform)?.name} deploys.`,
+          );
+          console.error(`  [${ERROR_CODES.DEPLOY_PICKER_NEEDS_TTY}] pass --mode target|token or run this in a terminal.\n`);
+          process.exit(EXIT_NEEDS_INPUT);
         } else {
           const connectorChoice = isGhActions
             ? 'Push SECRETS_BLOB + PROJECT_KEY to GitHub secrets via gh'
@@ -565,6 +675,31 @@ export class DeployCommand {
         }
         if (mode === 'connector') {
           if (isGhActions) {
+            if (describeOnly) {
+              // githubActionsConnector.ts has no preview of its own (out of
+              // scope here) — described directly: a mint, then a GitHub
+              // secrets write, neither performed.
+              if (dryRun) {
+                const changes: DryRunChange[] = [
+                  { where: 'capy_service', action: 'mint deploy token', target: platform, reversible: true },
+                  {
+                    where: 'third_party',
+                    action: 'push GitHub secrets (SECRETS_BLOB, PROJECT_KEY)',
+                    target: this.options.envName ? `env:${this.options.envName}` : this.options.scope ?? 'repo',
+                    reversible: true,
+                  },
+                ];
+                const result = dryRunOk('deploy', changes);
+                if (json) printDryRunResultJson(result);
+                else printDryRunResultHuman(result);
+                process.exit(dryRunExitCode(result));
+              }
+              console.log(
+                JSON.stringify({ platform, mode: 'connector', connector: connectorId, unanswered: [] }, null, 2),
+              );
+              process.exit(0);
+            }
+            const userId = await ensureUserId();
             const { runGithubActionsConnector } = await import('./githubActionsConnector');
             const code = await runGithubActionsConnector(
               { serviceClient, fm, orgId, projectId, userId },
@@ -576,6 +711,11 @@ export class DeployCommand {
             );
             process.exit(code);
           }
+          // Never calls `ensureUserId()` — `deployCommand()` authenticates
+          // itself (silently only; see fix/auth-needs-tty for the generic
+          // no-TTY-OAuth guard), and already implements its own `--dry-run`/
+          // `--json` preview correctly (CAP-659, rated OK in the audit) —
+          // forwarded through rather than re-implemented here.
           const { deployCommand } = await import('./deployCommand');
           const code = await deployCommand(undefined, {
             target: connectorId,
@@ -583,6 +723,9 @@ export class DeployCommand {
             force: !!this.options.force,
             devMode: this.devMode,
             web: this.options.web,
+            dryRun: !!this.options.dryRun,
+            json: !!this.options.json,
+            nonTty: !!this.options.nonTty,
             // The rail on the picker's screens continues the route this one
             // drew, rather than restarting it: these two stops were answered
             // here, and a second command drawing them as unasked would say the
@@ -594,6 +737,31 @@ export class DeployCommand {
         }
         // else fall through to existing token+docs flow
       }
+
+      if (describeOnly) {
+        // No connector (plain token+docs platform) or `mode === 'token'`:
+        // the only remaining real-run step is minting. Described, never
+        // performed — same contract as every branch above.
+        if (dryRun) {
+          const changes: DryRunChange[] = [
+            { where: 'capy_service', action: 'mint deploy token', target: platform, reversible: true },
+          ];
+          const result = dryRunOk('deploy', changes);
+          if (json) printDryRunResultJson(result);
+          else printDryRunResultHuman(result);
+          process.exit(dryRunExitCode(result));
+        }
+        console.log(
+          JSON.stringify(
+            { platform, mode: connectorId ? 'token' : null, connector: connectorId ?? null, unanswered: [] },
+            null,
+            2,
+          ),
+        );
+        process.exit(0);
+      }
+
+      const userId = await ensureUserId();
 
       const platformLabel = PLATFORMS.find(p => p.value === platform)?.name || platform!;
 
@@ -754,15 +922,34 @@ export function resolveTokenPrefix(
   return { code: 'ok', token: matches[0] };
 }
 
+export interface DeployRevokeCommandOptions {
+  web?: boolean;
+  /** Preview which token would be revoked; revoke nothing (CAP-659 — irreversible, so `reversible: false`). */
+  dryRun?: boolean;
+  /** Skip the confirmation. */
+  yes?: boolean;
+  json?: boolean;
+  /** CAP-520: refuse rather than prompt when input is needed, even with a TTY. */
+  nonTty?: boolean;
+}
+
 export class DeployRevokeCommand {
   private apiUrl?: string;
   private devMode: boolean;
   private web: boolean;
+  private dryRun: boolean;
+  private yes: boolean;
+  private json: boolean;
+  private nonTty: boolean;
 
-  constructor(apiUrl?: string, devMode: boolean = false, options: { web?: boolean } = {}) {
+  constructor(apiUrl?: string, devMode: boolean = false, options: DeployRevokeCommandOptions = {}) {
     this.apiUrl = apiUrl;
     this.devMode = devMode;
     this.web = !!options.web;
+    this.dryRun = !!options.dryRun;
+    this.yes = !!options.yes;
+    this.json = !!options.json;
+    this.nonTty = !!options.nonTty;
   }
 
   async execute(deployIdPrefix: string): Promise<void> {
@@ -771,7 +958,12 @@ export class DeployRevokeCommand {
       const projectState = await pm.detectProjectState();
 
       if (!projectState.initialized || !projectState.organizationId) {
-        console.error(`No keep.lock file found. Run ${B('capy')} first to initialize.`);
+        const message = `No keep.lock file found. Run ${B('capy')} first to initialize.`;
+        if (this.json) {
+          console.log(JSON.stringify({ ok: false, code: ERROR_CODES.NO_KEEP_FILE, error: message }));
+        } else {
+          console.error(message);
+        }
         process.exit(1);
       }
 
@@ -781,41 +973,92 @@ export class DeployRevokeCommand {
       const serviceClient = new ServiceClient(this.apiUrl, this.devMode);
       serviceClient.setTokenProvider(() => authService.getValidToken());
       // org-scoped silent → unscoped silent → interactive, as one value
-      // rather than a reassigned local.
-      const authResult = await (async () => {
-        const scoped = await authService.authenticateSilent(orgId);
-        if (scoped.success) return scoped;
-        const unscoped = await authService.authenticateSilent();
-        return unscoped.success ? unscoped : await authService.authenticate(orgId);
-      })();
+      // rather than a reassigned local. CAP-659: a dry run only ever reads
+      // (to resolve which token the prefix names) — capped to the two
+      // silent probes, never the interactive OAuth fallback, so it can
+      // never start a new sign-in. The real run keeps the original chain.
+      const authResult = this.dryRun
+        ? await (async () => {
+            const scoped = await authService.authenticateSilent(orgId);
+            return scoped.success ? scoped : await authService.authenticateSilent();
+          })()
+        : await (async () => {
+            const scoped = await authService.authenticateSilent(orgId);
+            if (scoped.success) return scoped;
+            const unscoped = await authService.authenticateSilent();
+            return unscoped.success ? unscoped : await authService.authenticate(orgId);
+          })();
       if (!authResult.success) {
+        if (this.dryRun) {
+          const result = dryRunRefused('deploy revoke', ERROR_CODES.AUTH_FAILED);
+          if (this.json) printDryRunResultJson(result);
+          else printDryRunResultHuman(result);
+          process.exit(dryRunExitCode(result));
+        }
         console.error('Authentication failed');
         process.exit(1);
       }
 
-      if (this.web && projectState.projectId) {
+      // Resolve which token the prefix names up front — the same validation
+      // `--web` already had (`resolveTokenPrefix`), now shared with the
+      // terminal path too (CAP-659/CAP-520): an ambiguous or unknown prefix
+      // used to be handed straight to the server, where "not found" and
+      // "ambiguous" come back looking the same.
+      //
+      // Under `--dry-run` this is a best-effort READ (CAP-659 allows a
+      // preview to do every check the real run does): if the list call
+      // itself can't be reached, the preview still reports — against the
+      // raw prefix, unresolved — rather than crashing a preview that must
+      // never do anything irreversible anyway.
+      let subject: DeployTokenListRow | null = null;
+      if (projectState.projectId) {
+        if (this.dryRun) {
+          try {
+            const { tokens } = await serviceClient.listDeployTokens(orgId, projectState.projectId);
+            const match = resolveTokenPrefix(tokenRows(tokens), deployIdPrefix);
+            if (match.code === 'ok') subject = match.token;
+          } catch {
+            // Best-effort — see the comment above.
+          }
+        } else {
+          const { tokens } = await serviceClient.listDeployTokens(orgId, projectState.projectId);
+          const rows = tokenRows(tokens);
+          const match = resolveTokenPrefix(rows, deployIdPrefix);
+          if (match.code === 'none') {
+            const message = `No deploy token starting with ${deployIdPrefix.slice(0, 12)} in this project.`;
+            if (this.json) console.log(JSON.stringify({ ok: false, code: ERROR_CODES.DEPLOY_TOKEN_NOT_FOUND, error: message }));
+            else console.error(`  ${message}`);
+            process.exit(1);
+          }
+          if (match.code === 'ambiguous') {
+            const message = `${match.matches.length} deploy tokens start with ${deployIdPrefix} — pass more of the id. Run \`capy deploy list\` to see them in full.`;
+            if (this.json) console.log(JSON.stringify({ ok: false, code: ERROR_CODES.DEPLOY_TOKEN_NOT_FOUND, error: message }));
+            else console.error(`  ${message}`);
+            process.exit(1);
+          }
+          subject = match.token;
+        }
+      }
+      const displayId = (subject?.deployId ?? deployIdPrefix).slice(0, 12);
+
+      if (this.dryRun) {
+        // Irreversible once it happens — CAP-659 never guesses `reversible`
+        // either way elsewhere, but this one is a verified `false`.
+        const result = dryRunOk('deploy revoke', [
+          { where: 'capy_service', action: 'revoke deploy token', target: displayId, reversible: false },
+        ]);
+        if (this.json) printDryRunResultJson(result);
+        else printDryRunResultHuman(result);
+        process.exit(dryRunExitCode(result));
+      }
+
+      if (this.web && projectState.projectId && subject) {
         // The terminal fires the DELETE the moment you press enter, with no
         // summary of what is about to lose access — and a mistyped prefix and
         // a permission failure come back looking the same. The browser draws
         // the token being cut off and wants its id typed back first.
         const { tokens } = await serviceClient.listDeployTokens(orgId, projectState.projectId);
         const rows = tokenRows(tokens);
-        // Branch on the code, not on anything printed. Resolving an ambiguous
-        // prefix to whichever row sorts first is how the wrong pipeline loses
-        // access, and revoking cannot be undone.
-        const match = resolveTokenPrefix(rows, deployIdPrefix);
-        if (match.code === 'none') {
-          console.error(`  No deploy token starting with ${deployIdPrefix.slice(0, 12)} in this project.`);
-          process.exit(1);
-        }
-        if (match.code === 'ambiguous') {
-          console.error(
-            `  ${match.matches.length} deploy tokens start with ${deployIdPrefix} — ` +
-              `pass more of the id. Run ${B('capy deploy list')} to see them in full.`,
-          );
-          process.exit(1);
-        }
-        const subject = match.token;
         const { showDeployTokensInBrowser } = await import('../ui/deployScreens');
         const picked = await showDeployTokensInBrowser({
           projectName: projectState.projectName ?? null,
@@ -839,9 +1082,31 @@ export class DeployRevokeCommand {
         return;
       }
 
-      await serviceClient.revokeDeployToken(deployIdPrefix);
+      // CAP-659/CAP-520: revoking is irreversible — a terminal run with no
+      // `--yes` needs a human to confirm, and off a TTY (or under `--json`,
+      // which must stay pure JSON on stdout) there is nobody to ask.
+      if (!this.yes) {
+        if (this.json || !isInteractive(this.nonTty)) {
+          const message = '`capy deploy revoke` needs confirmation — pass -y/--yes or run this in a terminal.';
+          if (this.json) console.log(JSON.stringify({ ok: false, code: ERROR_CODES.DEPLOY_CONFIRM_NEEDS_TTY, error: message }));
+          else {
+            console.error(`\n  non-interactive: ${message}`);
+            console.error(`  [${ERROR_CODES.DEPLOY_CONFIRM_NEEDS_TTY}]\n`);
+          }
+          process.exit(EXIT_NEEDS_INPUT);
+        }
+        const { yes: confirmed } = await inquirer.prompt([
+          { type: 'confirm', name: 'yes', message: `Revoke deploy token ${displayId}...? This cannot be undone.`, default: false },
+        ]);
+        if (!confirmed) {
+          console.log(`  Nothing revoked — ${displayId}... is still active.`);
+          return;
+        }
+      }
 
-      console.log(`  Deploy token ${deployIdPrefix.slice(0, 12)}... revoked.`);
+      await serviceClient.revokeDeployToken(subject?.deployId ?? deployIdPrefix);
+
+      console.log(`  Deploy token ${displayId}... revoked.`);
       // CAP-679: strip keep.lock's record of this deploy — best-effort, and
       // resolved to the FULL id (via listDeployTokens) since a prefix can't
       // be matched exactly against `targets[].deploy_id`.
@@ -861,11 +1126,13 @@ export class DeployListCommand {
   private apiUrl?: string;
   private devMode: boolean;
   private web: boolean;
+  private json: boolean;
 
-  constructor(apiUrl?: string, devMode: boolean = false, options: { web?: boolean } = {}) {
+  constructor(apiUrl?: string, devMode: boolean = false, options: { web?: boolean; json?: boolean } = {}) {
     this.apiUrl = apiUrl;
     this.devMode = devMode;
     this.web = !!options.web;
+    this.json = !!options.json;
   }
 
   async execute(): Promise<void> {
@@ -874,7 +1141,12 @@ export class DeployListCommand {
       const projectState = await pm.detectProjectState();
 
       if (!projectState.initialized || !projectState.organizationId || !projectState.projectId) {
-        console.error(`No keep.lock file found. Run ${B('capy')} first to initialize.`);
+        const message = `No keep.lock file found. Run ${B('capy')} first to initialize.`;
+        if (this.json) {
+          console.log(JSON.stringify({ ok: false, code: ERROR_CODES.NO_KEEP_FILE, error: message }));
+        } else {
+          console.error(message);
+        }
         process.exit(1);
       }
 
@@ -893,6 +1165,24 @@ export class DeployListCommand {
       }
 
       const { tokens } = await serviceClient.listDeployTokens(orgId, projectId);
+
+      if (this.json) {
+        // Read-only — never reaches the browser round-trip below.
+        console.log(
+          JSON.stringify(
+            tokens.map((t) => ({
+              deployId: t.deploy_id,
+              label: t.label,
+              createdAt: t.created_at,
+              createdBy: t.created_by || null,
+              revokedAt: t.revoked_at,
+            })),
+            null,
+            2,
+          ),
+        );
+        return;
+      }
 
       if (this.web) {
         // The one command you reach for in a hurry is also the one with no
