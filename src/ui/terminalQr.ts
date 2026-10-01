@@ -26,18 +26,22 @@
  *   a known-good vector" case (byte-for-byte against the library's own
  *   documented example output).
  *
- * FALLBACK, in priority order — never render a QR that won't actually work:
+ * HARD skips — the QR never renders, no matter the size — in priority
+ * order:
  *   1. `process.stdout` must be a real TTY (piping/redirecting skips it —
  *      dumping half-block escapes into a log file or an agent's stdout
  *      parser helps no one and could confuse a naive line-based reader).
  *   2. No `NO_COLOR`-style opt-out (https://no-color.org — any non-empty
  *      value). The QR isn't colored, but it's the same category of "extra
  *      terminal decoration" the convention exists to let a user suppress.
- *   3. The terminal must be at least as wide/tall as the block the URL
- *      ACTUALLY encoded to — computed from the real encoded string via
- *      {@link buildTerminalQr}, never a hardcoded module count. A short
- *      URL needs a small QR; a longer one needs a bigger terminal, and the
- *      check reflects that.
+ *
+ * SOFT skip — too small for the window ({@link QrFit} `'too_small'`): a
+ * long `capy transport` link encodes to a block that can be well over 100
+ * columns / 60 rows, bigger than a normal terminal window. Silently
+ * dropping the QR there defeats its one purpose (scan it with a phone) with
+ * no indication anything is missing. So an undersized block STILL renders
+ * — {@link renderTerminalQr} returns it plus a one-line hint to zoom the
+ * terminal out — rather than being swallowed like the two hard skips above.
  */
 import qrcodeTerminal from 'qrcode-terminal';
 
@@ -53,7 +57,7 @@ export interface RenderedQr {
 
 /**
  * Pure: encode `data` as a half-block QR and measure the result. No I/O, no
- * TTY/env checks — callers gate on {@link shouldRenderQr} before printing.
+ * TTY/env checks — callers gate on {@link qrFit} before printing.
  * Exported separately from {@link renderTerminalQr} so tests can assert on
  * the encoding without touching `process.stdout`/`process.env`.
  */
@@ -109,10 +113,10 @@ function isNoColorSet(): boolean {
 }
 
 /**
- * Read the ambient signals {@link shouldRenderQr} needs off the real
- * process. Isolated behind a function (rather than read inline) so tests
- * build a fake {@link QrEnv} instead of stubbing global `process` state —
- * `shouldRenderQr` itself stays a pure function either way.
+ * Read the ambient signals {@link qrFit} needs off the real process.
+ * Isolated behind a function (rather than read inline) so tests build a
+ * fake {@link QrEnv} instead of stubbing global `process` state — `qrFit`
+ * itself stays a pure function either way.
  */
 export function readQrEnv(): QrEnv {
   return {
@@ -126,30 +130,53 @@ export function readQrEnv(): QrEnv {
 }
 
 /**
- * Decide whether a QR block of `size` will actually render usefully in
- * `env`. Pure and independently testable — no TTY needed to exercise every
- * branch.
+ * Why a QR of `size` would or wouldn't render well in `env` — a typed
+ * result instead of a boolean so callers can tell "deliberately off"
+ * (`not_tty`/`no_color`, a hard skip either way) apart from "would be
+ * useful but doesn't fit the window" (`too_small` — {@link renderTerminalQr}
+ * still returns it, plus a hint, rather than dropping it). `fits` is the
+ * only case with no caveats.
  */
-export function shouldRenderQr(env: QrEnv, size: { width: number; height: number }): boolean {
-  if (!env.isTTY) return false;
-  if (env.noColor) return false;
-  if (env.columns < size.width) return false;
-  if (env.rows < size.height) return false;
-  return true;
+export type QrFit = 'fits' | 'too_small' | 'not_tty' | 'no_color';
+
+/**
+ * Classify `size` against `env`. Pure and independently testable — no TTY
+ * needed to exercise every branch.
+ */
+export function qrFit(env: QrEnv, size: { width: number; height: number }): QrFit {
+  if (!env.isTTY) return 'not_tty';
+  if (env.noColor) return 'no_color';
+  if (env.columns < size.width || env.rows < size.height) return 'too_small';
+  return 'fits';
+}
+
+/** COPY-FLAG (minimal-neutral, no approved copy on file for this one):
+ *  printed right after an undersized QR so scanning is still possible. */
+const TOO_SMALL_HINT = '  Zoom out (⌘− or Ctrl−) until the whole code is visible, then scan it with your phone.';
+
+export interface RenderedTerminalQr {
+  /** The half-block block itself — same contract as before (print as-is). */
+  readonly text: string;
+  /** Only set when {@link qrFit} returned `'too_small'` — print this right
+   *  after `text`. Absent (not `undefined` written out) when the block fit
+   *  cleanly, so callers can keep using a plain `if (qr.hint)` check. */
+  readonly hint?: string;
 }
 
 /**
  * The one entry point call sites use: builds the QR for `data` and returns
- * the renderable block, or `null` when it should not be shown (piped
- * output, narrow terminal, `NO_COLOR`). Never throws — a failed/garbled
- * render is a silent skip, never a crash of the ceremony around it; the
- * caller's unconditional plain-text print is the fallback either way.
+ * the renderable block (plus a hint line when it's too big for the
+ * terminal — see {@link QrFit}), or `null` when it should not be shown at
+ * all (piped output, `NO_COLOR`). Never throws — a failed/garbled render is
+ * a silent skip, never a crash of the ceremony around it; the caller's
+ * unconditional plain-text print is the fallback either way.
  */
-export function renderTerminalQr(data: string): string | null {
+export function renderTerminalQr(data: string): RenderedTerminalQr | null {
   try {
     const qr = buildTerminalQr(data);
-    if (!shouldRenderQr(readQrEnv(), qr)) return null;
-    return qr.text;
+    const fit = qrFit(readQrEnv(), qr);
+    if (fit === 'not_tty' || fit === 'no_color') return null;
+    return fit === 'too_small' ? { text: qr.text, hint: TOO_SMALL_HINT } : { text: qr.text };
   } catch {
     return null;
   }

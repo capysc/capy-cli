@@ -40,6 +40,11 @@ const SERVER_CODES = new Set<string>([
   ERROR_CODES.PAIRING_WRONG_USER,
   ERROR_CODES.PAIRING_NOT_READY,
   ERROR_CODES.INVALID_FORMAT,
+  // CAP-692 follow-up — `GET /transports/:id` (poll for redemption): 404
+  // once activated (the row is deleted on pickup, same lifecycle `/transports`
+  // POST already has) and 410 once expired.
+  ERROR_CODES.TRANSPORT_NOT_FOUND,
+  ERROR_CODES.TRANSPORT_EXPIRED,
 ]);
 
 /**
@@ -92,6 +97,18 @@ export function classifyResponse(
 
   return ERROR_CODES.SERVICE_ERROR;
 }
+
+/**
+ * `getTransportStatus`'s typed result (CAP-692 follow-up) — a closed set
+ * of outcomes rather than a raw status code, so every caller is forced to
+ * handle `'unknown'` explicitly instead of assuming a 404 always means
+ * redeemed.
+ */
+export type TransportStatusResult =
+  | { readonly kind: 'pending'; readonly expiresAt: string }
+  | { readonly kind: 'redeemed' }
+  | { readonly kind: 'expired' }
+  | { readonly kind: 'unknown' };
 
 export interface MemberProjectBranch {
   id: string;
@@ -703,6 +720,34 @@ export class ServiceClient {
    */
   async createTransport(ciphertext: string): Promise<{ id: string; expires_at: string }> {
     return this.request('POST', '/transports', { ciphertext });
+  }
+
+  /**
+   * `capy transport`'s redemption poll (CAP-692 follow-up): is this
+   * transport row still waiting to be activated? `GET /transports/:id`
+   * returns `{state: 'pending', expires_at}` while unused, 404
+   * `TRANSPORT_NOT_FOUND` once activated (the row is deleted on pickup —
+   * same lifecycle `POST /transports` already documents), and 410
+   * `TRANSPORT_EXPIRED` once expired. Decided only on status + the
+   * server's `code` field (never message text, per cardinal Rule 5) —
+   * `classifyResponse`/`SERVER_CODES` already do that translation for
+   * every other call on this client; this reads the verdict rather than
+   * re-deriving it. Anything else — a network error, a 5xx, a 401, or a
+   * 404 WITHOUT that code (e.g. an older service with no route yet) —
+   * is `'unknown'`: never mistaken for `'redeemed'`.
+   */
+  async getTransportStatus(id: string): Promise<TransportStatusResult> {
+    try {
+      const data = await this.request<{ state: string; expires_at: string }>(
+        'GET',
+        `/transports/${encodeURIComponent(id)}`,
+      );
+      return data.state === 'pending' ? { kind: 'pending', expiresAt: data.expires_at } : { kind: 'unknown' };
+    } catch (error: unknown) {
+      if (error instanceof CapyError && error.code === ERROR_CODES.TRANSPORT_NOT_FOUND) return { kind: 'redeemed' };
+      if (error instanceof CapyError && error.code === ERROR_CODES.TRANSPORT_EXPIRED) return { kind: 'expired' };
+      return { kind: 'unknown' };
+    }
   }
 
   /**
