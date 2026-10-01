@@ -33,6 +33,7 @@ describe('AGENTS_BLOCK', () => {
         '- Run `capy help --json` for every command, its options, and its error codes.',
         '- Always pass `--json` and branch on the `code` field, never on message text.',
         '- Never print, log, or commit secret values.',
+        '- To set a value, pipe it from the command that produces it: `<cmd> | capy edit NAME --json`. Never put a value in a command argument, an `echo`, or a heredoc — it would land in your context and the shell history.',
         '<!-- capy:agents:end -->',
       ].join('\n'),
     );

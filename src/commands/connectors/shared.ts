@@ -1,13 +1,13 @@
 import { createHash } from 'crypto';
 import { ProjectManager } from '../../core/projectManager';
 import { FileManager } from '../../files/fileManager';
-import { AuthService } from '../../auth/authService';
+import { AuthService, silentAuthFailureMessage } from '../../auth/authService';
 import { ServiceClient } from '../../service/serviceClient';
 import { SyncEngine } from '../../sync/syncEngine';
 import { Encryptor } from '../../crypto/encryptor';
 import { deriveResourceId } from '../../crypto/resourceId';
 import { writeKeepCache } from '../../config/globalConfig';
-import { setSyncKeepHash, KeepFile, ConnectorMetadata } from '../../types/index';
+import { setSyncKeepHash, KeepFile, ConnectorMetadata, CapyError, ERROR_CODES, AuthResult } from '../../types/index';
 import type { ImportOutcome } from './registry';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
@@ -27,30 +27,76 @@ export interface ResolvedContext {
 }
 
 /**
+ * How a failed setup step is reported. By default (every existing caller) it is
+ * the sentence on stderr and `process.exit(1)`. A caller that owes its reader a
+ * coded, machine-readable refusal (`capy edit NAME --json`) passes its own.
+ */
+export type ContextRefusal = (code: string, message: string) => never;
+
+const exitWithMessage: ContextRefusal = (_code, message) => {
+  console.error(message);
+  process.exit(1);
+};
+
+/**
+ * Silent auth for the org, then for any org, then (only when `interactive`) the
+ * interactive sign-in: the first that succeeds. `interactive: false` is for a
+ * caller that must never open a browser (`capy edit NAME < value`).
+ */
+async function authenticateForOrg(authService: AuthService, orgId: string, interactive: boolean): Promise<AuthResult> {
+  const forOrg = await authService.authenticateSilent(orgId);
+  if (forOrg.success) return forOrg;
+  const anyOrg = await authService.authenticateSilent();
+  if (anyOrg.success || !interactive) return anyOrg;
+  return authService.authenticate(orgId);
+}
+
+/** Decrypts `.env` (values the profile holds the key for; the rest are skipped). */
+function decryptLocalEnv(fileManager: FileManager, projectKey: string): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(fileManager.readEnvFile()).flatMap(([k, v]) => {
+      if (!v.startsWith('capy:')) return [[k, v] as const];
+      try {
+        return [[k, fileManager.decryptValue(v, projectKey)] as const];
+      } catch {
+        return []; // skip undecryptable
+      }
+    }),
+  );
+}
+
+/**
  * Run the standard "I'm an interactive command that needs to encrypt + push"
  * setup. Mirrors the front half of editCommand.ts. Exits the process on
- * unrecoverable errors (no keep.lock, auth fail, key resolution fail).
+ * unrecoverable errors (no keep.lock, auth fail, key resolution fail), or
+ * hands them to `opts.refuse` when the caller wants them coded.
  */
-export async function resolveContext(opts: { apiUrl?: string; devMode?: boolean } = {}): Promise<ResolvedContext> {
+export async function resolveContext(
+  opts: {
+    apiUrl?: string;
+    devMode?: boolean;
+    refuse?: ContextRefusal;
+    /** false: silent auth only, never the browser sign-in (default true). */
+    interactive?: boolean;
+  } = {},
+): Promise<ResolvedContext> {
+  const refuse = opts.refuse ?? exitWithMessage;
   const pm = new ProjectManager();
   const projectState = await pm.detectProjectState();
 
   if (!projectState.initialized || !projectState.organizationId || !projectState.projectId) {
-    console.error(`No keep.lock found. Run ${B('capy')} to initialize.`);
-    process.exit(1);
+    return refuse(ERROR_CODES.NO_KEEP_FILE, `No keep.lock found. Run ${B('capy')} to initialize.`);
   }
   const orgId = projectState.organizationId;
   const projectId = projectState.projectId;
   const branch = projectState.activeBranch;
   if (!branch) {
-    console.error(`No active branch. Run ${B('capy')} to select a branch.`);
-    process.exit(1);
+    return refuse(ERROR_CODES.NO_ACTIVE_BRANCH, `No active branch. Run ${B('capy')} to select a branch.`);
   }
 
   const keep = pm.readKeepFile();
   if (!keep) {
-    console.error('Could not read keep.lock');
-    process.exit(1);
+    return refuse(ERROR_CODES.NO_KEEP_FILE, 'Could not read keep.lock');
   }
 
   const fileManager = new FileManager();
@@ -59,44 +105,27 @@ export async function resolveContext(opts: { apiUrl?: string; devMode?: boolean 
   const serviceClient = new ServiceClient(opts.apiUrl, devMode);
   serviceClient.setTokenProvider(() => authService.getValidToken());
 
-  let authResult = await authService.authenticateSilent(orgId);
-  if (!authResult.success) authResult = await authService.authenticateSilent();
-  if (!authResult.success) authResult = await authService.authenticate(orgId);
+  const authResult = await authenticateForOrg(authService, orgId, opts.interactive !== false);
   if (!authResult.success || !authResult.user_id) {
-    console.error('Authentication failed');
-    process.exit(1);
+    // A silent-only caller gets the reason and the remedy (chosen from the
+    // failure's code inside `silentAuthFailureMessage`); everyone else keeps the
+    // sentence they have always had.
+    return refuse(
+      ERROR_CODES.AUTH_FAILED,
+      opts.interactive === false ? silentAuthFailureMessage(authResult) : 'Authentication failed',
+    );
   }
+  const userId = authResult.user_id;
 
-  const { resolveProjectKey } = await import('../../crypto/keyResolver');
-  let projectKey: string;
-  try {
-    projectKey = await resolveProjectKey(orgId, projectId, authResult.user_id, {
-      coDecrypt: (oid, ct) => serviceClient.coDecrypt(oid, ct).then((r) => r.plaintext),
-      wrapOuterLayer: (oid, pt) => serviceClient.wrapOuterLayer(oid, pt).then((r) => r.ciphertext),
-    });
-  } catch (err: any) {
-    const { displayErrorAndExit } = await import('../../ui/errorScreen');
-    await displayErrorAndExit(err, {
-      projectName: keep.project_name,
-      projectId: keep.project_id,
-      branch,
-    });
-    throw err;
-  }
-
-  const localPlaintext: Record<string, string> = {};
-  const rawLocal = fileManager.readEnvFile();
-  for (const [k, v] of Object.entries(rawLocal)) {
-    if (v.startsWith('capy:')) {
-      try {
-        localPlaintext[k] = fileManager.decryptValue(v, projectKey);
-      } catch {
-        // skip undecryptable
-      }
-    } else {
-      localPlaintext[k] = v;
-    }
-  }
+  const projectKey = await resolveProjectKeyOrRefuse({
+    orgId,
+    projectId,
+    userId,
+    serviceClient,
+    keep,
+    branch,
+    refuse: opts.refuse,
+  });
 
   return {
     pm,
@@ -106,11 +135,48 @@ export async function resolveContext(opts: { apiUrl?: string; devMode?: boolean 
     orgId,
     projectId,
     branch,
-    userId: authResult.user_id,
+    userId,
     projectKey,
     keep,
-    localPlaintext,
+    localPlaintext: decryptLocalEnv(fileManager, projectKey),
   };
+}
+
+/**
+ * Resolves the project key. On failure: the error screen + exit (default), or a
+ * coded refusal when the caller supplied one. A thrown error keeps its `code`;
+ * the message of anything that is not a CapyError is NOT forwarded.
+ */
+async function resolveProjectKeyOrRefuse(args: {
+  orgId: string;
+  projectId: string;
+  userId: string;
+  serviceClient: ServiceClient;
+  keep: KeepFile;
+  branch: string;
+  refuse?: ContextRefusal;
+}): Promise<string> {
+  const { orgId, projectId, userId, serviceClient, keep, branch, refuse } = args;
+  const { resolveProjectKey } = await import('../../crypto/keyResolver');
+  try {
+    return await resolveProjectKey(orgId, projectId, userId, {
+      coDecrypt: (oid, ct) => serviceClient.coDecrypt(oid, ct).then((r) => r.plaintext),
+      wrapOuterLayer: (oid, pt) => serviceClient.wrapOuterLayer(oid, pt).then((r) => r.ciphertext),
+    });
+  } catch (err: any) {
+    if (refuse) {
+      return err instanceof CapyError
+        ? refuse(err.code, err.message)
+        : refuse(ERROR_CODES.SERVICE_ERROR, 'Could not resolve the project key.');
+    }
+    const { displayErrorAndExit } = await import('../../ui/errorScreen');
+    await displayErrorAndExit(err, {
+      projectName: keep.project_name,
+      projectId: keep.project_id,
+      branch,
+    });
+    throw err;
+  }
 }
 
 /**
@@ -425,18 +491,15 @@ export function attachConnector(
   branch: string,
   connector: ConnectorMetadata,
 ): KeepFile {
-  const next: KeepFile = { ...keep, variables: { ...keep.variables } };
-  const existing = next.variables[varName] ? next.variables[varName].map((e) => ({ ...e })) : [];
+  const existing = (keep.variables[varName] ?? []).map((e) => ({ ...e }));
   const idx = existing.findIndex((e) => e.branch === branch);
-  if (idx >= 0) {
-    existing[idx] = { ...existing[idx], connector };
-  } else {
-    // No entry on this branch yet (writeAndSync hasn't pushed). Defer to the
-    // next merge — but seed an entry so subsequent reads see the connector.
-    existing.push({ resource_id: '', branch, value_hash: '', connector });
-  }
-  next.variables[varName] = existing;
-  return next;
+  // No entry on this branch yet (writeAndSync hasn't pushed): defer to the
+  // next merge — but seed an entry so subsequent reads see the connector.
+  const updated =
+    idx >= 0
+      ? existing.map((e, i) => (i === idx ? { ...e, connector } : e))
+      : [...existing, { resource_id: '', branch, value_hash: '', connector }];
+  return { ...keep, variables: { ...keep.variables, [varName]: updated } };
 }
 
 /**
@@ -458,21 +521,19 @@ export function listManagedKeys(
   keep: KeepFile,
   branch: string,
 ): Array<{ varName: string; connector: ConnectorMetadata }> {
-  const out: Array<{ varName: string; connector: ConnectorMetadata }> = [];
-  for (const [varName, entries] of Object.entries(keep.variables)) {
-    const entry = entries.find((e) => e.branch === branch);
-    if (entry?.connector) out.push({ varName, connector: entry.connector });
-  }
-  return out;
+  return Object.entries(keep.variables).flatMap(([varName, entries]) => {
+    const connector = entries.find((e) => e.branch === branch)?.connector;
+    return connector ? [{ varName, connector }] : [];
+  });
 }
 
 /** All variables with an entry on `branch`, sorted. Both managed and unmanaged. */
 export function listAllVarsOnBranch(keep: KeepFile, branch: string): string[] {
-  const out: string[] = [];
-  for (const [varName, entries] of Object.entries(keep.variables)) {
-    if (entries.some((e) => e.branch === branch)) out.push(varName);
-  }
-  return out.sort();
+  // The filter result is a fresh array, so sorting it is construction (no `toSorted` below ES2023).
+  return Object.entries(keep.variables)
+    .filter(([, entries]) => entries.some((e) => e.branch === branch))
+    .map(([varName]) => varName)
+    .sort();
 }
 
 /** `abc…xyz`-style snippet of a credential value; never plaintext. */
@@ -524,19 +585,19 @@ export function checkExpiringKeys(windowDays: number = 7): ExpiringKey[] {
     const managed = listManagedKeys(keep, branch);
     const now = Date.now() / 1000;
     const windowSec = windowDays * 86400;
-    const expiring: ExpiringKey[] = [];
-    for (const { varName, connector } of managed) {
-      if (typeof connector.expires_at !== 'number') continue;
+    return managed.flatMap(({ varName, connector }): ExpiringKey[] => {
+      if (typeof connector.expires_at !== 'number') return [];
       const remainingSec = connector.expires_at - now;
-      if (remainingSec > windowSec) continue;
-      expiring.push({
-        varName,
-        provider: connector.provider,
-        expiresIn: Math.floor(remainingSec / 86400),
-        connector,
-      });
-    }
-    return expiring;
+      if (remainingSec > windowSec) return [];
+      return [
+        {
+          varName,
+          provider: connector.provider,
+          expiresIn: Math.floor(remainingSec / 86400),
+          connector,
+        },
+      ];
+    });
   } catch {
     return [];
   }

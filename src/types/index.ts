@@ -664,6 +664,22 @@ export const ERROR_CODES = {
    * to clean it up manually.
    */
   DEPLOY_TOKEN_UNTRACKED: 'DEPLOY_TOKEN_UNTRACKED',
+  // --- Piped values: `<cmd> | capy edit NAME`, `<cmd> | capy add NAME` ---
+  /**
+   * `capy edit` with no name and no terminal. There is nothing to draw the
+   * table on and no variable named to take a piped value for. Exit 3.
+   */
+  EDIT_NEEDS_TTY: 'EDIT_NEEDS_TTY',
+  /** `capy edit NAME` piped mode only: the active profile is local-only, which has no piped path yet. */
+  EDIT_STDIN_LOCAL_ONLY: 'EDIT_STDIN_LOCAL_ONLY',
+  /** A piped value was empty after stripping one trailing line ending. Nothing is written. Shared by `capy edit` and `capy add`. */
+  STDIN_EMPTY: 'STDIN_EMPTY',
+  /** A piped value was over 1 MiB. Reading stops at the cap; nothing is written. Shared by `capy edit` and `capy add`. */
+  STDIN_TOO_LARGE: 'STDIN_TOO_LARGE',
+  /** `capy add` piped mode takes exactly one variable name per pipe. Exit 3. */
+  ADD_STDIN_ONE_NAME: 'ADD_STDIN_ONE_NAME',
+  /** `capy add` piped mode: the variable already exists and `--force` was not passed. Exit 3. */
+  ADD_VAR_EXISTS: 'ADD_VAR_EXISTS',
 } as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES];
