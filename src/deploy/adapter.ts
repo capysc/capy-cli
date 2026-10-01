@@ -12,6 +12,7 @@
 
 import type { Classification } from './classify';
 import type { ResolveDokployApiKeyResult } from './dokployApi';
+import type { ResolveVercelTokenResult } from './vercelTargetApi';
 import type { ErrorCode } from '../types/index';
 
 export type DeployMode = 'direct' | 'ci';
@@ -36,6 +37,12 @@ export interface AdapterCallContext {
   interactive?: boolean;
   /** A Dokploy API key pre-resolved by the caller — see `AdapterCallContext`'s own doc. */
   resolvedApiKey?: ResolveDokployApiKeyResult;
+  /**
+   * A Vercel token pre-resolved by the caller, once per command — set only
+   * for a Vercel target in API mode (CAP-696). Same idea as `resolvedApiKey`:
+   * the system store is asked at most once, and an admin prompted at most once.
+   */
+  resolvedVercelToken?: ResolveVercelTokenResult;
 }
 
 export interface TargetConfig {

@@ -76,6 +76,12 @@ import {
 } from '../deploy/adapters/dokploy';
 import type { ResolveDokployApiKeyResult, DokployServiceKind, DokployServiceUrlOk } from '../deploy/adapters/dokploy';
 import {
+  ResolveVercelTokenResult,
+  getVercelTargetSecretFromStore,
+  isVercelApiMode,
+  resolveVercelTargetToken,
+} from '../deploy/vercelTargetApi';
+import {
   DOKPLOY_CONNECTOR_SECRET_NAME,
   DOKPLOY_TARGET_SECRET_NAME,
   DokploySystemStoreCallOptions,
@@ -221,6 +227,32 @@ async function resolveDokployApiKeyOnce(
     devMode,
     storeName: DOKPLOY_TARGET_SECRET_NAME,
     deps: { getConnectorSecret },
+  });
+}
+
+/**
+ * Vercel API mode only (CAP-696): resolves the org system store's
+ * `_TARGET_VERCEL_TOKEN` ONCE for this command, exactly as
+ * `resolveDokployApiKeyOnce` does for Dokploy, and hands the result to every
+ * `preflight`/`deploy` call via `ctx.resolvedVercelToken`. `undefined` for any
+ * other adapter, and for a Vercel target still on the CLI path (no
+ * `projectId`) — those never read a token from the store.
+ */
+async function resolveVercelTokenOnce(
+  adapter: DeployAdapter,
+  target: TargetConfig,
+  orgId: string | undefined,
+  devMode: boolean | undefined,
+  interactive: boolean,
+): Promise<ResolveVercelTokenResult | undefined> {
+  if (adapter.id !== 'vercel') return undefined;
+  if (!isVercelApiMode(target.options)) return undefined;
+  return resolveVercelTargetToken({
+    env: process.env,
+    interactive,
+    orgId,
+    devMode,
+    getSecret: getVercelTargetSecretFromStore,
   });
 }
 
@@ -497,6 +529,16 @@ function targetRefFor(target: TargetConfig): Record<string, string> | undefined 
   const opts = target.options as Record<string, unknown>;
   if (typeof opts.composeId === 'string') return { composeId: opts.composeId };
   if (typeof opts.applicationId === 'string') return { applicationId: opts.applicationId };
+  // Vercel API mode (CAP-696): the project, plus the custom environment's id
+  // when the target points at one.
+  if (target.kind === 'vercel' && isVercelApiMode(opts)) {
+    return {
+      projectId: String(opts.projectId),
+      ...(typeof opts.customEnvironmentId === 'string' && opts.customEnvironmentId
+        ? { envId: opts.customEnvironmentId }
+        : {}),
+    };
+  }
   return undefined;
 }
 
@@ -1466,6 +1508,12 @@ export async function resolveAdapterOptions(
       },
     ]);
   }
+  if (adapter.id === 'vercel' && isVercelApiMode(existingOpts)) {
+    // API-mode target (CAP-696): its project/team/environment identity is set
+    // by whoever created it. Re-asking the CLI-path questions here would
+    // silently drop `projectId` and flip the target back to the CLI path.
+    return { ...existingOpts };
+  }
   if (adapter.id === 'vercel') {
     // Vercel: code ships via the keep.lock PR (Vercel git CI builds on merge),
     // but capy pushes each var as a plaintext Environment Variable into the
@@ -1779,7 +1827,12 @@ async function runPicker(
       branch: picked.branch,
       vars: picked.vars,
       knownVars: branchVars,
-      options: picked.options,
+      // An API-mode Vercel target keeps its saved options (CAP-696): the
+      // settings page only knows the CLI-path fields and would drop `projectId`.
+      options:
+        existing?.kind === 'vercel' && isVercelApiMode(existing.options)
+          ? { ...existing.options }
+          : picked.options,
       mode: picked.mode,
       gitBaseBranch: picked.gitBaseBranch,
     };
@@ -3144,8 +3197,11 @@ export async function deployCommand(
   // at `vercel env add` with "Branch not found in the connected Git
   // repository" whenever the names don't coincide. Ask once and persist.
   const targetOpts = target.options as Record<string, unknown>;
+  // API-mode targets (CAP-696) do not need a git branch: without one, the
+  // vars apply to every Preview branch — so they are never healed here.
   if (
     target.kind === 'vercel' &&
+    !isVercelApiMode(targetOpts) &&
     targetOpts.vercelEnv === 'preview' &&
     !targetOpts.gitBranch
   ) {
@@ -3157,29 +3213,32 @@ export async function deployCommand(
       console.error(`\nRun \`capy deploy --edit\` once interactively to set it.`);
       return 1;
     }
-    if (web.web) {
-      // One step of the setup screen — which is where this question belongs:
-      // the page states in as many words that this is a GIT branch and not the
-      // capy branch, which is the confusion that produced the gap being healed.
-      const healed = await promptVercelGitBranchInBrowser(cwd, keep, target);
-      if (!healed) {
-        console.log('Cancelled.');
-        return 0;
+    const healedOpts = await (async (): Promise<Record<string, unknown> | null> => {
+      if (web.web) {
+        // One step of the setup screen — which is where this question belongs:
+        // the page states in as many words that this is a GIT branch and not the
+        // capy branch, which is the confusion that produced the gap being healed.
+        const healed = await promptVercelGitBranchInBrowser(cwd, keep, target);
+        if (!healed) return null;
+        // Production is not branch-scoped, so a switch to it drops the key
+        // rather than leaving a stale one behind — the same reason the picker
+        // omits it.
+        const { gitBranch: _dropped, ...withoutBranch } = targetOpts;
+        return { ...withoutBranch, ...healed };
       }
-      // Production is not branch-scoped, so a switch to it drops the key
-      // rather than leaving a stale one behind — the same reason the picker
-      // omits it.
-      delete targetOpts.gitBranch;
-      Object.assign(targetOpts, healed);
-    } else {
-      targetOpts.gitBranch = await promptVercelGitBranch(cwd);
+      return { ...targetOpts, gitBranch: await promptVercelGitBranch(cwd) };
+    })();
+    if (!healedOpts) {
+      console.log('Cancelled.');
+      return 0;
     }
+    target = { ...target, options: healedOpts };
     upsertTarget(cwd, target);
     console.log(
       GREEN(
-        targetOpts.gitBranch
-          ? `✓ Saved gitBranch=${targetOpts.gitBranch} to target "${target.name}"`
-          : `✓ Saved vercelEnv=${targetOpts.vercelEnv} to target "${target.name}"`,
+        healedOpts.gitBranch
+          ? `✓ Saved gitBranch=${healedOpts.gitBranch} to target "${target.name}"`
+          : `✓ Saved vercelEnv=${healedOpts.vercelEnv} to target "${target.name}"`,
       ),
     );
   }
@@ -3256,7 +3315,15 @@ export async function deployCommand(
     !!web.web || !!options.yes || !!options.dryRun,
   );
   const dokployApiKey = await resolveDokployApiKeyOnce(adapter, target, keep.orgId, options.devMode, secretsInteractive);
-  const adapterCallCtx = { orgId: keep.orgId, devMode: options.devMode, interactive: secretsInteractive, resolvedApiKey: dokployApiKey };
+  // Vercel API mode only (CAP-696) — same once-per-command resolution, same prompt rules.
+  const vercelToken = await resolveVercelTokenOnce(adapter, target, keep.orgId, options.devMode, secretsInteractive);
+  const adapterCallCtx = {
+    orgId: keep.orgId,
+    devMode: options.devMode,
+    interactive: secretsInteractive,
+    resolvedApiKey: dokployApiKey,
+    resolvedVercelToken: vercelToken,
+  };
 
   // Preflight (fail BEFORE decryption). At a terminal, a failed preflight is
   // not a dead end: the user can edit the target (e.g. a wrong composeId) and

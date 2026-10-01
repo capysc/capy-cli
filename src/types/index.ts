@@ -675,7 +675,7 @@ export const ERROR_CODES = {
    */
   DEPLOY_TOKEN_UNTRACKED: 'DEPLOY_TOKEN_UNTRACKED',
   // CAP-696 Vercel import
-  /** `capy connect vercel`: no token anywhere (`_CONNECTOR_VERCEL_TOKEN`, `--token-env`, `$VERCEL_TOKEN`) and no way to ask. */
+  /** No Vercel token anywhere and no way to ask — import (`_CONNECTOR_VERCEL_TOKEN`, `--token-env`, `$VERCEL_TOKEN`) or API-mode deploy (`_TARGET_VERCEL_TOKEN`, `$VERCEL_TOKEN`). */
   VERCEL_TOKEN_MISSING: 'VERCEL_TOKEN_MISSING',
   /** `_CONNECTOR_VERCEL_TOKEN` is absent, `_TARGET_VERCEL_TOKEN` holds a token, and there is no TTY to ask which to use. */
   VERCEL_CONNECTOR_KEY_MISSING: 'VERCEL_CONNECTOR_KEY_MISSING',
@@ -701,6 +701,21 @@ export const ERROR_CODES = {
   VERCEL_CONFIRMATION_REQUIRED: 'VERCEL_CONFIRMATION_REQUIRED',
   /** Several Vercel projects map to the same repo, folder and branch, and this run cannot ask which wins. */
   VERCEL_MAPPING_COLLISION: 'VERCEL_MAPPING_COLLISION',
+  // CAP-696 Vercel target (codes not already above)
+  /** `_TARGET_VERCEL_TOKEN` is absent but `_CONNECTOR_VERCEL_TOKEN` holds one, and there is no TTY to choose. */
+  VERCEL_TARGET_KEY_MISSING: 'VERCEL_TARGET_KEY_MISSING',
+  /** Vercel answered 401: the token is not valid. */
+  VERCEL_TOKEN_REJECTED: 'VERCEL_TOKEN_REJECTED',
+  /** Vercel answered 403: the token has no access to this project or team. */
+  VERCEL_NO_ACCESS: 'VERCEL_NO_ACCESS',
+  /** The request never got an answer from Vercel. */
+  VERCEL_NETWORK_ERROR: 'VERCEL_NETWORK_ERROR',
+  /** After writing, the value Vercel holds hashes differently from the one sent. */
+  VERCEL_VERIFY_MISMATCH: 'VERCEL_VERIFY_MISMATCH',
+  /** The API-mode target's options are incomplete or malformed. */
+  VERCEL_OPTIONS_INVALID: 'VERCEL_OPTIONS_INVALID',
+  /** A shared record had this environment removed, but creating its replacement failed and the removal could not be undone. */
+  VERCEL_SPLIT_NOT_RESTORED: 'VERCEL_SPLIT_NOT_RESTORED',
 } as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES];
