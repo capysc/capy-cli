@@ -444,12 +444,11 @@ program
 program
   .command('pair')
   .description('Pair this device into an org via Keep (device-code login + key pickup)')
-  .option('--email <email>', 'account email expected for this location (required without a terminal)')
   .option('--json', 'emit machine-readable JSON instead of the human UI')
   .option('--force', 'overwrite a different local key already on this machine')
   .action(async (options) => {
     const { pairCommand } = await import('./commands/pairCommand');
-    await pairCommand({ email: options.email, json: options.json === true, force: options.force === true, apiUrl: process.env.CAPY_API_URL, devMode: true });
+    await pairCommand({ json: options.json === true, force: options.force === true, apiUrl: process.env.CAPY_API_URL, devMode: true });
   });
 
 program
