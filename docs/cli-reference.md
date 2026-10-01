@@ -728,6 +728,7 @@ Every refusal carries a stable `code` — branch on it, never on message text.
 - `CI_DEPLOY_TARGETS_RECORD_FAILED`
 - `DEPLOY_STALE_KEEP`
 - `DEPLOY_TOKEN_UNTRACKED`
+- `DRY_RUN_UNSUPPORTED`
 
 ## Conventions
 

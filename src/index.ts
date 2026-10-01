@@ -4,11 +4,13 @@
 import { applyProdPins, formatPinNotice } from './config/prodPins';
 import { Command } from 'commander';
 import { CapyCommand } from './commands/capyCommand';
-import { CliOptions } from './types/index';
+import { CliOptions, ERROR_CODES } from './types/index';
 import { assertNotLocalOnly } from './core/localGate';
 import { version as CLI_VERSION } from '../package.json';
 import { setWebMode } from './ui/webMode';
 import { ACCENT } from './ui/colors';
+import { resolveDryRunSupport, ROOT_COMMAND_PATH, type DryRunOverrideContext } from './core/dryRunSupport';
+import { dryRunRefused, printDryRunResultHuman, printDryRunResultJson } from './core/dryRun';
 
 // Prod talks to api.capy.sc and ~/.capy, full stop. Strip the environment's
 // attempts to move it before anything can read them — see config/prodPins.ts
@@ -54,6 +56,47 @@ if (process.argv.includes('-v') || process.argv.includes('--verbose')) {
 const pinNotice = formatPinNotice(strippedPins);
 if (pinNotice) console.error(pinNotice);
 
+/**
+ * Full space-joined command path for the command whose action is about to
+ * run (e.g. `"deploy revoke"`), matching `cliHelpDoc.ts`'s scheme — `''`
+ * (`ROOT_COMMAND_PATH`) for the bare root, since the root command has no
+ * parent to walk up from.
+ */
+function dryRunCommandPathOf(actionCommand: Command): string {
+  const names: string[] = [];
+  for (let current: Command | null = actionCommand; current && current.parent; current = current.parent) {
+    names.unshift(current.name());
+  }
+  return names.join(' ');
+}
+
+/**
+ * CAP-659 Phase 1 — the one guard that stops `--dry-run` from silently
+ * running any command for real. Reads `actionCommand.optsWithGlobals().dryRun`
+ * the same way `--web` is already read (one top-level declaration; never a
+ * second one on a subcommand — see `deploy`'s and `connect`'s own comments
+ * on why). A no-op whenever `--dry-run` wasn't passed, so every run without
+ * it is byte-for-byte unchanged.
+ */
+function guardDryRun(actionCommand: Command): void {
+  const dryRun = actionCommand.optsWithGlobals().dryRun === true;
+  if (!dryRun) return;
+
+  const path = dryRunCommandPathOf(actionCommand);
+  const ctx: DryRunOverrideContext = { opts: actionCommand.opts(), args: actionCommand.args };
+  const level = resolveDryRunSupport(path, ctx) ?? 'unsupported';
+  if (level !== 'unsupported') return;
+
+  const displayPath = path === ROOT_COMMAND_PATH ? actionCommand.name() : path;
+  const result = dryRunRefused(displayPath, ERROR_CODES.DRY_RUN_UNSUPPORTED);
+  if (actionCommand.opts().json === true) {
+    printDryRunResultJson(result);
+  } else {
+    printDryRunResultHuman(result);
+  }
+  process.exit(1);
+}
+
 const program = new Command();
 
 program
@@ -79,6 +122,13 @@ program
   // flow still read `command.optsWithGlobals().web`.
   .hook('preAction', (thisCommand) => {
     setWebMode(thisCommand.opts().web === true);
+  })
+  // CAP-659 Phase 1: a second, independent `preAction` hook rather than
+  // folding this into the one above — keeps the dry-run guard a single,
+  // reviewable no-op-unless-`--dry-run` block, never touching `--web`'s own
+  // behavior.
+  .hook('preAction', (_thisCommand, actionCommand) => {
+    guardDryRun(actionCommand);
   })
   .action(async (options, cmd) => {
     if (cmd.args.length > 0) {

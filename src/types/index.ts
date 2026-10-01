@@ -653,6 +653,15 @@ export const ERROR_CODES = {
    * to clean it up manually.
    */
   DEPLOY_TOKEN_UNTRACKED: 'DEPLOY_TOKEN_UNTRACKED',
+  // --- CLI dry-run (CAP-659 Phase 1) ---
+  /**
+   * `--dry-run` on a command whose preview isn't built yet (or that can
+   * never preview — `edit`, `decrypt`, `recover`). Refused before the
+   * command's action runs at all, from the top-level `preAction` guard in
+   * `src/index.ts` — see `src/core/dryRunSupport.ts`. A dry run never falls
+   * through to running the command for real.
+   */
+  DRY_RUN_UNSUPPORTED: 'DRY_RUN_UNSUPPORTED',
 } as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES];
