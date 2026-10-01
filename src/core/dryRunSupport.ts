@@ -90,12 +90,15 @@ export const COMMAND_DRY_RUN_SUPPORT: ReadonlyMap<string, DryRunSupportLevel> = 
   ['edit', 'unsupported'],
   ['checkout', 'unsupported'],
   ['push', 'unsupported'],
-  // Token path never reads `--dry-run` and can mint a live deploy token
-  // (CAP-659). Target mode already threads the flag through safely — the
-  // override below is what tells the two apart.
-  ['deploy', 'unsupported'],
-  ['deploy revoke', 'unsupported'],
-  ['deploy targets-remove', 'unsupported'],
+  // CAP-659 Phase 2: both routes `deploy` can take now preview — see
+  // `resolveDeploySupport`'s override below, which no longer distinguishes
+  // target mode from the token+docs picker (both build a real, no-write
+  // preview before anything is minted, authenticated, or written).
+  ['deploy', 'preview'],
+  // CAP-659 Phase 2: previews (which token; `reversible: false`), revokes nothing.
+  ['deploy revoke', 'preview'],
+  // CAP-659 Phase 2: previews (what would be stripped/revoked/removed), changes nothing.
+  ['deploy targets-remove', 'preview'],
   ['logout', 'unsupported'],
   ['byoc', 'unsupported'],
   ['use', 'unsupported'],
@@ -144,15 +147,18 @@ const NO_OVERRIDE_CONTEXT: DryRunOverrideContext = { opts: {}, args: [] };
 
 /**
  * `deploy [target]` routes to target mode exactly when `src/index.ts`'s own
- * action does: `--target`, `--connect`, or a positional target. Target mode
- * already passes `dryRun` into `deployCommand`; token mode (none of the
- * three) is the path CAP-659 says ignores the flag and can mint a token —
- * refused until it previews. Decided on the same structured fields the real
- * action branches on, never on prose.
+ * action does: `--target`, `--connect`, or a positional target; anything
+ * else is the token+docs picker. CAP-659 Phase 1 refused the picker route
+ * (it ignored `--dry-run` entirely and could mint a live token) — Phase 2
+ * gave it a real preview too (`DeployCommand#execute` in
+ * `deployTokenCommand.ts`: describes the platform/mode route, reports the
+ * mint it would make, never authenticates or writes `.capy/config`). Both
+ * routes preview now; kept as an explicit function (rather than folded into
+ * the flat table) because the TWO routes still build their preview very
+ * differently, not because the levels differ.
  */
-function resolveDeploySupport(ctx: DryRunOverrideContext): DryRunSupportLevel {
-  const isTargetMode = Boolean(ctx.opts.target) || Boolean(ctx.opts.connect) || ctx.args.length > 0;
-  return isTargetMode ? 'preview' : 'unsupported';
+function resolveDeploySupport(_ctx: DryRunOverrideContext): DryRunSupportLevel {
+  return 'preview';
 }
 
 /**

@@ -662,6 +662,26 @@ export const ERROR_CODES = {
    * through to running the command for real.
    */
   DRY_RUN_UNSUPPORTED: 'DRY_RUN_UNSUPPORTED',
+  // --- Deploy non-interactive guards (CAP-659 Phase 2 / CAP-520) ---
+  /**
+   * A `capy deploy` picker (platform, mode, or the ad-hoc adapter/saved-
+   * target picker under `--target`) would have to prompt, and there is no
+   * TTY and no flag that answers it (`--platform`, `--mode`, or a saved
+   * target name). Refused before any prompt is attempted — never a silent
+   * hang or an inquirer EOF.
+   */
+  DEPLOY_PICKER_NEEDS_TTY: 'DEPLOY_PICKER_NEEDS_TTY',
+  /** `--mode` was given a value other than `target`/`connector` (old alias) or `token`. */
+  DEPLOY_MODE_INVALID: 'DEPLOY_MODE_INVALID',
+  /** `--platform` was given a value that isn't one of the known platform ids. */
+  DEPLOY_PLATFORM_INVALID: 'DEPLOY_PLATFORM_INVALID',
+  /**
+   * A `capy deploy` confirmation (ship now / open a deploy PR / revoke a
+   * token / remove a target) needs a human answer and there is no TTY and
+   * `--yes`/`-y` was not passed. Distinct from `REMOVE_NEEDS_TTY`'s own copy
+   * (a different command), same shape.
+   */
+  DEPLOY_CONFIRM_NEEDS_TTY: 'DEPLOY_CONFIRM_NEEDS_TTY',
 } as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES];

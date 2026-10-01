@@ -36,6 +36,15 @@ export interface AdapterCallContext {
   interactive?: boolean;
   /** A Dokploy API key pre-resolved by the caller — see `AdapterCallContext`'s own doc. */
   resolvedApiKey?: ResolveDokployApiKeyResult;
+  /**
+   * `capy deploy --dry-run` (CAP-659 Phase 2). `preflight()` runs for real
+   * under a dry run (its own checks are read-only), but it must never
+   * perform a LOCAL WRITE or spawn an interactive vendor wizard to get
+   * there — Vercel's own project-linking step is the one preflight that
+   * otherwise would (writes `.vercel/project.json`, may run `vercel link`).
+   * An adapter whose preflight has no such side effect ignores this field.
+   */
+  dryRun?: boolean;
 }
 
 export interface TargetConfig {

@@ -148,8 +148,8 @@ describe('resolveDryRunSupport', () => {
     expect(resolveDryRunSupport('this-command-does-not-exist')).toBeUndefined();
   });
 
-  test('deploy: token mode (no target/connect/positional) is unsupported', () => {
-    expect(resolveDryRunSupport('deploy', { opts: {}, args: [] })).toBe('unsupported');
+  test('deploy: token mode (no target/connect/positional) previews too (CAP-659 Phase 2 — DeployCommand#execute builds a real preview)', () => {
+    expect(resolveDryRunSupport('deploy', { opts: {}, args: [] })).toBe('preview');
   });
 
   test('deploy: --target flips to preview', () => {
