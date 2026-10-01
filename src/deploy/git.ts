@@ -7,6 +7,7 @@
  * deploy with other uncommitted code changes.
  */
 import { spawnSync } from 'child_process';
+import { join } from 'path';
 import { existsSync, readFileSync, writeFileSync } from 'fs';
 import { resolveGh, GH_SEARCHED } from '../utils/gh';
 import { ProjectManager } from '../core/projectManager';
@@ -143,11 +144,36 @@ export function getStatus(cwd: string): GitStatusEntry[] {
 }
 
 /**
- * The single file `capy deploy` ever auto-commits. `keep.lock` carries no
- * secrets — only var-name hashes — so committing it on the user's behalf is
- * always safe. Everything else stays the user's to commit (or not).
+ * One of the two files `capy deploy` auto-commits (the other is
+ * `.capy/deploy.json`, below). `keep.lock` carries no secrets — only
+ * var-name hashes — so committing it on the user's behalf is always safe.
+ * Everything else stays the user's to commit (or not).
  */
 const KEEP_LOCK = 'keep.lock';
+
+/**
+ * The deploy targets file. Holds target settings and variable NAMES only (no
+ * values), and `capy`'s .gitignore explicitly un-ignores it, so `capy deploy`
+ * commits it with keep.lock: the targets a deploy recorded in keep.lock are
+ * meaningless to a teammate (or CI) without the target definitions.
+ */
+const DEPLOY_CONFIG = '.capy/deploy.json';
+
+/** True for a `git status --porcelain` path that is the deploy targets file (or `.capy/` collapsed, which is how git lists it while it's the only un-ignored file there). */
+function isDeployConfigStatusPath(path: string): boolean {
+  return path === DEPLOY_CONFIG || path === '.capy/';
+}
+
+/**
+ * The deploy targets file's path relative to `cwd`, when it exists and git
+ * would accept it (not ignored). Null otherwise: an older .gitignore that
+ * ignores all of `.capy/` keeps it out rather than forcing it in.
+ */
+export function deployConfigToCommit(cwd: string): string | null {
+  if (!existsSync(join(cwd, DEPLOY_CONFIG))) return null;
+  const ignored = git(['check-ignore', '-q', '--', DEPLOY_CONFIG], cwd);
+  return ignored.code === 0 ? null : DEPLOY_CONFIG;
+}
 
 /**
  * Returns true if the user has unstaged changes to keep.lock that the deploy
@@ -164,7 +190,7 @@ export function hasKeepLockChanges(cwd: string): boolean {
  * stash dance is needed before switching branches in CI mode.
  */
 export function hasOtherChanges(cwd: string): boolean {
-  return getStatus(cwd).some((e) => e.path !== KEEP_LOCK);
+  return getStatus(cwd).some((e) => e.path !== KEEP_LOCK && !isDeployConfigStatusPath(e.path));
 }
 
 export function stageAndCommit(
@@ -225,6 +251,7 @@ export function stashOtherChanges(
       'capy-deploy: temporary stash of non-keep.lock changes',
       '--',
       ':!keep.lock',
+      `:!${DEPLOY_CONFIG}`,
     ],
     cwd,
   );

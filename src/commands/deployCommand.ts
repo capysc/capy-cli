@@ -10,8 +10,8 @@
  * into CI for `capy run` deployed mode. This command is the inverse: it
  * runs the deploy itself.
  */
-import { existsSync, readFileSync, writeFileSync } from 'fs';
-import { join, basename } from 'path';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
+import { join, basename, dirname } from 'path';
 import inquirer from 'inquirer';
 import { FileManager } from '../files/fileManager';
 import {
@@ -26,6 +26,7 @@ import {
   isGitRepo,
   hasKeepLockChanges,
   stageAndCommit,
+  deployConfigToCommit,
   currentBranch,
   checkoutBranch,
   discardPaths,
@@ -2835,7 +2836,16 @@ async function commitAndOpenDeployPr(
   try {
     const relKeep = repoRelPath(cwd, 'keep.lock');
     writeFileSync(join(wt, relKeep), deployKeepContent);
-    const commit = stageAndCommit(wt, [relKeep], msg);
+    // The PR also carries the deploy targets file, copied from the user's
+    // checkout into the isolated worktree (it's never in origin/<base> yet
+    // on a first deploy).
+    const deployConfig = deployConfigToCommit(cwd);
+    const relDeployConfig = deployConfig ? repoRelPath(cwd, deployConfig) : null;
+    if (deployConfig && relDeployConfig) {
+      mkdirSync(dirname(join(wt, relDeployConfig)), { recursive: true });
+      copyFileSync(join(cwd, deployConfig), join(wt, relDeployConfig));
+    }
+    const commit = stageAndCommit(wt, relDeployConfig ? [relKeep, relDeployConfig] : [relKeep], msg);
     if (!commit.ok) {
       console.error(`${RED('✗')} ${commit.error}`);
       return { ok: false };
@@ -3436,7 +3446,8 @@ export async function deployCommand(
     if (stash.stashed) {
       console.log(`  ${GREEN('✓')} stash   set aside other working-tree changes (will restore)`);
     }
-    const commit = stageAndCommit(cwd, ['keep.lock'], msg);
+    const deployConfig = deployConfigToCommit(cwd);
+    const commit = stageAndCommit(cwd, deployConfig ? ['keep.lock', deployConfig] : ['keep.lock'], msg);
     if (!commit.ok) {
       console.error(`${RED('✗')} ${commit.error}`);
       restorePathsToHead(cwd, ['keep.lock']);
