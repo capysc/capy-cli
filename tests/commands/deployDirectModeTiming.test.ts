@@ -150,15 +150,18 @@ describe.if(HAS_WRANGLER)('deploy direct mode: keep.lock timing (real git, no mo
   beforeEach(setUpRepo);
   afterEach(() => rmSync(TMP, { recursive: true, force: true }));
 
-  test('cancelled confirm (non-TTY default) leaves the tracked keep.lock untouched', async () => {
+  test('no --yes, no TTY: refuses before the confirm loop (CAP-659/CAP-520), leaves the tracked keep.lock untouched', async () => {
     const headBefore = git(['rev-parse', 'HEAD'], REPO).stdout.trim();
     const trackedBefore = readFileSync(join(REPO, 'keep.lock'), 'utf-8');
 
-    // No --yes: the confirm loop runs. bun test's stdin isn't a TTY, so
-    // keypressConfirm resolves to its non-interactive default, 'cancel'.
+    // No --yes, and bun test's stdin isn't a TTY: this used to reach the
+    // confirm loop, where keypressConfirm resolves to its non-interactive
+    // default ('cancel') and the command exited 0 with "Cancelled." — a
+    // false green in CI (nothing shipped, yet the run "succeeded"). It now
+    // refuses with a coded exit before the loop is ever entered.
     const code = await deployCommand('worker-prod', {}, REPO);
 
-    expect(code).toBe(0);
+    expect(code).toBe(3);
     expect(git(['rev-parse', 'HEAD'], REPO).stdout.trim()).toBe(headBefore);
     expect(readFileSync(join(REPO, 'keep.lock'), 'utf-8')).toBe(trackedBefore);
     expect(git(['status', '--porcelain'], REPO).stdout.trim()).toBe('');

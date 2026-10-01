@@ -184,7 +184,7 @@ describe('capy deploy targets-remove — never pushes a wrong-branch env blob (C
     writeFileSync(join(ROOT, '.env'), '# capy:branch=development\nDATABASE_URL=x\n');
     const before = readFileSync(join(ROOT, 'keep.lock'), 'utf-8');
 
-    const r = capy(['deploy', 'targets-remove', 'dokploy-target']);
+    const r = capy(['deploy', 'targets-remove', 'dokploy-target', '--yes']);
     expect(r.code).toBe(0); // local removal still succeeds
     expect(r.stderr).toContain('DEPLOY_BRANCH_MISMATCH');
 
@@ -215,7 +215,7 @@ describe('capy deploy targets-remove — never pushes a wrong-branch env blob (C
     writeFileSync(join(ROOT, 'keep.lock'), JSON.stringify(withSecondBranch, null, 2));
     const before = readFileSync(join(ROOT, 'keep.lock'), 'utf-8');
 
-    const r = capy(['deploy', 'targets-remove', 'dokploy-target']);
+    const r = capy(['deploy', 'targets-remove', 'dokploy-target', '--yes']);
     expect(r.code).toBe(0);
     expect(r.stderr).toContain('DEPLOY_BRANCH_UNKNOWN');
 
@@ -233,7 +233,7 @@ describe('capy deploy targets-remove — never pushes a wrong-branch env blob (C
     writeDeployConfig(ROOT, [dokployTarget('production')]);
     writeFileSync(join(ROOT, '.env'), '# capy:branch=production\nDATABASE_URL=x\n');
 
-    const r = capy(['deploy', 'targets-remove', 'dokploy-target']);
+    const r = capy(['deploy', 'targets-remove', 'dokploy-target', '--yes']);
     expect(r.code).toBe(0);
     expect(r.stderr).not.toContain('DEPLOY_BRANCH_MISMATCH');
     expect(r.stderr).not.toContain('DEPLOY_BRANCH_UNKNOWN');
@@ -253,7 +253,7 @@ describe('capy deploy targets-remove — token revocation gated on strip outcome
     // No DOKPLOY_API_KEY anywhere → onRemove refuses with code "no_token".
     writeFileSync(join(ROOT, '.env'), '# capy:branch=production\nDATABASE_URL=x\n');
 
-    const r = capy(['deploy', 'targets-remove', 'dokploy-target']);
+    const r = capy(['deploy', 'targets-remove', 'dokploy-target', '--yes']);
     expect(r.code).toBe(0);
     expect(r.stdout).toContain('left untouched'); // the onRemove offer's own refusal (offer.ok === false)
     expect(r.stdout).toContain('keeping 1 deploy token(s)');

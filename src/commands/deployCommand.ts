@@ -58,6 +58,14 @@ import {
   VarDelivery,
 } from '../deploy/targetsGate';
 import { KeepFile, ERROR_CODES, AuthResult, ErrorCode } from '../types/index';
+import { isInteractive, EXIT_NEEDS_INPUT } from '../ui/interactive';
+import {
+  dryRunOk,
+  dryRunExitCode,
+  printDryRunResultHuman,
+  printDryRunResultJson,
+  type DryRunChange,
+} from '../core/dryRun';
 import type { AuthService } from '../auth/authService';
 import type { ServiceClient } from '../service/serviceClient';
 import { ProjectManager } from '../core/projectManager';
@@ -165,6 +173,12 @@ export interface DeployCliOptions {
    * ships it later. `targets` are still recorded — the write happened.
    */
   noDeploy?: boolean;
+  /**
+   * CAP-520: refuse rather than prompt when input is needed, even when
+   * `process.stdin.isTTY` happens to be true (agents/CI that run attached to
+   * a pty). Same meaning as every other command's `--non-tty`.
+   */
+  nonTty?: boolean;
 }
 
 /** Whether a question is asked in a browser, and what the rail already holds. */
@@ -1984,9 +1998,28 @@ function targetRows(cwd: string, targets: TargetConfig[]): DeployTargetRow[] {
 
 export async function deployList(
   cwd: string = process.cwd(),
-  opts: { web?: boolean } = {},
+  opts: { web?: boolean; json?: boolean } = {},
 ): Promise<number> {
   const targets = listTargets(cwd);
+
+  if (opts.json) {
+    // Read-only — same guarantee as the plain-text listing below, just
+    // machine-parseable. Never reaches `--web`'s browser round-trip.
+    console.log(
+      JSON.stringify(
+        targets.map((t) => ({
+          name: t.name,
+          kind: t.kind,
+          branch: t.branch,
+          mode: t.mode ?? 'direct',
+          vars: t.vars,
+        })),
+        null,
+        2,
+      ),
+    );
+    return 0;
+  }
 
   if (opts.web) {
     // The printed listing stops. Here it answers: the rows carry mode, PR base
@@ -2066,8 +2099,47 @@ export async function deployList(
 export async function deployRemove(
   name: string,
   cwd: string = process.cwd(),
-  opts: { web?: boolean; devMode?: boolean; noDeploy?: boolean } = {},
+  opts: { web?: boolean; devMode?: boolean; noDeploy?: boolean; dryRun?: boolean; json?: boolean } = {},
 ): Promise<number> {
+  if (opts.dryRun) {
+    // CAP-659: the real run's own first reads (target lookup, keep.lock),
+    // never a browser, never a network call, never a write — same contract
+    // as every other preview in this file.
+    const target = getTarget(cwd, name);
+    if (!target) {
+      console.error(`No target named "${name}".`);
+      return 1;
+    }
+    const adapter = getAdapter(target.kind);
+    const keep = new ProjectManager(cwd).readKeepFile();
+    const deployIds = keep ? deployIdsForTarget(keep, target.kind, target.name) : [];
+    const changes: DryRunChange[] = [
+      ...(adapter?.onRemove
+        ? [{ where: 'third_party' as const, action: 'offer adapter-specific platform cleanup', target: target.kind, reversible: true }]
+        : []),
+      ...(deployIds.length > 0
+        ? [
+            {
+              where: 'capy_service' as const,
+              action: 'strip deploy target record from keep.lock',
+              target: 'keep.lock',
+              reversible: true,
+            },
+            {
+              where: 'capy_service' as const,
+              action: 'revoke deploy token(s)',
+              target: `${deployIds.length} token(s) for "${name}"`,
+              reversible: false,
+            },
+          ]
+        : []),
+      { where: 'local_file', action: 'remove target', target: name, reversible: true },
+    ];
+    const result = dryRunOk('deploy targets-remove', changes);
+    if (opts.json) printDryRunResultJson(result);
+    else printDryRunResultHuman(result);
+    return dryRunExitCode(result);
+  }
   if (opts.web) {
     // The terminal removes on a bare argument with no question at all. The
     // settings behind that name took seven prompts to produce and
@@ -2968,6 +3040,19 @@ export async function deployCommand(
         options: detected.options ?? {},
         ...(adapter.ciOnly ? { mode: 'ci' as const } : {}),
       };
+    } else if (!web.web && !isInteractive(options.nonTty)) {
+      // CAP-659/CAP-520: `--target <id>` with no `--yes` would otherwise fall
+      // straight into an inquirer picker below (saved-target reuse, or the
+      // full setup picker) — with no TTY that picker can never be answered.
+      // Refused before any prompt is attempted, same code+exit as the
+      // confirm-loop gate further down.
+      console.error(
+        `\n  non-interactive: \`capy deploy --target ${options.target}\` needs a human to pick or confirm a target.`,
+      );
+      console.error(
+        `  [${ERROR_CODES.DEPLOY_PICKER_NEEDS_TTY}] pass --yes (ad-hoc CI target) or run this in a terminal.\n`,
+      );
+      return EXIT_NEEDS_INPUT;
     } else {
       // Interactive but adapter is pre-chosen — handoff path from the
       // existing platform picker. If the user already saved targets for
@@ -3256,7 +3341,15 @@ export async function deployCommand(
     !!web.web || !!options.yes || !!options.dryRun,
   );
   const dokployApiKey = await resolveDokployApiKeyOnce(adapter, target, keep.orgId, options.devMode, secretsInteractive);
-  const adapterCallCtx = { orgId: keep.orgId, devMode: options.devMode, interactive: secretsInteractive, resolvedApiKey: dokployApiKey };
+  const adapterCallCtx = {
+    orgId: keep.orgId,
+    devMode: options.devMode,
+    interactive: secretsInteractive,
+    resolvedApiKey: dokployApiKey,
+    // CAP-659: lets an adapter's preflight (Vercel today) tell a check apart
+    // from a local write/interactive wizard it must skip under a dry run.
+    dryRun: !!options.dryRun,
+  };
 
   // Preflight (fail BEFORE decryption). At a terminal, a failed preflight is
   // not a dead end: the user can edit the target (e.g. a wrong composeId) and
@@ -3299,6 +3392,17 @@ export async function deployCommand(
   // can fix a saved target inline instead of having to abort, run
   // `capy deploy --edit`, then re-run.
   if (!options.yes && !options.dryRun) {
+    // CAP-659/CAP-520: off a TTY, `keypressConfirm` resolves to its
+    // non-interactive default ('cancel') immediately rather than hanging —
+    // but that used to surface as "Cancelled." exit 0, a false green in CI
+    // (nothing shipped, yet the run "succeeded"). Refuse with a coded exit
+    // instead, before the loop even starts. `--web` is unaffected: that
+    // confirm is answered on a page, not at this TTY.
+    if (!web.web && !isInteractive(options.nonTty)) {
+      console.error(`\n  non-interactive: \`capy deploy ${target.name}\` needs a human to confirm the deploy.`);
+      console.error(`  [${ERROR_CODES.DEPLOY_CONFIRM_NEEDS_TTY}] pass --yes or run this in a terminal.\n`);
+      return EXIT_NEEDS_INPUT;
+    }
     while (true) {
       const summary =
         mode === 'ci'
@@ -3456,10 +3560,11 @@ export async function deployCommand(
   const result = await adapter.deploy(target, {
     env,
     deployToken,
-    dryRun: !!options.dryRun,
     secretsOnly: mode === 'ci',
     noDeploy: !!options.noDeploy,
     cwd,
+    // Carries `dryRun` too (CAP-659) — set once, above, from the same
+    // `options.dryRun` this spread's `dryRun` field would otherwise repeat.
     ...adapterCallCtx,
   });
   renderResult(result);

@@ -138,7 +138,7 @@ describe('capy deploy list / remove', () => {
         options: { workerName: 'w', workerDir: 'worker' },
       },
     ]);
-    const r = capy(['deploy', 'targets-remove', 'worker-prod']);
+    const r = capy(['deploy', 'targets-remove', 'worker-prod', '--yes']);
     expect(r.code).toBe(0);
     expect(r.stdout).toContain('Removed');
     const r2 = capy(['deploy', 'targets']);
@@ -146,7 +146,7 @@ describe('capy deploy list / remove', () => {
   });
 
   test('remove unknown target exits non-zero', () => {
-    const r = capy(['deploy', 'targets-remove', 'nope']);
+    const r = capy(['deploy', 'targets-remove', 'nope', '--yes']);
     expect(r.code).toBe(1);
     expect(r.stderr).toContain('No target');
   });
