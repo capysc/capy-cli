@@ -685,9 +685,10 @@ program
 
 program
   .command('pair')
-  .description('Pair this device into an org via Keep (device-code login + key pickup)')
+  .description('Pair this device via Keep; requires interactive confirmation of the returned account before installing any session or keys')
   .option('--json', 'emit machine-readable JSON instead of the human UI')
   .option('--force', 'overwrite a different local key already on this machine')
+  .addHelpText('after', '\nAfter browser approval: Enable this location as [email]? (y/N)\nAgents: use an interactive terminal/PTY, show the email to the human, and obtain explicit approval before answering Yes. Never auto-confirm. No upfront email is required.\n')
   .action(async (options) => {
     assertNotLocalOnly('pair');
     const { pairCommand } = await import('./commands/pairCommand');
