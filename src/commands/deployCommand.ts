@@ -13,7 +13,7 @@
 import { existsSync, readFileSync, writeFileSync } from 'fs';
 import { join, basename } from 'path';
 import inquirer from 'inquirer';
-import { formatKeyHelp } from '../deploy/keyHelp';
+import { formatKeyHelp, teamSlugOf } from '../deploy/keyHelp';
 import { FileManager } from '../files/fileManager';
 import {
   DeployAdapter,
@@ -76,6 +76,7 @@ import {
   resolveDokployEnvironmentLabel,
 } from '../deploy/adapters/dokploy';
 import type { ResolveDokployApiKeyResult, DokployServiceKind, DokployServiceUrlOk } from '../deploy/adapters/dokploy';
+import { resolveVercelSetup } from '../deploy/vercelSetup';
 import {
   ResolveVercelTokenResult,
   getVercelTargetSecretFromStore,
@@ -249,12 +250,14 @@ async function resolveVercelTokenOnce(
 ): Promise<ResolveVercelTokenResult | undefined> {
   if (adapter.id !== 'vercel') return undefined;
   if (!isVercelApiMode(target.options)) return undefined;
+  const team = teamSlugOf(typeof target.options.teamSlug === 'string' ? target.options.teamSlug : undefined);
   return resolveVercelTargetToken({
     env: process.env,
     interactive,
     orgId,
     devMode,
     getSecret: getVercelTargetSecretFromStore,
+    ...(team ? { helpTeam: team } : {}),
   });
 }
 
@@ -988,9 +991,12 @@ async function promptVercelGitBranch(
 /**
  * Adapters whose settings step has no browser screen yet. They are left out of
  * the browser's adapter list, and a run that already knows it is one of them
- * asks its questions in the terminal instead.
+ * asks its questions in the terminal instead. Vercel is one: its setup is the
+ * one link question plus live checks (`deploy/vercelSetup.ts`), which the old
+ * browser settings screen (project directory, environment, git branch) cannot
+ * ask — it would save a target on the removed `vercel link` path.
  */
-const TERMINAL_ONLY_SETUP: ReadonlySet<string> = new Set(['dokploy']);
+const TERMINAL_ONLY_SETUP: ReadonlySet<string> = new Set(['dokploy', 'vercel']);
 
 function adapterChoices(): DeployAdapterChoice[] {
   return [
@@ -1491,6 +1497,8 @@ export async function resolveAdapterOptions(
    * existing caller that never had an org id to pass, is unaffected.
    */
   orgId?: string,
+  /** `readOnly`: a dry run — the Vercel setup may read the token from the store but never asks for or saves one. */
+  setup?: { readOnly?: boolean },
 ): Promise<Record<string, unknown>> {
   if (adapter.id === 'cf-worker') {
     return await inquirer.prompt([
@@ -1510,48 +1518,11 @@ export async function resolveAdapterOptions(
       },
     ]);
   }
-  if (adapter.id === 'vercel' && isVercelApiMode(existingOpts)) {
-    // API-mode target (CAP-696): its project/team/environment identity is set
-    // by whoever created it. Re-asking the CLI-path questions here would
-    // silently drop `projectId` and flip the target back to the CLI path.
-    return { ...existingOpts };
-  }
   if (adapter.id === 'vercel') {
-    // Vercel: code ships via the keep.lock PR (Vercel git CI builds on merge),
-    // but capy pushes each var as a plaintext Environment Variable into the
-    // chosen Vercel environment via the vercel CLI — so the build reads them
-    // natively with no `capy run` decrypt step. Capture the app dir, which
-    // Vercel environment these vars go to, and — for Preview — exactly which
-    // git branch that Preview env is wired to. The Preview scope is a GIT
-    // branch Vercel knows about, which is NOT a capy branch name nor necessarily
-    // the branch you're checked out on, so we pick from the repo's real branches.
-    const ans = await inquirer.prompt([
-      {
-        type: 'input',
-        name: 'projectDir',
-        message: 'Project directory (contains .vercel/project.json or package.json):',
-        default: existingOpts.projectDir ?? detectedOpts.projectDir ?? '.',
-        validate: (v: string) => (v.trim() ? true : 'required'),
-      },
-      {
-        type: 'list',
-        name: 'vercelEnv',
-        message: 'Which Vercel environment should these secrets go to?',
-        choices: [
-          { name: 'Preview — scoped to a specific git branch', value: 'preview' },
-          { name: 'Production', value: 'production' },
-        ],
-        default: existingOpts.vercelEnv ?? 'preview',
-      },
-    ]);
-    // Drop gitBranch entirely for production — it has no meaning there.
-    return ans.vercelEnv === 'preview'
-      ? {
-          projectDir: ans.projectDir,
-          vercelEnv: 'preview',
-          gitBranch: await promptVercelGitBranch(cwd, existingOpts.gitBranch),
-        }
-      : { projectDir: ans.projectDir, vercelEnv: 'production' };
+    // API mode only: the project's dashboard link (or name), checked live
+    // against Vercel. No `vercel` program, no `.vercel/project.json`, no
+    // `vercel link`. See `deploy/vercelSetup.ts`.
+    return (await resolveVercelSetup(existingOpts, orgId, { readOnly: setup?.readOnly })).options;
   }
   if (adapter.id === 'cf-pages') {
     return await inquirer.prompt([
@@ -1702,10 +1673,13 @@ async function resolveGitBaseBranch(
   cwd: string,
   mode: DeployMode,
   existing: TargetConfig | undefined,
+  /** A branch the platform itself names (Vercel's production branch): it leads the defaults. */
+  platformBranch?: string,
 ): Promise<string | undefined> {
   if (mode !== 'ci') return undefined;
   const local = listLocalBranches(cwd);
   const fallback =
+    platformBranch ??
     currentBranch(cwd) ??
     existing?.gitBaseBranch ??
     (local.includes('main') ? 'main' : local.includes('master') ? 'master' : 'main');
@@ -1755,13 +1729,15 @@ async function pickNewVars(target: TargetConfig, added: readonly string[]): Prom
   return ans.vars;
 }
 
-async function runPicker(
+export async function runPicker(
   cwd: string,
   keep: KeepInfo,
   existing?: TargetConfig,
   /** When set, skip adapter-selection (caller has already picked). */
   preselectedAdapterId?: string,
   web?: WebPickerOptions,
+  /** `readOnly`: a dry run — a setup question that would save a key to the store does not ask. */
+  setup?: { readOnly?: boolean },
 ): Promise<TargetConfig | null> {
   // Scope the picker to the ACTIVE branch's vars. keep.lock's `variables` is the
   // union across EVERY branch, so it would offer vars that only exist on
@@ -1776,12 +1752,12 @@ async function runPicker(
   const branchVarSet = new Set(Object.keys(new FileManager(cwd).readEnvFile()));
   const branchVars = keep.variables.filter((v) => branchVarSet.has(v));
 
-  // Dokploy has no browser settings screen yet (browser screens are built in
-  // the Keep workbench first), so its setup stays in the terminal.
+  // Dokploy and Vercel have no browser settings screen (browser screens are
+  // built in the Keep workbench first), so their setup stays in the terminal.
   const knownAdapterId = existing?.kind ?? preselectedAdapterId;
   const browserSetup = !!web?.web && !(knownAdapterId && TERMINAL_ONLY_SETUP.has(knownAdapterId));
   if (web?.web && !browserSetup) {
-    console.log(`  ${DIM('Dokploy setup runs in the terminal.')}`);
+    console.log(`  ${DIM(`${getAdapter(knownAdapterId ?? '')?.label ?? knownAdapterId} setup runs in the terminal.`)}`);
   }
 
   if (web?.web && browserSetup) {
@@ -1829,12 +1805,7 @@ async function runPicker(
       branch: picked.branch,
       vars: picked.vars,
       knownVars: branchVars,
-      // An API-mode Vercel target keeps its saved options (CAP-696): the
-      // settings page only knows the CLI-path fields and would drop `projectId`.
-      options:
-        existing?.kind === 'vercel' && isVercelApiMode(existing.options)
-          ? { ...existing.options }
-          : picked.options,
+      options: picked.options,
       mode: picked.mode,
       gitBaseBranch: picked.gitBaseBranch,
     };
@@ -1872,7 +1843,12 @@ async function runPicker(
   // 4. Adapter-specific options.
   const detectedOpts = (detected.options ?? {}) as Record<string, string>;
   const existingOpts = (existing?.options ?? {}) as Record<string, string>;
-  const options = await resolveAdapterOptions(adapter, cwd, branchVars, detectedOpts, existingOpts, keep.orgId);
+  // Vercel's setup also learns the project's production branch, which becomes
+  // the default for the PR base branch below.
+  const vercelSetup = adapter.id === 'vercel' ? await resolveVercelSetup(existingOpts, keep.orgId, { readOnly: setup?.readOnly }) : undefined;
+  const options = vercelSetup
+    ? vercelSetup.options
+    : await resolveAdapterOptions(adapter, cwd, branchVars, detectedOpts, existingOpts, keep.orgId, setup);
 
   // 5. Var picking — show every var in keep.lock and pre-select the ones
   // most likely to be relevant for this adapter (runtime for cf-worker,
@@ -1928,7 +1904,7 @@ async function runPicker(
   // shape. Text entry defaulting to the current branch (you usually open the
   // PR against the branch you're on), then the existing target's saved value,
   // then main/master.
-  const gitBaseBranch = await resolveGitBaseBranch(cwd, mode, existing);
+  const gitBaseBranch = await resolveGitBaseBranch(cwd, mode, existing, vercelSetup?.productionBranch);
 
   // 7. Target name.
   const defaultName = existing?.name ?? `${adapter.id}-${branch}`;
@@ -1975,7 +1951,7 @@ function renderPlan(target: TargetConfig, adapter: DeployAdapter): void {
 
 /** A key refusal says where to get a key and what to do (stderr). Prints nothing for any other refusal. */
 function printKeyHelp(r: { link?: { label: string; url: string }; remedy?: string }): void {
-  if (r.link && r.remedy) console.error('\n' + formatKeyHelp({ link: r.link, remedy: r.remedy }) + '\n');
+  if (r.link && r.remedy) console.error('\n' + formatKeyHelp({ remedy: r.remedy }) + '\n');
 }
 
 function renderResult(result: DeployResult): void {
@@ -3091,7 +3067,7 @@ export async function deployCommand(
       if (chosen !== '__new__') {
         target = chosen;
       } else {
-        const built = await runPicker(cwd, keep, undefined, adapter.id, web.web ? web : undefined);
+        const built = await runPicker(cwd, keep, undefined, adapter.id, web.web ? web : undefined, { readOnly: !!options.dryRun });
         if (!built) {
           console.log('Cancelled.');
           return 0;
@@ -3111,6 +3087,7 @@ export async function deployCommand(
         options.edit && targets.length === 1 ? targets[0] : undefined,
         undefined,
         web.web ? web : undefined,
+        { readOnly: !!options.dryRun },
       );
       if (!built) {
         console.log('Cancelled.');
@@ -3124,7 +3101,7 @@ export async function deployCommand(
     } else if (web.web) {
       const picked = await pickTargetInBrowser(cwd, targets);
       if (picked.action === 'new') {
-        const built = await runPicker(cwd, keep, undefined, undefined, web);
+        const built = await runPicker(cwd, keep, undefined, undefined, web, { readOnly: !!options.dryRun });
         if (!built) {
           console.log('Cancelled.');
           return 0;
@@ -3156,7 +3133,7 @@ export async function deployCommand(
         },
       ]);
       if (ans.name === '__new__') {
-        const built = await runPicker(cwd, keep);
+        const built = await runPicker(cwd, keep, undefined, undefined, undefined, { readOnly: !!options.dryRun });
         if (!built) {
           console.log('Cancelled.');
           return 0;
@@ -3281,6 +3258,7 @@ export async function deployCommand(
           target,
           undefined,
           web.web ? { ...web, intent: 'reconfirm' } : undefined,
+          { readOnly: !!options.dryRun },
         );
         if (!reconfirmed) {
           console.log('Cancelled.');
@@ -3352,7 +3330,7 @@ export async function deployCommand(
     const action = await keypressConfirm({ message: 'Preflight failed. Press e to edit this target, c to check again, esc to cancel.' });
     if (action === 'confirm') return preflightOrEdit(t);
     if (action !== 'edit') return { ok: false };
-    const edited = await runPicker(cwd, keep, t, undefined, undefined);
+    const edited = await runPicker(cwd, keep, t, undefined, undefined, { readOnly: !!options.dryRun });
     if (!edited) return { ok: false };
     upsertTarget(cwd, edited);
     console.log(GREEN(`✓ Saved target "${edited.name}" to .capy/deploy.json`));
@@ -3402,7 +3380,7 @@ export async function deployCommand(
         return 0;
       }
       if (action === 'edit') {
-        const edited = await runPicker(cwd, keep, target, undefined, web.web ? web : undefined);
+        const edited = await runPicker(cwd, keep, target, undefined, web.web ? web : undefined, { readOnly: !!options.dryRun });
         if (!edited) {
           console.log('Cancelled.');
           return 0;

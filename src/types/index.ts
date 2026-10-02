@@ -716,21 +716,8 @@ export const ERROR_CODES = {
   VERCEL_OPTIONS_INVALID: 'VERCEL_OPTIONS_INVALID',
   /** A shared record had this environment removed, but creating its replacement failed and the removal could not be undone. */
   VERCEL_SPLIT_NOT_RESTORED: 'VERCEL_SPLIT_NOT_RESTORED',
-  // Creating the Vercel token from the Vercel CLI's sign-in (`capy connect vercel --create-token`)
-  /** The `vercel` program is not installed (or not on PATH). */
-  VERCEL_CLI_MISSING: 'VERCEL_CLI_MISSING',
-  /** The Vercel CLI has no sign-in (its own `whoami` did not succeed). */
-  VERCEL_CLI_NOT_SIGNED_IN: 'VERCEL_CLI_NOT_SIGNED_IN',
-  /** `--create-token` was combined with `--dry-run`; a preview never creates or saves a key. */
-  VERCEL_CREATE_TOKEN_DRY_RUN: 'VERCEL_CREATE_TOKEN_DRY_RUN',
-  /** `--token-expires-days` is not a whole number of days, 1 or more. */
-  VERCEL_TOKEN_EXPIRY_INVALID: 'VERCEL_TOKEN_EXPIRY_INVALID',
-  /** The Vercel CLI could not create the token (or its answer could not be read). */
-  VERCEL_TOKEN_CREATE_FAILED: 'VERCEL_TOKEN_CREATE_FAILED',
-  /** The new token is not scoped to exactly the chosen team; it was deleted again. */
-  VERCEL_TOKEN_SCOPE_UNEXPECTED: 'VERCEL_TOKEN_SCOPE_UNEXPECTED',
-  /** A token was created but could not be deleted again; its id is named so a human can remove it. */
-  VERCEL_TOKEN_CLEANUP_FAILED: 'VERCEL_TOKEN_CLEANUP_FAILED',
+  /** `capy deploy`'s setup was given something that is neither a Vercel dashboard link for a project nor a project name. */
+  VERCEL_URL_INVALID: 'VERCEL_URL_INVALID',
 } as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES];

@@ -622,9 +622,8 @@ capy connect [provider] [options]
 | `--token-env <name>` | dokploy/vercel import: env var holding the API token |  |
 | `--project <project>` | vercel import: Vercel project id or name (under --discover: the project that wins a mapping collision) |  |
 | `--team <team>` | vercel import/discover: Vercel team slug or id (default: the token's only team) |  |
-| `--create-token` | vercel: create the Vercel token from the Vercel CLI sign-in (team-scoped) and save it as _CONNECTOR_VERCEL_TOKEN; with --project/--discover the run then continues, alone it stops after saving. Not with --dry-run |  |
-| `--token-expires-days <days>` | vercel --create-token: days until the created token expires (default: never) |  |
 | `--json` | emit machine-readable JSON instead of the human UI (import connectors) |  |
+| `--targets` | Also write a Vercel deploy target for each imported environment |  |
 | `--dry-run` | dokploy import/discover: preview the plan only — resolve settings + read Dokploy, write/push nothing |  |
 | `--discover` | dokploy/vercel: find every Dokploy service / Vercel project matching a repo under cwd, instead of one named --application/--compose/--project |  |
 | `-y, --yes` | dokploy import/discover: skip the confirmation prompt (import: --overwrite's clear/replace/import ask; discover: the real-run "proceed?" ask) — required non-interactively |  |
@@ -756,13 +755,7 @@ Every refusal carries a stable `code` — branch on it, never on message text.
 - `VERCEL_VERIFY_MISMATCH`
 - `VERCEL_OPTIONS_INVALID`
 - `VERCEL_SPLIT_NOT_RESTORED`
-- `VERCEL_CLI_MISSING`
-- `VERCEL_CLI_NOT_SIGNED_IN`
-- `VERCEL_CREATE_TOKEN_DRY_RUN`
-- `VERCEL_TOKEN_EXPIRY_INVALID`
-- `VERCEL_TOKEN_CREATE_FAILED`
-- `VERCEL_TOKEN_SCOPE_UNEXPECTED`
-- `VERCEL_TOKEN_CLEANUP_FAILED`
+- `VERCEL_URL_INVALID`
 
 ## Conventions
 

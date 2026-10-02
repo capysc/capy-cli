@@ -119,7 +119,6 @@ import { KeepFile } from '../../types/index';
 import type { AuthService } from '../../auth/authService';
 import type { ServiceClient } from '../../service/serviceClient';
 import type { ConnectFailure, ImportOutcome } from './registry';
-import type { TokenCreatedReport } from '../../deploy/vercelCliToken';
 import type { DiscoveryCommitOutcome } from '../../git/discoveryCommit';
 
 /**
@@ -1194,6 +1193,17 @@ export async function runDiscoverySequences(
  */
 export type DiscoveryRepoCommitResult = { repoDir: string } & DiscoveryCommitOutcome;
 
+/** A deploy target Vercel `--targets` would write (dry run) or wrote, by folder and Capy branch. Names only. */
+export interface DiscoveryDeployTarget {
+  repoDir: string;
+  /** Relative to `repoDir`; `''` = repo root. */
+  folder: string;
+  /** The Capy branch (= the Vercel environment) the target ships. */
+  branch: string;
+  name: string;
+  written: boolean;
+}
+
 export type DiscoveryOutcome =
   | {
       ok: true;
@@ -1205,7 +1215,7 @@ export type DiscoveryOutcome =
       cancelled?: boolean;
       /** One entry per repo touched by the plan (dry run: every repo the plan would touch) — see `DiscoveryRepoCommitResult`'s own doc. Absent only when nothing was ever going to be committed (no matched repos at all). */
       commits?: readonly DiscoveryRepoCommitResult[];
-      /** Vercel `--create-token` only: the token this run created and saved. Never its value. */
-      tokenCreated?: TokenCreatedReport;
+      /** Vercel `--targets` under `--dry-run` only: the targets a real run would write. A real run reports them per environment (`applied`). */
+      deployTargets?: readonly DiscoveryDeployTarget[];
     }
   | ConnectFailure;

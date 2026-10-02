@@ -21,6 +21,11 @@ import type { VercelFetchLike } from '../../src/deploy/vercelApi';
 import { captureConsole, withExitCodeRestored } from '../helpers/testSandbox';
 
 const VERCEL_PAGE = 'https://vercel.com/account/settings/tokens';
+/** Vince's approved wording, verbatim. */
+const CREATE = `Create a token at ${VERCEL_PAGE}. Set Scope to the team that owns the project`;
+const sentence = (team?: string) => `${CREATE}${team ? ` (${team})` : ''}.`;
+const SAVE = (name: string) => `Then save it: capy system set ${name}`;
+const FAKE_TOKEN = 'vcp_FAKE_TOKEN_VALUE_123';
 const DOKPLOY_BASE = 'https://deploy.example.test';
 
 const ctxWith = (): ResolvedContext =>
@@ -43,19 +48,32 @@ async function printed(connector: ReturnType<typeof createVercelConnector>, prov
 }
 
 describe('keyHelp — the four known names', () => {
-  test('Vercel: the token page and the --create-token alternative, for both names', () => {
+  test('Vercel: the approved two sentences, for both names — one string in `remedy`, one line each for the terminal', () => {
     for (const name of ['_CONNECTOR_VERCEL_TOKEN', '_TARGET_VERCEL_TOKEN']) {
       const help = keyHelpForName(name);
-      expect(help?.link.url).toBe(VERCEL_PAGE);
-      expect(help?.remedy).toContain(`capy system set ${name}`);
-      expect(help?.remedy).toContain('capy connect vercel --create-token');
+      expect(help?.link).toEqual({ label: 'Vercel token page', url: VERCEL_PAGE });
+      expect(help?.remedy).toBe(`${sentence()} ${SAVE(name)}`);
+      expect(help?.lines).toEqual([sentence(), SAVE(name)]);
+      expect(help?.remedy).not.toContain('--create-token');
     }
+  });
+
+  test('Vercel: the team slug is named when known; a team id is never shown as a slug', () => {
+    expect(vercelKeyHelp('_TARGET_VERCEL_TOKEN', { team: 'acme' }).lines[0]).toBe(sentence('acme'));
+    expect(vercelKeyHelp('_TARGET_VERCEL_TOKEN', { team: 'team_abc123' }).lines[0]).toBe(sentence());
+    expect(keyHelpForName('_CONNECTOR_VERCEL_TOKEN', { team: 'acme' })?.remedy).toContain('(acme)');
+  });
+
+  test('Vercel at a hidden prompt: "Then paste it here." instead of the save line', () => {
+    const help = vercelKeyHelp('_TARGET_VERCEL_TOKEN', { team: 'acme', mode: 'paste' });
+    expect(help.lines).toEqual([sentence('acme'), 'Then paste it here.']);
+    expect(formatKeyHelp(help)).not.toContain('capy system set');
   });
 
   test('Dokploy: the page inside the user\'s own Dokploy when the base URL is known (trailing slashes ignored), else the docs', () => {
     expect(dokployKeyHelp('_CONNECTOR_DOKPLOY_API_KEY', `${DOKPLOY_BASE}///`).link.url).toBe(`${DOKPLOY_BASE}/dashboard/settings/profile`);
     expect(keyHelpForName('_TARGET_DOKPLOY_API_KEY')?.link.url).toBe('https://docs.dokploy.com/docs/api');
-    expect(keyHelpForName('_TARGET_DOKPLOY_API_KEY', DOKPLOY_BASE)?.link.url).toBe(`${DOKPLOY_BASE}/dashboard/settings/profile`);
+    expect(keyHelpForName('_TARGET_DOKPLOY_API_KEY', { baseUrl: DOKPLOY_BASE })?.link.url).toBe(`${DOKPLOY_BASE}/dashboard/settings/profile`);
   });
 
   test('any other name has no help', () => {
@@ -65,8 +83,8 @@ describe('keyHelp — the four known names', () => {
 
   test('the human text carries the URL and the remedy', () => {
     const text = formatKeyHelp(vercelKeyHelp('_CONNECTOR_VERCEL_TOKEN'));
-    expect(text).toContain(VERCEL_PAGE);
-    expect(text).toContain('capy system set _CONNECTOR_VERCEL_TOKEN');
+    expect(text).toBe(`  ${sentence()}\n  ${SAVE('_CONNECTOR_VERCEL_TOKEN')}`);
+    expect(formatKeyHelp(dokployKeyHelp('_CONNECTOR_DOKPLOY_API_KEY', DOKPLOY_BASE))).toContain(`${DOKPLOY_BASE}/dashboard/settings/profile`);
   });
 });
 
@@ -81,9 +99,37 @@ describe('capy connect vercel — key refusals', () => {
     expect(parsed).toMatchObject({ ok: false, code: ERROR_CODES.VERCEL_TOKEN_MISSING, link: { url: VERCEL_PAGE } });
     expect(typeof parsed.message).toBe('string');
     expect(parsed.link.label).toBeTruthy();
-    expect(parsed.remedy).toContain('--create-token');
+    expect(parsed.remedy).toBe(`${sentence()} ${SAVE('_CONNECTOR_VERCEL_TOKEN')}`);
     expect(human.stdout.join('')).toBe('');
-    expect(human.stderr.join('\n')).toContain(VERCEL_PAGE);
+    expect(human.stderr.join('\n')).toContain(sentence());
+    expect(human.stderr.join('\n')).toContain(SAVE('_CONNECTOR_VERCEL_TOKEN'));
+    expect([...json.stdout, ...json.stderr, ...human.stdout, ...human.stderr].join('\n')).not.toContain('--create-token');
+  });
+
+  test('--team <slug> is named in the instructions (JSON remedy and stderr); a team id is not', async () => {
+    const connector = createVercelConnector({ fetch: unreachable, env: {} });
+    const named = await printed(connector, 'vercel', { ...opts, team: 'acme' });
+    expect(JSON.parse(named.json.stdout[0]).remedy).toBe(`${sentence('acme')} ${SAVE('_CONNECTOR_VERCEL_TOKEN')}`);
+    expect(named.human.stderr.join('\n')).toContain(sentence('acme'));
+    const byId = await printed(connector, 'vercel', { ...opts, team: 'team_abc123' });
+    expect(JSON.parse(byId.json.stdout[0]).remedy).toContain(`${sentence()} `);
+  });
+
+  test('--discover with no token carries the same instructions (team slug included)', async () => {
+    const connector = createVercelConnector({ fetch: unreachable, env: {} });
+    const out = await connector.discover!(
+      { orgId: 'o', userId: 'u', authService: {}, serviceClient: {} } as never,
+      { nonTty: true, discover: true, team: 'acme' },
+    );
+    expect(out).toMatchObject({ ok: false, code: ERROR_CODES.VERCEL_TOKEN_MISSING, link: { url: VERCEL_PAGE } });
+    expect((out as { remedy?: string }).remedy).toBe(`${sentence('acme')} ${SAVE('_CONNECTOR_VERCEL_TOKEN')}`);
+  });
+
+  test('a token value is never printed: the token env var holds a fake value and it appears nowhere', async () => {
+    const unauthorized: VercelFetchLike = async () => ({ status: 401, ok: false, text: async () => '{}' });
+    const connector = createVercelConnector({ fetch: unauthorized, env: { T: FAKE_TOKEN }, sleep: async () => {} });
+    const { json, human } = await printed(connector, 'vercel', { ...opts, tokenEnv: 'T' });
+    expect([...json.stdout, ...json.stderr, ...human.stdout, ...human.stderr].join('\n')).not.toContain(FAKE_TOKEN);
   });
 
   test('the store refusing (not an admin / the other direction already has a key) carries it too', async () => {
@@ -185,8 +231,13 @@ describe('capy deploy — the preflight refusal for a missing or rejected key ca
     const adapter = createVercelAdapter({ env: {}, fetch: unreachable as never, getTargetSecret: async () => null });
     const r = await adapter.preflight(vercelTarget, { cwd: '/nonexistent-cwd' });
     expect(r).toMatchObject({ ok: false, code: ERROR_CODES.VERCEL_TOKEN_MISSING, link: { url: VERCEL_PAGE } });
-    expect(r.remedy).toContain('capy system set _TARGET_VERCEL_TOKEN');
-    expect(r.remedy).toContain('capy connect vercel --create-token');
+    expect(r.remedy).toBe(`${sentence()} ${SAVE('_TARGET_VERCEL_TOKEN')}`);
+  });
+
+  test('Vercel API mode, no token, target saved with its team slug: the slug is named', async () => {
+    const adapter = createVercelAdapter({ env: {}, fetch: unreachable as never, getTargetSecret: async () => null });
+    const r = await adapter.preflight({ ...vercelTarget, options: { ...vercelTarget.options, teamSlug: 'acme' } }, { cwd: '/nonexistent-cwd' });
+    expect(r.remedy).toBe(`${sentence('acme')} ${SAVE('_TARGET_VERCEL_TOKEN')}`);
   });
 
   test('Vercel API mode, token rejected (401)', async () => {

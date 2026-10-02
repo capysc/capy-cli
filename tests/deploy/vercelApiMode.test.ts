@@ -379,6 +379,20 @@ describe('vercel API mode — preflight', () => {
     expect(fake.writeCalls()).toEqual([]);
   });
 
+  test('a target saved with only the team\'s slug (setup could not check the project) scopes every request by ?slug=, never ?teamId=', async () => {
+    const { adapter, fake } = setUp({ teamId: undefined });
+    const r = await prefl(adapter, { vercelEnv: 'production', teamId: undefined, teamSlug: 'acme' });
+    expect(r.ok).toBe(true);
+    expect(fake.calls().length).toBeGreaterThan(0);
+    expect(fake.calls().every((c) => c.query.slug === 'acme' && c.query.teamId === undefined)).toBe(true);
+  });
+
+  test('a teamId wins over a slug when both are present', async () => {
+    const { adapter, fake } = setUp();
+    await prefl(adapter, { vercelEnv: 'production', teamSlug: 'acme' });
+    expect(fake.calls().every((c) => c.query.teamId === TEAM && c.query.slug === undefined)).toBe(true);
+  });
+
   test('an empty vars list is refused', async () => {
     const { adapter } = setUp();
     const r = await adapter.preflight(target({ vercelEnv: 'production' }, []), { cwd: '/nonexistent-cwd' });

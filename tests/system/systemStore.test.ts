@@ -404,8 +404,8 @@ describe('systemStore', () => {
     });
   });
 
-  // ── Key help before the hidden prompt, and the `onMissing` hook ──
-  describe('key help and onMissing (hidden-prompt path)', () => {
+  // ── Key help before the hidden prompt ──
+  describe('key help (hidden-prompt path)', () => {
     /** Runs `fn` with console.error captured; returns what it printed. */
     const stderrOf = async (fn: () => Promise<unknown>): Promise<string> => {
       const spy = spyOn(console, 'error').mockImplementation((() => {}) as never);
@@ -417,11 +417,18 @@ describe('systemStore', () => {
       }
     };
 
-    it('a known key name: the link is printed (stderr) before the prompt', async () => {
+    it('a known key name: the approved instructions end "Then paste it here." (stderr), before the prompt', async () => {
       promptQueue.push({ value: 'typed-secret' });
       const text = await stderrOf(() => getConnectorSecret('_CONNECTOR_VERCEL_TOKEN', { orgId: ORG_A, devMode: true, interactive: true }));
-      expect(text).toContain('https://vercel.com/account/settings/tokens');
+      expect(text).toContain('Create a token at https://vercel.com/account/settings/tokens. Set Scope to the team that owns the project.');
+      expect(text).toContain('Then paste it here.');
       expect(text).not.toContain('typed-secret');
+    });
+
+    it('a known Vercel key name with a team slug: the slug is named', async () => {
+      promptQueue.push({ value: 'typed-secret' });
+      const text = await stderrOf(() => getConnectorSecret('_CONNECTOR_VERCEL_TOKEN', { orgId: ORG_A, devMode: true, interactive: true, helpTeam: 'acme' }));
+      expect(text).toContain('Set Scope to the team that owns the project (acme).');
     });
 
     it('a known Dokploy key name with a base URL: the link is that Dokploy\'s page', async () => {
@@ -436,37 +443,6 @@ describe('systemStore', () => {
       promptQueue.push({ value: 'typed-secret' });
       const text = await stderrOf(() => getConnectorSecret('_CONNECTOR_FOO_KEY', { orgId: ORG_A, devMode: true, interactive: true }));
       expect(text).toBe('');
-    });
-
-    it('onMissing that makes a value: it is saved through the store\'s own save, returned, and the hidden prompt never runs', async () => {
-      const value = await getConnectorSecret('_CONNECTOR_VERCEL_TOKEN', {
-        orgId: ORG_A,
-        devMode: true,
-        interactive: true,
-        onMissing: async (save) => {
-          await save('made-elsewhere');
-          return 'made-elsewhere';
-        },
-      });
-      expect(value).toBe('made-elsewhere');
-      expect(promptedWith).toEqual([]);
-      const again = await getConnectorSecret('_CONNECTOR_VERCEL_TOKEN', { orgId: ORG_A, devMode: true, interactive: false });
-      expect(again).toBe('made-elsewhere');
-    });
-
-    it('onMissing that returns null: the hidden prompt carries on', async () => {
-      promptQueue.push({ value: 'typed-secret' });
-      const value = await getConnectorSecret('_CONNECTOR_VERCEL_TOKEN', { orgId: ORG_A, devMode: true, interactive: true, onMissing: async () => null });
-      expect(value).toBe('typed-secret');
-      expect(promptedWith).toHaveLength(1);
-    });
-
-    it('onMissing is never called when the entry exists, or when nobody can be asked', async () => {
-      const hook = mock(async () => 'x');
-      expect(await getConnectorSecret('_CONNECTOR_VERCEL_TOKEN', { orgId: ORG_A, devMode: true, interactive: false, onMissing: hook })).toBeNull();
-      await setValue(ORG_A, '_CONNECTOR_VERCEL_TOKEN', 'present');
-      expect(await getConnectorSecret('_CONNECTOR_VERCEL_TOKEN', { orgId: ORG_A, devMode: true, interactive: true, onMissing: hook })).toBe('present');
-      expect(hook.mock.calls.length).toBe(0);
     });
   });
 

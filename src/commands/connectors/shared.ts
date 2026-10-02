@@ -374,6 +374,20 @@ export async function writeImportOutcome(
   opts: { push: boolean; dryRun: boolean },
 ): Promise<{ wrote: boolean }> {
   if (opts.dryRun) return { wrote: false };
+  const written = await writeImportedValues(ctx, outcome, opts);
+  // `--targets`: the deploy target is saved only after the import itself landed.
+  if (outcome.deployTargetToWrite) {
+    const { upsertTarget } = await import('../../deploy/config');
+    upsertTarget(outcome.deployTargetToWrite.dir, outcome.deployTargetToWrite.target);
+  }
+  return written;
+}
+
+async function writeImportedValues(
+  ctx: ResolvedContext,
+  outcome: Extract<ImportOutcome, { ok: true }>,
+  opts: { push: boolean },
+): Promise<{ wrote: boolean }> {
   const cleared = outcome.cleared ?? [];
   // CAP-673: a dokploy import's same-value names still carry a FRESH
   // connector entry (see `ImportOutcome.unchangedEntries`'s doc) — merged

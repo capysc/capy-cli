@@ -621,8 +621,8 @@ const SET_ENV_LABEL = 'set Vercel env';
 const VERIFY_LABEL = 'verify Vercel env';
 
 /** A rejected token (HTTP 401) says where to get another; any other failure adds nothing. */
-function rejectedKeyHelp(code: string): { link?: { label: string; url: string }; remedy?: string } {
-  return code === ERROR_CODES.VERCEL_TOKEN_REJECTED ? vercelTargetKeyHelp() : {};
+function rejectedKeyHelp(code: string, team: string | undefined): { link?: { label: string; url: string }; remedy?: string } {
+  return code === ERROR_CODES.VERCEL_TOKEN_REJECTED ? vercelTargetKeyHelp(team) : {};
 }
 
 function failResult(step: DeployStep): DeployResult {
@@ -667,7 +667,7 @@ export function createVercelAdapter(deps: VercelAdapterDeps = {}): DeployAdapter
   const clientDeps = { fetch: deps.fetch, sleep: deps.sleep, now: deps.now };
 
   /** The Vercel token for one call: the caller's single pre-resolution wins; else resolve here. */
-  const resolveToken = (ctx: AdapterCallContext): Promise<ResolveVercelTokenResult> =>
+  const resolveToken = (ctx: AdapterCallContext, team?: string): Promise<ResolveVercelTokenResult> =>
     ctx.resolvedVercelToken
       ? Promise.resolve(ctx.resolvedVercelToken)
       : resolveVercelTargetToken({
@@ -676,10 +676,11 @@ export function createVercelAdapter(deps: VercelAdapterDeps = {}): DeployAdapter
           orgId: ctx.orgId,
           devMode: ctx.devMode,
           getSecret: deps.getTargetSecret,
+          ...(team ? { helpTeam: team } : {}),
         });
 
   const clientFor = (token: string, opts: VercelApiOptions): VercelClient =>
-    createVercelClient(token, opts.projectId, opts.teamId, clientDeps);
+    createVercelClient(token, opts.projectId, opts.teamId, { ...clientDeps, ...(opts.teamSlug ? { teamSlug: opts.teamSlug } : {}) });
 
   async function apiPreflight(config: TargetConfig, ctx: { cwd: string } & AdapterCallContext): Promise<PreflightResult> {
     const parsed = parseVercelApiOptions(config.options);
@@ -693,36 +694,36 @@ export function createVercelAdapter(deps: VercelAdapterDeps = {}): DeployAdapter
         hint: 'Re-run with `--edit` and select at least one var.',
       };
     }
-    const token = await resolveToken(ctx);
+    const token = await resolveToken(ctx, parsed.options.teamSlug);
     if (!token.ok) {
       const { reason, hint } = describeVercelTokenProblem(token.code);
-      return { ok: false, reason, hint, code: asKnownErrorCode(token.code), ...vercelTargetKeyHelp() };
+      return { ok: false, reason, hint, code: asKnownErrorCode(token.code), ...vercelTargetKeyHelp(parsed.options.teamSlug) };
     }
     const checked = await checkVercelTarget(clientFor(token.value, parsed.options), parsed.options);
     if (!checked.ok) {
-      return { ok: false, ...describeVercelFailure(checked.code, checked.status), code: checked.code };
+      return { ok: false, ...describeVercelFailure(checked.code, checked.status, parsed.options.teamSlug), code: checked.code };
     }
     return { ok: true };
   }
 
   async function apiDryRun(config: TargetConfig, ctx: DeployContext, opts: VercelApiOptions): Promise<DeployResult> {
     // Reads only — a dry run makes no write call of any kind.
-    const token = await resolveToken(ctx);
+    const token = await resolveToken(ctx, opts.teamSlug);
     if (!token.ok) {
       const { reason } = describeVercelTokenProblem(token.code);
-      return failResult({ label: 'vercel auth', status: 'fail', detail: reason, code: asKnownErrorCode(token.code), ...vercelTargetKeyHelp() });
+      return failResult({ label: 'vercel auth', status: 'fail', detail: reason, code: asKnownErrorCode(token.code), ...vercelTargetKeyHelp(opts.teamSlug) });
     }
     const client = clientFor(token.value, opts);
     const scope = await resolveEnvScope(client, opts);
     if (!scope.ok) {
-      return failResult({ label: SET_ENV_LABEL, status: 'fail', code: scope.code, detail: describeVercelFailure(scope.code, scope.status).reason, ...rejectedKeyHelp(scope.code) });
+      return failResult({ label: SET_ENV_LABEL, status: 'fail', code: scope.code, detail: describeVercelFailure(scope.code, scope.status).reason, ...rejectedKeyHelp(scope.code, opts.teamSlug) });
     }
     const listed = await client.listEnvs().then(
       (records) => ({ ok: true as const, records }),
       (err) => failureOf(err),
     );
     if (!listed.ok) {
-      return failResult({ label: SET_ENV_LABEL, status: 'fail', code: listed.code, detail: describeVercelFailure(listed.code, listed.status).reason, ...rejectedKeyHelp(listed.code) });
+      return failResult({ label: SET_ENV_LABEL, status: 'fail', code: listed.code, detail: describeVercelFailure(listed.code, listed.status).reason, ...rejectedKeyHelp(listed.code, opts.teamSlug) });
     }
     const plan = dryRunSummary(config.vars, listed.records, scope.scope);
     const names = (xs: readonly string[]) => (xs.length > 0 ? ` [${sortedNames(xs).join(', ')}]` : '');
@@ -758,15 +759,15 @@ export function createVercelAdapter(deps: VercelAdapterDeps = {}): DeployAdapter
         detail: `missing in branch ${config.branch}: ${missing.join(', ')}`,
       });
     }
-    const token = await resolveToken(ctx);
+    const token = await resolveToken(ctx, parsed.options.teamSlug);
     if (!token.ok) {
       const { reason } = describeVercelTokenProblem(token.code);
-      return failResult({ label: 'vercel auth', status: 'fail', detail: reason, code: asKnownErrorCode(token.code), ...vercelTargetKeyHelp() });
+      return failResult({ label: 'vercel auth', status: 'fail', detail: reason, code: asKnownErrorCode(token.code), ...vercelTargetKeyHelp(parsed.options.teamSlug) });
     }
     const client = clientFor(token.value, parsed.options);
     const scope = await resolveEnvScope(client, parsed.options);
     if (!scope.ok) {
-      return failResult({ label: SET_ENV_LABEL, status: 'fail', code: scope.code, detail: describeVercelFailure(scope.code, scope.status).reason, ...rejectedKeyHelp(scope.code) });
+      return failResult({ label: SET_ENV_LABEL, status: 'fail', code: scope.code, detail: describeVercelFailure(scope.code, scope.status).reason, ...rejectedKeyHelp(scope.code, parsed.options.teamSlug) });
     }
     const where = describeScope(scope.scope);
     const listed = await client.listEnvs().then(
@@ -774,7 +775,7 @@ export function createVercelAdapter(deps: VercelAdapterDeps = {}): DeployAdapter
       (err) => failureOf(err),
     );
     if (!listed.ok) {
-      return failResult({ label: SET_ENV_LABEL, status: 'fail', code: listed.code, detail: describeVercelFailure(listed.code, listed.status).reason, ...rejectedKeyHelp(listed.code) });
+      return failResult({ label: SET_ENV_LABEL, status: 'fail', code: listed.code, detail: describeVercelFailure(listed.code, listed.status).reason, ...rejectedKeyHelp(listed.code, parsed.options.teamSlug) });
     }
 
     const pairs = config.vars.map((name) => [name, ctx.env[name]] as const);

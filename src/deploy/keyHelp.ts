@@ -9,8 +9,9 @@
  *
  * Pages (checked 2026-10-01):
  *   - Vercel: the dashboard's token page, `https://vercel.com/account/settings/tokens`.
- *     Vercel's own CLI points at `https://vercel.com/account/tokens`, which
- *     redirects (308) to this path.
+ *     A `vercel login` session is OAuth and cannot create tokens, so the token
+ *     must be made in the dashboard; Vercel has no org-owned key, but a token
+ *     can be scoped to one team ("Scope").
  *   - Dokploy: inside the user's OWN Dokploy, Settings → Profile → API/CLI
  *     section (docs: https://docs.dokploy.com/docs/api, "go to the
  *     /settings/profile page and go to API/CLI Section and generate the
@@ -20,8 +21,10 @@
 
 export interface KeyHelp {
   link: { label: string; url: string };
-  /** One plain instruction for the human. */
+  /** The instructions for the human, as one string. */
   remedy: string;
+  /** The same instructions, one per terminal line (stderr). */
+  lines: readonly string[];
 }
 
 export const VERCEL_TOKEN_PAGE_URL = 'https://vercel.com/account/settings/tokens';
@@ -30,13 +33,39 @@ export const DOKPLOY_API_DOCS_URL = 'https://docs.dokploy.com/docs/api';
 const VERCEL_SECRET_NAMES: readonly string[] = ['_CONNECTOR_VERCEL_TOKEN', '_TARGET_VERCEL_TOKEN'];
 const DOKPLOY_SECRET_NAMES: readonly string[] = ['_CONNECTOR_DOKPLOY_API_KEY', '_TARGET_DOKPLOY_API_KEY'];
 
+/** `save`: the key is saved with `capy system set` (refusals, non-interactive). `paste`: a hidden prompt follows right here. */
+export type KeyHelpMode = 'save' | 'paste';
+
+export interface KeyHelpOptions {
+  /** Dokploy: the dashboard's base URL, so the link is that Dokploy's own page. */
+  baseUrl?: string;
+  /** Vercel: the slug of the team that owns the project, when Capy knows it. */
+  team?: string;
+  mode?: KeyHelpMode;
+}
+
+/**
+ * A team id (`team_…`) is not a slug and is never shown as one; `--team`
+ * takes either, so this is the one place that tells them apart.
+ */
+export function teamSlugOf(team: string | undefined): string | undefined {
+  const trimmed = team?.trim();
+  if (!trimmed || trimmed.startsWith('team_')) return undefined;
+  return trimmed;
+}
+
 /** Where to get the Vercel token `secretName` holds. */
-export function vercelKeyHelp(secretName: string): KeyHelp {
+export function vercelKeyHelp(secretName: string, opts: KeyHelpOptions = {}): KeyHelp {
+  const team = teamSlugOf(opts.team);
+  // COPY-FLAG (approved wording)
+  const first = `Create a token at ${VERCEL_TOKEN_PAGE_URL}. Set Scope to the team that owns the project${team ? ` (${team})` : ''}.`;
+  // COPY-FLAG (approved wording)
+  const second = opts.mode === 'paste' ? 'Then paste it here.' : `Then save it: capy system set ${secretName}`;
   return {
     // COPY-FLAG: new user-facing string, minimal/neutral wording.
     link: { label: 'Vercel token page', url: VERCEL_TOKEN_PAGE_URL },
-    // COPY-FLAG: new user-facing string, minimal/neutral wording.
-    remedy: `Create a token at the link and save it with \`capy system set ${secretName}\`, or run \`capy connect vercel --create-token\`.`,
+    remedy: `${first} ${second}`,
+    lines: [first, second],
   };
 }
 
@@ -52,17 +81,16 @@ export function dokployKeyPage(baseUrl: string | undefined): { label: string; ur
 
 /** Where to get the Dokploy API key `secretName` holds. */
 export function dokployKeyHelp(secretName: string, baseUrl?: string): KeyHelp {
-  return {
-    link: dokployKeyPage(baseUrl),
-    // COPY-FLAG: new user-facing string, minimal/neutral wording.
-    remedy: `Open the link, find the API/CLI section, generate a key, and save it with \`capy system set ${secretName}\`.`,
-  };
+  const link = dokployKeyPage(baseUrl);
+  // COPY-FLAG: new user-facing string, minimal/neutral wording.
+  const remedy = `Open ${link.url}, find the API/CLI section, generate a key, and save it with \`capy system set ${secretName}\`.`;
+  return { link, remedy, lines: [remedy] };
 }
 
 /** Help for one of the four known key names; `null` for any other name. */
-export function keyHelpForName(name: string, baseUrl?: string): KeyHelp | null {
-  if (VERCEL_SECRET_NAMES.includes(name)) return vercelKeyHelp(name);
-  if (DOKPLOY_SECRET_NAMES.includes(name)) return dokployKeyHelp(name, baseUrl);
+export function keyHelpForName(name: string, opts: KeyHelpOptions = {}): KeyHelp | null {
+  if (VERCEL_SECRET_NAMES.includes(name)) return vercelKeyHelp(name, opts);
+  if (DOKPLOY_SECRET_NAMES.includes(name)) return dokployKeyHelp(name, opts.baseUrl);
   return null;
 }
 
@@ -71,7 +99,7 @@ export function keyHelpFields(help: KeyHelp): { link: { label: string; url: stri
   return { link: help.link, remedy: help.remedy };
 }
 
-/** Human text for stderr: the link, then the one instruction. */
-export function formatKeyHelp(help: KeyHelp): string {
-  return `  ${help.link.label}: ${help.link.url}\n  ${help.remedy}`;
+/** Human text for stderr: one line per instruction. A refusal that carries only `remedy` prints it as one line (the remedy already holds the link). */
+export function formatKeyHelp(help: { remedy: string; lines?: readonly string[] }): string {
+  return (help.lines ?? [help.remedy]).map((line) => `  ${line}`).join('\n');
 }

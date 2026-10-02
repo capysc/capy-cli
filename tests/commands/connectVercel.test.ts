@@ -436,6 +436,163 @@ describe('vercel import — deploy-target offer (interactive only, like Dokploy)
   });
 });
 
+// ── --targets: write the deploy target without asking ──────────────────────
+
+describe('vercel import --targets — the deploy target is written without a question', () => {
+  const PRODUCTION_TARGET = {
+    name: 'vercel-production',
+    kind: 'vercel',
+    branch: 'production',
+    vars: ['PLAIN_PROD', 'ENC_ALL'],
+    mode: 'ci',
+    gitBaseBranch: 'main',
+    options: { projectDir: '.', vercelEnv: 'production', projectId: 'prj_web', teamId: 'team_acme' },
+  };
+
+  const KEY = 'vercel-targets-project-key-0123456789';
+  const realCtx = (dir: string, branch: string): ResolvedContext =>
+    ({
+      pm: { readSyncState: () => null },
+      fileManager: new FileManager(dir),
+      serviceClient: { pushSecrets: () => { throw new Error('push failed'); } },
+      orgId: 'org_1',
+      projectId: 'p',
+      branch,
+      userId: 'u',
+      projectKey: KEY,
+      keep: { version: '3.0', org_id: 'o', project_id: 'p', project_name: 'demo', variables: {} },
+      localPlaintext: {},
+    }) as unknown as ResolvedContext;
+
+  const importTo = (dir: string, branch: string, over: Partial<ConnectOpts> = {}, extra: Partial<Parameters<typeof createVercelConnector>[0]> = {}) =>
+    captureConsole(() =>
+      new ConnectCommand(false)['executeImport'](makeConnector(DATA, { cwd: dir, ...extra }).connector, 'vercel', realCtx(dir, branch), { ...BASE_OPTS, noPush: true, targets: true, ...over }),
+    );
+
+  test('non-interactive and --json: the target is written (no question), identical to what the interactive offer saves, and reported by folder and name', async () => {
+    await withIsolatedGlobalDir(() =>
+      withExitCodeRestored(() =>
+        withTempDir('capy-vercel-targets', async (dir) => {
+          const confirm = mock(async () => true);
+          const { stdout, stderr } = await importTo(dir, 'production', { json: true }, { confirm });
+          expect(stdout.length).toBe(1);
+          expect(JSON.parse(stdout[0])).toMatchObject({
+            ok: true,
+            dryRun: false,
+            deployTargets: [{ folder: '.', name: 'vercel-production', environment: 'production', written: true }],
+          });
+          expect(confirm.mock.calls.length).toBe(0);
+          expect(listTargets(dir)).toEqual([PRODUCTION_TARGET]);
+
+          // the same shape the interactive offer writes (a second directory, via the offer)
+          await withTempDir('capy-vercel-offer', async (offerDir) => {
+            await withTTY(() =>
+              makeConnector(DATA, { confirm: async () => true, selectVars: async (c: readonly string[]) => c, cwd: offerDir }).connector.import!(ctxWith({ branch: 'production' }), { ...BASE_OPTS, nonTty: false }),
+            );
+            expect(listTargets(offerDir)).toEqual(listTargets(dir));
+          });
+          ALL_SENTINELS.concat('tok_fake_value').forEach((v) => expect([...stdout, ...stderr].join('\n') + readFileSync(join(dir, '.env'), 'utf-8')).not.toContain(v));
+        }),
+      ),
+    );
+  });
+
+  test('human output says what was written; preview has no gitBaseBranch and a custom environment records its ID', async () => {
+    await withIsolatedGlobalDir(() =>
+      withExitCodeRestored(() =>
+        withTempDir('capy-vercel-targets-envs', async (dir) => {
+          const human = await importTo(dir, 'preview');
+          expect(human.stdout.join('\n')).toContain('Wrote deploy target vercel-preview.');
+          await importTo(dir, 'staging');
+          const byName = Object.fromEntries(listTargets(dir).map((t) => [t.name, t]));
+          expect(byName['vercel-preview'].gitBaseBranch).toBeUndefined();
+          expect(byName['vercel-staging'].options).toEqual({ projectDir: '.', vercelEnv: 'staging', projectId: 'prj_web', teamId: 'team_acme', customEnvironmentId: 'env_c1' });
+        }),
+      ),
+    );
+  });
+
+  test('--dry-run lists the target it would write and writes nothing (no .capy/deploy.json)', async () => {
+    await withIsolatedGlobalDir(() =>
+      withExitCodeRestored(() =>
+        withTempDir('capy-vercel-targets-dry', async (dir) => {
+          const json = await importTo(dir, 'production', { dryRun: true, json: true });
+          expect(JSON.parse(json.stdout[0])).toMatchObject({
+            dryRun: true,
+            deployTargets: [{ folder: '.', name: 'vercel-production', environment: 'production', written: false }],
+          });
+          const human = await importTo(dir, 'production', { dryRun: true });
+          expect(human.stdout.join('\n')).toContain('Would write deploy target vercel-production.');
+          expect(existsSync(join(dir, '.capy', 'deploy.json'))).toBe(false);
+          expect(listTargets(dir)).toEqual([]);
+        }),
+      ),
+    );
+  });
+
+  test('it also works with --overwrite --yes', async () => {
+    await withIsolatedGlobalDir(() =>
+      withExitCodeRestored(() =>
+        withTempDir('capy-vercel-targets-overwrite', async (dir) => {
+          await importTo(dir, 'production', { overwrite: true, yes: true, json: true });
+          expect(listTargets(dir).map((t) => t.name)).toEqual(['vercel-production']);
+        }),
+      ),
+    );
+  });
+
+  test('a project + environment that already has a target gets no second one; nothing imported means no target', async () => {
+    await withIsolatedGlobalDir(() =>
+      withExitCodeRestored(() =>
+        withTempDir('capy-vercel-targets-existing', async (dir) => {
+          upsertTarget(dir, { name: 'mine', kind: 'vercel', branch: 'production', vars: [], options: { projectId: 'prj_web', vercelEnv: 'production' } });
+          const again = await importTo(dir, 'production', { json: true });
+          expect(JSON.parse(again.stdout[0]).deployTargets).toBeUndefined();
+          expect(listTargets(dir).map((t) => t.name)).toEqual(['mine']);
+        }),
+      ),
+    );
+    await withIsolatedGlobalDir(() =>
+      withExitCodeRestored(() =>
+        withTempDir('capy-vercel-targets-empty', async (dir) => {
+          const empty = { ...DATA, envs: { prj_web: [] } };
+          await captureConsole(() =>
+            new ConnectCommand(false)['executeImport'](makeConnector(empty, { cwd: dir }).connector, 'vercel', realCtx(dir, 'production'), { ...BASE_OPTS, noPush: true, targets: true, json: true }),
+          );
+          expect(listTargets(dir)).toEqual([]);
+        }),
+      ),
+    );
+  });
+
+  test('without --targets nothing is written non-interactively, and no deployTargets key appears', async () => {
+    await withIsolatedGlobalDir(() =>
+      withExitCodeRestored(() =>
+        withTempDir('capy-vercel-no-targets', async (dir) => {
+          const out = await importTo(dir, 'production', { targets: false, json: true });
+          expect(JSON.parse(out.stdout[0]).deployTargets).toBeUndefined();
+          expect(listTargets(dir)).toEqual([]);
+        }),
+      ),
+    );
+  });
+
+  test('the target is saved only AFTER the import landed: a failed write leaves no target behind', async () => {
+    await withIsolatedGlobalDir(() =>
+      withExitCodeRestored(() =>
+        withTempDir('capy-vercel-targets-failed', async (dir) => {
+          const failing = await captureConsole(() =>
+            // push is on and the fake service refuses it
+            new ConnectCommand(false)['executeImport'](makeConnector(DATA, { cwd: dir }).connector, 'vercel', realCtx(dir, 'production'), { ...BASE_OPTS, noPush: false, targets: true, json: true }).catch((err: Error) => err.message),
+          );
+          expect(typeof failing.result).toBe('string');
+          expect(listTargets(dir)).toEqual([]);
+        }),
+      ),
+    );
+  });
+});
+
 // ── end to end: real FileManager, real executeImport, no value on any surface ─
 
 describe('vercel import — end to end through ConnectCommand.executeImport', () => {

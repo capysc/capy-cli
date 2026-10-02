@@ -63,6 +63,8 @@ export interface VercelSystemStoreCallOptions {
   interactive: boolean;
   devMode?: boolean;
   apiUrl?: string;
+  /** The slug of the team that owns the project, when known: the hidden prompt's token instructions name it. */
+  helpTeam?: string;
 }
 
 export type GetVercelStoreSecret = (
@@ -114,6 +116,8 @@ export interface ResolveVercelTokenOptions {
   orgId?: string;
   devMode?: boolean;
   apiUrl?: string;
+  /** See `VercelSystemStoreCallOptions.helpTeam`. */
+  helpTeam?: string;
   /** Defaults to a getter that never touches the store (env-only). Real callers pass `getVercelTargetSecretFromStore`. */
   getSecret?: GetVercelStoreSecret;
 }
@@ -137,6 +141,7 @@ export async function resolveVercelTargetToken(
     interactive: opts.interactive,
     devMode: opts.devMode,
     apiUrl: opts.apiUrl,
+    ...(opts.helpTeam ? { helpTeam: opts.helpTeam } : {}),
   });
   if (outcome.kind === 'value') return { ok: true, value: outcome.value, source: 'system' };
   const fallback = opts.env[DEFAULT_VERCEL_TOKEN_ENV];
@@ -147,8 +152,8 @@ export async function resolveVercelTargetToken(
 }
 
 /** Where to get the deploy-side Vercel token: the `link` + `remedy` fields of a key refusal. */
-export function vercelTargetKeyHelp(): { link: { label: string; url: string }; remedy: string } {
-  return keyHelpFields(vercelKeyHelp(VERCEL_TARGET_SECRET_NAME));
+export function vercelTargetKeyHelp(team?: string): { link: { label: string; url: string }; remedy: string } {
+  return keyHelpFields(vercelKeyHelp(VERCEL_TARGET_SECRET_NAME, { team }));
 }
 
 /** A token refusal as a printable reason + hint. Names only, never a value. */
@@ -198,6 +203,12 @@ export interface VercelApiOptions {
   vercelEnv: string;
   projectId: string;
   teamId?: string;
+  /**
+   * The team's slug. Saved by `capy deploy`'s setup ONLY when the project could
+   * not be checked against Vercel (so no `teamId` was learned): requests then
+   * scope by slug. Also lets the token instructions name the team.
+   */
+  teamSlug?: string;
   /** Preview only. Absent means every preview branch. */
   gitBranch?: string;
   customEnvironmentId?: string;
@@ -235,6 +246,7 @@ export function parseVercelApiOptions(raw: Record<string, unknown>): ParsedVerce
       vercelEnv,
       projectId,
       teamId: nonEmptyString(raw.teamId),
+      teamSlug: nonEmptyString(raw.teamSlug),
       gitBranch: nonEmptyString(raw.gitBranch),
       customEnvironmentId: nonEmptyString(raw.customEnvironmentId),
     },
@@ -284,6 +296,8 @@ export interface VercelClientDeps {
   sleep?: (ms: number) => Promise<void>;
   /** Epoch milliseconds. */
   now?: () => number;
+  /** Scope requests by the team's slug (`?slug=`) when there is no `teamId` to scope by. */
+  teamSlug?: string;
 }
 
 export interface VercelClient {
@@ -338,7 +352,8 @@ export function createVercelClient(
   const project = encodeURIComponent(projectId);
 
   const urlFor = (path: string, query: Readonly<Record<string, string>>): string => {
-    const params = new URLSearchParams({ ...query, ...(teamId ? { teamId } : {}) });
+    const scope: Record<string, string> = teamId ? { teamId } : deps.teamSlug ? { slug: deps.teamSlug } : {};
+    const params = new URLSearchParams({ ...query, ...scope });
     const qs = params.toString();
     return `${API_BASE}${path}${qs ? `?${qs}` : ''}`;
   };
@@ -799,11 +814,12 @@ export function sortedNames(names: readonly string[]): string[] {
 export function describeVercelFailure(
   code: ErrorCode,
   status?: number,
+  team?: string,
 ): { reason: string; hint?: string; link?: { label: string; url: string }; remedy?: string } {
   const http = status !== undefined ? ` (HTTP ${status})` : '';
   if (code === ERROR_CODES.VERCEL_TOKEN_REJECTED) {
     // COPY-FLAG
-    return { reason: `Vercel rejected the token${http}`, hint: `Replace it: capy system set ${VERCEL_TARGET_SECRET_NAME}`, ...vercelTargetKeyHelp() };
+    return { reason: `Vercel rejected the token${http}`, hint: `Replace it: capy system set ${VERCEL_TARGET_SECRET_NAME}`, ...vercelTargetKeyHelp(team) };
   }
   if (code === ERROR_CODES.VERCEL_NO_ACCESS) {
     // COPY-FLAG

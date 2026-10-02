@@ -1,8 +1,8 @@
 import { ConnectorMetadata } from '../../types/index';
+import type { TargetConfig } from '../../deploy/adapter';
 import type { Blocked } from '../../ui/screens/contract';
 import type { DokployImportSource } from '../../deploy/dokployApi';
 import type { VercelImportSource } from '../../deploy/vercelApi';
-import type { TokenCreatedReport } from '../../deploy/vercelCliToken';
 import type { DiscoveryContext, DiscoveryOutcome } from './dokployDiscovery';
 import { ResolvedContext } from './shared';
 
@@ -187,20 +187,25 @@ export interface ConnectOpts {
    */
   vercelProject?: { id: string; name: string; productionBranch?: string };
   /**
-   * Vercel only (flag `--create-token`): create `_CONNECTOR_VERCEL_TOKEN` from
-   * the Vercel CLI's sign-in and save it to the org system store, without
-   * prompting. With `--project`/`--discover` the run then continues; alone, it
-   * stops after reporting the token. Refused under `--dry-run`.
-   */
-  createToken?: boolean;
-  /** Vercel only (flag `--token-expires-days`): how many days the created token lasts. Absent = no expiry. */
-  tokenExpiresDays?: string | number;
-  /**
    * Vercel import only: the folder a saved deploy target's `.capy/deploy.json`
    * belongs in. Set INTERNALLY by discovery (each folder has its own); a plain
    * import uses the current directory.
    */
   projectDir?: string;
+  /**
+   * Vercel only (flag `--targets`): also write a Vercel deploy target for each
+   * environment that imports, without asking — in non-interactive and `--json`
+   * runs too. Under `--dry-run` the targets are listed, never written.
+   */
+  targets?: boolean;
+}
+
+/** A deploy target `--targets` wrote (`written`), or under `--dry-run` would write. Names only. */
+export interface DeployTargetReport {
+  name: string;
+  /** The Vercel environment (= the Capy branch) the target ships to. */
+  environment: string;
+  written: boolean;
 }
 
 export interface RotateOpts {
@@ -290,6 +295,14 @@ export type ImportOutcome =
       skipped: readonly ImportSkip[];
       warnings: readonly ImportWarning[];
       deployTargetSaved: boolean;
+      /** Vercel `--targets` only: the deploy target this import wrote (dry run: would write). Absent when none applies. */
+      deployTarget?: DeployTargetReport;
+      /**
+       * Vercel `--targets` only, internal: the target for `writeImportOutcome`
+       * to save into `dir`'s `.capy/deploy.json` once the import itself is
+       * written — so a failed write leaves no target behind. Never set under a dry run.
+       */
+      deployTargetToWrite?: { dir: string; target: TargetConfig };
       /**
        * Dokploy import only: names with a different local value that a real
        * (non-dry-run) run would have prompted about. Only populated under
@@ -325,17 +338,12 @@ export type ImportOutcome =
        * `--overwrite` decline branch, where nothing is touched at all.
        */
       unchangedEntries?: readonly ImportedVarEntry[];
-      /** Vercel `--create-token` only: the token this run created and saved. Never its value. */
-      tokenCreated?: TokenCreatedReport;
     }
   | ConnectFailure;
 
 /**
  * A refusal. `link` + `remedy` (same field names as `Blocked`) say where to get
- * a missing or rejected API key and what the human does next; `tokenId` names a
- * Vercel token that was created and could not be removed (never its value);
- * `tokenCreated` is set when a token WAS created and saved before the refusal.
- * All additive.
+ * a missing or rejected API key and what the human does next. Additive.
  */
 export interface ConnectFailure {
   ok: false;
@@ -344,12 +352,7 @@ export interface ConnectFailure {
   message: string;
   link?: { label: string; url: string };
   remedy?: string;
-  tokenId?: string;
-  tokenCreated?: TokenCreatedReport;
 }
-
-/** `capy connect vercel --create-token` on its own: the token that was made and saved, or why not. */
-export type CreateTokenOutcome = { ok: true; tokenCreated: TokenCreatedReport } | ConnectFailure;
 
 export interface ConnectorModule {
   name: string;
@@ -424,13 +427,6 @@ export interface ConnectorModule {
    * that implement it — no other provider does today.
    */
   discover?(ctx: DiscoveryContext, opts: ConnectOpts): Promise<DiscoveryOutcome>;
-  /**
-   * `--create-token` with neither `--project` nor `--discover`: make and save
-   * the provider's API key, report it, import nothing. `orgIdOf` resolves the
-   * org (it may authenticate), so the connector can refuse a bad request
-   * before any of that. Present only on connectors that can make their key.
-   */
-  createToken?(opts: ConnectOpts, orgIdOf: () => Promise<string>): Promise<CreateTokenOutcome>;
   /**
    * A connector whose discovery plan has its own shape (Vercel: project name
    * + id, skipped names grouped by reason) prints and emits it here instead

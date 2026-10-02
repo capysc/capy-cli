@@ -263,6 +263,18 @@ describe('capy deploy — Vercel API mode, end to end (CAP-696)', () => {
     expect(result.vercelCalls).toBe(0);
     expect(result.lines.some((l) => l.includes('_TARGET_VERCEL_TOKEN'))).toBe(true);
     expect(pushSecretsMock).not.toHaveBeenCalled();
+    // The refusal says how to make a token, in the approved words (stderr).
+    const text = result.lines.join('\n');
+    expect(text).toContain('Create a token at https://vercel.com/account/settings/tokens. Set Scope to the team that owns the project.');
+    expect(text).toContain('Then save it: capy system set _TARGET_VERCEL_TOKEN');
+    expect(text).not.toContain(TOKEN);
+  }, 30_000);
+
+  test('the same refusal names the team when the saved target knows its slug', async () => {
+    setUpRepo({ ...API_OPTIONS, vercelEnv: 'production', teamSlug: 'acme' });
+    const result = await withCwd(() => run({ yes: true }, {}, null));
+    expect(result.code).toBe(1);
+    expect(result.lines.join('\n')).toContain('Set Scope to the team that owns the project (acme).');
   }, 30_000);
 
   test('a token Vercel rejects: refused at preflight before any value is sent, nothing recorded', async () => {

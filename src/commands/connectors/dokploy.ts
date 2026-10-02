@@ -1329,10 +1329,14 @@ function discoveryConfirmMessage(folders: readonly DiscoveryPlanFolder[], overwr
 
 const folderPath = (repoDir: string, folder: string): string => (folder ? join(repoDir, folder) : repoDir);
 
-/** keep.lock and .gitignore, relative to `repoDir` — the ONLY paths discovery's own commit step ever touches. */
-export function discoveryCommitPathsFor(folder: string): readonly string[] {
+/**
+ * keep.lock and .gitignore, relative to `repoDir` — the ONLY paths discovery's
+ * own commit step ever touches. `deployConfig` (Vercel `--targets`) adds the
+ * folder's `.capy/deploy.json`, which the run itself wrote.
+ */
+export function discoveryCommitPathsFor(folder: string, opts: { deployConfig?: boolean } = {}): readonly string[] {
   const prefix = folder ? `${folder}/` : '';
-  return [`${prefix}keep.lock`, `${prefix}.gitignore`];
+  return [`${prefix}keep.lock`, `${prefix}.gitignore`, ...(opts.deployConfig ? [`${prefix}.capy/deploy.json`] : [])];
 }
 
 /**
@@ -1353,10 +1357,18 @@ export function commitPreviewForFolders(
   branchName: string,
   /** The commit subject; default is the Dokploy one. */
   commitMessage?: string,
+  /** Vercel `--targets`: whether this folder's `.capy/deploy.json` is part of the commit. */
+  deployConfigFor?: (folder: DiscoveryPlanFolder) => boolean,
 ): readonly DiscoveryRepoCommitResult[] {
   const repoDirs = [...new Set(folders.map((f) => f.repoDir))];
   return repoDirs.map((repoDir) => {
-    const paths = [...new Set(folders.filter((f) => f.repoDir === repoDir).flatMap((f) => discoveryCommitPathsFor(f.folder)))];
+    const paths = [
+      ...new Set(
+        folders
+          .filter((f) => f.repoDir === repoDir)
+          .flatMap((f) => discoveryCommitPathsFor(f.folder, { deployConfig: deployConfigFor?.(f) ?? false })),
+      ),
+    ];
     const outcome = commitDiscoveryChanges(repoDir, paths, new Set(), { branchName, dryRun: true, summaryLines: [], ...(commitMessage ? { commitMessage } : {}) });
     return { repoDir, ...outcome };
   });
@@ -1375,12 +1387,14 @@ export function commitForAppliedRepos(
   branchName: string,
   /** The commit subject; default is the Dokploy one. */
   commitMessage?: string,
+  /** Vercel `--targets`: whether this folder's run wrote a `.capy/deploy.json` that belongs in the commit. */
+  deployConfigFor?: (folder: DiscoveryFolderResult) => boolean,
 ): readonly DiscoveryRepoCommitResult[] {
   const repoDirs = [...new Set(applied.map((f) => f.repoDir))];
   return repoDirs.flatMap((repoDir) => {
     const okFolders = applied.filter((f) => f.repoDir === repoDir && f.ok);
     if (okFolders.length === 0) return [];
-    const paths = okFolders.flatMap((f) => discoveryCommitPathsFor(f.folder));
+    const paths = okFolders.flatMap((f) => discoveryCommitPathsFor(f.folder, { deployConfig: deployConfigFor?.(f) ?? false }));
     const summaryLines = okFolders.map((f) => `- ${f.folder || '.'}: ${(f as Extract<DiscoveryFolderResult, { ok: true }>).activeBranch}`);
     const outcome = commitDiscoveryChanges(repoDir, paths, beforeStatusByRepo.get(repoDir) ?? new Set(), {
       branchName,
