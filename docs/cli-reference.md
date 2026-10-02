@@ -338,7 +338,7 @@ JSON support: yes (`--json`)
 
 ## `capy pair`
 
-Pair this device into an org via Keep (device-code login + key pickup)
+Pair this device via Keep; requires interactive confirmation of the returned account before installing any session or keys
 
 ```
 capy pair [options]
