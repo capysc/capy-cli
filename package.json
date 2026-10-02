@@ -1,6 +1,6 @@
 {
   "name": "@capysc/cli",
-  "version": "0.9.7",
+  "version": "0.9.8",
   "description": "Capy CLI - SecretOps for the AI age",
   "main": "dist/index.js",
   "bin": {
@@ -69,7 +69,9 @@
     "typescript": "^5.0.0"
   },
   "overrides": {
-    "@yao-pkg/pkg-fetch/undici": "^7.29.0"
+    "@yao-pkg/pkg-fetch": {
+      "undici": "^7.29.0"
+    }
   },
   "license": "AGPL-3.0-only",
   "engines": {
