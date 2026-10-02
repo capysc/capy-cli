@@ -38,6 +38,7 @@ mock.module('../../src/crypto/keyResolver', () => ({
 mock.module('../../src/config/globalConfig', () => ({
   writeKeepCache: mock(() => undefined),
   fetchSecretsWithCache: mock(async () => null),
+  hasLocalRoot: mock(() => false),
 }));
 mock.module('inquirer', () => ({
   default: {
@@ -898,6 +899,44 @@ describe('CapyCommand', () => {
       consoleSpy.mockRestore();
     });
 
+    test('pairs a fresh device once after authentication, then continues the existing sync flow', async () => {
+      const { hasOrgKey } = await import('../../src/crypto/keyResolver');
+      (hasOrgKey as any).mockReturnValueOnce(false).mockReturnValue(true);
+      const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
+      const pairSpy = spyOn(capyCommand as any, 'executePairCommand').mockResolvedValue(undefined);
+
+      try {
+        await (capyCommand as any).syncProject(mockProjectState);
+        expect(pairSpy).toHaveBeenCalledTimes(1);
+        expect(pairSpy).toHaveBeenCalledWith('user-456');
+        expect(consoleSpy).toHaveBeenCalledWith('No local keys found. Starting device pairing...');
+        expect(consoleSpy).toHaveBeenCalledWith('Everything is up to date!');
+      } finally {
+        (hasOrgKey as any).mockReturnValue(true);
+        pairSpy.mockRestore();
+        consoleSpy.mockRestore();
+      }
+    });
+
+    test('does not pair when partial local key material already exists', async () => {
+      const { hasOrgKey } = await import('../../src/crypto/keyResolver');
+      const { hasLocalRoot } = await import('../../src/config/globalConfig');
+      (hasOrgKey as any).mockReturnValue(false);
+      (hasLocalRoot as any).mockReturnValue(true);
+      const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
+      const pairSpy = spyOn(capyCommand as any, 'executePairCommand').mockResolvedValue(undefined);
+
+      try {
+        await (capyCommand as any).syncProject(mockProjectState);
+        expect(pairSpy).not.toHaveBeenCalled();
+      } finally {
+        (hasOrgKey as any).mockReturnValue(true);
+        (hasLocalRoot as any).mockReturnValue(false);
+        pairSpy.mockRestore();
+        consoleSpy.mockRestore();
+      }
+    });
+
     test('a run with nothing to do serves no browser report and holds no socket', async () => {
       // `capy --web` in a synced directory is the common case, and it asks
       // nothing: the report page it used to serve had to be opened by `open()`,
@@ -1407,6 +1446,23 @@ describe('CapyCommand', () => {
       try {
         await expect((capyCommand as any).initializeProject()).rejects.toThrow('no encryption key');
         await expect((capyCommand as any).initializeProject()).rejects.toThrow('capy redeem');
+      } finally {
+        (hasOrgKey as any).mockReturnValue(true);
+        consoleSpy.mockRestore();
+      }
+    });
+
+    test('starts interactive pairing once for a fresh device and keeps the redeem fallback if the selected org was not paired', async () => {
+      const { hasOrgKey } = await import('../../src/crypto/keyResolver');
+      (hasOrgKey as any).mockReturnValue(false);
+      const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
+
+      try {
+        const pairSpy = spyOn(capyCommand as any, 'executePairCommand').mockResolvedValue(undefined);
+        await expect((capyCommand as any).initializeProject()).rejects.toThrow('capy redeem');
+        expect(pairSpy).toHaveBeenCalledTimes(1);
+        expect(pairSpy).toHaveBeenCalledWith('user-456');
+        pairSpy.mockRestore();
       } finally {
         (hasOrgKey as any).mockReturnValue(true);
         consoleSpy.mockRestore();

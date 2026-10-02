@@ -302,6 +302,35 @@ describe('pairCommand', () => {
     expect(mockPickupDevicePairing).not.toHaveBeenCalled();
   });
 
+  test('stops after account-confirmation cancellation without installing state or retrying', async () => {
+    mockConfirmPairAccount.mockResolvedValue(false);
+    const { stdout } = await withCapturedIo(async () => {
+      await expect(pairCommand({ json: true, expectedUserId: EXCHANGE_USER.id })).rejects.toThrow();
+    });
+    const parsed = JSON.parse(stdout);
+    expect(parsed.code).toBe('AUTH_FAILED');
+    expect(mockConfirmPairAccount).toHaveBeenCalledTimes(1);
+    expect(mockInstallDeviceGrantSession).not.toHaveBeenCalled();
+    expect(mockPickupDevicePairing).not.toHaveBeenCalled();
+    expect(mockSaveLocalRoot).not.toHaveBeenCalled();
+  });
+
+  test('refuses a paired account that differs from the account that started the root command', async () => {
+    mockPollDeviceToken.mockResolvedValue({
+      token: { access_token: 'jwt', refresh_token: 'rt', expires_in: 600 },
+      user: { ...EXCHANGE_USER, id: 'other-user' },
+      organizations: [{ id: 'org-123', workos_org_id: 'wo_1', name: 'Acme' }],
+    });
+    const { stdout } = await withCapturedIo(async () => {
+      await expect(pairCommand({ json: true, expectedUserId: EXCHANGE_USER.id })).rejects.toThrow();
+    });
+    const parsed = JSON.parse(stdout);
+    expect(parsed.code).toBe('AUTH_FAILED');
+    expect(mockConfirmPairAccount).not.toHaveBeenCalled();
+    expect(mockInstallDeviceGrantSession).not.toHaveBeenCalled();
+    expect(mockSaveLocalRoot).not.toHaveBeenCalled();
+  });
+
   test('falls back to authenticateSilent() when the device-grant token has no scoped org yet', async () => {
     mockInstallDeviceGrantSession.mockResolvedValue({ success: true, organization_id: '', user_id: EXCHANGE_USER.id });
     const { stdout } = await withCapturedIo(() => pairCommand({ json: true }));

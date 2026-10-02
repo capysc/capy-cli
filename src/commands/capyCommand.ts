@@ -37,7 +37,7 @@ import {
   hasOrgKey,
   KeyServiceOps,
 } from '../crypto/keyResolver';
-import { writeKeepCache, fetchSecretsWithCache, readSecretsLocal, LOCAL_ORG_ID, LOCAL_USER_ID } from '../config/globalConfig';
+import { writeKeepCache, fetchSecretsWithCache, readSecretsLocal, hasLocalRoot, LOCAL_ORG_ID, LOCAL_USER_ID } from '../config/globalConfig';
 import { excludeSystemProject, assertProjectNameAllowed } from '../system/reservedProjectName';
 import { isLocalOnly } from '../config/profileConfig';
 import { resolveLocalProjectKey } from '../core/localUnlock';
@@ -111,6 +111,24 @@ export class CapyCommand {
       coDecrypt: (orgId, ciphertext) => this.serviceClient.coDecrypt(orgId, ciphertext).then(r => r.plaintext),
       wrapOuterLayer: (orgId, plaintext) => this.serviceClient.wrapOuterLayer(orgId, plaintext).then(r => r.ciphertext),
     };
+  }
+
+  /**
+   * A device with no protected local state can establish it through the
+   * interactive pairing flow. Pairing owns its account confirmation and
+   * conflict checks; this caller never supplies `--force` and attempts it
+   * only once per command path.
+   */
+  private async pairFreshDevice(orgId: string, userId: string): Promise<boolean> {
+    if (hasOrgKey(orgId, userId) || hasLocalRoot(orgId, userId)) return hasOrgKey(orgId, userId);
+    console.log('No local keys found. Starting device pairing...');
+    await this.executePairCommand(userId);
+    return hasOrgKey(orgId, userId);
+  }
+
+  private async executePairCommand(expectedUserId: string): Promise<void> {
+    const { pairCommand } = await import('./pairCommand');
+    await pairCommand({ devMode: this.devMode, expectedUserId });
   }
 
   /**
@@ -553,7 +571,7 @@ export class CapyCommand {
 
     // User has access to an existing org but no local key — they were invited
     // and need to redeem their invite code to receive the shared master key.
-    const orgKeyPresent = hasOrgKey(selectedOrg.id, authResult.user_id!);
+    const orgKeyPresent = await this.pairFreshDevice(selectedOrg.id, authResult.user_id!);
     wizard?.record({ hasOrgKey: orgKeyPresent });
     if (!orgKeyPresent) {
       // The most common way this run stops, and it stops one step after the
@@ -1450,14 +1468,14 @@ export class CapyCommand {
 
     const encryptionKey = await (async (): Promise<string> => {
       try {
-        return localMode
-          ? await resolveLocalProjectKey(projectState.projectId!)
-          : await resolveProjectKey(
-              projectState.organizationId!,
-              projectState.projectId!,
-              authResult.user_id!,
-              this.keyServiceOps(),
-            );
+        if (localMode) return await resolveLocalProjectKey(projectState.projectId!);
+        await this.pairFreshDevice(projectState.organizationId!, authResult.user_id!);
+        return await resolveProjectKey(
+          projectState.organizationId!,
+          projectState.projectId!,
+          authResult.user_id!,
+          this.keyServiceOps(),
+        );
       } catch (err: any) {
         // Confirmed kick → destructive local cleanup (wraps key, user dir,
         // project caches, keep.lock). Any other error path — bare 403,

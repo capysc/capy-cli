@@ -32,6 +32,8 @@ export interface PairOptions {
   readonly force?: boolean;
   readonly apiUrl?: string;
   readonly devMode?: boolean;
+  /** Internal root-command guard; direct `capy pair` remains account-selectable. */
+  readonly expectedUserId?: string;
 }
 
 /** Prose/QR/progress output. Always sent to stderr under `--json` so stdout stays pure JSON; stdout in human mode otherwise. */
@@ -165,6 +167,13 @@ export async function pairCommand(options: PairOptions = {}): Promise<void> {
         prompt?.stop();
       }
     })();
+
+    if (options.expectedUserId && exchange.user.id !== options.expectedUserId) {
+      throw new CapyError(
+        'Pairing account does not match the account that started this command. No session or keys were installed.',
+        ERROR_CODES.AUTH_FAILED,
+      );
+    }
 
     if (!await confirmPairAccount(exchange.user.email, json)) {
       throw new CapyError(
