@@ -390,6 +390,18 @@ export function pushBranch(
   return { ok: true };
 }
 
+/**
+ * The URL of the `origin` remote (`git remote get-url origin`), or null when
+ * there is no such remote. Decided by exit status only. The URL can carry
+ * userinfo — callers must reduce it (see `parseGithubRemote`) and never log it.
+ */
+export function originRemoteUrl(cwd: string): string | null {
+  const r = git(['remote', 'get-url', 'origin'], cwd);
+  if (r.code !== 0) return null;
+  const url = r.stdout.trim();
+  return url.length > 0 ? url : null;
+}
+
 /** Repo-root-relative path of a file in `cwd` (e.g. `service/keep.lock`). */
 export function repoRelPath(cwd: string, file: string): string {
   const prefix = git(['rev-parse', '--show-prefix'], cwd).stdout.trim();

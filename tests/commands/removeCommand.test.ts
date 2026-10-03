@@ -396,7 +396,8 @@ describe('proceedWithRemoval', () => {
     };
     const ctx = ctxWith({ keep, localPlaintext: { TARGET: 'v' } });
 
-    const r = await capture(() => proceedWithRemoval(ctx, ['TARGET'], { json: false, cwd: TEST_DIR }));
+    // `--no-pr` keeps this test from ever prompting, even when run from a real terminal.
+    const r = await capture(() => proceedWithRemoval(ctx, ['TARGET'], { json: false, cwd: TEST_DIR, pr: { noPr: true } }));
     expect(r.exitCode).toBeUndefined();
     expect(r.stderr).toContain('prod');
     expect(r.stderr).toContain('TARGET');
@@ -430,6 +431,63 @@ describe('proceedWithRemoval', () => {
       errSpy.mockRestore();
     }
   });
+  // ── the keep.lock PR step ────────────────────────────────────────────
+  // The step itself is covered in keepLockPr.test.ts with injected GitHub
+  // fakes; here is the wiring: what `remove` records, and what its JSON says.
+  // TEST_DIR is not a git repository, so `--pr` stops at KEEP_PR_NOT_GIT_REPO
+  // without ever reaching `gh` or the network.
+  function removable(): ResolvedContext {
+    const keep: KeepFile = {
+      version: '3.0',
+      org_id: 'o',
+      project_id: 'p',
+      project_name: 'demo',
+      variables: { TARGET: [{ resource_id: 'r1', branch: 'development', value_hash: hashValue('v') }] },
+    };
+    return ctxWith({ keep, localPlaintext: { TARGET: 'v' } });
+  }
+
+  async function removeJson(pr: { pr?: boolean; noPr?: boolean; prBase?: string }) {
+    const r = await capture(() => proceedWithRemoval(removable(), ['TARGET'], { json: true, cwd: TEST_DIR, pr }));
+    return { ...r, parsed: JSON.parse(r.stdout.trim()) as Record<string, unknown> };
+  }
+
+  test('--json with no PR flags and no terminal: exit 0, keep_lock changed-not-committed, both questions unanswered', async () => {
+    const r = await removeJson({});
+    expect(r.exitCode).toBeUndefined();
+    expect(r.parsed).toEqual({
+      removed: ['TARGET'],
+      branch: 'development',
+      keep_lock: { changed: true, committed: false },
+      unanswered: [
+        { id: 'create_pr', flag: '--pr' },
+        { id: 'pr_base', flag: '--pr-base' },
+      ],
+    });
+    expect(r.stderr).toBe('');
+  });
+
+  test('--json --no-pr: no unanswered', async () => {
+    const r = await removeJson({ noPr: true });
+    expect(r.parsed.keep_lock).toEqual({ changed: true, committed: false });
+    expect(r.parsed.unanswered).toBeUndefined();
+  });
+
+  test('--json --pr outside a git repo: the removal still succeeds (exit 0) with a coded keep_lock.error, stdout pure JSON', async () => {
+    const r = await removeJson({ pr: true, prBase: 'dev' });
+    expect(r.exitCode).toBeUndefined();
+    expect(r.parsed.removed).toEqual(['TARGET']);
+    expect(r.parsed.keep_lock).toMatchObject({ changed: true, committed: false, error: { code: 'KEEP_PR_NOT_GIT_REPO' } });
+    expect(r.stderr).toBe('');
+  });
+
+  test('human mode: a PR failure is one short stderr line, exit 0', async () => {
+    const r = await capture(() => proceedWithRemoval(removable(), ['TARGET'], { json: false, cwd: TEST_DIR, pr: { pr: true } }));
+    expect(r.exitCode).toBeUndefined();
+    expect(r.stdout).toContain('Removed TARGET');
+    expect(r.stderr.trim().split('\n')).toHaveLength(1);
+    expect(r.stderr).toContain('KEEP_PR_NOT_GIT_REPO');
+  });
 });
 
 // ── RemoveCommand.execute — local-only refusals (no auth reached) ──────
@@ -450,6 +508,12 @@ describe('RemoveCommand.execute local refusals', () => {
   function run(names: string[], opts: Record<string, unknown>): Promise<{ exitCode?: number; stdout: string; stderr: string }> {
     return capture(() => new RemoveCommand(false).execute(names, opts as never));
   }
+
+  test('--pr together with --no-pr is refused as INVALID_FORMAT before anything else (even before keep.lock is read)', async () => {
+    const r = await run(['A'], { json: true, yes: true, pr: { pr: true, noPr: true } });
+    expect(r.exitCode).toBe(1);
+    expect(JSON.parse(r.stdout.trim())).toMatchObject({ ok: false, code: 'INVALID_FORMAT' });
+  });
 
   test('VAR_NOT_FOUND lists exactly the missing names, in human mode', async () => {
     writeFixture({

@@ -19,11 +19,21 @@ import { hashValue } from './statusCommand';
 import { isInteractive, EXIT_NEEDS_INPUT } from '../ui/interactive';
 import { listTargets } from '../deploy/config';
 import { CapyError, ERROR_CODES, KeepFile } from '../types/index';
+import {
+  recordsForRemoval,
+  refuseBadPrFlags,
+  reportKeepLockHuman,
+  runKeepLockPrStep,
+  withKeepLock,
+  type PrFlags,
+} from './keepLockPr';
 
 export interface RemoveOpts {
   yes?: boolean;
   json?: boolean;
   nonTty?: boolean;
+  /** `--pr` / `--no-pr` / `--pr-base`: answers the keep.lock PR step. */
+  pr?: PrFlags;
 }
 
 /** Pure JSON refusal on stdout — never on stderr, so `--json` output stays parseable. */
@@ -115,7 +125,7 @@ async function promptRemovalConfirmation(message: string): Promise<boolean> {
 export async function proceedWithRemoval(
   ctx: ResolvedContext,
   names: readonly string[],
-  opts: { json: boolean; cwd: string },
+  opts: { json: boolean; cwd: string; pr?: PrFlags; nonTty?: boolean },
 ): Promise<void> {
   const pinned = pinnedHashesFor(ctx.keep, ctx.branch);
   const drifted = computeDrift(pinned, ctx.localPlaintext, names);
@@ -134,14 +144,28 @@ export async function proceedWithRemoval(
 
   await removeAndSync(ctx, names);
 
+  // The removal is done whatever the PR step reports (it never throws).
+  const outcome = await runKeepLockPrStep({
+    command: 'remove',
+    cwd: opts.cwd,
+    records: recordsForRemoval(ctx.branch, names),
+    localKeep: ctx.keep,
+    flags: opts.pr ?? {},
+    json: opts.json,
+    nonTty: opts.nonTty,
+  });
+
   if (opts.json) {
     console.log(
       JSON.stringify(
-        {
-          removed: names,
-          branch: ctx.branch,
-          ...(warnings.length > 0 ? { warnings: warnings.map(formatDeployWarning) } : {}),
-        },
+        withKeepLock(
+          {
+            removed: names,
+            branch: ctx.branch,
+            ...(warnings.length > 0 ? { warnings: warnings.map(formatDeployWarning) } : {}),
+          },
+          outcome,
+        ),
         null,
         2,
       ),
@@ -156,6 +180,7 @@ export async function proceedWithRemoval(
   for (const w of warnings) {
     console.error(formatDeployWarning(w));
   }
+  reportKeepLockHuman(outcome, { successTo: 'stdout', noteUnanswered: false });
 }
 
 export class RemoveCommand {
@@ -163,6 +188,8 @@ export class RemoveCommand {
 
   async execute(varNames: string[], opts: RemoveOpts): Promise<void> {
     const json = opts.json === true;
+    // Contradictory PR flags are refused before anything is changed.
+    refuseBadPrFlags(opts.pr ?? {}, json);
     const names = varNames.map((n) => n.trim()).filter(Boolean);
     if (names.length === 0) {
       refuse(json, new CapyError('No variable name given.', ERROR_CODES.INVALID_FORMAT));
@@ -216,6 +243,6 @@ export class RemoveCommand {
     // authenticate and decrypt `.env`, which the drift check and the push
     // both need.
     const ctx = await resolveContext({ devMode: this.devMode });
-    await proceedWithRemoval(ctx, names, { json, cwd: process.cwd() });
+    await proceedWithRemoval(ctx, names, { json, cwd: process.cwd(), pr: opts.pr, nonTty: opts.nonTty });
   }
 }

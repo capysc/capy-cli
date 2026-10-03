@@ -21,6 +21,7 @@ import { ERROR_CODES } from '../types/index';
 import { isLocalOnly } from '../config/profileConfig';
 import { MAX_PIPED_BYTES, readPipedValue, refuseInvalidName, refusePiped } from './pipedValue';
 import { isValidVarName, runPipedWrite } from './pipedWrite';
+import type { PrFlags } from './keepLockPr';
 
 export type EditMode = 'tui' | 'web' | 'piped' | 'refuse';
 
@@ -52,6 +53,8 @@ export interface EditPipedOpts {
   readonly json: boolean;
   readonly push: boolean;
   readonly devMode: boolean;
+  /** `--pr` / `--no-pr` / `--pr-base`: answers the keep.lock PR step. */
+  readonly pr?: PrFlags;
 }
 
 /** `<cmd> | capy edit NAME`: read stdin, set the variable, report. Never prompts. */
@@ -68,5 +71,5 @@ export async function editPipedCommand(name: string, opts: EditPipedOpts): Promi
   const piped = await readPipedValue(process.stdin, MAX_PIPED_BYTES);
   if (!piped.ok) return refusePiped(opts.json, piped.code, piped.error);
 
-  await runPipedWrite(name, piped.value, opts);
+  await runPipedWrite(name, piped.value, { ...opts, command: 'edit' });
 }

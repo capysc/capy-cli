@@ -152,6 +152,9 @@ program
   .option('--no-push', 'piped value: write .env only; do not push to Capy')
   .option('--json', 'emit machine-readable JSON instead of the human UI (piped value)')
   .option('--non-tty', 'treat stdin as not a terminal; never prompt (agents/CI)')
+  .option('--pr', 'create a PR with the keep.lock change (answers the prompt)') // COPY-FLAG
+  .option('--no-pr', 'do not create a PR with the keep.lock change') // COPY-FLAG
+  .option('--pr-base <branch>', 'base branch for the PR (answers the prompt)') // COPY-FLAG
   .addHelpText(
     'after',
     // COPY-FLAG
@@ -161,6 +164,7 @@ program
   )
   .action(async (name, options, command) => {
     const { EditCommand } = await import('./commands/editCommand');
+    const { prFlagsFromCommand } = await import('./commands/keepLockPr');
     const cmd = new EditCommand();
     await cmd.execute({
       web: command.optsWithGlobals().web === true,
@@ -168,6 +172,7 @@ program
       json: options.json,
       noPush: options.push === false,
       nonTty: options.nonTty,
+      pr: prFlagsFromCommand(command, options.prBase),
     });
   });
 
@@ -884,6 +889,9 @@ program
   .option('-f, --force', 'overwrite existing values without prompting')
   .option('--non-tty', 'never prompt; resolve from flags or fail fast (agents/CI)')
   .option('--json', 'emit machine-readable JSON instead of the human UI (piped value)')
+  .option('--pr', 'create a PR with the keep.lock change (answers the prompt)') // COPY-FLAG
+  .option('--no-pr', 'do not create a PR with the keep.lock change') // COPY-FLAG
+  .option('--pr-base <branch>', 'base branch for the PR (answers the prompt)') // COPY-FLAG
   .addHelpText(
     'after',
     // COPY-FLAG
@@ -894,6 +902,7 @@ program
   .action(async (varNames, options, command) => {
     assertNotLocalOnly('add');
     const { AddCommand } = await import('./commands/addCommand');
+    const { prFlagsFromCommand } = await import('./commands/keepLockPr');
     const cmd = new AddCommand();
     const merged = command.optsWithGlobals();
     await cmd.execute(varNames, {
@@ -907,6 +916,7 @@ program
       force: merged.force,
       nonTty: options.nonTty,
       json: options.json,
+      pr: prFlagsFromCommand(command, options.prBase),
     });
   });
 
@@ -916,14 +926,19 @@ program
   .option('-y, --yes', 'skip the confirmation prompt (required non-interactively)')
   .option('--json', 'emit machine-readable JSON instead of the human UI')
   .option('--non-tty', 'never prompt; resolve from flags or fail fast (agents/CI)')
-  .action(async (varNames, options) => {
+  .option('--pr', 'create a PR with the keep.lock change (answers the prompt)') // COPY-FLAG
+  .option('--no-pr', 'do not create a PR with the keep.lock change') // COPY-FLAG
+  .option('--pr-base <branch>', 'base branch for the PR (answers the prompt)') // COPY-FLAG
+  .action(async (varNames, options, command) => {
     assertNotLocalOnly('remove');
     const { RemoveCommand } = await import('./commands/removeCommand');
+    const { prFlagsFromCommand } = await import('./commands/keepLockPr');
     const cmd = new RemoveCommand();
     await cmd.execute(varNames, {
       yes: options.yes,
       json: options.json,
       nonTty: options.nonTty,
+      pr: prFlagsFromCommand(command, options.prBase),
     });
   });
 
