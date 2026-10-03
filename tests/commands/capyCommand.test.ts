@@ -1527,6 +1527,48 @@ describe('CapyCommand', () => {
     });
   });
 
+  describe('resolveProjectChoice — type-to-filter project picker (CAP-700)', () => {
+    const NEW = '__new__';
+    const projects = [
+      { id: 'p1', name: 'billing-api', organization_id: 'org-1' },
+      { id: 'p2', name: 'web-frontend', organization_id: 'org-1' },
+    ];
+
+    /** Runs the picker with a recorded `inquirer.prompt` that answers with `answer`. */
+    async function runPicker(answer: string) {
+      const inquirer = (await import('inquirer')).default;
+      const origPrompt = inquirer.prompt;
+      const promptSpy = mock(async (_questions: any) => ({ projectChoice: answer }));
+      (inquirer as any).prompt = promptSpy;
+      try {
+        const chosen = await (capyCommand as any).resolveProjectChoice(null, projects, NEW);
+        const asked = promptSpy.mock.calls.flatMap((call: any[]) => call[0] as any[]);
+        return { chosen, asked };
+      } finally {
+        (inquirer as any).prompt = origPrompt;
+      }
+    }
+
+    test('asks a searchable question with the same message and the default kept on "New project"', async () => {
+      const { asked } = await runPicker('p2');
+      expect(asked).toHaveLength(1);
+      expect(asked[0].type).toBe('search');
+      expect(asked[0].message).toBe('Which project do you want to use?');
+      expect(asked[0].source('').map((c: any) => c.name)).toEqual(['New project', 'billing-api', 'web-frontend']);
+    });
+
+    test('typing filters, and "New project" stays reachable by its own label', async () => {
+      const { asked } = await runPicker('p2');
+      expect(asked[0].source('web').map((c: any) => c.value)).toEqual(['p2']);
+      expect(asked[0].source('new').map((c: any) => c.value)).toEqual([NEW]);
+    });
+
+    test('returns whatever the prompt resolved', async () => {
+      expect((await runPicker('p1')).chosen).toBe('p1');
+      expect((await runPicker(NEW)).chosen).toBe(NEW);
+    });
+  });
+
   describe('error handling', () => {
     test('should use displayErrorAndExit for errors in execute', async () => {
       // The execute method now uses displayErrorAndExit from errorScreen module

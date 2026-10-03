@@ -635,8 +635,6 @@ export class InviteCommand {
     // The cwd project sorts first (it's the most likely intent) and is
     // the non-interactive default when --project is omitted.
     const cwdProjectId = await this.resolveCwdProjectId(projects);
-    const cwdFirst = <T extends { id: string }>(a: T, b: T) =>
-      a.id === cwdProjectId ? -1 : b.id === cwdProjectId ? 1 : 0;
 
     if (opts.projects && opts.projects.length > 0) {
       const resolved = resolveProjectTokens(opts.projects, projects, cwdProjectId);
@@ -659,22 +657,20 @@ export class InviteCommand {
       );
     }
 
-    const { CHECKBOX_INSTRUCTIONS, CHECKBOX_THEME } = await import('../ui/promptStyle');
-    const ordered = [...projects].sort(cwdFirst);
-    const { chosenProjectIds } = await inquirer.prompt<{ chosenProjectIds: string[] }>({
-      type: 'checkbox',
-      name: 'chosenProjectIds',
+    const { SEARCHABLE_CHECKBOX_INSTRUCTIONS, CHECKBOX_THEME } = await import('../ui/promptStyle');
+    const { searchableCheckbox } = await import('../ui/searchableCheckbox');
+    const ordered = [...projects.filter((p) => p.id === cwdProjectId), ...projects.filter((p) => p.id !== cwdProjectId)];
+    const ids = await searchableCheckbox<string>({
       message: `Grant ${role === 'project-admin' ? 'Project Admin' : 'Member'} access to which projects?`,
-      instructions: CHECKBOX_INSTRUCTIONS,
+      instructions: SEARCHABLE_CHECKBOX_INSTRUCTIONS,
       theme: CHECKBOX_THEME,
       choices: ordered.map((p) => ({
         name: p.name,
         value: p.id,
         checked: p.id === cwdProjectId,
       })),
-      validate: (v: ReadonlyArray<unknown>) => v.length > 0 || 'Pick at least one project',
-    } as any);
-    const ids: string[] = chosenProjectIds;
+      validate: (v) => v.length > 0 || 'Pick at least one project',
+    });
     return { projectId: ids[0], extraProjectIds: ids.slice(1), projectSource: undefined };
   }
 

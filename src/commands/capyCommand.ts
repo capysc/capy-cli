@@ -46,6 +46,7 @@ import { cleanupOrgData } from '../cleanup/orgCleanup';
 import { compareSecrets, hashValue, formatSnippet } from './statusCommand';
 import { ACCENT } from '../ui/colors';
 import { installSyncHooks } from '../git/syncHooks';
+import { initProjectQuestion } from '../ui/projectQuestions';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -824,20 +825,7 @@ export class CapyCommand {
       }
       return chosen === 'new' ? createNewProjectValue : chosen;
     }
-    const choices = [
-      { name: 'New project', value: createNewProjectValue },
-      ...existingProjects.map(p => ({
-        name: p.name,
-        value: p.id,
-      })),
-    ];
-    const { projectChoice } = await inquirer.prompt([{
-      type: 'list',
-      name: 'projectChoice',
-      message: 'Which project do you want to use?',
-      choices,
-      default: createNewProjectValue,
-    }]);
+    const { projectChoice } = await inquirer.prompt([initProjectQuestion(existingProjects, createNewProjectValue)]);
     return projectChoice;
   }
 

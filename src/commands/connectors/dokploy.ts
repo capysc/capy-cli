@@ -63,6 +63,7 @@ import { listOrgProjectsOrUnavailable } from '../capyCommand';
 import { commitDiscoveryChanges, defaultDiscoveryCommitBranchName, isValidDiscoveryCommitBranchName, snapshotPathStatus } from '../../git/discoveryCommit';
 import { fingerprint, writeImportedAndSync, writeImportOutcome, ResolvedContext } from './shared';
 import { ConnectOpts, ConnectorModule, ConnectResult, ImportOutcome, ImportWarning, RotateResult } from './registry';
+import { discoveryProjectQuestion } from '../../ui/projectQuestions';
 import {
   CandidateRepo,
   DISCOVERY_PROJECT_NAME_MAX_LENGTH,
@@ -569,17 +570,13 @@ async function defaultAskDiscoveryBaseUrl(): Promise<string> {
 export const DISCOVERY_NEW_PROJECT = '__capy_discovery_new_project__';
 
 // COPY-FLAG: new user-facing string, minimal/neutral wording.
-async function defaultAskExistingOrNewProject(
+export async function defaultAskExistingOrNewProject(
   existing: ReadonlyArray<{ id: string; name: string }>,
   defaultName: string,
 ): Promise<string> {
   const inquirer = (await import('inquirer')).default;
-  const choices = [
-    { name: `New project (${defaultName})`, value: DISCOVERY_NEW_PROJECT },
-    ...existing.map((p) => ({ name: p.name, value: p.id })),
-  ];
   const { projectChoice } = await inquirer.prompt([
-    { type: 'list', name: 'projectChoice', message: 'Which project should this folder use?', choices, default: DISCOVERY_NEW_PROJECT },
+    discoveryProjectQuestion(existing, defaultName, DISCOVERY_NEW_PROJECT),
   ]);
   return projectChoice;
 }

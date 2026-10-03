@@ -20,6 +20,7 @@ import { formatRelativeTime } from './relativeTime';
 import { renderInlineValue } from './editScreen';
 import { hashValue } from '../commands/statusCommand';
 import { ACCENT } from './colors';
+import { normalizeQuery, textMatches } from './searchMatch';
 
 // ── ANSI (mirrors EditScreen's palette/look-and-feel) ───────────────────────
 
@@ -237,22 +238,22 @@ function locationConnectorMatches(location: SecretIndexLocation, qLower: string)
   const provider = location.connector?.provider ?? location.service?.provider;
   const name = location.service?.name;
   const candidates = [provider, name].filter((s): s is string => Boolean(s));
-  return candidates.some((s) => s.toLowerCase().includes(qLower));
+  return candidates.some((s) => textMatches(s, qLower));
 }
 
 /** Whether ANY of `location`'s outbound deploy targets (absent/`[]` on a server that predates CAP-676) matches `qLower` — a substring of that target's provider or of its target name. */
 function locationTargetMatches(location: SecretIndexLocation, qLower: string): boolean {
   return (location.targets ?? []).some(
-    (t) => t.provider.toLowerCase().includes(qLower) || t.target.toLowerCase().includes(qLower),
+    (t) => textMatches(t.provider, qLower) || textMatches(t.target, qLower),
   );
 }
 
 /** `qLower` is the trimmed, lowercased query; `rawHash`/`trimmedHash` are the query's hash(es) — computed once by the caller, never here. */
 function rowMatchReasons(row: SecretIndexRow, qLower: string, rawHash: string, trimmedHash: string | null): readonly MatchReason[] {
   const isValueMatch = row.value_hash === rawHash || (trimmedHash !== null && row.value_hash === trimmedHash);
-  const isNameMatch = row.name.toLowerCase().includes(qLower);
-  const isProjectMatch = row.locations.some((l) => l.project_name.toLowerCase().includes(qLower));
-  const isBranchMatch = row.locations.some((l) => l.branch.toLowerCase().includes(qLower));
+  const isNameMatch = textMatches(row.name, qLower);
+  const isProjectMatch = row.locations.some((l) => textMatches(l.project_name, qLower));
+  const isBranchMatch = row.locations.some((l) => textMatches(l.branch, qLower));
   const isConnectorMatch = row.locations.some((l) => locationConnectorMatches(l, qLower));
   const isTargetMatch = row.locations.some((l) => locationTargetMatches(l, qLower));
   return (
@@ -279,7 +280,7 @@ function rowMatchReasons(row: SecretIndexRow, qLower: string, rawHash: string, t
  */
 function computeFilteredRows(rows: readonly SecretIndexRow[], query: string): readonly MatchedRow[] {
   const trimmed = query.trim();
-  const qLower = trimmed.toLowerCase();
+  const qLower = normalizeQuery(query);
   if (!qLower) return rows.map((row) => ({ row, reasons: [] as const }));
 
   // Computed ONCE per filter pass — never inside the per-row map below.
