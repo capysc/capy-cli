@@ -36,15 +36,6 @@ export interface ConnectOpts {
    */
   reauth?: boolean;
   /**
-   * Render this command's questions as compiled screens in a local browser.
-   *
-   * Not the same axis as `nonTty`, and the pairing is the whole point: the
-   * caller `--web` exists for runs with piped stdio, so `isInteractive()` is
-   * already false and every picker below has either defaulted or refused
-   * without asking. `--web` is what turns those back into questions.
-   */
-  web?: boolean;
-  /**
    * A `capy-dev` binary. Live mode is refused outright, so the mode question
    * says so beside the option rather than accepting it and exiting afterwards.
    */
@@ -168,8 +159,6 @@ export interface RotateOpts {
   noPush?: boolean;
   /** Disable interactive prompts: resolve every choice from flags or fail fast. */
   nonTty?: boolean;
-  /** Render this command's questions as compiled screens in a local browser. */
-  web?: boolean;
 }
 
 /** Result of provider.connect(): the provider hands us a value + the connector metadata to record on the keep.lock entry. */

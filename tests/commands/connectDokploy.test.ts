@@ -1339,22 +1339,6 @@ describe('dokploy import — system store token resolution', () => {
     return { getConnectorSecret, promptFn };
   }
 
-  test('--web: a real TTY does not let the store prompt — refused, zero prompt calls', async () => {
-    const { getConnectorSecret, promptFn } = fakeSystemStore(null);
-    const connector = createDokployConnector({ fetch: unreachableFetch, env: {}, getConnectorSecret });
-    const outcome = await withTTY(() =>
-      connector.import!(ctxWith(), {
-        ...BASE_OPTS,
-        nonTty: false,
-        web: true,
-        baseUrl: 'https://d.example.com',
-        application: 'app_1',
-      }),
-    );
-    expect(outcome.ok).toBe(false);
-    expect(promptFn).not.toHaveBeenCalled();
-  });
-
   test('--json: a real TTY does not let the store prompt — refused, zero prompt calls', async () => {
     const { getConnectorSecret, promptFn } = fakeSystemStore(null);
     const connector = createDokployConnector({ fetch: unreachableFetch, env: {}, getConnectorSecret });
@@ -1371,7 +1355,7 @@ describe('dokploy import — system store token resolution', () => {
     expect(promptFn).not.toHaveBeenCalled();
   });
 
-  test('neither --web nor --json: a real TTY DOES let the store prompt (sanity check for the two tests above)', async () => {
+  test('without --json: a real TTY DOES let the store prompt (sanity check for the test above)', async () => {
     const { getConnectorSecret, promptFn } = fakeSystemStore(null);
     const connector = createDokployConnector({
       fetch: fakeFetch({ env: 'A=1', calls: [] }),
