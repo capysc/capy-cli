@@ -44,6 +44,7 @@ ISOLATED_FILES=(
   tests/commands/deployRevokeWiring.test.ts
   tests/commands/deployDirectModeTiming.test.ts
   tests/commands/deployDokployPickerTokenEnv.test.ts
+  tests/commands/projectPickerWiring.test.ts
   tests/files/fileManager.test.ts
   tests/ui/promptEngine.test.ts
   tests/commands/decryptCommand.test.ts

@@ -96,6 +96,13 @@ mock.module('inquirer', () => ({
   prompt: mockPromptFn,
 }));
 
+// The terminal project checkbox (CAP-700) is its own prompt, not an inquirer
+// question — stubbed so the test can see what it was asked and answer it.
+const mockSearchableCheckbox = jest.fn();
+mock.module('../../src/ui/searchableCheckbox', () => ({
+  searchableCheckbox: mockSearchableCheckbox,
+}));
+
 // The question wizard is stubbed; the code page is not. `serveInviteCode` is
 // the real one, on a real loopback server, because "the code is on the page and
 // not on stdout" cannot be checked against a stub of the page.
@@ -475,5 +482,58 @@ describe('InviteCommand', () => {
     expect(mockExit).toHaveBeenCalledWith(1);
     expect(mockAskInBrowser).not.toHaveBeenCalled();
     expect(mockCreateInvite).not.toHaveBeenCalled();
+  });
+
+  describe('the interactive project checkbox is searchable (CAP-700)', () => {
+    const planInput = {} as any;
+    const askProjects = (opts: Record<string, unknown>, interactive: boolean) =>
+      (new InviteCommand() as any).resolveInviteeProjects(
+        'member',
+        opts,
+        { listProjects: mockListProjects },
+        interactive,
+        false,
+        [],
+        planInput,
+      );
+
+    test('asks the searchable checkbox with the same message, in project order, nothing pre-ticked without a cwd project', async () => {
+      mockSearchableCheckbox.mockResolvedValue(['p2']);
+      const result = await askProjects({}, true);
+      expect(mockSearchableCheckbox).toHaveBeenCalledTimes(1);
+      const config = mockSearchableCheckbox.mock.calls[0][0] as any;
+      expect(config.message).toBe('Grant Member access to which projects?');
+      expect(config.choices).toEqual([
+        { name: 'storefront', value: 'p1', checked: false },
+        { name: 'warehouse', value: 'p2', checked: false },
+      ]);
+      expect(result).toEqual({ projectId: 'p2', extraProjectIds: [], projectSource: undefined });
+    });
+
+    test('the cwd project is listed first and pre-ticked', async () => {
+      mockDetectProjectState.mockResolvedValue({ initialized: true, organizationId: 'org-123', projectId: 'p2' });
+      mockSearchableCheckbox.mockResolvedValue(['p2', 'p1']);
+      const result = await askProjects({}, true);
+      const config = mockSearchableCheckbox.mock.calls[0][0] as any;
+      expect(config.choices.map((c: any) => [c.value, c.checked])).toEqual([['p2', true], ['p1', false]]);
+      expect(result).toEqual({ projectId: 'p2', extraProjectIds: ['p1'], projectSource: undefined });
+    });
+
+    test('still refuses an empty selection', async () => {
+      mockSearchableCheckbox.mockResolvedValue(['p1']);
+      await askProjects({}, true);
+      const config = mockSearchableCheckbox.mock.calls[0][0] as any;
+      expect(config.validate([])).toBe('Pick at least one project');
+      expect(config.validate(['p1'])).toBe(true);
+    });
+
+    test('--project and non-interactive runs never open the picker', async () => {
+      const byFlag = await askProjects({ projects: ['warehouse'] }, true);
+      expect(byFlag.projectId).toBe('p2');
+      mockDetectProjectState.mockResolvedValue({ initialized: true, organizationId: 'org-123', projectId: 'p1' });
+      const piped = await askProjects({}, false);
+      expect(piped.projectId).toBe('p1');
+      expect(mockSearchableCheckbox).not.toHaveBeenCalled();
+    });
   });
 });

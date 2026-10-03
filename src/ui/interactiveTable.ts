@@ -1,4 +1,6 @@
 import { MemberDetail, MemberProject, MemberProjectBranch } from '../service/serviceClient';
+import { ACCENT } from './colors';
+import { stepProjectPicker, visibleProjects, type ProjectPickerState } from './inlineProjectPicker';
 
 // ANSI escape codes
 const ESC = '\x1b';
@@ -32,6 +34,16 @@ const ASSIGNABLE_BY_CALLER: Record<string, ReadonlyArray<RoleValue>> = {
   admin: ['admin', 'project-admin', 'member'],
   'project-admin': ['project-admin', 'member'],
 };
+
+/** Runs `task`; resolves to its error message, or null when it succeeded. */
+async function errorMessageOf(task: () => Promise<void>): Promise<string | null> {
+  try {
+    await task();
+    return null;
+  } catch (err: any) {
+    return err.message || String(err);
+  }
+}
 
 export interface ProjectChoice {
   id: string;
@@ -105,13 +117,11 @@ export class InteractiveTable {
   private editingProjectRoleIndex = 0;
   private statusMessage: { text: string; isError: boolean } | null = null;
   // In-TUI multi-select project picker (Flow B).
-  private projectPicker: {
-    projects: ProjectChoice[];
-    cursor: number;
-    selected: Set<string>;
-    resolve: (ids: string[] | null) => void;
-    prompt: string;
-  } | null = null;
+  // Replaced wholesale on every key (see `inlineProjectPicker`), never edited in place.
+  private projectPicker: (ProjectPickerState & {
+    readonly resolve: (ids: string[] | null) => void;
+    readonly prompt: string;
+  }) | null = null;
 
   computeColumnWidths(termWidth: number): { widths: number[]; showAdded: boolean } {
     const available = Math.min(termWidth, 130) - MARGIN * 2;
@@ -447,16 +457,16 @@ export class InteractiveTable {
     }
 
     if (this.projectPicker) {
-      output.push(`${m} ${this.projectPicker.prompt}`);
-      output.push(`${m} ${DIM}↑↓ navigate  ${RESET}${BOLD_WHITE}Space${RESET}${DIM} select  ${RESET}${BOLD_WHITE}Enter${RESET}${DIM} confirm  ${RESET}${BOLD_WHITE}Esc${RESET}${DIM} cancel${RESET}`);
-      for (let i = 0; i < this.projectPicker.projects.length; i++) {
-        const p = this.projectPicker.projects[i];
-        const atCursor = i === this.projectPicker.cursor;
-        const checked = this.projectPicker.selected.has(p.id);
-        const mark = checked ? '[x]' : '[ ]';
+      const picker = this.projectPicker;
+      const query = picker.query ?? '';
+      // COPY-FLAG: `search:` and `type to filter` are the wording `capy secrets` search already uses.
+      output.push(`${m} ${picker.prompt}${query === '' ? '' : ` ${DIM}search:${RESET} ${ACCENT}${query}${RESET}`}`);
+      output.push(`${m} ${DIM}↑↓ navigate  ${RESET}${BOLD_WHITE}Space${RESET}${DIM} select  ${RESET}${BOLD_WHITE}Enter${RESET}${DIM} confirm  ${RESET}${BOLD_WHITE}Esc${RESET}${DIM} cancel  type to filter${RESET}`);
+      visibleProjects(picker).forEach((p, i) => {
+        const mark = picker.selected.has(p.id) ? '[x]' : '[ ]';
         const line = `${m}   ${mark} ${p.name}`;
-        output.push(atCursor ? `${INVERSE}${this.padToWidth(line, totalWidth)}${RESET}` : line);
-      }
+        output.push(i === picker.cursor ? `${INVERSE}${this.padToWidth(line, totalWidth)}${RESET}` : line);
+      });
     }
 
     return output.map(line => line + CLEAR_EOL).join('\n');
@@ -720,42 +730,26 @@ export class InteractiveTable {
 
   private handleProjectPickerKey(key: string): void {
     if (!this.projectPicker) return;
-    const { projects } = this.projectPicker;
-    if (key === `${ESC}[A`) {
-      this.projectPicker.cursor = (this.projectPicker.cursor - 1 + projects.length) % projects.length;
-      this.draw();
-      return;
-    }
-    if (key === `${ESC}[B`) {
-      this.projectPicker.cursor = (this.projectPicker.cursor + 1) % projects.length;
-      this.draw();
-      return;
-    }
-    if (key === ' ') {
-      const current = projects[this.projectPicker.cursor];
-      if (current) {
-        if (this.projectPicker.selected.has(current.id)) {
-          this.projectPicker.selected.delete(current.id);
-        } else {
-          this.projectPicker.selected.add(current.id);
-        }
-      }
-      this.draw();
-      return;
-    }
-    if (key === ESC || key === `${ESC}\x1b`) {
-      const { resolve } = this.projectPicker;
+    const { resolve } = this.projectPicker;
+    const step = stepProjectPicker(this.projectPicker, key);
+    if (step.kind === 'state') {
+      this.projectPicker = step.state;
+    } else {
       this.projectPicker = null;
-      resolve(null);
-      this.draw();
-      return;
+      resolve(step.kind === 'cancel' ? null : Array.from(step.chosen));
     }
-    if (key === '\r' || key === '\n') {
-      const { resolve, selected } = this.projectPicker;
-      const chosen = Array.from(selected);
-      this.projectPicker = null;
-      resolve(chosen);
-      this.draw();
+    this.draw();
+  }
+
+  /** `pickProjectsInline`, with a refusal (e.g. no projects) returned as `{ error }` instead of thrown. */
+  private async tryPickProjects(
+    prompt: string,
+    initialSelected: Set<string>,
+  ): Promise<{ readonly chosen: string[] | null } | { readonly error: string }> {
+    try {
+      return { chosen: await this.pickProjectsInline(prompt, initialSelected) };
+    } catch (err: any) {
+      return { error: err.message || String(err) };
     }
   }
 
@@ -773,6 +767,7 @@ export class InteractiveTable {
         projects,
         cursor: 0,
         selected: new Set(initialSelected),
+        query: '',
         resolve,
         prompt,
       };
@@ -818,17 +813,13 @@ export class InteractiveTable {
         .map((p) => p.id),
     );
 
-    let chosen: string[] | null;
-    try {
-      chosen = await this.pickProjectsInline(
-        `Assign ${newRole} on which projects?`,
-        existingAtTarget,
-      );
-    } catch (err: any) {
-      this.statusMessage = { text: `Error: ${err.message || err}`, isError: true };
+    const picked = await this.tryPickProjects(`Assign ${newRole} on which projects?`, existingAtTarget);
+    if ('error' in picked) {
+      this.statusMessage = { text: `Error: ${picked.error}`, isError: true };
       this.draw();
       return;
     }
+    const { chosen } = picked;
     if (!chosen) {
       this.statusMessage = { text: 'Cancelled', isError: false };
       this.draw();
@@ -850,40 +841,28 @@ export class InteractiveTable {
     // at least once to flip the WorkOS role. Pair it with the first add if we
     // have one; otherwise drop through and just call changeRole with the first
     // remaining project (if any).
-    const errors: string[] = [];
-    let successCount = 0;
     const workosRoleNeedsFlip = member.role !== newRole;
-
-    try {
-      if (workosRoleNeedsFlip) {
-        const firstProject = toAdd.shift() ?? Array.from(chosenSet)[0];
-        if (!firstProject) {
-          throw new Error('Pick at least one project');
-        }
-        await this.ctx.changeRole(member.userId, newRole, firstProject);
-        successCount++;
-      }
-    } catch (err: any) {
-      errors.push(err.message || String(err));
-    }
-
-    for (const pid of toAdd) {
-      try {
-        await this.ctx.assignProjectRole(pid, member.email, newRole);
-        successCount++;
-      } catch (err: any) {
-        errors.push(err.message || String(err));
-      }
-    }
-
-    for (const pid of toRemove) {
-      try {
-        await this.ctx.removeProjectRole(pid, member.userId);
-        successCount++;
-      } catch (err: any) {
-        errors.push(err.message || String(err));
-      }
-    }
+    const ctx = this.ctx;
+    const flipProject = toAdd[0] ?? Array.from(chosenSet)[0];
+    const tasks: ReadonlyArray<() => Promise<void>> = [
+      ...(workosRoleNeedsFlip
+        ? [async () => {
+            if (!flipProject) throw new Error('Pick at least one project');
+            await ctx.changeRole(member.userId, newRole, flipProject);
+          }]
+        : []),
+      ...(workosRoleNeedsFlip ? toAdd.slice(1) : toAdd).map(
+        (pid) => () => ctx.assignProjectRole(pid, member.email, newRole),
+      ),
+      ...toRemove.map((pid) => () => ctx.removeProjectRole(pid, member.userId)),
+    ];
+    // One at a time, in order; each task yields its error message or null.
+    const outcomes = await tasks.reduce(
+      async (soFar, task) => [...(await soFar), await errorMessageOf(task)],
+      Promise.resolve([] as ReadonlyArray<string | null>),
+    );
+    const errors = outcomes.flatMap((o) => (o === null ? [] : [o]));
+    const successCount = outcomes.length - errors.length;
 
     await this.refreshAfterMutation(member.userId);
 

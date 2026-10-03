@@ -10,6 +10,7 @@ import { createNewOrganization } from './orgCreation';
 import { excludeSystemProject, assertProjectNameAllowed, isReservedProjectName, PROJECT_NAME_RESERVED_MESSAGE } from '../system/reservedProjectName';
 import { execSync } from 'child_process';
 import { ACCENT } from '../ui/colors';
+import { orgProjectQuestion } from '../ui/projectQuestions';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -207,15 +208,7 @@ export class OrgCommand {
     }
 
     // Let user pick a project
-    const { projectId } = await inquirer.prompt([{
-      type: 'list',
-      name: 'projectId',
-      message: 'Select project:',
-      choices: orgProjects.map(p => ({
-        name: p.name,
-        value: p.id,
-      })),
-    }]);
+    const { projectId } = await inquirer.prompt([orgProjectQuestion(orgProjects)]);
 
     const selectedProject = orgProjects.find(p => p.id === projectId)!;
     this.bindToProject(selectedOrg, selectedProject, authResult.user_id, hasProject);
