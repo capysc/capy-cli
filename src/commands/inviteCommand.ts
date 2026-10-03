@@ -14,16 +14,12 @@ import { isInteractive, refuseNonInteractive } from '../ui/interactive';
 import { excludeSystemProject } from '../system/reservedProjectName';
 import {
   invitePlan,
-  unansweredInviteStops,
-  grantedProjects,
   parseTtl,
   formatTtl,
-  formatRelativeFuture,
   type InvitePlanInput,
   type SettledAnswer,
 } from '../core/invitePlan';
 import type { InviteTeammateStop } from '../ui/screens/contract';
-import type { WebInviteParams } from '../ui/memberScreens';
 
 const ROLES = [
   { name: 'Member', value: 'member' },
@@ -44,22 +40,11 @@ export interface InviteOpts {
   json?: boolean;
   /** No prompts: resolve from flags or fail fast; also skips the clipboard prompt. */
   nonTty?: boolean;
-  /**
-   * Render the questions as compiled screens in a local browser instead of
-   * inquirer, and hand the redeem code over in a page rather than on stdout.
-   *
-   * `--web` is a global option on the root program. `src/index.ts` does not
-   * read it for `invite` yet, so this path is live and tested but not reachable
-   * from argv until whoever owns that file threads `optsWithGlobals().web`
-   * through — the same seam `capy checkout` is waiting on.
-   */
-  web?: boolean;
 }
 
 /** Parse "30s"/"10m"/"2h"/"12h" or bare seconds → ms. Exits on invalid input. */
 function parseTtlMs(raw: string): number {
-  // The grammar lives in `invitePlan` so the flag and the browser's expiry step
-  // accept exactly the same lifetimes. Only the exit is this command's.
+  // The grammar lives in `invitePlan`. Only the exit is this command's.
   const ms = parseTtl(raw);
   if (ms === null) {
     console.error(`\n  Invalid --ttl "${raw}". Use e.g. 30m, 2h, 12h, or a number of seconds (max 12h).\n`);
@@ -71,13 +56,8 @@ function parseTtlMs(raw: string): number {
 /**
  * Resolve the invite's notAfter (ms epoch) from --expires / --ttl / env
  * default. Exits on invalid.
- *
- * `chosenTtl` is the lifetime the browser's expiry stop answered. It sits
- * between the flags and the env default deliberately: an explicit `--expires`
- * or `--ttl` on the command line still outranks a control the same run put on
- * screen, which is §8.2's precedence and not a preference.
  */
-function resolveNotAfter(opts: InviteOpts, chosenTtl?: string): number {
+function resolveNotAfter(opts: InviteOpts): number {
   if (opts.expires) {
     const t = Date.parse(opts.expires);
     if (Number.isNaN(t)) {
@@ -91,7 +71,6 @@ function resolveNotAfter(opts: InviteOpts, chosenTtl?: string): number {
     return capAtCeiling(t, `--expires ${opts.expires}`);
   }
   if (opts.ttl) return capAtCeiling(Date.now() + parseTtlMs(opts.ttl), `--ttl ${opts.ttl}`);
-  if (chosenTtl) return capAtCeiling(Date.now() + parseTtlMs(chosenTtl), `an expiry of ${chosenTtl}`);
   return Date.now() + resolveInviteTtlMs();
 }
 
@@ -131,21 +110,13 @@ function settledExpiry(opts: InviteOpts): SettledAnswer | undefined {
   return undefined;
 }
 
-/**
- * Resolve `--project` tokens (id or name) to ids, cwd first. Exits on unknowns.
- *
- * Shared by the terminal path and the browser one, because `--project` settles
- * the projects stop for both: the browser never serves a step a flag already
- * answered, so the ids those tokens name have to come from somewhere other than
- * an answer nobody was asked for. One resolution, one refusal.
- */
+/** Resolve `--project` tokens (id or name) to ids, cwd first. Exits on unknowns. */
 function resolveProjectTokens(
   tokens: string[],
   projects: Array<{ id: string; name: string }>,
   cwdProjectId: string | undefined,
 ): string[] {
-  const resolved: string[] = [];
-  for (const token of tokens) {
+  const ids = tokens.map((token) => {
     const match = projects.find((p) => p.id === token || p.name === token);
     if (!match) {
       console.error(
@@ -153,9 +124,9 @@ function resolveProjectTokens(
       );
       process.exit(1);
     }
-    if (!resolved.includes(match.id)) resolved.push(match.id);
-  }
-  return resolved.sort((a, b) => (a === cwdProjectId ? -1 : b === cwdProjectId ? 1 : 0));
+    return match.id;
+  });
+  return [...new Set(ids)].sort((a, b) => (a === cwdProjectId ? -1 : b === cwdProjectId ? 1 : 0));
 }
 
 /** `CAPY_INVITE_TTL_SECONDS` in `--ttl`'s own vocabulary, when it is set. */
@@ -187,7 +158,7 @@ export class InviteCommand {
   async execute(email: string, opts: InviteOpts = {}): Promise<void> {
     const interactive = isInteractive(opts.nonTty);
     try {
-      const { orgId, userId, userEmail, authService, serviceClient } = await resolveOrgContext(this.apiUrl, this.devMode);
+      const { orgId, userId, userEmail, serviceClient } = await resolveOrgContext(this.apiUrl, this.devMode);
 
       // Check if inviting yourself or an existing member
       if (userEmail && userEmail.toLowerCase() === email.toLowerCase()) {
@@ -230,12 +201,10 @@ export class InviteCommand {
         ? (existingMember.projects || []).map((p) => p.id)
         : [];
 
-      // The whole route, declared before anything opens. Built from argv and
+      // The whole route, declared before anything is asked. Built from argv and
       // from the membership this address already has — the two things that can
-      // settle a question before it is asked — so the rail, the decision about
-      // whether to open a browser at all, and what `--json` prints all come off
-      // one call. `canAskExpiry` is `--web`: `resolveNotAfter` never prompts, so
-      // a terminal run's expiry is settled before the command starts.
+      // settle a question before it is asked. `resolveNotAfter` never prompts, so
+      // a run's expiry is settled before the command starts.
       const inheritedRole = existingMember && !opts.role ? existingMember.role : undefined;
       const inheritedProjectNames =
         existingMember && !opts.role ? (existingMember.projects || []).map((p) => p.name) : [];
@@ -250,28 +219,12 @@ export class InviteCommand {
         expiry: settledExpiry(opts),
         envTtl: envTtl(),
         defaultTtl: envTtl() ?? '12h',
-        canAskExpiry: opts.web === true,
       };
-      const plan = invitePlan(planInput);
 
-      /** Everything the browser needs, gathered once so both pages share it. */
-      const webParams = opts.web
-        ? await this.gatherWebParams(
-            email, orgId, me, invitable, existingMember, planInput, authService, serviceClient, userEmail,
-          )
-        : undefined;
-
-      const resolution = await this.resolveInviteRoleAndProjects({
+      const { role, projectId, extraProjectIds, roleSource, projectSource } = await this.resolveInviteRoleAndProjects({
         email, opts, me, invitable, existingMember, reissuing, existingProjectIds,
-        webParams, plan, planInput, serviceClient, interactive,
+        planInput, serviceClient, interactive,
       });
-      // Cancelling is a refusal: nothing was minted and nothing below may
-      // run, because everything below hands somebody a copy of the org key.
-      if (resolution.cancelled) {
-        console.log('\n  No invite created.\n');
-        return;
-      }
-      const { role, projectId, extraProjectIds, roleSource, projectSource, chosenTtl } = resolution;
 
       // 1. Generate invite token T
       const inviteToken = generateInviteToken();
@@ -282,7 +235,7 @@ export class InviteCommand {
 
       // 3. Service outer wraps (KMS layer), bound to (orgId, notAfter) so
       //    the redeem code can't outlive its window even if forwarded.
-      const notAfter = resolveNotAfter(opts, chosenTtl);
+      const notAfter = resolveNotAfter(opts);
       const { ciphertext: outerBlob } = await serviceClient.wrapOuterLayer(
         orgId,
         Buffer.from(innerBlob, 'base64').toString('base64'),
@@ -303,13 +256,10 @@ export class InviteCommand {
       const roleName = ROLES.find(r => r.value === role)?.name ?? role;
       const redeemCommand = `capy redeem ${redeemCode}`;
       const grantedProjectIds = [projectId, ...extraProjectIds].filter(Boolean) as string[];
-      // Ids for the service, names for the page. The id is the fallback rather
-      // than a blank: a project this run granted and could not name is still a
-      // project this run granted, and the page has to say so.
-      const grantedProjectRefs = grantedProjectIds.map((id) => ({
-        id,
-        name: webParams?.projects.find((x) => x.id === id)?.name ?? id,
-      }));
+      // Ids for the service; the id also stands in as the name, because a
+      // project this run granted and could not name is still a project this run
+      // granted.
+      const grantedProjectRefs = grantedProjectIds.map((id) => ({ id, name: id }));
       // What the fan-out actually landed. A stop is a claim about what this run
       // DID, so a project the service refused cannot be listed as one this
       // invite granted — that is the exact failure the markers exist to
@@ -320,17 +270,9 @@ export class InviteCommand {
       );
 
       // The route as it ended up: the same builder, fed what actually settled
-      // each stop. `--json` and the browser payload cannot describe different
-      // runs, because neither of them builds a rail of its own.
-      //
-      // `canAskExpiry` goes false here — this rail describes a FINISHED run and
-      // nothing on a finished run is still outstanding. Left true, a re-issue
-      // that never opened a browser (existing member, no `--role`) reports
-      // `expiry · current` on a run that already minted the code, which is a
-      // stop whose state does not describe what the run did.
+      // each stop.
       const finalStops: InviteTeammateStop[] = invitePlan({
         ...planInput,
-        canAskExpiry: false,
         role: { value: role, flag: roleSource },
         projects: assignedProjectRefs.length > 0
           ? {
@@ -345,7 +287,6 @@ export class InviteCommand {
                 : {}),
             }
           : undefined,
-        expiry: planInput.expiry ?? (chosenTtl ? { value: chosenTtl } : undefined),
       });
 
       // Machine-readable path for agents/CI: emit JSON to stdout and skip the
@@ -373,55 +314,14 @@ export class InviteCommand {
       }
       console.log('');
 
-      if (webParams) {
-        // The redeem code carries a double-wrapped copy of the organization
-        // key, unwrappable only by the invited email. `--web` is
-        // agent-only, and an agent shelling `capy` reads stdout, so under it the
-        // code goes to a page and NOWHERE else: not printed, not logged, not
-        // copied to the clipboard. The page it lands on is served with the
-        // display-only CSP (`connect-src 'none'`), so the one document in this
-        // flow holding key material is the one with no way to open a socket.
-        const { serveInviteCode } = await import('../ui/memberScreens');
-        const page = await serveInviteCode(
-          webParams,
-          {
-            redeemCommand,
-            expiresAtIso: new Date(notAfter).toISOString(),
-            expiresRelative: formatRelativeFuture(notAfter),
-            role,
-            reissued: reissuing,
-            // What landed, not what was asked for. The failures travel in their
-            // own field right below, and a project that appears in both is a
-            // page contradicting itself about what this invite reaches.
-            grantedProjects: assignedProjectRefs,
-            assignmentFailures: failures.map((f) => ({
-              project: {
-                id: f.projectId,
-                name: webParams!.projects.find((x) => x.id === f.projectId)?.name ?? f.projectId,
-              },
-              error: f.error,
-            })),
-          },
-          { role, projectIds: assignedProjectRefs.map((p) => p.id), ttl: chosenTtl },
-          // Open the user's browser by default; CAPY_WEB_NO_OPEN lets CI /
-          // headless verification drive the loopback without hijacking one.
-          { open: !process.env.CAPY_WEB_NO_OPEN },
-        );
-        console.log('  The redeem code is on this page — it is deliberately not printed here:');
-        console.log(`  ${page.url}`);
-        console.log('');
-        console.log(`  \x1b[90mExpires ${new Date(notAfter).toISOString()}.\x1b[0m`);
-        console.log('');
-      } else {
-        console.log('  Send them this command:');
-        console.log('');
-        console.log(`    ${B('capy')} redeem ${redeemCode}`);
-        console.log('');
-        console.log('  \x1b[90mThis code is safe to share with your team member over email or your\x1b[0m');
-        console.log('  \x1b[90mteam messaging app. It can only be used by them.\x1b[0m');
-        console.log(`  \x1b[90mExpires ${new Date(notAfter).toISOString()}.\x1b[0m`);
-        console.log('');
-      }
+      console.log('  Send them this command:');
+      console.log('');
+      console.log(`    ${B('capy')} redeem ${redeemCode}`);
+      console.log('');
+      console.log('  \x1b[90mThis code is safe to share with your team member over email or your\x1b[0m');
+      console.log('  \x1b[90mteam messaging app. It can only be used by them.\x1b[0m');
+      console.log(`  \x1b[90mExpires ${new Date(notAfter).toISOString()}.\x1b[0m`);
+      console.log('');
 
       if (failures.length > 0) {
         console.log(`  \x1b[33m${failures.length} additional project assignment${failures.length === 1 ? '' : 's'} failed:\x1b[0m`);
@@ -431,10 +331,8 @@ export class InviteCommand {
         console.log('');
       }
 
-      // The clipboard prompt is interactive — skip it under --non-tty/piped,
-      // and under `--web`, where the terminal never held the code to begin with
-      // and the page has its own copy control.
-      if (interactive && !webParams) {
+      // The clipboard prompt is interactive — skip it under --non-tty/piped.
+      if (interactive) {
         const { promptCopyToClipboard } = await import('../ui/clipboard');
         await promptCopyToClipboard(redeemCommand);
       }
@@ -489,26 +387,19 @@ export class InviteCommand {
     existingMember: { role: string; status: string; projects?: Array<{ id: string; name: string }> } | undefined;
     reissuing: boolean;
     existingProjectIds: string[];
-    webParams: WebInviteParams | undefined;
-    plan: InviteTeammateStop[];
     planInput: InvitePlanInput;
     serviceClient: { listProjects: () => Promise<Array<{ id: string; name: string }>> };
     interactive: boolean;
-  }): Promise<
-    | { cancelled: true }
-    | {
-        cancelled: false;
-        role: string;
-        projectId: string | undefined;
-        extraProjectIds: string[];
-        roleSource: string | undefined;
-        projectSource: string | undefined;
-        chosenTtl: string | undefined;
-      }
-  > {
+  }): Promise<{
+    role: string;
+    projectId: string | undefined;
+    extraProjectIds: string[];
+    roleSource: string | undefined;
+    projectSource: string | undefined;
+  }> {
     const {
       email, opts, me, invitable, existingMember, reissuing, existingProjectIds,
-      webParams, plan, planInput, serviceClient, interactive,
+      planInput, serviceClient, interactive,
     } = ctx;
 
     // Pure re-issue (existing member, no explicit --role): reuse their current
@@ -518,54 +409,11 @@ export class InviteCommand {
     // role instead of silently keeping the stale one.
     if (existingMember && !opts.role) {
       return {
-        cancelled: false,
         role: existingMember.role,
         projectId: existingProjectIds[0],
         extraProjectIds: existingProjectIds.slice(1),
         roleSource: 'existing membership',
         projectSource: 'existing membership',
-        chosenTtl: undefined,
-      };
-    }
-
-    if (webParams && unansweredInviteStops(plan).length > 0) {
-      // `--role` is validated first either way: a role this caller cannot
-      // grant is refused before a browser opens, not after somebody answers
-      // two more questions on top of it.
-      if (opts.role && !invitable.includes(opts.role as typeof ROLES[number]['value'])) {
-        console.error(
-          `\n  Your role (${me.role}) can't grant "${opts.role}". Allowed: ${invitable.join(', ')}.\n`,
-        );
-        process.exit(1);
-      }
-      // `--project` settles the projects stop, so the browser never serves
-      // it — and an unknown token is refused here, before a browser opens,
-      // rather than after somebody has answered two questions on top of it.
-      const flagProjectIds =
-        opts.projects && opts.projects.length > 0
-          ? resolveProjectTokens(
-              opts.projects,
-              webParams.projects,
-              webParams.projects.find((p) => p.isCwd)?.id,
-            )
-          : [];
-
-      const { askInviteInBrowser } = await import('../ui/memberScreens');
-      const answered = await askInviteInBrowser(webParams);
-      if (answered.cancelled) {
-        return { cancelled: true };
-      }
-      const ids = grantedProjects(answered.role, answered.projectIds, flagProjectIds);
-      return {
-        cancelled: false,
-        role: answered.role,
-        projectId: ids[0],
-        extraProjectIds: ids.slice(1),
-        chosenTtl: answered.ttl,
-        // A stop a flag settled is never served, so anything the browser did
-        // NOT answer keeps the marker argv gave it.
-        roleSource: opts.role ? `--role ${opts.role}` : undefined,
-        projectSource: answered.projectIds.length > 0 ? undefined : planInput.projects?.flag,
       };
     }
 
@@ -574,14 +422,14 @@ export class InviteCommand {
     // Project scope is only required for project-admin and member.
     if (role !== 'project-admin' && role !== 'member') {
       return {
-        cancelled: false, role, projectId: undefined, extraProjectIds: [], roleSource, projectSource: undefined, chosenTtl: undefined,
+        role, projectId: undefined, extraProjectIds: [], roleSource, projectSource: undefined,
       };
     }
 
     const { projectId, extraProjectIds, projectSource } = await this.resolveInviteeProjects(
       role, opts, serviceClient, interactive, reissuing, existingProjectIds, planInput,
     );
-    return { cancelled: false, role, projectId, extraProjectIds, roleSource, projectSource, chosenTtl: undefined };
+    return { role, projectId, extraProjectIds, roleSource, projectSource };
   }
 
   /** Asks (flag, non-interactive default, or inquirer) which role to grant. Exits on an ungrantable --role. */
@@ -699,94 +547,5 @@ export class InviteCommand {
     })();
     const restFailures = await this.fanOutExtraProjectInvites(orgId, email, role, rest, serviceClient);
     return firstFailure ? [firstFailure, ...restFailures] : restFailures;
-  }
-
-  /** The org's display name, re-asked from the cached session — falls back to `orgId` on any failure. */
-  private async resolveOrgName(
-    authService: { authenticateSilent: (orgId?: string) => Promise<{ organization_name?: string }> },
-    orgId: string,
-  ): Promise<string> {
-    try {
-      const again = await authService.authenticateSilent(orgId);
-      return again.organization_name || orgId;
-    } catch {
-      // ignore — the id still identifies the organization unambiguously
-      return orgId;
-    }
-  }
-
-  /**
-   * Everything the two browser pages need, gathered once.
-   *
-   * Both the question wizard and the code page render the same screen with the
-   * same payload shape, so building it twice would be two chances for the run a
-   * person answered and the run they are handed a key for to disagree.
-   *
-   * The project list is fetched here even when the role is already settled and
-   * needs no projects: the code page names the projects an invite granted, and
-   * `createInvite` takes ids while a person reads names.
-   */
-  private async gatherWebParams(
-    email: string,
-    orgId: string,
-    me: { role: string },
-    invitable: ReadonlyArray<typeof ROLES[number]['value']>,
-    existingMember: { role: string; status: string; projects?: Array<{ id: string; name: string }> } | undefined,
-    planInput: InvitePlanInput,
-    authService: { authenticateSilent: (orgId?: string) => Promise<{ organization_name?: string }> },
-    serviceClient: { listProjects: () => Promise<Array<{ id: string; name: string }>> },
-    callerEmail: string | undefined,
-  ): Promise<WebInviteParams> {
-    const projects = excludeSystemProject(await serviceClient.listProjects());
-
-    // The cwd project sorts first and is ticked by default — the same order and
-    // the same default the terminal checkbox uses. The screen keeps both and
-    // drops the silence: the row says where the tick came from.
-    const cwdProjectId = await this.resolveCwdProjectId(projects);
-    const ordered = [...projects].sort((a, b) =>
-      a.id === cwdProjectId ? -1 : b.id === cwdProjectId ? 1 : 0,
-    );
-
-    // `resolveOrgContext` drops the organization name on the way out, and a
-    // page headed by a UUID is a page that cannot tell you it opened on the
-    // wrong organization. Re-asking the cached session for it costs nothing —
-    // a live token short-circuits before any request — and the id is the
-    // fallback rather than a blank.
-    const orgName = await this.resolveOrgName(authService, orgId);
-
-    return {
-      // What the CODE is bound to, not what argv typed. `innerWrap` derives the
-      // inner key from `${orgId}:${email.toLowerCase()}`, so the lowercased
-      // address is the one that decides whether this invite can ever be
-      // redeemed, and it is the one the page names. Argv travels beside it: the
-      // screen draws "The address was cleaned up" when the two differ, which is
-      // the only warning anybody gets that `capy invite Bob@X.com` mints a code
-      // bound to something they did not type.
-      //
-      // Lowercased and NOT trimmed, because the CLI lowercases and does not
-      // trim. A page that showed a trimmed address would be claiming a binding
-      // the code does not have — and ` bob@x.com` really does mint a code
-      // nobody can redeem. Fixing THAT is a change to what the command mints,
-      // for every path and not only this one, so it is reported rather than
-      // smuggled in behind a flag that is supposed to change rendering only.
-      email: email.toLowerCase(),
-      rawEmail: email,
-      orgName,
-      callerEmail: callerEmail ?? '',
-      callerRole: me.role,
-      grantableRoles: [...invitable],
-      projects: ordered.map((p) => ({ id: p.id, name: p.name, isCwd: p.id === cwdProjectId })),
-      ...(existingMember
-        ? {
-            existing: {
-              role: existingMember.role,
-              status: existingMember.status,
-              projects: (existingMember.projects || []).map((p) => ({ id: p.id, name: p.name })),
-            },
-          }
-        : {}),
-      plan: planInput,
-      open: !process.env.CAPY_WEB_NO_OPEN,
-    };
   }
 }

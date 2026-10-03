@@ -381,10 +381,6 @@ export interface CliOptions {
   verbose?: boolean;
   force?: boolean;
   dryRun?: boolean;
-  /** Render bare `capy`'s interactive steps (init trainstops / sync conflict resolver)
-   *  in a local browser instead of TTY prompts. Lazy: the browser only opens when an
-   *  interactive decision is actually reached (a clean sync stays terminal-only). */
-  web?: boolean;
 }
 
 export interface ProjectInitResult {
@@ -450,9 +446,7 @@ export const ERROR_CODES = {
   LOCAL_KEY_BACKEND_ERROR: 'LOCAL_KEY_BACKEND_ERROR',
   // Local-state refusals: the command cannot start because this directory,
   // this branch or this build does not hold what it needs. Nothing has been
-  // asked of the service yet, so none of these is a SERVICE_ERROR — and each
-  // one used to be a bare `console.error` + `process.exit(1)`, which under
-  // `--web` is a decision reported to a stream nobody is reading.
+  // asked of the service yet, so none of these is a SERVICE_ERROR.
   /** The branch has no connector-managed credentials, so there is nothing to rotate. */
   NO_MANAGED_KEYS: 'NO_MANAGED_KEYS',
   /** The branch has no variables at all yet. */
@@ -698,6 +692,8 @@ export const ERROR_CODES = {
   ADD_STDIN_ONE_NAME: 'ADD_STDIN_ONE_NAME',
   /** `capy add` piped mode: the variable already exists and `--force` was not passed. Exit 3. */
   ADD_VAR_EXISTS: 'ADD_VAR_EXISTS',
+  /** `--web` was passed. The browser screens were removed and the command is not run. Exit 1. */
+  WEB_MODE_REMOVED: 'WEB_MODE_REMOVED',
 } as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES];

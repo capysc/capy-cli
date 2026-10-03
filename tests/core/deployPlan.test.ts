@@ -1,20 +1,11 @@
 /**
  * The deploy route, made checkable.
  *
- * `capy deploy` draws its rail on three screens, and until this file each of
- * them carried its own copy of the station list in a lookup table inside its
- * Screen.svelte. Three copies of one route is three chances for the rail to say
- * something different depending on which page you happen to be standing on —
- * and none of the three was the CLI's, which is the surface that decides how
- * many questions there are.
- *
- * These tests pin the route and — the point of the exercise — assert that the
- * browser payload and a headless caller are fed by ONE builder, by comparing
- * what each emits for the same run.
+ * `capy deploy --json` emits this route. These tests pin its shape: the whole
+ * route is declared, and each stop says what settled it.
  */
 import { describe, test, expect } from 'bun:test';
-import { deployPlan, unansweredDeployStops, SIGNIN_COMMAND } from '../../src/core/deployPlan';
-import { renderScreen } from '../../src/ui/screens/serve';
+import { deployPlan, unansweredDeployStops } from '../../src/core/deployPlan';
 
 const ROUTE = [
   'platform',
@@ -121,51 +112,5 @@ describe('deployPlan', () => {
     });
     // Only the gate is left, which is the one thing --yes answers.
     expect(unansweredDeployStops(settled)).toEqual(['review']);
-  });
-
-  test('§8 parity: the browser payload and a headless caller carry one array', () => {
-    const stops = deployPlan({
-      at: 'review',
-      answers: { platform: 'Vercel', branch: 'production', name: 'vercel-prod' },
-      skipped: ['mode'],
-      dryRun: true,
-    });
-    const jsonSurface = JSON.parse(JSON.stringify({ stops }));
-
-    const html = renderScreen('deploy-plan-confirm', {
-      nonce: 'test-nonce',
-      stops,
-      target: {
-        name: 'vercel-prod',
-        adapterId: 'vercel',
-        adapterLabel: 'Vercel',
-        branch: 'production',
-        mode: 'ci',
-        options: [],
-        vars: ['DATABASE_URL'],
-        saved: true,
-      },
-      action: 'ci',
-      dryRun: true,
-      preflight: [],
-    } as never);
-
-    // The payload is inlined into the page verbatim, so the array can be read
-    // back out of the served HTML and compared.
-    const match = html.match(/window\.__CAPY_DATA__ = (\{.*?\});/s);
-    expect(match).not.toBeNull();
-    const browserSurface = JSON.parse(match![1].replace(/\\u003c/g, '<'));
-    expect(browserSurface.stops).toEqual(jsonSurface.stops);
-    // And the modifiers survive the round trip — they are the part a rail
-    // needs to explain itself, and the easiest thing to lose in a serialize.
-    expect(browserSurface.stops.find((s: any) => s.id === 'signin').manual).toBe(true);
-    expect(browserSurface.stops.find((s: any) => s.id === 'deploy').blank).toBe(true);
-    expect(browserSurface.stops.find((s: any) => s.id === 'mode').state).toBe('skipped');
-  });
-
-  test('the manual sign-in command is known for every shipped adapter', () => {
-    for (const id of ['cf-worker', 'cf-pages', 'vercel', 'aws-ssm']) {
-      expect(typeof SIGNIN_COMMAND[id]).toBe('string');
-    }
   });
 });

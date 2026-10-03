@@ -1,10 +1,7 @@
-import { EventEmitter, once } from 'node:events';
 import { CapyError, ERROR_CODES } from '../types';
 import { resolveContext, writeAndSync, type ResolvedContext } from './connectors/shared';
 import { MAX_PIPED_BYTES, readPipedValue, refuseInvalidName, refusePiped } from './pipedValue';
 import { runPipedWrite, variableExists } from './pipedWrite';
-import { runWebIntake, parseVars, type SecretPair } from '../ui/secretIntakeScreen';
-import type { IntakeVar } from '../ui/screens/contract';
 import {
   recordsForWrite,
   refuseBadPrFlags,
@@ -13,18 +10,13 @@ import {
   type PrFlags,
 } from './keepLockPr';
 
-// The intake moved to `ui/secretIntakeScreen.ts` with the compiled screen it
-// now serves. Re-exported here because this is where the flow is entered from
-// and where its tests have always looked for it.
-export { runWebIntake, parseVars, type SecretPair };
+/** One name and the value entered for it. */
+export interface SecretPair {
+  readonly name: string;
+  readonly value: string;
+}
 
 export interface AddOpts {
-  web?: boolean;
-  reason?: string;
-  /** Repeatable `--help-url NAME=URL` pairs: a per-variable "where to find this" link. */
-  helpUrls?: string[];
-  /** false when --no-open was passed (commander negation). */
-  open?: boolean;
   noPush?: boolean;
   force?: boolean;
   nonTty?: boolean;
@@ -36,42 +28,13 @@ export interface AddOpts {
 
 const VAR_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
-/** Parse repeatable `--help-url NAME=URL` flags into a name→url map (http(s) only). */
-export function parseHelpUrls(pairs: string[] | undefined): Record<string, string> {
-  return Object.fromEntries(
-    (pairs ?? []).flatMap((pair) => {
-      const eq = pair.indexOf('=');
-      if (eq <= 0) return [];
-      const name = pair.slice(0, eq).trim();
-      const url = pair.slice(eq + 1).trim();
-      return VAR_RE.test(name) && /^https?:\/\//i.test(url) ? [[name, url] as const] : [];
-    }),
-  );
-}
-
 /**
- * The terminal's overwrite confirm, in a form the intake page can carry.
- *
- * The CLI's own sentence, verbatim, because two wordings for one thing is a
- * bug. `--web` used to skip this question entirely — the confirm is gated on
- * `!opts.web` — so a browser intake silently overwrote existing values with no
- * mention anywhere. It cannot be a second screen (the intake form is the whole
- * flow and has no confirm step), so it is stated above the form and the Save
- * button is the answer: closing the window changes nothing, which is what
- * refusing meant in the terminal too.
+ * Piped mode is "a value arrives on stdin". It is decided by stdin alone.
+ * `--non-tty` with a real terminal on stdin is NOT piped (nothing was piped,
+ * and reading the keyboard would hang), so it reaches the refusal below.
  */
-export function overwriteNotice(existing: string[]): string | undefined {
-  return existing.length > 0 ? `${existing.join(', ')} already exist(s). Overwrite?` : undefined;
-}
-
-/**
- * Piped mode is "a value arrives on stdin, and there is no `--web`". It is
- * decided by stdin alone. `--non-tty` with a real terminal on stdin is NOT
- * piped (nothing was piped, and reading the keyboard would hang), so it still
- * reaches the refusal below that points at `--web`.
- */
-export function isPipedAdd(opts: AddOpts): boolean {
-  return opts.web !== true && process.stdin.isTTY !== true;
+export function isPipedAdd(): boolean {
+  return process.stdin.isTTY !== true;
 }
 
 /** Asks for each value in turn, hidden. Sequential by construction: one prompt, then the rest. */
@@ -110,7 +73,7 @@ export class AddCommand {
     refuseBadPrFlags(opts.pr ?? {}, opts.json === true);
 
     // `<cmd> | capy add NAME`: the value comes from stdin and nothing prompts.
-    if (isPipedAdd(opts)) return this.executePiped(names, opts);
+    if (isPipedAdd()) return this.executePiped(names, opts);
 
     if (names.length === 0) {
       throw new CapyError('No variable name given.', ERROR_CODES.INVALID_FORMAT);
@@ -125,7 +88,7 @@ export class AddCommand {
     const push = opts.noPush !== true;
 
     const existing = names.filter((n) => n in ctx.localPlaintext);
-    if (existing.length > 0 && !opts.force && !opts.web && !opts.nonTty) {
+    if (existing.length > 0 && !opts.force && !opts.nonTty) {
       const inquirer = (await import('inquirer')).default;
       const { ok } = await inquirer.prompt([
         { type: 'confirm', name: 'ok', message: `${existing.join(', ')} already exist(s). Overwrite?`, default: false },
@@ -136,11 +99,7 @@ export class AddCommand {
       }
     }
 
-    const savedNames = opts.web
-      ? await this.collectViaBrowser(ctx, names, existing, opts, push)
-      : await this.collectViaTerminal(ctx, names, opts, push);
-    // The browser was closed without saving: already reported, nothing to confirm.
-    if (savedNames === undefined) return;
+    const savedNames = await this.collectViaTerminal(ctx, names, opts, push);
 
     const where = push ? ` and synced to ${ctx.branch}` : ' (.env only — not pushed)';
     console.log(`✓ Saved ${savedNames.length} variable(s): ${savedNames.join(', ')}${where}.`);
@@ -193,66 +152,6 @@ export class AddCommand {
     });
   }
 
-  /**
-   * The browser intake. Returns the names that were saved, or `undefined` when
-   * the form was closed without saving (reported here).
-   */
-  private async collectViaBrowser(
-    ctx: ResolvedContext,
-    names: readonly string[],
-    existing: readonly string[],
-    opts: AddOpts,
-    push: boolean,
-  ): Promise<string[] | undefined> {
-    const helpUrls = parseHelpUrls(opts.helpUrls);
-    const vars: IntakeVar[] = names.map((name) => ({ name, helpUrl: helpUrls[name] }));
-    // The overwrite warning goes above whatever the caller asked for: the
-    // consequence of pressing Save outranks the note explaining why the form
-    // was opened.
-    const warning = opts.force ? undefined : overwriteNotice([...existing]);
-    const reason = [warning, opts.reason].filter(Boolean).join(' ') || undefined;
-
-    // `onSubmit` having run is the only signal that the form was filled in (a
-    // closed window and a step nobody answered both resolve the intake the same
-    // way). It is announced on a one-shot channel rather than written to a
-    // variable, so nothing here is reassigned.
-    const bus = new EventEmitter();
-    const submitted = once(bus, 'submitted');
-    await runWebIntake(
-      // Open the user's browser by default; CAPY_WEB_NO_OPEN lets CI and
-      // headless runs drive the loopback without hijacking a real browser.
-      { vars, reason, open: opts.open !== false && !process.env.CAPY_WEB_NO_OPEN },
-      async (pairs) => {
-        await writeInOrder(ctx, pairs, push);
-        bus.emit('submitted', pairs.map((p) => p.name));
-      },
-    );
-    // First in the list wins when both are already settled: a submission that
-    // happened beats the "nothing was entered" fallback.
-    const [captured] = (await Promise.race([submitted, Promise.resolve([[]] as [string[]])])) as [string[]];
-
-    // The intake resolves whether or not it was filled in — a closed window
-    // and a step nobody answered both land here — and this is the only
-    // signal that separates them from a save. Without it the command ran on
-    // to `✓ Saved 0 variable(s): ` and reported a refusal as a success,
-    // which for an overwrite is the difference between "I left it alone" and
-    // "I replaced it".
-    //
-    // A PRINTED LINE AND A NORMAL RETURN, not a throw. Closing the window is
-    // a refusal, and a refusal is one of the two endings this flow HAS — it
-    // is not a fault. Throwing here reached the process-level
-    // `unhandledRejection` handler (nothing between here and `program.parse`
-    // catches it), which printed the sentence a second time under a node
-    // stack trace and exited 1: a person who declined an overwrite was shown
-    // a crash. The terminal path for the identical refusal prints `Aborted.`
-    // and returns 0.
-    if (captured.length === 0) {
-      console.log('\n  Nothing was added. The browser was closed without saving.\n');
-      return undefined;
-    }
-    return captured;
-  }
-
   /** The hidden terminal prompt, one value per name. */
   private async collectViaTerminal(
     ctx: ResolvedContext,
@@ -262,7 +161,8 @@ export class AddCommand {
   ): Promise<string[]> {
     if (opts.nonTty) {
       throw new CapyError(
-        'Non-interactive add requires --web (browser intake). Re-run with --web.',
+        // COPY-FLAG
+        'Non-interactive add reads the value from stdin: <cmd> | capy add NAME',
         ERROR_CODES.INVALID_FORMAT,
       );
     }

@@ -174,7 +174,7 @@ async function withEnv<T>(vars: Readonly<Record<string, string | undefined>>, fn
 
 /**
  * Fakes a real TTY on stdin — `bun test` never has one — so a test can
- * prove `--web`/`--yes`/`--dry-run` suppress the store's prompt EVEN THOUGH
+ * prove `--yes`/`--dry-run` suppress the store's prompt EVEN THOUGH
  * a real terminal is present, not merely because there is no terminal to
  * begin with. Same technique `tests/commands/connectDokploy.test.ts` uses.
  */
@@ -480,27 +480,6 @@ describe('capy deploy dokploy — org system store token resolution (CAP-664)', 
       expect(getConnectorSecret).not.toHaveBeenCalled();
       expect(promptFn).not.toHaveBeenCalled();
       expect(writeFn).not.toHaveBeenCalled();
-    } finally {
-      tearDown();
-    }
-  }, 30_000);
-
-  test('--web: a real TTY does not let the store prompt — refused, coded, zero prompt calls', async () => {
-    setUp({});
-    const { getConnectorSecret, promptFn } = fakeSystemStore(null);
-    // CAP-679 follow-up: deploy resolves through `getDirectionalConnectorSecret`
-    // now, not the bare `getConnectorSecret` — same call shape modulo the
-    // extra fallback-name argument, which every mock here ignores.
-    mock.module('../../src/system/systemStore', () => ({ getDirectionalConnectorSecret: getConnectorSecret }));
-
-    try {
-      const { code } = await withTTY(() =>
-        withEnv({ DOKPLOY_API_KEY: undefined }, async () => ({
-          code: await deployCommand('dokploy-ci', { yes: true, web: true }, ROOT),
-        })),
-      );
-      expect(code).toBe(1);
-      expect(promptFn).not.toHaveBeenCalled();
     } finally {
       tearDown();
     }
