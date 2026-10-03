@@ -11,6 +11,12 @@ import { createHarness, BRANCH, type Harness } from '../helpers/pipedHarness';
 
 const PEM = readFileSync(join(__dirname, '../fixtures/rsa_test_key.pem'), 'utf8').trimEnd();
 
+// Neither --pr nor --no-pr and no terminal: the PR step does not run and says which flags would answer it.
+const UNANSWERED = [
+  { id: 'create_pr', flag: '--pr' },
+  { id: 'pr_base', flag: '--pr-base' },
+];
+
 function parseJson(stdout: string): Record<string, unknown> {
   return JSON.parse(stdout) as Record<string, unknown>;
 }
@@ -32,7 +38,7 @@ describe('capy add NAME < value (piped)', () => {
     const r = await h().run(['add', 'ADD_NEW', '--json'], 'v\n');
     expect(r.code).toBe(0);
     expect(r.stderr).toBe('');
-    expect(parseJson(r.stdout)).toEqual({ ok: true, name: 'ADD_NEW', branch: BRANCH, action: 'created', pushed: true });
+    expect(parseJson(r.stdout)).toEqual({ ok: true, name: 'ADD_NEW', branch: BRANCH, action: 'created', pushed: true, keep_lock: { changed: true, committed: false }, unanswered: UNANSWERED });
     expect(h().envValue('ADD_NEW')).toBe('v');
     expect(h().pushCount()).toBe(1);
   });
@@ -61,7 +67,7 @@ describe('capy add NAME < value (piped)', () => {
   test('--force overwrites: updated', async () => {
     const r = await h().run(['add', 'ADD_EXISTS', '--force', '--json'], 'second\n');
     expect(r.code).toBe(0);
-    expect(parseJson(r.stdout)).toEqual({ ok: true, name: 'ADD_EXISTS', branch: BRANCH, action: 'updated', pushed: true });
+    expect(parseJson(r.stdout)).toEqual({ ok: true, name: 'ADD_EXISTS', branch: BRANCH, action: 'updated', pushed: true, keep_lock: { changed: true, committed: false }, unanswered: UNANSWERED });
     expect(h().envValue('ADD_EXISTS')).toBe('second');
   });
 
@@ -113,7 +119,7 @@ describe('capy add NAME < value (piped)', () => {
   test('--no-push writes .env only: no push call, result says so', async () => {
     const pushes = h().pushCount();
     const r = await h().run(['add', 'ADD_LOCAL', '--no-push', '--json'], 'local\n');
-    expect(parseJson(r.stdout)).toEqual({ ok: true, name: 'ADD_LOCAL', branch: BRANCH, action: 'created', pushed: false });
+    expect(parseJson(r.stdout)).toEqual({ ok: true, name: 'ADD_LOCAL', branch: BRANCH, action: 'created', pushed: false, keep_lock: { changed: false } });
     expect(h().envValue('ADD_LOCAL')).toBe('local');
     expect(h().pushCount()).toBe(pushes);
   });
@@ -140,5 +146,28 @@ describe('capy add NAME < value (piped)', () => {
     } finally {
       await failing.dispose();
     }
+  });
+
+  test('--pr with --no-pr is refused before anything is written', async () => {
+    const pushes = h().pushCount();
+    const r = await h().run(['add', 'ADD_PR_CONFLICT', '--pr', '--no-pr', '--json'], 'v\n');
+    expect(r.code).toBe(1);
+    expect(parseJson(r.stdout)).toMatchObject({ ok: false, code: 'INVALID_FORMAT' });
+    expect(h().pushCount()).toBe(pushes);
+    expect(h().envValue('ADD_PR_CONFLICT')).toBeUndefined();
+  });
+
+  test('--no-pr: keep_lock is changed-not-committed and nothing is left unanswered', async () => {
+    const r = await h().run(['add', 'ADD_PR_NO', '--no-pr', '--json'], 'v\n');
+    expect(r.code).toBe(0);
+    expect(parseJson(r.stdout)).toMatchObject({ ok: true, keep_lock: { changed: true, committed: false } });
+    expect(parseJson(r.stdout).unanswered).toBeUndefined();
+  });
+
+  test('--pr outside a repository checkout: the add still succeeds (exit 0) and keep_lock.error is coded', async () => {
+    const r = await h().run(['add', 'ADD_PR_NOT_GIT', '--pr', '--json'], 'v\n');
+    expect(r.code).toBe(0);
+    expect(h().envValue('ADD_PR_NOT_GIT')).toBe('v');
+    expect(parseJson(r.stdout).keep_lock).toMatchObject({ changed: true, committed: false, error: { code: 'KEEP_PR_NOT_GIT_REPO' } });
   });
 });

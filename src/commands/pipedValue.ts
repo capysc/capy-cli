@@ -21,6 +21,7 @@
  */
 import { ERROR_CODES } from '../types/index';
 import { EXIT_NEEDS_INPUT } from '../ui/interactive';
+import type { KeepLockPrOutcome } from './keepLockPr';
 
 /** 1 MiB. A value over this is refused without reading further. */
 export const MAX_PIPED_BYTES = 1024 * 1024;
@@ -185,10 +186,26 @@ export function pipedSuccessLine(result: PipedSuccess): string {
   return `✓ Set ${result.name} on ${result.branch} ${where}`;
 }
 
-/** `--json`: pure JSON on stdout. Human: one line on stderr. */
-export function reportPipedSuccess(json: boolean, result: PipedSuccess): void {
+/**
+ * `--json`: pure JSON on stdout, with `keep_lock` (and `unanswered`) when the
+ * keep.lock PR step ran. Human: one line on stderr.
+ */
+export function reportPipedSuccess(json: boolean, result: PipedSuccess, keepLock?: KeepLockPrOutcome): void {
   if (json) {
-    console.log(JSON.stringify({ ok: true, ...result }, null, 2));
+    const payload = { ok: true, ...result };
+    console.log(
+      JSON.stringify(
+        keepLock === undefined
+          ? payload
+          : {
+              ...payload,
+              keep_lock: keepLock.keep_lock,
+              ...(keepLock.unanswered === undefined ? {} : { unanswered: keepLock.unanswered }),
+            },
+        null,
+        2,
+      ),
+    );
     return;
   }
   console.error(pipedSuccessLine(result));

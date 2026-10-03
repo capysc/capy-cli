@@ -13,8 +13,8 @@ import { formatRelativeTime } from '../ui/relativeTime';
 import { Encryptor } from '../crypto/encryptor';
 import { deriveResourceId } from '../crypto/resourceId';
 import { setSyncKeepHash, KeepFile } from '../types/index';
-import { EditSaveRecord } from '../deploy/keepGate';
-import { concludeEditSession } from './editExitFlow';
+import { reportKeepLockHuman, refuseBadPrFlags, runKeepLockPrStep, type PrFlags } from './keepLockPr';
+import { startSaveLog } from './sessionSaveLog';
 import { decideEditMode, editPipedCommand, refuseEditNeedsTty } from './editPiped';
 import { refuseInvalidName } from './pipedValue';
 import { isValidVarName } from './pipedWrite';
@@ -170,6 +170,8 @@ export interface EditOpts {
   noPush?: boolean;
   /** Treat stdin as not a terminal even when it is one. */
   nonTty?: boolean;
+  /** `--pr` / `--no-pr` / `--pr-base`: answers the keep.lock PR step. */
+  pr?: PrFlags;
 }
 
 export class EditCommand {
@@ -230,6 +232,9 @@ export class EditCommand {
   }
 
   async execute(opts: EditOpts = {}): Promise<void> {
+    // Contradictory PR flags are refused before anything is changed.
+    refuseBadPrFlags(opts.pr ?? {}, opts.json === true);
+
     // Decided first: before anything is drawn, and before any auth or network call.
     const mode = decideEditMode({
       hasName: opts.name !== undefined,
@@ -244,6 +249,7 @@ export class EditCommand {
         json: opts.json === true,
         push: opts.noPush !== true,
         devMode: this.devMode,
+        pr: opts.pr,
       });
     }
 
@@ -369,19 +375,10 @@ export class EditCommand {
       const { printExpiryWarnings } = await import('./connectors/shared');
       printExpiryWarnings();
     };
-    // Immutable, append-only log of what happened this session, used only to
-    // build the exit-time PR (editExitFlow.ts) — never to decide what gets
-    // written to disk during the session itself.
-    //
-    // The screen API's `saveLocalEdits` callback (below) is called once per
-    // save and returns only that save's changed_at map — it has no channel
-    // back into this function's scope to thread accumulated state through
-    // return values across repeated calls. That forces exactly one mutable
-    // cell, confined to this single object and touched nowhere else:
-    // `sessionSaves.current` is reassigned to a brand-new (readonly) array on
-    // every save, never mutated in place. Everything the array holds, and
-    // everything built from it afterwards, is immutable.
-    const sessionSaves: { current: readonly EditSaveRecord[] } = { current: [] };
+    // Append-only log of what happened this session, used only to build the
+    // exit-time PR (keepLockPr.ts) — never to decide what gets written to disk
+    // during the session itself. See sessionSaveLog.ts.
+    const saveLog = startSaveLog();
 
     const editContext = {
       saveLocalEdits: async (edits: Record<string, string>) => {
@@ -464,7 +461,7 @@ export class EditCommand {
           variable,
           entry: adoptedKeep.variables[variable]?.find((e) => e.branch === branch) ?? null,
         }));
-        sessionSaves.current = [...sessionSaves.current, { branch, entries: touchedEntries }];
+        saveLog.record({ branch, entries: touchedEntries });
 
         // Hand the server-assigned changed_at back to the TUI so the UPDATED
         // column reflects the authoritative stamp for this commit, not a
@@ -504,8 +501,19 @@ export class EditCommand {
       await screen.run(state, editContext);
     }
     // Same exit behavior in both modes: asked in the terminal, even after a
-    // --web session's browser tab has closed. See editExitFlow.ts.
-    await concludeEditSession(process.cwd(), sessionSaves.current, keep);
+    // --web session's browser tab has closed. The TUI has already released
+    // stdin (raw mode off, its key listener removed) by the time `run`
+    // resolves, so the prompts in keepLockPr.ts start from a clean terminal.
+    const outcome = await runKeepLockPrStep({
+      command: 'edit',
+      cwd: process.cwd(),
+      records: await saveLog.finish(),
+      localKeep: keep,
+      flags: opts.pr ?? {},
+      json: opts.json === true,
+      nonTty: opts.nonTty,
+    });
+    reportKeepLockHuman(outcome, { successTo: 'stdout', noteUnanswered: true });
     await printExpiryAfter();
   }
 }

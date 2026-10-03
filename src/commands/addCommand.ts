@@ -5,6 +5,13 @@ import { MAX_PIPED_BYTES, readPipedValue, refuseInvalidName, refusePiped } from 
 import { runPipedWrite, variableExists } from './pipedWrite';
 import { runWebIntake, parseVars, type SecretPair } from '../ui/secretIntakeScreen';
 import type { IntakeVar } from '../ui/screens/contract';
+import {
+  recordsForWrite,
+  refuseBadPrFlags,
+  reportKeepLockHuman,
+  runKeepLockPrStep,
+  type PrFlags,
+} from './keepLockPr';
 
 // The intake moved to `ui/secretIntakeScreen.ts` with the compiled screen it
 // now serves. Re-exported here because this is where the flow is entered from
@@ -23,6 +30,8 @@ export interface AddOpts {
   nonTty?: boolean;
   /** Piped mode: pure JSON on stdout. */
   json?: boolean;
+  /** `--pr` / `--no-pr` / `--pr-base`: answers the keep.lock PR step. */
+  pr?: PrFlags;
 }
 
 const VAR_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -97,6 +106,9 @@ export class AddCommand {
   async execute(varNames: string[], opts: AddOpts): Promise<void> {
     const names = varNames.map((n) => n.trim()).filter(Boolean);
 
+    // Contradictory PR flags are refused before anything is changed.
+    refuseBadPrFlags(opts.pr ?? {}, opts.json === true);
+
     // `<cmd> | capy add NAME`: the value comes from stdin and nothing prompts.
     if (isPipedAdd(opts)) return this.executePiped(names, opts);
 
@@ -132,6 +144,17 @@ export class AddCommand {
 
     const where = push ? ` and synced to ${ctx.branch}` : ' (.env only — not pushed)';
     console.log(`✓ Saved ${savedNames.length} variable(s): ${savedNames.join(', ')}${where}.`);
+
+    const outcome = await runKeepLockPrStep({
+      command: 'add',
+      cwd: process.cwd(),
+      records: recordsForWrite(ctx.keep, ctx.pm.readKeepFile(), ctx.branch, savedNames),
+      localKeep: ctx.keep,
+      flags: opts.pr ?? {},
+      json: opts.json === true,
+      nonTty: opts.nonTty,
+    });
+    reportKeepLockHuman(outcome, { successTo: 'stdout', noteUnanswered: false });
   }
 
   /** `<cmd> | capy add NAME`. One name, one pipe; an existing name needs `--force`. */
@@ -158,6 +181,8 @@ export class AddCommand {
       json,
       push: opts.noPush !== true,
       devMode: this.devMode,
+      command: 'add',
+      pr: opts.pr,
       gate: (ctx) =>
         variableExists(ctx, name) && opts.force !== true
           ? {
