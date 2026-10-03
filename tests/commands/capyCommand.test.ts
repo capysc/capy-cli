@@ -55,17 +55,6 @@ mock.module('inquirer', () => ({
     Separator: class Separator { constructor() {} },
   },
 }));
-// The two browser REPORTS. Mocked so a `--web` run in here can be asked what
-// it decided to serve without any test binding a socket — and, more to the
-// point, without a no-op sync leaving a listening server behind it.
-const shownSyncResults: unknown[] = [];
-mock.module('../../src/ui/syncScreens', () => ({
-  showSyncResultInBrowser: mock(async (p: unknown) => {
-    shownSyncResults.push(p);
-    return 'http://127.0.0.1:1/s/not-served';
-  }),
-  showSyncStatusInBrowser: mock(async () => 'http://127.0.0.1:1/s/not-served'),
-}));
 mock.module('../../src/ui/spinner', () => ({
   default: (text: string) => ({
     start: () => ({
@@ -898,25 +887,6 @@ describe('CapyCommand', () => {
       consoleSpy.mockRestore();
     });
 
-    test('a run with nothing to do serves no browser report and holds no socket', async () => {
-      // `capy --web` in a synced directory is the common case, and it asks
-      // nothing: the report page it used to serve had to be opened by `open()`,
-      // which fails quietly on the headless and remote hosts where `--web`
-      // actually runs — leaving the listening socket to hold the process for
-      // its whole 120-second timeout, on every single run, to render a page
-      // that says nothing happened.
-      const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
-      shownSyncResults.length = 0;
-
-      const webCommand = new CapyCommand({ web: true });
-      await (webCommand as any).syncProject(mockProjectState);
-
-      expect(consoleSpy).toHaveBeenCalledWith('Everything is up to date!');
-      expect(shownSyncResults).toEqual([]);
-
-      consoleSpy.mockRestore();
-    });
-
     test('should handle authentication failure during sync', async () => {
       mockAuthService.authenticateSilent.mockResolvedValue({ success: false });
       mockAuthService.authenticate.mockResolvedValue({
@@ -1524,6 +1494,48 @@ describe('CapyCommand', () => {
         (inquirer as any).prompt = origPrompt;
         consoleSpy.mockRestore();
       }
+    });
+  });
+
+  describe('resolveProjectChoice — type-to-filter project picker (CAP-700)', () => {
+    const NEW = '__new__';
+    const projects = [
+      { id: 'p1', name: 'billing-api', organization_id: 'org-1' },
+      { id: 'p2', name: 'web-frontend', organization_id: 'org-1' },
+    ];
+
+    /** Runs the picker with a recorded `inquirer.prompt` that answers with `answer`. */
+    async function runPicker(answer: string) {
+      const inquirer = (await import('inquirer')).default;
+      const origPrompt = inquirer.prompt;
+      const promptSpy = mock(async (_questions: any) => ({ projectChoice: answer }));
+      (inquirer as any).prompt = promptSpy;
+      try {
+        const chosen = await (capyCommand as any).resolveProjectChoice(projects, NEW);
+        const asked = promptSpy.mock.calls.flatMap((call: any[]) => call[0] as any[]);
+        return { chosen, asked };
+      } finally {
+        (inquirer as any).prompt = origPrompt;
+      }
+    }
+
+    test('asks a searchable question with the same message and the default kept on "New project"', async () => {
+      const { asked } = await runPicker('p2');
+      expect(asked).toHaveLength(1);
+      expect(asked[0].type).toBe('search');
+      expect(asked[0].message).toBe('Which project do you want to use?');
+      expect(asked[0].source('').map((c: any) => c.name)).toEqual(['New project', 'billing-api', 'web-frontend']);
+    });
+
+    test('typing filters, and "New project" stays reachable by its own label', async () => {
+      const { asked } = await runPicker('p2');
+      expect(asked[0].source('web').map((c: any) => c.value)).toEqual(['p2']);
+      expect(asked[0].source('new').map((c: any) => c.value)).toEqual([NEW]);
+    });
+
+    test('returns whatever the prompt resolved', async () => {
+      expect((await runPicker('p1')).chosen).toBe('p1');
+      expect((await runPicker(NEW)).chosen).toBe(NEW);
     });
   });
 

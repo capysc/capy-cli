@@ -2,12 +2,12 @@
 // Imported first, and applied below before any other statement: the pin has to
 // land before a single Capy module reads configuration.
 import { applyProdPins, formatPinNotice } from './config/prodPins';
-import { Command } from 'commander';
+import { Command, Option } from 'commander';
 import { CapyCommand } from './commands/capyCommand';
 import { CliOptions } from './types/index';
 import { assertNotLocalOnly } from './core/localGate';
 import { version as CLI_VERSION } from '../package.json';
-import { setWebMode } from './ui/webMode';
+import { refuseWebMode } from './core/webModeRemoved';
 import { ACCENT } from './ui/colors';
 
 // Prod talks to api.capy.sc and ~/.capy, full stop. Strip the environment's
@@ -66,19 +66,17 @@ program
   .option('-v, --verbose', 'enable detailed logging')
   .option('-f, --force', 're-encrypt existing variables')
   .option('-d, --dry-run', 'preview changes without applying')
-  .option('--web', 'render interactive steps (first-run setup / sync conflicts) in a local browser instead of TTY prompts')
+  // Hidden: `--web` was removed. It still parses so the hook below can refuse it (WEB_MODE_REMOVED).
+  .addOption(new Option('--web').hideHelp())
   // Root help only (Commander scopes addHelpText to the command it's called
   // on) — points an agent at `capy help --json` for the full, drift-proof
   // command reference (CAP-681).
   .addHelpText('after', '\nAgents: run `capy help --json` for a machine-readable command reference.')
-  // Record `--web` once, before any handler runs, for the code that has no way
-  // to ask. `displayErrorAndExit` is reached from eighteen catch blocks — a key
-  // resolver, a service client, a crypto path — none of which is handed the
-  // flag, and threading a boolean through every signature between here and
-  // there would be forgotten on the nineteenth. Commands that decide their own
-  // flow still read `command.optsWithGlobals().web`.
-  .hook('preAction', (thisCommand) => {
-    setWebMode(thisCommand.opts().web === true);
+  // `--web` is gone: refuse it before any handler runs, so an agent that still
+  // passes it is told so instead of having the command run unattended.
+  .hook('preAction', (_thisCommand, actionCommand) => {
+    const opts = actionCommand.optsWithGlobals();
+    if (opts.web === true) refuseWebMode(opts.json === true);
   })
   .action(async (options, cmd) => {
     if (cmd.args.length > 0) {
@@ -114,8 +112,7 @@ program
       envPath: options.envPath,
       verbose: options.verbose,
       force: options.force,
-      dryRun: options.dryRun,
-      web: options.web
+      dryRun: options.dryRun
     };
 
     const command = new CapyCommand(cliOptions);
@@ -142,7 +139,7 @@ program
   .action(async (options, command) => {
     const { StatusCommand } = await import('./commands/statusCommand');
     const cmd = new StatusCommand();
-    await cmd.execute({ json: options.json, web: command.optsWithGlobals().web === true });
+    await cmd.execute({ json: options.json });
   });
 
 program
@@ -167,7 +164,6 @@ program
     const { prFlagsFromCommand } = await import('./commands/keepLockPr');
     const cmd = new EditCommand();
     await cmd.execute({
-      web: command.optsWithGlobals().web === true,
       name,
       json: options.json,
       noPush: options.push === false,
@@ -297,7 +293,7 @@ program
         // `capy branch` hands its switch step to checkout, so the flag has to
         // travel with it — otherwise picking a branch here drops out of the
         // browser and into a TTY prompt halfway through the same run.
-        await cmd.execute(selected, { web: command.optsWithGlobals().web === true });
+        await cmd.execute(selected);
       }
     }
 
@@ -341,7 +337,6 @@ program
     await cmd.execute(branch, {
       create: options.create,
       protected: options.protected,
-      web: command.optsWithGlobals().web === true,
     });
   });
 
@@ -396,9 +391,6 @@ const deploy = program
         target: options.target,
         yes: options.yes ?? merged.yes,
         dryRun: options.dryRun ?? merged.dryRun,
-        // Same inherited-global rule as every other converted command: --web
-        // is declared once on the root program, so it arrives in merged opts.
-        web: merged.web === true,
         edit: options.edit,
         // Deploy-level flag only — the global `-f/--force` means "re-encrypt",
         // a different thing, so it must NOT be merged in here.
@@ -435,7 +427,7 @@ deploy
   .action(async (deployId: string, _options, command) => {
     assertNotLocalOnly('deploy revoke');
     const { DeployRevokeCommand } = await import('./commands/deployTokenCommand');
-    const cmd = new DeployRevokeCommand(undefined, false, { web: command.optsWithGlobals().web === true });
+    const cmd = new DeployRevokeCommand();
     await cmd.execute(deployId);
   });
 
@@ -445,7 +437,7 @@ deploy
   .action(async (_options, command) => {
     assertNotLocalOnly('deploy list');
     const { DeployListCommand } = await import('./commands/deployTokenCommand');
-    const cmd = new DeployListCommand(undefined, false, { web: command.optsWithGlobals().web === true });
+    const cmd = new DeployListCommand();
     await cmd.execute();
   });
 
@@ -455,7 +447,7 @@ deploy
   .action(async (_options, command) => {
     assertNotLocalOnly('deploy targets');
     const { deployList } = await import('./commands/deployCommand');
-    process.exit(await deployList(process.cwd(), { web: command.optsWithGlobals().web === true }));
+    process.exit(await deployList(process.cwd()));
   });
 
 deploy
@@ -467,7 +459,6 @@ deploy
     const { deployRemove } = await import('./commands/deployCommand');
     process.exit(
       await deployRemove(name, process.cwd(), {
-        web: command.optsWithGlobals().web === true,
         // commander negates `--no-deploy` onto the positive `deploy` property.
         noDeploy: options.deploy === false,
       }),
@@ -501,9 +492,7 @@ program
   .description('Connect to a self-hosted Capy (BYOC) instance')
   .action(async (url: string | undefined, _options: unknown, command: Command) => {
     const { byocCommand } = await import('./commands/byocCommand');
-    // `--web` is a global option on the root program, so read it via globals.
-    const web = command.optsWithGlobals().web === true;
-    process.exit(await byocCommand(url, { web }));
+    process.exit(await byocCommand(url));
   });
 
 program
@@ -657,7 +646,6 @@ program
     const { InviteCommand } = await import('./commands/inviteCommand');
     const cmd = new InviteCommand();
     await cmd.execute(email, {
-      web: command.optsWithGlobals().web === true,
       role: options.role,
       projects: options.project,
       ttl: options.ttl,
@@ -707,7 +695,7 @@ program
     assertNotLocalOnly('kick');
     const { KickCommand } = await import('./commands/kickCommand');
     const cmd = new KickCommand();
-    await cmd.execute(email, { web: command.optsWithGlobals().web === true });
+    await cmd.execute(email);
   });
 
 const systemCmd = program
@@ -756,7 +744,7 @@ program
     const { OrgCommand } = await import('./commands/orgCommand');
     // OrgCommand takes it at construction — see its own note on why a
     // subcommand must read the inherited global rather than its own options.
-    const cmd = new OrgCommand(undefined, false, { web: command.optsWithGlobals().web === true });
+    const cmd = new OrgCommand();
     await cmd.execute();
   });
 
@@ -847,7 +835,7 @@ program
   .action(async (_options, command) => {
     const { DecryptCommand } = await import('./commands/decryptCommand');
     const cmd = new DecryptCommand();
-    await cmd.execute({ web: command.optsWithGlobals().web === true });
+    await cmd.execute();
   });
 
 program
@@ -856,7 +844,7 @@ program
   .action(async (_options, command) => {
     const { EndRecoverCommand } = await import('./commands/endRecoverCommand');
     const cmd = new EndRecoverCommand();
-    await cmd.execute({ web: command.optsWithGlobals().web === true });
+    await cmd.execute();
   });
 
 program
@@ -866,25 +854,12 @@ program
     assertNotLocalOnly('recover');
     const { RecoverCommand } = await import('./commands/recoverCommand');
     const cmd = new RecoverCommand();
-    await cmd.execute({ web: command.optsWithGlobals().web === true });
+    await cmd.execute();
   });
 
 program
   .command('add <vars...>')
   .description('Add one or more secret values to the project (encrypts + syncs)')
-  // NOTE: `--web` is intentionally NOT declared here. The root program already
-  // defines a global `--web`, and Commander binds a doubly-declared flag to the
-  // parent scope — so a local copy would silently shadow to undefined (the bug
-  // that made `capy add --web` fall through to the dead TTY prompt). Like `byoc`,
-  // we read the inherited global via `merged.web` below.
-  .option('--reason <text>', 'short note shown on the intake page')
-  .option(
-    '--help-url <NAME=URL>',
-    'per-variable "where to find this" link, e.g. STRIPE_SECRET_KEY=https://dashboard.stripe.com/apikeys (repeatable)',
-    (val: string, acc: string[]) => [...acc, val],
-    [] as string[],
-  )
-  .option('--no-open', 'do not auto-open the browser; print the URL only')
   .option('--no-push', 'write to .env only; do not push to Capy')
   .option('-f, --force', 'overwrite existing values without prompting')
   .option('--non-tty', 'never prompt; resolve from flags or fail fast (agents/CI)')
@@ -906,12 +881,6 @@ program
     const cmd = new AddCommand();
     const merged = command.optsWithGlobals();
     await cmd.execute(varNames, {
-      // `--web` is defined on both the root program and this subcommand, so Commander
-      // binds it to the global scope — read it from merged opts, not the local `options`.
-      web: merged.web,
-      reason: options.reason,
-      helpUrls: options.helpUrl,
-      open: options.open,
       noPush: options.push === false,
       force: merged.force,
       nonTty: options.nonTty,
@@ -981,19 +950,14 @@ program
     const { ConnectCommand } = await import('./commands/connectCommand');
     const cmd = new ConnectCommand();
     if (!provider) {
-      await cmd.list({ web: command.optsWithGlobals().web === true });
+      await cmd.list();
       return;
     }
-    // Globals, because `--web` is declared once on the root program. Dropping
-    // it here is not a no-op: `ConnectCommand` reads `opts.web` to choose
-    // between the browser route and the TTY prompts, so an unpassed flag makes
-    // `capy connect stripe --web` answer in a terminal nobody is watching.
-    // `--dry-run` is also declared once on the root program (like `--web`) —
+    // `--dry-run` is declared once on the root program —
     // merge globals so `capy --dry-run connect dokploy` and
     // `capy connect dokploy --dry-run` both work, same pattern as `deploy`.
     const merged = command.optsWithGlobals();
     await cmd.execute(provider, {
-      web: merged.web === true,
       live: options.live,
       var: options.var,
       account: options.account,
@@ -1027,7 +991,6 @@ program
     const { RotateCommand } = await import('./commands/rotateCommand');
     const cmd = new RotateCommand();
     await cmd.execute(varName, {
-      web: command.optsWithGlobals().web === true,
       all: options.all,
       noPush: options.push === false,
       skipPrompts: !!(options.yes || options.skipPrompts),

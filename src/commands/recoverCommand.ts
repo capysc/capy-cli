@@ -53,6 +53,61 @@ async function tryListProjects(serviceClient: ServiceClient): Promise<Array<{ id
   }
 }
 
+/** `null` when the project's decrypt data could not be read. */
+async function tryEnvContent(serviceClient: ServiceClient, projectId: string): Promise<string | null> {
+  try {
+    return (await serviceClient.getDecryptData(projectId)).env_content || '';
+  } catch {
+    return null;
+  }
+}
+
+/** The first genuinely-encrypted value in `envContent`, as an oracle bound to `projectId`. */
+function firstOracleIn(envContent: string, projectId: string, fm: FileManager): CiphertextOracle | undefined {
+  // Only genuinely-encrypted values work as oracles: capy:{id}:{payload}.
+  // Tombstones (capy:deleted) and plaintext decrypt as no-ops under any key.
+  const [value] = envContent.split('\n').flatMap(line => {
+    const eq = line.indexOf('=');
+    if (eq < 0) return [];
+    const candidate = line.slice(eq + 1).trim();
+    return candidate.startsWith('capy:') && candidate.split(':').length >= 3 ? [candidate] : [];
+  });
+  if (value === undefined) return undefined;
+  return {
+    projectId,
+    verify: (projectKey: string) => {
+      try {
+        fm.decryptValue(value, projectKey);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+  };
+}
+
+/**
+ * Walks the projects in order. `anyRead` is whether at least one project's
+ * data was read, so the gap code can tell "nothing was looked at" from "it was
+ * looked at and held no encrypted default-branch value".
+ */
+async function scanProjects(
+  serviceClient: ServiceClient,
+  fm: FileManager,
+  projects: ReadonlyArray<{ id: string }>,
+  anyRead: boolean,
+): Promise<{ oracle: CiphertextOracle } | { gap: OracleGapCode }> {
+  // The projects exist and were read, and none of their DEFAULT branches held
+  // an encrypted value. Reporting that rather than "no secrets" is the honest
+  // statement of what was looked at.
+  if (projects.length === 0) return { gap: anyRead ? 'other-branch' : 'fetch-failed' };
+  const [proj, ...rest] = projects;
+  const envContent = await tryEnvContent(serviceClient, proj.id);
+  if (envContent === null) return scanProjects(serviceClient, fm, rest, anyRead);
+  const oracle = firstOracleIn(envContent, proj.id, fm);
+  return oracle ? { oracle } : scanProjects(serviceClient, fm, rest, true);
+}
+
 async function findOrgCiphertextOracle(
   serviceClient: ServiceClient,
   orgId: string,
@@ -67,42 +122,7 @@ async function findOrgCiphertextOracle(
   const mine = projects.filter(p => p.organization_id === orgId);
   if (mine.length === 0) return { gap: 'no-secrets' };
 
-  let anyRead = false;
-  for (const proj of mine) {
-    let envContent = '';
-    try {
-      envContent = (await serviceClient.getDecryptData(proj.id)).env_content || '';
-      anyRead = true;
-    } catch {
-      continue;
-    }
-    for (const line of envContent.split('\n')) {
-      const eq = line.indexOf('=');
-      if (eq < 0) continue;
-      const value = line.slice(eq + 1).trim();
-      // Only genuinely-encrypted values work as oracles: capy:{id}:{payload}.
-      // Tombstones (capy:deleted) and plaintext decrypt as no-ops under any key.
-      if (!value.startsWith('capy:') || value.split(':').length < 3) continue;
-      return {
-        oracle: {
-          projectId: proj.id,
-          verify: (projectKey: string) => {
-            try {
-              fm.decryptValue(value, projectKey);
-              return true;
-            } catch {
-              return false;
-            }
-          },
-        },
-      };
-    }
-  }
-
-  // The projects exist and were read, and none of their DEFAULT branches held
-  // an encrypted value. Reporting that rather than "no secrets" is the honest
-  // statement of what was looked at.
-  return { gap: anyRead ? 'other-branch' : 'fetch-failed' };
+  return scanProjects(serviceClient, fm, mine, false);
 }
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
@@ -110,25 +130,36 @@ const Y = (s: string) => `\x1b[33m${s}\x1b[0m`;
 const G = (s: string) => `\x1b[32m${s}\x1b[0m`;
 
 /**
- * How many words a recovery phrase has.
- *
- * `validateSeedPhrase` is the authority and enforces 24. This states the same
- * number where the browser path needs it BEFORE anything opens: the rail
- * counts the words the run expects and the field builds that many boxes from
- * it, so a screen that hardcoded 24 would be the one place in the product
- * deciding how long a phrase is.
+ * The master key for the phrase. The org's KDF version isn't recorded, so it is
+ * detected by trial against a piece of the org's own ciphertext. This also
+ * validates the phrase up front — a phrase that matches nothing in the org is
+ * rejected before anything is written. With no ciphertext to verify against,
+ * the current KDF version is used (what a new org would use).
  */
-const PHRASE_WORD_COUNT = 24;
-
-export interface RecoverOptions {
-  /**
-   * Ask this run's questions in a browser instead of at the TTY.
-   *
-   * Changes only where a question is RENDERED. The same phrase is checked the
-   * same way, by the same trial decryption, and the same wrapped key lands in
-   * the same file — this flag moves no crypto and writes nothing new.
-   */
-  web?: boolean;
+function resolveMasterKey(
+  found: { oracle: CiphertextOracle } | { gap: OracleGapCode },
+  phrase: string,
+  orgId: string,
+  orgName: string,
+): Buffer {
+  if ('oracle' in found) {
+    const { oracle } = found;
+    const trial = resolveProjectKeyByTrial(phrase, orgId, oracle.projectId, oracle.verify);
+    if (!trial) {
+      console.error(`\n  That recovery phrase does not match any secrets in ${B(orgName)}.`);
+      console.error('  Double-check the phrase, and that you selected the right organization.');
+      console.error('  No changes were written.\n');
+      process.exit(1);
+    }
+    return trial.masterKey;
+  }
+  // No stored secrets in this org — nothing to verify against. With no
+  // ciphertext there is nothing to mis-key; the first push defines the key tree.
+  console.log('');
+  console.log(Y('  ⚠ This org has no stored secrets yet, so the recovery phrase could not'));
+  console.log(Y('    be verified. Writing a key under the current KDF version — run capy in'));
+  console.log(Y('    a project for this org to confirm it decrypts.'));
+  return seedPhraseToMasterKey(phrase, CURRENT_KDF_VERSION);
 }
 
 /**
@@ -164,7 +195,15 @@ export class RecoverCommand {
     this.devMode = devMode;
   }
 
-  async execute(options: RecoverOptions = {}): Promise<void> {
+  /** Silent first; interactive OAuth when there is no usable session. */
+  private async signIn(authService: AuthService) {
+    const silent = await authService.authenticateSilent();
+    if (silent.success) return silent;
+    console.log(`\n  No active session. Launching browser to sign in...\n`);
+    return authService.authenticate();
+  }
+
+  async execute(): Promise<void> {
     const inquirer = (await import('inquirer')).default;
 
     // 1. Authenticate. Try silent first; if there's no usable session (e.g.
@@ -175,11 +214,7 @@ export class RecoverCommand {
     const projectState = await pm.detectProjectState();
     const authService = new AuthService(this.apiUrl, this.devMode, projectState.userId);
 
-    let authResult = await authService.authenticateSilent();
-    if (!authResult.success) {
-      console.log(`\n  No active session. Launching browser to sign in...\n`);
-      authResult = await authService.authenticate();
-    }
+    const authResult = await this.signIn(authService);
     if (!authResult.success) {
       console.error(`\n  Sign-in failed: ${authResult.error || 'unknown error'}. Re-run ${B('capy recover')} after authenticating.\n`);
       process.exit(1);
@@ -190,11 +225,6 @@ export class RecoverCommand {
     if (orgs.length === 0) {
       console.error(`\n  No organizations found for ${B(authResult.user_email || 'this user')}.\n`);
       process.exit(1);
-    }
-
-    if (options.web) {
-      await this.executeInBrowser(authService, userId, orgs, authResult.user_email);
-      return;
     }
 
     // 2. ALWAYS prompt for which org to recover. Never inherit keep.lock —
@@ -212,7 +242,7 @@ export class RecoverCommand {
 
     // 3. Re-scope the session to the chosen org so the KMS wrap-outer call
     //    on this org's endpoint succeeds with the right token.
-    let scoped = await authService.authenticateSilent(orgId);
+    const scoped = await authService.authenticateSilent(orgId);
     if (!scoped.success) {
       // "select this org and retry" is the right advice for an ended session
       // and the wrong advice for an unreachable service, so the cause leads
@@ -225,8 +255,6 @@ export class RecoverCommand {
       );
       process.exit(1);
     }
-    authResult = scoped;
-
     const serviceClient = new ServiceClient(this.apiUrl, this.devMode);
     serviceClient.setTokenProvider(() => authService.getValidToken());
 
@@ -275,35 +303,11 @@ export class RecoverCommand {
       process.exit(1);
     }
 
-    // Determine M. The KDF version that created this org isn't recorded, so we
-    // detect it by trial against a piece of the org's own ciphertext. This also
-    // validates the phrase up front — recover used to write a key.enc for a
-    // wrong phrase and only fail later (see class doc); now a phrase that
-    // matches nothing in the org is rejected before anything is written.
+    // Determine M (see `resolveMasterKey`).
     const fm = new FileManager();
     const found = await findOrgCiphertextOracle(serviceClient, orgId, fm);
 
-    let masterKey: Buffer;
-    if ('oracle' in found) {
-      const { oracle } = found;
-      const trial = resolveProjectKeyByTrial(phrase, orgId, oracle.projectId, oracle.verify);
-      if (!trial) {
-        console.error(`\n  That recovery phrase does not match any secrets in ${B(selectedOrg.name)}.`);
-        console.error('  Double-check the phrase, and that you selected the right organization.');
-        console.error('  No changes were written.\n');
-        process.exit(1);
-      }
-      masterKey = trial.masterKey;
-    } else {
-      // No stored secrets in this org — nothing to verify against. Use the
-      // current KDF version (what a new org would use). With no ciphertext there
-      // is nothing to mis-key; the first push defines the key tree.
-      console.log('');
-      console.log(Y('  ⚠ This org has no stored secrets yet, so the recovery phrase could not'));
-      console.log(Y('    be verified. Writing a key under the current KDF version — run capy in'));
-      console.log(Y('    a project for this org to confirm it decrypts.'));
-      masterKey = seedPhraseToMasterKey(phrase, CURRENT_KDF_VERSION);
-    }
+    const masterKey = resolveMasterKey(found, phrase, orgId, selectedOrg.name);
 
     const keyOps = {
       coDecrypt: (oid: string, ct: string) =>
@@ -327,157 +331,5 @@ export class RecoverCommand {
     console.log(`  Verify by running ${B('capy')} in a project for this org — a wrong recovery`);
     console.log(`  phrase will surface as a decryption failure on the first encrypted variable.`);
     console.log('');
-  }
-
-  /**
-   * The same three questions, drawn in a browser instead of at the TTY.
-   *
-   * Every decision below is still this command's. The screen module is handed
-   * three operations and never sees a master key: `scopeToOrg` re-scopes the
-   * session, `verifyPhrase` runs the identical trial decryption the terminal
-   * path runs, and `writeKey` derives and wraps. What moves is where the
-   * questions are asked — and, on one fork, whether they are asked at all.
-   *
-   * That fork is the unverified case. With nothing to trial-decrypt against,
-   * the terminal prints a warning and writes a key under the current KDF
-   * version anyway; for a legacy v1 organization caught by a transient outage
-   * that is a silently wrong key, discovered weeks later as a decryption
-   * failure. Here it is a stop, with the reason named, that the user answers.
-   *
-   * Nothing about the phrase is printed, logged or returned: this method sees
-   * the words only inside `verifyPhrase` and `writeKey`, which are the two
-   * places that have to.
-   */
-  private async executeInBrowser(
-    authService: AuthService,
-    userId: string,
-    orgs: Array<{ id: string; name: string }>,
-    userEmail?: string,
-  ): Promise<void> {
-    const serviceClient = new ServiceClient(this.apiUrl, this.devMode);
-    serviceClient.setTokenProvider(() => authService.getValidToken());
-    const fm = new FileManager();
-
-    const keyOps = {
-      coDecrypt: (oid: string, ct: string) =>
-        serviceClient.coDecrypt(oid, ct).then(r => r.plaintext),
-      wrapOuterLayer: (oid: string, pt: string) =>
-        serviceClient.wrapOuterLayer(oid, pt).then(r => r.ciphertext),
-    };
-
-    console.log('');
-    console.log(`  Signed in as ${B(userEmail || userId)}.`);
-
-    const { recoverInBrowser } = await import('../ui/recoveryScreens');
-    const pending = recoverInBrowser({
-      userEmail,
-      // Which organizations already hold a key here decides whether the
-      // overwrite stop is a station or a struck-out one, and the rail says so
-      // before the user picks — the terminal springs it afterwards.
-      orgs: orgs.map(o => ({
-        id: o.id,
-        name: o.name,
-        hasKeyOnThisDevice: hasOrgKey(o.id, userId),
-      })),
-      wordCount: PHRASE_WORD_COUNT,
-      // Open the user's browser by default; CAPY_WEB_NO_OPEN lets CI and
-      // headless verification drive the loopback without hijacking a real one.
-      open: !process.env.CAPY_WEB_NO_OPEN,
-      ops: {
-        scopeToOrg: async (orgId: string) => {
-          const scoped = await authService.authenticateSilent(orgId);
-          return scoped.success === true;
-        },
-        verifyPhrase: async (orgId: string, phrase: string) => {
-          // The terminal path's two checks, in the same order, so a phrase
-          // this command refuses at the TTY is refused in the browser too.
-          if (!phrase) return { code: 'EMPTY' as const };
-          if (!validateSeedPhrase(phrase)) return { code: 'INVALID' as const };
-
-          const found = await findOrgCiphertextOracle(serviceClient, orgId, fm);
-          if ('gap' in found) return { code: 'NO_ORACLE' as const, gap: found.gap };
-
-          const trial = resolveProjectKeyByTrial(
-            phrase,
-            orgId,
-            found.oracle.projectId,
-            found.oracle.verify,
-          );
-          if (!trial) return { code: 'NO_MATCH' as const };
-          return { code: 'MATCH' as const, kdfVersion: trial.version };
-        },
-        writeKey: async (orgId: string, phrase: string, kdfVersion?: 1 | 2) => {
-          const masterKey = seedPhraseToMasterKey(phrase, kdfVersion ?? CURRENT_KDF_VERSION);
-          try {
-            await wrapAndSaveMasterKey(masterKey, orgId, userId, keyOps);
-          } catch (err: any) {
-            // The CLI's own sentence, carried whole so a failure reads the
-            // same wherever it is shown.
-            return {
-              ok: false as const,
-              message: `Failed to wrap and save the master key: ${err?.message || err}. No changes were written. Re-authenticate and try again.`,
-            };
-          }
-          return { ok: true as const, keyPath: `~/.capy/orgs/${orgId}/users/${userId}/key.enc` };
-        },
-      },
-    });
-    const result = await this.orReportRefusal(pending);
-
-    if (result.cancelled) {
-      console.log('  Aborted. No changes made.');
-      return;
-    }
-
-    if (result.kdfVersion === null) {
-      // Deliberately NOT the terminal path's sentence. That one says the org
-      // has no stored secrets, which is only one of four reasons the trial can
-      // fail to run — the page named the actual one, and repeating a guess
-      // here would be the CLI claiming something it did not establish.
-      console.log('');
-      console.log(Y('  ⚠ Nothing here could check this recovery phrase, and you chose to write'));
-      console.log(Y('    the key anyway. It is under the current KDF version — run capy in a'));
-      console.log(Y('    project for this org to confirm it decrypts.'));
-    }
-
-    console.log('');
-    console.log(G(`  ✓ Recovered master key for ${B(result.orgName)}.`));
-    console.log('');
-    if (result.keyPath) {
-      console.log(`  Wrapped key written to ${B(result.keyPath)}.`);
-    }
-    console.log(`  Verify by running ${B('capy')} in a project for this org — a wrong recovery`);
-    console.log(`  phrase will surface as a decryption failure on the first encrypted variable.`);
-    console.log('');
-  }
-
-  /**
-   * A browser flow that never answered is a refusal, and it is said out loud.
-   *
-   * There are three ways out of `capy recover --web`: the key is written, the
-   * user cancels, or the window is closed. The third resolves nothing, so the
-   * wizard eventually gives up and rejects — and with no handler here that
-   * rejection reached index.ts's global `unhandledRejection`, which dumps the
-   * raw error object. A stack trace is not one of the endings, and it is a
-   * particularly bad one on the command whose subject is a master key: it
-   * says nothing about whether a key was written.
-   *
-   * Nothing derives or wraps a key outside `ops.writeKey`, and that returns
-   * its failures rather than throwing, so every rejection reaching here is a
-   * run that wrote nothing. That is what gets stated, before the CLI's own
-   * error screen renders the reason.
-   */
-  private async orReportRefusal<T>(pending: Promise<T>): Promise<T> {
-    try {
-      return await pending;
-    } catch (err) {
-      console.log('');
-      console.log('  Nothing was written. No key on this device was created or replaced.');
-      const { displayErrorAndExit } = await import('../ui/errorScreen');
-      await displayErrorAndExit(err);
-      // Unreachable: the line above exits. Present so this function has no
-      // path that falls out of the catch returning nothing.
-      throw err;
-    }
   }
 }

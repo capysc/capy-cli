@@ -1,17 +1,17 @@
 /**
  * `capy edit [NAME]` — which mode a given invocation is in, and piped mode.
  *
- * The decision is a pure function of four facts (a name, `--web`, whether stdin
- * is a terminal, `--non-tty`) and is made BEFORE anything is drawn and before
- * any auth or network call, so `capy edit </dev/null` refuses immediately
- * instead of writing an ANSI screen into captured stdout and hanging on a stdin
- * that never delivers a key.
+ * The decision is a pure function of three facts (a name, whether stdin is a
+ * terminal, `--non-tty`) and is made BEFORE anything is drawn and before any
+ * auth or network call, so `capy edit </dev/null` refuses immediately instead
+ * of writing an ANSI screen into captured stdout and hanging on a stdin that
+ * never delivers a key.
  *
- * | name | stdin   | mode                                                     |
- * |------|---------|----------------------------------------------------------|
- * | any  | TTY     | `tui`, or `web` with `--web`                             |
- * | yes  | not TTY | `piped` (`--web` ignored)                                |
- * | no   | not TTY | `web` with `--web` (the headless agent editor, as always), otherwise `refuse` |
+ * | name | stdin   | mode     |
+ * |------|---------|----------|
+ * | any  | TTY     | `tui`    |
+ * | yes  | not TTY | `piped`  |
+ * | no   | not TTY | `refuse` |
  *
  * `--non-tty` takes the TTY off the table. A name with `--non-tty` on a real
  * terminal has nothing piped to read, so it refuses rather than block on the
@@ -23,21 +23,20 @@ import { MAX_PIPED_BYTES, readPipedValue, refuseInvalidName, refusePiped } from 
 import { isValidVarName, runPipedWrite } from './pipedWrite';
 import type { PrFlags } from './keepLockPr';
 
-export type EditMode = 'tui' | 'web' | 'piped' | 'refuse';
+export type EditMode = 'tui' | 'piped' | 'refuse';
 
 export interface EditModeFacts {
   readonly hasName: boolean;
-  readonly web: boolean;
   readonly stdinIsTTY: boolean;
   readonly nonTty: boolean;
 }
 
 export function decideEditMode(facts: EditModeFacts): EditMode {
-  const { hasName, web, stdinIsTTY, nonTty } = facts;
-  if (stdinIsTTY && !nonTty) return web ? 'web' : 'tui';
+  const { hasName, stdinIsTTY, nonTty } = facts;
+  if (stdinIsTTY && !nonTty) return 'tui';
   const somethingIsPiped = !stdinIsTTY;
   if (hasName) return somethingIsPiped ? 'piped' : 'refuse';
-  return web ? 'web' : 'refuse';
+  return 'refuse';
 }
 
 /** `EDIT_NEEDS_TTY`, exit 3. Hint verbatim from the spec. */
