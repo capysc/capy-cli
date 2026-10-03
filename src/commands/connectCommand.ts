@@ -1,86 +1,10 @@
-import { resolveContext, writeAndSync, writeImportOutcome, listManagedKeys, ResolvedContext } from './connectors/shared';
-import { listProviders, loadProvider, ConnectOpts, ConnectorModule, ConnectResult } from './connectors/registry';
-import { connectPlan } from './connectors/plans';
+import { resolveContext, writeAndSync, writeImportOutcome, ResolvedContext } from './connectors/shared';
+import { listProviders, loadProvider, ConnectOpts, ConnectorModule } from './connectors/registry';
 import { isInteractive } from '../ui/interactive';
-import { ProjectManager } from '../core/projectManager';
 import { resolveOrgContext } from '../core/orgContext';
-import { confirmLiveActionInBrowser } from '../ui/connectScreens';
 import type { DiscoveryContext } from './connectors/dokployDiscovery';
-import type {
-  ConnectLiveGateStop,
-  ConnectorChoice,
-  ConnectOutcome,
-  ConnectResultData,
-} from '../ui/screens/contract';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
-
-/** Browser paths honour this so a test never opens the developer's real browser. */
-const shouldOpen = (): boolean => !process.env.CAPY_WEB_NO_OPEN;
-
-/**
- * The connector list, with the three things the terminal's two columns cannot
- * say until it is too late: that the connector wants a binary you may not have,
- * that it hands you off to a browser pairing, and how many variables on this
- * branch it already owns.
- *
- * Exported so a test can assert the shape without a browser. The keep.lock read
- * is best-effort: `capy connect` runs outside an initialised project too, and a
- * missing count is not a reason to refuse the list.
- */
-/** Managed-variable counts per provider, on the active branch. `{}` on any failure (see `describeConnectors`'s own doc) — never partial. */
-function computeManagedCounts(): Record<string, number> {
-  try {
-    const pm = new ProjectManager();
-    const keep = pm.readKeepFile();
-    const branch = pm.deriveActiveBranch();
-    if (!keep || !branch) return {};
-    return listManagedKeys(keep, branch).reduce<Record<string, number>>(
-      (acc, { connector }) => ({ ...acc, [connector.provider]: (acc[connector.provider] ?? 0) + 1 }),
-      {},
-    );
-  } catch {
-    return {};
-  }
-}
-
-export async function describeConnectors(): Promise<ConnectorChoice[]> {
-  const managed = computeManagedCounts();
-  return Promise.all(
-    listProviders().map(async (p) => {
-      const mod = await loadProvider(p.name);
-      const found = mod.toolInstalled ? mod.toolInstalled() : undefined;
-      return {
-        id: p.name,
-        description: p.description,
-        ...(mod.requiresAuth ? { requiresAuth: true } : {}),
-        ...(mod.requiresTool ? { requiresTool: mod.requiresTool } : {}),
-        ...(found === undefined ? {} : { toolFound: found }),
-        // The identical refusal `capy connect <id>` would run into, previewed
-        // here rather than discovered one command later. Same object, so the two
-        // cannot word one condition differently.
-        ...(found === false && mod.toolMissing ? { blocked: mod.toolMissing } : {}),
-        ...(managed[p.name] ? { managedCount: managed[p.name] } : {}),
-      };
-    }),
-  );
-}
-
-/**
- * What the result page's Push stop should say, given how the run ended.
- *
- * One mapping, keyed off the outcome enum rather than off prose, so the rail
- * and the body of the page cannot disagree: a `push-failed` page that reads
- * "The push did not land" beside a rail drawing Push as a stop still ahead of
- * the traveller is the drift the declared plan exists to remove.
- */
-export function pushOutcomeFor(outcome: ConnectOutcome): 'landed' | 'failed' | 'not-reached' {
-  if (outcome === 'pushed') return 'landed';
-  if (outcome === 'push-failed') return 'failed';
-  // `local-only` never attempted it, `write-failed` never got that far, and
-  // `cancelled` stopped at the gate before it.
-  return 'not-reached';
-}
 
 /**
  * Discovery's own context — org + auth + serviceClient, exactly what
@@ -104,24 +28,8 @@ export class ConnectCommand {
     this.devMode = devMode;
   }
 
-  /**
-   * `capy connect` with no provider.
-   *
-   * In the terminal this prints a catalogue and stops: the user reads two
-   * columns and then types a second command. Under `--web` the catalogue is
-   * the picker, and picking a row continues into the same connect.
-   */
-  async list(opts: ConnectOpts = {}): Promise<void> {
-    if (opts.web) {
-      const picked = await this.chooseProviderInBrowser(opts);
-      if (!picked) {
-        console.log('\n  No connector selected — nothing changed.\n');
-        return;
-      }
-      await this.execute(picked, opts);
-      return;
-    }
-
+  /** `capy connect` with no provider: prints the catalogue and stops. */
+  async list(): Promise<void> {
     console.log('');
     console.log('  Available connectors:');
     for (const p of listProviders()) {
@@ -130,83 +38,14 @@ export class ConnectCommand {
     console.log('');
   }
 
-  /** Serve the connector list and return the pick, or null on cancel. */
-  private async chooseProviderInBrowser(
-    opts: ConnectOpts,
-    unknownProvider?: string,
-  ): Promise<string | null> {
-    const pm = new ProjectManager();
-    const keep = pm.readKeepFile();
-    const { chooseConnectorInBrowser } = await import('../ui/connectScreens');
-    const picked = await chooseConnectorInBrowser({
-      projectName: keep?.project_name ?? 'project',
-      branch: pm.deriveActiveBranch() ?? '',
-      connectors: await describeConnectors(),
-      ...(unknownProvider ? { unknownProvider } : {}),
-      open: shouldOpen(),
-    });
-    return picked.cancelled ? null : picked.provider;
-  }
-
-  /**
-   * Loads the named connector, or — under `--web` with an unknown provider —
-   * lets the browser picker choose a real one and finishes the WHOLE command
-   * from there, which is why the failure path returns a `shortCircuit`
-   * carrying `execute`'s own result rather than just a module.
-   */
-  private async resolveProviderOrShortCircuit(
-    provider: string,
-    opts: ConnectOpts,
-  ): Promise<{ kind: 'ok'; mod: ConnectorModule } | { kind: 'shortCircuit'; result: { linked: boolean } }> {
+  /** Loads the named connector; an unknown provider exits 1 with a pointer back to the catalogue. */
+  private async resolveProvider(provider: string): Promise<ConnectorModule> {
     try {
-      return { kind: 'ok', mod: await loadProvider(provider) };
+      return await loadProvider(provider);
     } catch (err) {
-      if (opts.web) {
-        // The terminal answers a bad provider with `Unknown connector: x` and a
-        // pointer back to the bare `capy connect`, which is a second command
-        // for a list the CLI could have shown with the mistake. Here it does.
-        const picked = await this.chooseProviderInBrowser(opts, provider);
-        if (picked) {
-          // RETURN, never `process.exit(0)`: the run that just finished served
-          // its own ending page from a loopback server in this process, and
-          // exiting here would close the socket underneath it. Returning lets
-          // the process end on its own once that page has been read, carrying
-          // whatever exit code the inner run set.
-          return { kind: 'shortCircuit', result: await this.execute(picked, opts) };
-        }
-      }
       console.error(`\n  ${(err as Error).message}`);
       console.error('  Run `capy connect` to see available providers.\n');
       process.exit(1);
-    }
-  }
-
-  /**
-   * `writeAndSync`, mapped down to the two states `execute`'s ending needs: a
-   * push that fails after the local write leaves `.env` holding a key nobody
-   * else has, which is a different next move than a clean write, so the
-   * outcome (and, on failure, the detail string) come back rather than being
-   * assigned onto a variable the try/catch closes over.
-   */
-  private async writeConnectResult(
-    ctx: ResolvedContext,
-    opts: ConnectOpts,
-    result: Pick<ConnectResult, 'varName' | 'value' | 'entry' | 'also'>,
-  ): Promise<{ outcome: ConnectOutcome; detail?: string }> {
-    const initialOutcome: ConnectOutcome = opts.noPush ? 'local-only' : 'pushed';
-    try {
-      await writeAndSync(ctx, result.varName, result.value, {
-        push: !opts.noPush,
-        connector: result.entry,
-        alsoConnect: result.also,
-      });
-      return { outcome: initialOutcome };
-    } catch (err) {
-      if (!opts.web) throw err;
-      return {
-        outcome: opts.noPush ? 'write-failed' : 'push-failed',
-        detail: err instanceof Error ? err.message : String(err),
-      };
     }
   }
 
@@ -216,8 +55,7 @@ export class ConnectCommand {
    * A caller that has more journey after this one — `capy rotate` promoting an
    * unmanaged variable — has to know whether to carry on, and the honest
    * signal is a return value rather than re-reading keep.lock and inferring it.
-   * A decline and a failed push both leave `linked: false`; every path that
-   * ends in `process.exit` never returns at all.
+   * Every path that ends in `process.exit` never returns at all.
    */
   async execute(provider: string, opts: ConnectOpts): Promise<{ linked: boolean }> {
     // Live-mode firewall: capy-dev never touches a live key.
@@ -232,9 +70,7 @@ export class ConnectCommand {
     // exiting two screens later.
     const effective: ConnectOpts = { ...opts, devMode: this.devMode };
 
-    const resolved = await this.resolveProviderOrShortCircuit(provider, opts);
-    if (resolved.kind === 'shortCircuit') return resolved.result;
-    const mod = resolved.mod;
+    const mod = await this.resolveProvider(provider);
 
     if (mod.precheck) mod.precheck();
 
@@ -274,86 +110,29 @@ export class ConnectCommand {
     // Confirmation gate for live mode in prod: a human typing the account ID.
     // In assisted non-interactive mode we skip the typed echo — when connect
     // ran `stripe login`, completing that browser pairing is the human-presence
-    // proof. The typed confirmation only runs in an interactive terminal, or in
-    // a browser when one was asked for.
-    if (!this.devMode && entry.mode === 'live' && (opts.web || isInteractive(opts.nonTty))) {
-      const ok = opts.web
-        ? await confirmLiveActionInBrowser({
-            action: 'connect',
-            provider,
-            projectName: ctx.keep.project_name,
-            branch: ctx.branch,
-            varName,
-            accountId: entry.account_id ?? null,
-            // Read off the recorded metadata, not off a value: `connect` no
-            // longer carries one. `key_prefix` exists for exactly this — the
-            // fingerprint keeps three characters, which cannot tell `sk_test_`
-            // from `sk_live_` at the confirmation that exists to tell them
-            // apart.
-            ...(entry.key_prefix ? { keyPrefix: entry.key_prefix } : {}),
-            push: !opts.noPush,
-            pushFromFlag: opts.noPush === true,
-            accountFromFlag: Boolean(opts.account),
-            varFromFlag: Boolean(opts.var),
-            stops: connectPlan({
-              provider,
-              branch: ctx.branch,
-              requiresTool: mod.requiresTool,
-              requiresAuth: mod.requiresAuth,
-              standing: null,
-              varName,
-              varFromFlag: Boolean(opts.var),
-              mode: 'live',
-              modeFromFlag: Boolean(opts.live),
-              account: entry.account_id,
-              accountFromFlag: Boolean(opts.account),
-              alreadySignedIn: true,
-              push: !opts.noPush,
-              pushFromFlag: opts.noPush === true,
-            }),
-            open: shouldOpen(),
-                })
-        : await confirmLiveAction({
-            action: 'connect',
-            varName,
-            accountId: entry.account_id ?? '(unknown)',
-            keyPrefix: entry.key_prefix ?? '(unknown)',
-          });
+    // proof. The typed confirmation only runs in an interactive terminal.
+    if (!this.devMode && entry.mode === 'live' && isInteractive(opts.nonTty)) {
+      const ok = await confirmLiveAction({
+        action: 'connect',
+        varName,
+        accountId: entry.account_id ?? '(unknown)',
+        keyPrefix: entry.key_prefix ?? '(unknown)',
+      });
       if (!ok) {
         console.log('  Cancelled.');
-        // The terminal path is unchanged: nothing was written, and the command
-        // is over.
-        if (!opts.web) process.exit(0);
-        // Under `--web` the decline gets a page saying what it left behind —
-        // and that page is served from THIS process, so the run ends by
-        // returning rather than by exiting. `process.exit(0)` here closed the
-        // loopback server microseconds after it started listening, which made
-        // the ending unreachable and the refusal indistinguishable from a
-        // successful connect.
-        await this.showResult(ctx.keep.project_name, ctx.branch, provider, mod.requiresTool, opts, {
-          outcome: 'cancelled',
-          varName,
-          mode: entry.mode as 'test' | 'live' | undefined,
-          requiresAuth: mod.requiresAuth === true,
-        });
-        return { linked: false };
+        // Nothing was written, and the command is over.
+        process.exit(0);
       }
     }
 
-    // A push that fails after the local write leaves .env holding a key nobody
-    // else has, and the terminal reports that as a stack trace. The two states
-    // need different next moves, so the browser result names which one happened.
-    const { outcome, detail } = await this.writeConnectResult(ctx, opts, { varName, value, entry, also });
+    await writeAndSync(ctx, varName, value, {
+      push: !opts.noPush,
+      connector: entry,
+      alsoConnect: also,
+    });
 
-    // The terminal's own lines first, then the page. The other order made the
-    // whole summary wait on a human loading a browser tab, because the ending
-    // page holds the run open until it has been delivered.
-    const failed = outcome === 'push-failed' || outcome === 'write-failed';
     console.log('');
-    if (failed) {
-      console.error(`  ✗ ${B(varName)}: ${detail}`);
-      console.log('');
-    } else if (opts.noPush) {
+    if (opts.noPush) {
       // Say what moved AND what did not. The old wording — "wrote VAR to .env"
       // — described a value write that no longer happens, and a success line
       // that overstates its own reach is how a user learns the wrong model of
@@ -378,40 +157,12 @@ export class ConnectCommand {
       console.log('');
     }
 
-    // No ending page for a step that is not the end. `showResult` serves a
-    // page that says the run is over and holds the process until a browser has
-    // read it; between the link and the rotation it would be a false ending
-    // and a second window. The failure endings below this branch are a
-    // different case — the outer command stops there, so the page is the only
-    // report there is.
-    if (opts.web && (failed || !opts.subStep)) {
-      await this.showResult(ctx.keep.project_name, ctx.branch, provider, mod.requiresTool, opts, {
-        outcome,
-        varName,
-        mode: entry.mode as 'test' | 'live' | undefined,
-        accountId: entry.account_id,
-        ...(entry.key_prefix ? { keyPrefix: entry.key_prefix } : {}),
-        fingerprint: entry.fingerprint,
-        expiresAt: entry.expires_at,
-        detail,
-        requiresAuth: mod.requiresAuth === true,
-      });
-    }
-
-    // `process.exitCode`, never `process.exit`. The failure endings above are
-    // only reachable under `--web` (without it the throw propagates), and the
-    // page explaining them is served from this process — an exit here is what
-    // made "the push did not land" a page nobody could open. The code is
-    // delivered when the loop drains, which is after the browser has the page.
-    if (failed) process.exitCode = 1;
-    return { linked: !failed };
+    return { linked: true };
   }
 
   /**
    * `capy connect <import-connector>` — pulls the provider's variables into
-   * `.env` in one pass, then reports. No browser ending page exists for this
-   * yet (no screen has been built for an import run); `--json` and the
-   * terminal are the only two surfaces today.
+   * `.env` in one pass, then reports (`--json` or the terminal).
    *
    * Names and codes only, everywhere — never a value. `outcome.imported`
    * carries the actual values (needed for the write below); every printed or
@@ -521,8 +272,7 @@ export class ConnectCommand {
   /**
    * `capy connect dokploy --discover` (CAP-657 follow-up) — reports the plan
    * (names/counts only, never a value), then — for a real, confirmed,
-   * non-empty run — what was actually written. No browser ending page exists
-   * for this yet, same as `executeImport`.
+   * non-empty run — what was actually written.
    */
   private async executeDiscovery(
     mod: ConnectorModule,
@@ -728,102 +478,6 @@ export class ConnectCommand {
     console.log('');
     return { linked };
   }
-
-  /** The tail of the command, as a page. Reports only — nothing here decides. */
-  private async showResult(
-    projectName: string,
-    branch: string,
-    provider: string,
-    requiresTool: string | undefined,
-    opts: ConnectOpts,
-    run: {
-      outcome: ConnectOutcome;
-      varName: string;
-      mode?: 'test' | 'live';
-      accountId?: string;
-      keyPrefix?: string;
-      fingerprint?: string;
-      expiresAt?: number;
-      detail?: string;
-      /** The provider's own flag, not an assumption about every connector. */
-      requiresAuth: boolean;
-    },
-  ): Promise<void> {
-    const { showConnectResultInBrowser } = await import('../ui/connectScreens');
-    const expiresInDays =
-      typeof run.expiresAt === 'number'
-        ? Math.floor((run.expiresAt - Date.now() / 1000) / 86400)
-        : undefined;
-    const stops: ConnectResultData['stops'] = connectPlan({
-      provider,
-      branch,
-      requiresTool,
-      requiresAuth: run.requiresAuth,
-      standing: null,
-      varName: run.varName,
-      varFromFlag: Boolean(opts.var),
-      ...(run.mode ? { mode: run.mode } : {}),
-      modeFromFlag: Boolean(opts.live),
-      ...(run.accountId ? { account: run.accountId } : {}),
-      accountFromFlag: Boolean(opts.account),
-      // Every outcome this page reports arrives AFTER `mod.connect()` returned
-      // a key, so the provider session existed by then however it got there.
-      // Drawing "Sign in" as still upcoming on a finished run is the same
-      // drift as drawing Push as upcoming on a run that pushed.
-      signedIn: true,
-      push: !opts.noPush,
-      pushFromFlag: opts.noPush === true,
-      pushOutcome: pushOutcomeFor(run.outcome),
-    });
-    await showConnectResultInBrowser({
-      outcome: run.outcome,
-      provider,
-      projectName,
-      branch,
-      varName: run.varName,
-      ...(run.mode ? { mode: run.mode } : {}),
-      ...(run.accountId ? { accountId: run.accountId } : {}),
-      ...(run.keyPrefix ? { keyPrefix: run.keyPrefix } : {}),
-      ...(run.fingerprint ? { fingerprint: run.fingerprint } : {}),
-      ...(expiresInDays !== undefined ? { expiresInDays } : {}),
-      ...(run.detail ? { detail: run.detail } : {}),
-      stops,
-      open: shouldOpen(),
-    });
-  }
-}
-
-/**
- * The route a rotation's live gate draws.
- *
- * Rotation reaches `confirmLiveAction` with the variable and the account
- * already settled — the variable positionally, the account off the keep.lock
- * entry — so both stops are `done`. The variable stop carries no `flag`
- * deliberately: `capy rotate` takes the variable positionally, and naming a
- * flag would be the rail telling the reader to retype an argument the command
- * would reject.
- */
-export function rotateLiveGateStops(args: {
-  provider: string;
-  branch: string;
-  varName: string;
-  accountId?: string;
-  push: boolean;
-  pushFromFlag?: boolean;
-}): ConnectLiveGateStop[] {
-  return connectPlan({
-    provider: args.provider,
-    branch: args.branch,
-    requiresTool: args.provider === 'stripe' ? 'stripe' : undefined,
-    requiresAuth: true,
-    standing: null,
-    varName: args.varName,
-    mode: 'live',
-    ...(args.accountId ? { account: args.accountId } : {}),
-    alreadySignedIn: true,
-    push: args.push,
-    ...(args.pushFromFlag ? { pushFromFlag: true } : {}),
-  });
 }
 
 /**

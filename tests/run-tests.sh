@@ -10,11 +10,9 @@ cd "$(dirname "$0")/.."
 # auto-commit (CAP-303) create real commits here.
 export CAPY_NO_AUTOCOMMIT=1
 
-# No test may launch the developer's browser. Every `--web` call site reads
-# this before calling `open()`, and the browser tests drive a downloaded
-# headless shell with a throwaway profile instead. Individual tests also pass
-# `open: false`; this is the backstop for the ones that go through a command,
-# where the flag is not theirs to pass.
+# No test may launch the developer's browser. `openScreen` reads this before
+# calling `open()`; it is the backstop for the tests that go through a command
+# (the sign-in callback, the deploy page), where the flag is not theirs to pass.
 export CAPY_WEB_NO_OPEN=1
 
 FAIL=0
@@ -57,7 +55,6 @@ ISOLATED_FILES=(
   tests/service/serviceClient.test.ts
   tests/commands/profileCommand.test.ts
   tests/commands/localOnlyFlow.test.ts
-  tests/ui/deployDeadline.test.ts
   tests/ui/secretsScreenSearchHashing.test.ts
   tests/commands/rotatePromotesThenRotates.test.ts
   tests/system/systemStore.test.ts

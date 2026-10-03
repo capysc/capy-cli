@@ -16,7 +16,6 @@ import {
 import ora from '../ui/spinner';
 import inquirer from 'inquirer';
 import { generateDeployHtml } from '../ui/deployPage/html';
-import { formatRelativeTime } from '../ui/relativeTime';
 import { hashValue } from '../deploy/keepGate';
 import { stripTargetsForDeployId } from '../deploy/targetsGate';
 import { ERROR_CODES } from '../types/index';
@@ -163,48 +162,6 @@ function decorateChoices(
       };
     }
     return { ...p };
-  });
-}
-
-/**
- * The same list the terminal picker offers, as rows the browser can draw.
- *
- * `hasConnector` is the fork the terminal renders as a dim ` (connector
- * available)` suffix — which is also the only warning that picking a platform
- * without one silently skips the next question. `connectorLabel` and
- * `connectorDetail` are the adapter's own `label` and `description`, carried
- * verbatim: `aws-ecs` maps to the AWS SSM Parameter Store adapter, so choosing
- * "AWS ECS" in the terminal lands you in a picker that never says ECS again.
- */
-async function platformRows(): Promise<
-  Array<{
-    id: string;
-    name: string;
-    hasConnector: boolean;
-    connectorId?: string;
-    connectorLabel?: string;
-    connectorDetail?: Array<string | { code: string }>;
-  }>
-> {
-  const { getAdapter } = await import('../deploy/registry');
-  // "Other..." last. The inquirer list renders it FIRST, which makes the
-  // default landing row on a fresh project "none of these" — the one answer
-  // that skips every connector Capy has.
-  const ordered = [
-    ...PLATFORMS.filter((p) => p.value !== 'other'),
-    ...PLATFORMS.filter((p) => p.value === 'other'),
-  ];
-  return ordered.map((p) => {
-    const connectorId = PLATFORM_TO_CONNECTOR[p.value];
-    const adapter = connectorId ? getAdapter(connectorId) : null;
-    return {
-      id: p.value,
-      name: p.name,
-      hasConnector: !!connectorId,
-      connectorId,
-      connectorLabel: adapter?.label,
-      connectorDetail: adapter ? [adapter.description] : undefined,
-    };
   });
 }
 
@@ -357,9 +314,8 @@ function writeConfig(projectRoot: string, config: CapyConfig): void {
 
 async function openInBrowser(url: string): Promise<void> {
   const { openScreen } = await import('../ui/openScreen');
-  // Wide, and not because of `Page`: this one is not a compiled screen but the
-  // deploy instructions — fenced blocks of platform config someone is going to
-  // read and copy. A 520px dialog would wrap every one of them.
+  // Wide: this is the deploy instructions — fenced blocks of platform config
+  // someone is going to read and copy. A 520px dialog would wrap every one of them.
   await openScreen(url, { kind: 'dialog', wide: true });
 }
 
@@ -380,14 +336,74 @@ export interface DeployCommandOptions {
   yes?: boolean;
   /** Forwarded to the connector flow: force a redeploy even if keep.lock is unchanged. */
   force?: boolean;
-  /**
-   * Ask this run's questions in a browser instead of at the TTY.
-   *
-   * Changes only where a question is RENDERED. The same flags settle the same
-   * steps, the same answers reach the same code, and nothing about what is
-   * minted, written to `.capy/config`, or handed to the connector moves.
-   */
-  web?: boolean;
+}
+
+/** org-scoped silent → unscoped silent → interactive: the first success, else the last attempt. */
+async function authenticateOrgFirst(authService: AuthService, orgId: string) {
+  const scoped = await authService.authenticateSilent(orgId);
+  if (scoped.success) return scoped;
+  const unscoped = await authService.authenticateSilent();
+  return unscoped.success ? unscoped : await authService.authenticate(orgId);
+}
+
+/**
+ * Serve the deploy instructions on a loopback port and open them (the
+ * clipboard API needs a localhost origin). Resolves `false` when the page
+ * could not be served, so the caller falls back to the terminal. Once the page
+ * is being served this never resolves: the process stays up until the
+ * five-minute timer or Ctrl+C ends it.
+ */
+async function serveDeployInstructions(html: string): Promise<boolean> {
+  try {
+    const server = createServer((_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(html);
+    });
+
+    await new Promise<void>((resolve, reject) => {
+      server.listen(0, '127.0.0.1', () => resolve());
+      server.on('error', reject);
+    });
+
+    const addr = server.address();
+    if (!(addr && typeof addr === 'object')) return false;
+
+    // Use 127.0.0.1 explicitly: `localhost` resolves to ::1 (IPv6) first
+    // on macOS/modern Linux, but the server above binds to 127.0.0.1 only,
+    // so default browsers opened via the printed terminal URL would hit
+    // a dead IPv6 port. The popup path happened to retry families and
+    // hid this from users who relied on the auto-opened window.
+    const url = `http://127.0.0.1:${addr.port}`;
+    console.log(`\n  Temporary deploy instructions — if the browser doesn't open, visit:`);
+    console.log(`  ${url}`);
+    console.log('  Press Ctrl+C to close.\n');
+
+    await openInBrowser(url);
+
+    // Auto-shutdown after 5 minutes
+    const shutdownTimer = setTimeout(() => {
+      server.close();
+      process.exit(0);
+    }, 5 * 60 * 1000);
+    shutdownTimer.unref();
+
+    // Clean shutdown on Ctrl+C
+    process.on('SIGINT', () => {
+      server.close();
+      process.exit(0);
+    });
+    process.on('SIGTERM', () => {
+      server.close();
+      process.exit(0);
+    });
+
+    // Keep process alive
+    await new Promise(() => {});
+    return true;
+  } catch {
+    // Fall through to terminal output
+    return false;
+  }
 }
 
 export class DeployCommand {
@@ -399,6 +415,77 @@ export class DeployCommand {
     this.apiUrl = apiUrl;
     this.devMode = devMode;
     this.options = options;
+  }
+
+  /** The platform: the `--platform` flag, or the picker. An unknown flag value exits 1. */
+  private async resolvePlatform(defaultPlatform: string | undefined): Promise<string> {
+    const flagPlatform = this.options.platform;
+    if (flagPlatform !== undefined) {
+      if (!PLATFORMS.some(p => p.value === flagPlatform)) {
+        console.error(`  --platform must be one of: ${PLATFORMS.map(p => p.value).join(', ')}`);
+        process.exit(1);
+      }
+      return flagPlatform;
+    }
+    // Show "Other..." at the top as a ready-made escape hatch, with a
+    // non-selectable Separator between it and the alphabetical list so
+    // it doesn't read as "just another platform".
+    const choices = [
+      ...decorateChoices(PLATFORMS.filter(p => p.value === 'other')),
+      new inquirer.Separator() as any,
+      ...decorateChoices(PLATFORMS.filter(p => p.value !== 'other')),
+    ];
+    const answer = await inquirer.prompt([{
+      type: 'list',
+      name: 'platform',
+      message: 'Where does this project deploy?',
+      choices,
+      default: defaultPlatform,
+      pageSize: 20,
+    }]);
+    return answer.platform;
+  }
+
+  /** The mode: the `--mode` flag, or the picker. */
+  private async resolveMode(platform: string, isGhActions: boolean): Promise<'connector' | 'token'> {
+    if (this.options.mode) return this.options.mode;
+    const connectorChoice = isGhActions
+      ? 'Push SECRETS_BLOB + PROJECT_KEY to GitHub secrets via gh'
+      : 'Deploy now via direct target deploy (push secrets + ship code)';
+    const r = await inquirer.prompt([{
+      type: 'list',
+      name: 'mode',
+      message: `${PLATFORMS.find(p => p.value === platform)?.name} — what do you want to do?`,
+      choices: [
+        // `value: 'connector'` is the internal identifier, untouched —
+        // only the displayed `name`/`short` moved to "target" wording.
+        { name: connectorChoice, value: 'connector', short: 'target' },
+        {
+          name: 'Set up CI deploy token + docs (capy run in your CI)',
+          value: 'token',
+          short: 'token+docs',
+        },
+      ],
+      default: 'connector',
+    }]);
+    return r.mode;
+  }
+
+  /** Mints the deploy credentials behind a spinner; any failure exits 1. */
+  private async mintWithSpinner(deps: MintDeployTokenDeps): Promise<MintedDeployToken> {
+    const spinner = ora('Generating deploy credentials...').start();
+    try {
+      const minted = await mintDeployToken(deps);
+      if (minted.blobBytes > BLOB_SIZE_WARN_THRESHOLD) {
+        spinner.warn(`SECRETS_BLOB is ${Math.round(minted.blobBytes / 1024)}KB — some platforms have 32-64KB env var limits. Consider splitting into multiple projects.`);
+      } else {
+        spinner.succeed(`Deploy credentials generated (${minted.secretCount} secrets)`);
+      }
+      return minted;
+    } catch (err: any) {
+      spinner.fail(err?.message ?? 'Failed to generate deploy credentials');
+      process.exit(1);
+    }
   }
 
   async execute(): Promise<void> {
@@ -420,9 +507,7 @@ export class DeployCommand {
       const authService = new AuthService(this.apiUrl, this.devMode, projectState.userId);
       const serviceClient = new ServiceClient(this.apiUrl, this.devMode);
       serviceClient.setTokenProvider(() => authService.getValidToken());
-      let authResult = await authService.authenticateSilent(orgId);
-      if (!authResult.success) authResult = await authService.authenticateSilent();
-      if (!authResult.success) authResult = await authService.authenticate(orgId);
+      const authResult = await authenticateOrgFirst(authService, orgId);
       if (!authResult.success) {
         console.error('Authentication failed');
         process.exit(1);
@@ -430,95 +515,11 @@ export class DeployCommand {
 
       const userId = authResult.user_id!;
 
-      // Steps 1 and 2: where this project deploys, and — for the five
-      // platforms with a connector — whether Capy drives the deploy or just
-      // mints credentials. Two questions in the terminal with nothing between
-      // them; one route in the browser, declared before it opens.
+      // Step 1: where this project deploys.
       const config = readConfig(projectRoot);
-      const defaultPlatform = config.platform;
-      const flagPlatform = this.options.platform;
-      const badPlatformFlag =
-        flagPlatform !== undefined && !PLATFORMS.some(p => p.value === flagPlatform);
-
-      let platform: string;
-      // A mode the browser answered, so the rail on the NEXT screen can say the
-      // question happened. Undefined means nobody was asked.
-      let modeAnswer: string | undefined;
-      let webMode: 'connector' | 'token' | null | undefined;
-
-      // Under `--web` the browser is opened only when a question is actually
-      // left. `--platform heroku` settles the whole route on its own — that
-      // platform has no connector, so the mode question does not exist for it
-      // — and opening a page with nothing to answer is a wait, not a wizard.
-      const rows = this.options.web ? await platformRows() : [];
-      const flagRow = flagPlatform ? rows.find(r => r.id === flagPlatform) : undefined;
-      const webAsks =
-        !!this.options.web &&
-        (badPlatformFlag ||
-          !flagRow ||
-          (flagRow.hasConnector && this.options.mode === undefined));
-
-      if (webAsks) {
-        if (badPlatformFlag) {
-          // The terminal answers a bad --platform by printing all thirty-one
-          // ids and exiting: six lines of machine text, and redundant with the
-          // picker it refuses to show. The screen carries the refusal and asks
-          // the question underneath it.
-          console.error(`  --platform must be one of: ${PLATFORMS.map(p => p.value).join(', ')}`);
-        }
-        const { chooseDeployDestinationInBrowser } = await import('../ui/deployScreens');
-        const picked = await chooseDeployDestinationInBrowser({
-          platforms: rows,
-          lastPlatform: defaultPlatform,
-          platform: badPlatformFlag ? undefined : flagPlatform,
-          mode: this.options.mode,
-          rejected: badPlatformFlag
-            ? {
-                argv: `--platform ${flagPlatform}`,
-                message: 'is not a platform Capy knows. Pick one below — the answer is remembered for this project.',
-              }
-            : undefined,
-          open: !process.env.CAPY_WEB_NO_OPEN,
-        });
-        if (picked.cancelled) {
-          console.log('Cancelled.');
-          process.exit(0);
-        }
-        platform = picked.platform;
-        webMode = picked.mode;
-        if (picked.mode) {
-          // CAP-679 follow-up: display text says "Target" now — 'connector'
-          // stays the internal value (untouched, see the `mode` doc above).
-          modeAnswer = picked.mode === 'connector' ? 'Target' : 'Deploy token';
-        }
-      } else if (flagPlatform !== undefined) {
-        if (badPlatformFlag) {
-          console.error(`  --platform must be one of: ${PLATFORMS.map(p => p.value).join(', ')}`);
-          process.exit(1);
-        }
-        platform = flagPlatform;
-      } else {
-        // Show "Other..." at the top as a ready-made escape hatch, with a
-        // non-selectable Separator between it and the alphabetical list so
-        // it doesn't read as "just another platform".
-        const choices = [
-          ...decorateChoices(PLATFORMS.filter(p => p.value === 'other')),
-          new inquirer.Separator() as any,
-          ...decorateChoices(PLATFORMS.filter(p => p.value !== 'other')),
-        ];
-        const answer = await inquirer.prompt([{
-          type: 'list',
-          name: 'platform',
-          message: 'Where does this project deploy?',
-          choices,
-          default: defaultPlatform,
-          pageSize: 20,
-        }]);
-        platform = answer.platform;
-      }
+      const platform = await this.resolvePlatform(config.platform);
       if (platform !== config.platform) {
-        config.platform = platform;
-        writeConfig(projectRoot, config);
+        writeConfig(projectRoot, { ...config, platform });
       }
 
       // Connector branch: when the picked platform has a real adapter,
@@ -535,34 +536,7 @@ export class DeployCommand {
         // dispatch goes to a dedicated connector instead of through
         // DeployAdapter.deploy().
         const isGhActions = connectorId === 'gh-actions';
-        let mode: 'connector' | 'token';
-        if (this.options.mode) {
-          mode = this.options.mode;
-        } else if (webMode) {
-          // Already answered on the second stop of the destination route.
-          mode = webMode;
-        } else {
-          const connectorChoice = isGhActions
-            ? 'Push SECRETS_BLOB + PROJECT_KEY to GitHub secrets via gh'
-            : 'Deploy now via direct target deploy (push secrets + ship code)';
-          const r = await inquirer.prompt([{
-            type: 'list',
-            name: 'mode',
-            message: `${PLATFORMS.find(p => p.value === platform)?.name} — what do you want to do?`,
-            choices: [
-              // `value: 'connector'` is the internal identifier, untouched —
-              // only the displayed `name`/`short` moved to "target" wording.
-              { name: connectorChoice, value: 'connector', short: 'target' },
-              {
-                name: 'Set up CI deploy token + docs (capy run in your CI)',
-                value: 'token',
-                short: 'token+docs',
-              },
-            ],
-            default: 'connector',
-          }]);
-          mode = r.mode;
-        }
+        const mode = await this.resolveMode(platform, isGhActions);
         if (mode === 'connector') {
           if (isGhActions) {
             const { runGithubActionsConnector } = await import('./githubActionsConnector');
@@ -582,92 +556,23 @@ export class DeployCommand {
             yes: !!this.options.yes,
             force: !!this.options.force,
             devMode: this.devMode,
-            web: this.options.web,
-            // The rail on the picker's screens continues the route this one
-            // drew, rather than restarting it: these two stops were answered
-            // here, and a second command drawing them as unasked would say the
-            // user skipped a question they just answered.
-            platformAnswer: PLATFORMS.find(p => p.value === platform)?.name,
-            modeAnswer,
           });
           process.exit(code);
         }
         // else fall through to existing token+docs flow
       }
 
-      const platformLabel = PLATFORMS.find(p => p.value === platform)?.name || platform!;
+      const platformLabel = PLATFORMS.find(p => p.value === platform)?.name || platform;
 
       // Step 2: Generate credentials
-      const spinner = ora('Generating deploy credentials...').start();
-      let minted: MintedDeployToken;
-      try {
-        minted = await mintDeployToken({ serviceClient, fm, orgId, projectId, userId });
-      } catch (err: any) {
-        spinner.fail(err?.message ?? 'Failed to generate deploy credentials');
-        process.exit(1);
-      }
-      const { secretsBlob, projectKey, secretCount, blobBytes } = minted;
-      if (blobBytes > BLOB_SIZE_WARN_THRESHOLD) {
-        spinner.warn(`SECRETS_BLOB is ${Math.round(blobBytes / 1024)}KB — some platforms have 32-64KB env var limits. Consider splitting into multiple projects.`);
-      } else {
-        spinner.succeed(`Deploy credentials generated (${secretCount} secrets)`);
-      }
+      const { secretsBlob, projectKey } = await this.mintWithSpinner({ serviceClient, fm, orgId, projectId, userId });
 
       // Step 3: Fetch instructions and serve HTML page
-      const { markdown } = await serviceClient.fetchDeployInstructions(platform!);
-      const html = generateDeployHtml(secretsBlob, projectKey, platformLabel, platform!, markdown);
+      const { markdown } = await serviceClient.fetchDeployInstructions(platform);
+      const html = generateDeployHtml(secretsBlob, projectKey, platformLabel, platform, markdown);
 
       // Try to serve via localhost (needed for clipboard API)
-      let serverStarted = false;
-      try {
-        const server = createServer((_req, res) => {
-          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-          res.end(html);
-        });
-
-        await new Promise<void>((resolve, reject) => {
-          server.listen(0, '127.0.0.1', () => resolve());
-          server.on('error', reject);
-        });
-
-        const addr = server.address();
-        if (addr && typeof addr === 'object') {
-          // Use 127.0.0.1 explicitly: `localhost` resolves to ::1 (IPv6) first
-          // on macOS/modern Linux, but the server above binds to 127.0.0.1 only,
-          // so default browsers opened via the printed terminal URL would hit
-          // a dead IPv6 port. The popup path happened to retry families and
-          // hid this from users who relied on the auto-opened window.
-          const url = `http://127.0.0.1:${addr.port}`;
-          console.log(`\n  Temporary deploy instructions — if the browser doesn't open, visit:`);
-          console.log(`  ${url}`);
-          console.log('  Press Ctrl+C to close.\n');
-
-          await openInBrowser(url);
-          serverStarted = true;
-
-          // Auto-shutdown after 5 minutes
-          const shutdownTimer = setTimeout(() => {
-            server.close();
-            process.exit(0);
-          }, 5 * 60 * 1000);
-          shutdownTimer.unref();
-
-          // Clean shutdown on Ctrl+C
-          process.on('SIGINT', () => {
-            server.close();
-            process.exit(0);
-          });
-          process.on('SIGTERM', () => {
-            server.close();
-            process.exit(0);
-          });
-
-          // Keep process alive
-          await new Promise(() => {});
-        }
-      } catch {
-        // Fall through to terminal output
-      }
+      const serverStarted = await serveDeployInstructions(html);
 
       if (!serverStarted) {
         // Fallback: print values to terminal
@@ -690,79 +595,13 @@ export class DeployCommand {
   }
 }
 
-/** One minted deploy token, as the listing and the confirm both read it. */
-export interface DeployTokenListRow {
-  deployId: string;
-  label: string | null;
-  createdAge: string;
-  createdOn: string;
-  createdBy?: string;
-  revokedAge: string | null;
-}
-
-/**
- * Turn the service's token records into the rows the browser draws.
- *
- * Age is humanised here, once, so the listing and the confirm agree; the
- * absolute date is carried alongside because `toLocaleDateString()` renders
- * `7/27/2026` on one machine and `27/07/2026` on another for the same token.
- */
-function tokenRows(
-  tokens: Array<{
-    deploy_id: string;
-    label: string | null;
-    created_by: string;
-    created_at: string;
-    revoked_at: string | null;
-  }>,
-): DeployTokenListRow[] {
-  return tokens.map(t => ({
-    deployId: t.deploy_id,
-    label: t.label,
-    createdAge: formatRelativeTime(t.created_at),
-    createdOn: new Date(t.created_at).toISOString().slice(0, 10),
-    createdBy: t.created_by || undefined,
-    revokedAge: t.revoked_at ? formatRelativeTime(t.revoked_at) : null,
-  }));
-}
-
-/** What a typed prefix resolved to. A CODE, never a sentence to be parsed. */
-export type TokenPrefixMatch =
-  | { code: 'ok'; token: DeployTokenListRow }
-  | { code: 'none' }
-  | { code: 'ambiguous'; matches: DeployTokenListRow[] };
-
-/**
- * Resolve the prefix a user typed to the ONE token it names.
- *
- * The terminal hands the prefix to the service and lets it pick; under `--web`
- * the whole list is already in hand, so an ambiguous prefix is a question that
- * can be answered honestly instead of resolved to whichever row happens to sort
- * first. Revoking is irreversible and cuts a live pipeline off, so "probably
- * this one" is not an answer.
- */
-export function resolveTokenPrefix(
-  rows: DeployTokenListRow[],
-  prefix: string,
-): TokenPrefixMatch {
-  // An exact id is never ambiguous, whatever else it happens to prefix.
-  const exact = rows.find(t => t.deployId === prefix);
-  if (exact) return { code: 'ok', token: exact };
-  const matches = rows.filter(t => t.deployId.startsWith(prefix));
-  if (matches.length === 0) return { code: 'none' };
-  if (matches.length > 1) return { code: 'ambiguous', matches };
-  return { code: 'ok', token: matches[0] };
-}
-
 export class DeployRevokeCommand {
   private apiUrl?: string;
   private devMode: boolean;
-  private web: boolean;
 
-  constructor(apiUrl?: string, devMode: boolean = false, options: { web?: boolean } = {}) {
+  constructor(apiUrl?: string, devMode: boolean = false) {
     this.apiUrl = apiUrl;
     this.devMode = devMode;
-    this.web = !!options.web;
   }
 
   async execute(deployIdPrefix: string): Promise<void> {
@@ -780,63 +619,10 @@ export class DeployRevokeCommand {
       const authService = new AuthService(this.apiUrl, this.devMode, projectState.userId);
       const serviceClient = new ServiceClient(this.apiUrl, this.devMode);
       serviceClient.setTokenProvider(() => authService.getValidToken());
-      // org-scoped silent → unscoped silent → interactive, as one value
-      // rather than a reassigned local.
-      const authResult = await (async () => {
-        const scoped = await authService.authenticateSilent(orgId);
-        if (scoped.success) return scoped;
-        const unscoped = await authService.authenticateSilent();
-        return unscoped.success ? unscoped : await authService.authenticate(orgId);
-      })();
+      const authResult = await authenticateOrgFirst(authService, orgId);
       if (!authResult.success) {
         console.error('Authentication failed');
         process.exit(1);
-      }
-
-      if (this.web && projectState.projectId) {
-        // The terminal fires the DELETE the moment you press enter, with no
-        // summary of what is about to lose access — and a mistyped prefix and
-        // a permission failure come back looking the same. The browser draws
-        // the token being cut off and wants its id typed back first.
-        const { tokens } = await serviceClient.listDeployTokens(orgId, projectState.projectId);
-        const rows = tokenRows(tokens);
-        // Branch on the code, not on anything printed. Resolving an ambiguous
-        // prefix to whichever row sorts first is how the wrong pipeline loses
-        // access, and revoking cannot be undone.
-        const match = resolveTokenPrefix(rows, deployIdPrefix);
-        if (match.code === 'none') {
-          console.error(`  No deploy token starting with ${deployIdPrefix.slice(0, 12)} in this project.`);
-          process.exit(1);
-        }
-        if (match.code === 'ambiguous') {
-          console.error(
-            `  ${match.matches.length} deploy tokens start with ${deployIdPrefix} — ` +
-              `pass more of the id. Run ${B('capy deploy list')} to see them in full.`,
-          );
-          process.exit(1);
-        }
-        const subject = match.token;
-        const { showDeployTokensInBrowser } = await import('../ui/deployScreens');
-        const picked = await showDeployTokensInBrowser({
-          projectName: projectState.projectName ?? null,
-          tokens: rows,
-          view: 'confirm-revoke',
-          subjectToken: subject.deployId,
-          open: !process.env.CAPY_WEB_NO_OPEN,
-        });
-        // A decline, a closed window and an unanswered page are one outcome and
-        // it is not a failure: the token is still active, which is what the
-        // user asked for. Said out loud, and exit 0.
-        if (!picked.deployId) {
-          console.log(`  Nothing revoked — ${subject.deployId.slice(0, 12)} is still active.`);
-          return;
-        }
-        await serviceClient.revokeDeployToken(picked.deployId);
-        console.log(`  Deploy token ${picked.deployId.slice(0, 12)}... revoked.`);
-        if (authResult.user_id) {
-          await stripRevokedTargets(pm, serviceClient, projectState, authResult.user_id, picked.deployId);
-        }
-        return;
       }
 
       await serviceClient.revokeDeployToken(deployIdPrefix);
@@ -860,12 +646,10 @@ export class DeployRevokeCommand {
 export class DeployListCommand {
   private apiUrl?: string;
   private devMode: boolean;
-  private web: boolean;
 
-  constructor(apiUrl?: string, devMode: boolean = false, options: { web?: boolean } = {}) {
+  constructor(apiUrl?: string, devMode: boolean = false) {
     this.apiUrl = apiUrl;
     this.devMode = devMode;
-    this.web = !!options.web;
   }
 
   async execute(): Promise<void> {
@@ -884,40 +668,13 @@ export class DeployListCommand {
       const authService = new AuthService(this.apiUrl, this.devMode, projectState.userId);
       const serviceClient = new ServiceClient(this.apiUrl, this.devMode);
       serviceClient.setTokenProvider(() => authService.getValidToken());
-      let authResult = await authService.authenticateSilent(orgId);
-      if (!authResult.success) authResult = await authService.authenticateSilent();
-      if (!authResult.success) authResult = await authService.authenticate(orgId);
+      const authResult = await authenticateOrgFirst(authService, orgId);
       if (!authResult.success) {
         console.error('Authentication failed');
         process.exit(1);
       }
 
       const { tokens } = await serviceClient.listDeployTokens(orgId, projectId);
-
-      if (this.web) {
-        // The one command you reach for in a hurry is also the one with no
-        // confirmation, so the browser listing carries the revoke rather than
-        // making you copy an id into a second command that fires immediately.
-        //
-        // No `.catch()` swallowing the outcome here: a refusal — closed window,
-        // nothing clicked — RESOLVES as `cancelled`, and a server that could
-        // not listen is a real failure that belongs on the error screen.
-        const { showDeployTokensInBrowser } = await import('../ui/deployScreens');
-        const picked = await showDeployTokensInBrowser({
-          projectName: projectState.projectName ?? null,
-          tokens: tokenRows(tokens),
-          open: !process.env.CAPY_WEB_NO_OPEN,
-        });
-        if (picked.deployId) {
-          await serviceClient.revokeDeployToken(picked.deployId);
-          console.log(`  Deploy token ${picked.deployId.slice(0, 12)}... revoked.`);
-        } else {
-          // A listing that ends is a listing. Saying so is the difference
-          // between "you read it and moved on" and "something went wrong".
-          console.log('  Nothing revoked.');
-        }
-        return;
-      }
 
       if (tokens.length === 0) {
         console.log('  No deploy tokens for this project.');

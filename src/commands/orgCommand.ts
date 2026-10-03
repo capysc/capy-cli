@@ -30,47 +30,20 @@ async function resolveAuthResultWithFallback(authService: AuthService, currentOr
   return authService.authenticate(currentOrgId);
 }
 
-/**
- * The branch a first project is bootstrapped with.
- *
- * Named rather than inline so the browser can state it before the project is
- * created. The terminal only mentions it as a spinner line that has already
- * scrolled past by the time anyone looks.
- */
+/** The branch a first project is bootstrapped with. */
 const FIRST_BRANCH = 'development';
-
-export interface OrgCommandOptions {
-  /**
-   * Serve the three questions as browser screens instead of inquirer prompts.
-   *
-   * Agent-only, and NOT REACHABLE FROM ARGV YET. `src/index.ts` declares
-   * `--web` once, on the root program; a subcommand has to read the inherited
-   * global for itself, which `byoc` does in two lines:
-   *
-   *     const web = command.optsWithGlobals().web === true;
-   *
-   * `org`'s own action takes no `command` argument and never calls
-   * `optsWithGlobals`, so `new OrgCommand()` is always built without this. The
-   * flow below is live and browser-tested; the missing hop is argv wiring,
-   * which the coordinator owns centrally along with the rest of the command
-   * registry — this parcel may not edit index.ts.
-   */
-  web?: boolean;
-}
 
 export class OrgCommand {
   private projectManager: ProjectManager;
   private fileManager: FileManager;
   private authService: AuthService;
   private serviceClient: ServiceClient;
-  private web: boolean;
 
-  constructor(apiUrl?: string, devMode: boolean = false, options: OrgCommandOptions = {}) {
+  constructor(apiUrl?: string, devMode: boolean = false) {
     this.projectManager = new ProjectManager();
     this.fileManager = new FileManager();
     this.authService = new AuthService(apiUrl, devMode);
     this.serviceClient = new ServiceClient(apiUrl, devMode);
-    this.web = options.web === true;
 
     this.serviceClient.setTokenProvider(() => this.authService.getValidToken());
   }
@@ -104,14 +77,6 @@ export class OrgCommand {
     const orgs = authResult.organizations || [];
     const currentOrg = currentOrgId ? orgs.find(o => o.id === currentOrgId) : undefined;
     const CREATE_NEW_ORG = '__create_new__';
-
-    if (this.web) {
-      // No TTY under --web (this is driven through the MCP): an inquirer list
-      // here would hang forever with nothing on screen and no URL to hand
-      // anybody. Same three questions, same order, served as screens.
-      await this._executeWeb(authResult, orgs, currentOrgId, hasProject);
-      return;
-    }
 
     console.log('');
     const { orgId } = await inquirer.prompt([{
@@ -248,140 +213,6 @@ export class OrgCommand {
     }
   }
 
-  /**
-   * The same three questions, served as screens.
-   *
-   * The order is the terminal's — organization, then project — and so is
-   * everything between them: the session is re-scoped, the device's key for the
-   * org is checked, the project list is fetched. Two things the terminal cannot
-   * do come for free from doing that work where the picker can hear the answer:
-   * an org this device holds no key for is refused in its own row rather than
-   * after a switch the CLI has already announced, and a failed re-scope leaves
-   * the list on screen with the reason attached instead of ending the run.
-   */
-  private async _executeWeb(
-    authResult: AuthResult,
-    orgs: Organization[],
-    currentOrgId: string | undefined,
-    hasProject: boolean,
-  ): Promise<void> {
-    const userId = authResult.user_id!;
-    const refreshToken = authResult._refresh_token || this.authService.getToken()?.refresh_token;
-    if (!refreshToken) {
-      console.error('No refresh token available. Run `capy` to re-authenticate.');
-      process.exit(1);
-    }
-
-    const { switchOrganizationInBrowser, nameFirstProjectInBrowser } = await import('../ui/selectWeb');
-
-    const facts = {
-      signedInAs: authResult.user_email,
-      currentOrgId,
-      // The one fact the terminal picker does not carry. `hasOrgKey` is what
-      // the CLI checks AFTER announcing the switch; shipping it with the list
-      // is what lets the screen refuse the row instead.
-      orgs: orgs.map(o => ({ id: o.id, name: o.name, hasLocalKey: hasOrgKey(o.id, userId) })),
-      hasKeepLock: hasProject,
-      defaultProjectName: this.projectManager.getDefaultProjectName(),
-      firstBranchName: FIRST_BRANCH,
-    };
-
-    const picked = await switchOrganizationInBrowser({
-      ...facts,
-      onOrgChosen: async (orgId: string) => {
-        const org = orgs.find(o => o.id === orgId)!;
-        const scopedAuth = await this.authService.refreshWithCredentials(
-          refreshToken,
-          org.id,
-          userId,
-        );
-        if (!scopedAuth.success) {
-          return { ok: false as const, reason: scopedAuth.error || 'Organization switch failed' };
-        }
-        const projects = excludeSystemProject(await this.serviceClient.listProjects());
-        const orgProjects = projects.filter(p => p.organization_id === org.id);
-        if (orgProjects.length === 0) {
-          const refusal = this.firstProjectRefusal(org, hasProject);
-          if (refusal) return { ok: false as const, reason: refusal };
-        }
-        return {
-          ok: true as const,
-          projects: orgProjects.map(p => ({ id: p.id, name: p.name })),
-        };
-      },
-      open: !process.env.CAPY_WEB_NO_OPEN,
-    });
-
-    if (picked.action === 'cancel') {
-      console.log('\n  Switch cancelled.\n');
-      return;
-    }
-
-    if (picked.action === 'create') {
-      const created = await createNewOrganization(
-        this.authService,
-        this.serviceClient,
-        refreshToken,
-        userId,
-        true,
-      );
-      const scopedAuth = await this.authService.refreshWithCredentials(
-        refreshToken,
-        created.id,
-        userId,
-      );
-      if (!scopedAuth.success) {
-        throw new CapyError(
-          scopedAuth.error || 'Organization switch failed',
-          ERROR_CODES.AUTH_FAILED,
-        );
-      }
-      // A brand-new org has no projects, so the only route on is the first one.
-      console.log(`\n  ${B(created.name)} has no projects yet.`);
-      const refusal = this.firstProjectRefusal(created, hasProject);
-      if (refusal) throw new CapyError(refusal, ERROR_CODES.INVALID_FORMAT);
-      const name = await nameFirstProjectInBrowser({
-        ...facts,
-        orgs: [{ id: created.id, name: created.name, hasLocalKey: true }],
-        currentOrgId: undefined,
-        orgId: created.id,
-        open: !process.env.CAPY_WEB_NO_OPEN,
-      });
-      if (name === null) {
-        console.log(`\n  Switch cancelled. Run ${B('capy')} in a fresh directory to create a project in ${B(created.name)}.\n`);
-        return;
-      }
-      await this.bootstrapFirstProject(created, userId, name);
-      return;
-    }
-
-    // `picked` here is 'select-project' or 'create-project' (the 'cancel' and
-    // 'create' actions already returned above), and both carry the id of
-    // whichever org `onOrgChosen` last switched into successfully.
-    const selectedOrg = orgs.find(o => o.id === picked.orgId)!;
-    if (!hasOrgKey(selectedOrg.id, userId)) {
-      // Unreachable through the screen, which disables a row with no key —
-      // and still checked, because the throw is what stops a switch this
-      // device cannot decrypt anything in.
-      throw new CapyError(
-        `You have access to "${selectedOrg.name}" but no encryption key on this device.\n\n` +
-        '  Ask your org owner for an invite code, then run:\n\n' +
-        '    capy redeem <code>\n\n' +
-        '  This will securely transfer the shared encryption key to your device.',
-        ERROR_CODES.AUTH_FAILED,
-      );
-    }
-
-    if (picked.action === 'create-project') {
-      await this.bootstrapFirstProject(selectedOrg, userId, picked.projectName);
-      return;
-    }
-
-    const projects = excludeSystemProject(await this.serviceClient.listProjects());
-    const selectedProject = projects.find(p => p.id === picked.projectId)!;
-    this.bindToProject(selectedOrg, selectedProject, userId, hasProject);
-  }
-
   private keyServiceOps(): KeyServiceOps {
     return {
       coDecrypt: (orgId, ciphertext) =>
@@ -438,12 +269,9 @@ export class OrgCommand {
   /**
    * Why this directory cannot take the first project of another org, or null.
    *
-   * A sentence rather than a throw so both surfaces can use it: the terminal
-   * raises it as a CapyError and ends the run, and the browser hands it back as
-   * a refusal on the organization list, where the user still has other rows to
-   * pick. The condition is the same one either way — a .env holding values
-   * encrypted for the project this directory is currently bound to, which
-   * rebinding keep.lock would orphan.
+   * A sentence rather than a throw; the caller raises it as a CapyError. The
+   * condition is a .env holding values encrypted for the project this
+   * directory is currently bound to, which rebinding keep.lock would orphan.
    */
   private firstProjectRefusal(selectedOrg: Organization, hasProject: boolean): string | null {
     if (!hasProject) return null;
@@ -464,9 +292,7 @@ export class OrgCommand {
     userId: string,
     projectName: string,
   ): Promise<void> {
-    // Choke point for both callers (terminal prompt above and the browser
-    // wizard's create-project path, which has no synchronous validate hook of
-    // its own) — the reserved name must never reach the service either way.
+    // Choke point: the reserved name must never reach the service.
     assertProjectNameAllowed(projectName.trim());
 
     const initSpinner = ora('Creating project...').start();

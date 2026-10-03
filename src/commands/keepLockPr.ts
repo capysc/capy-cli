@@ -1,5 +1,5 @@
 /**
- * The keep.lock PR step: the one place `capy add`, `capy edit` (TUI, `--web`
+ * The keep.lock PR step: the one place `capy add`, `capy edit` (TUI
  * and piped) and `capy remove` offer to turn a keep.lock change into a PR.
  *
  * It is built on the GitHub API through the user's own `gh` login

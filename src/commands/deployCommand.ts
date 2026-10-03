@@ -83,18 +83,8 @@ import {
   createDokployClient,
 } from '../deploy/dokployApi';
 import { classify, isBuildTime } from '../deploy/classify';
-import type { WebDeployAdapterContext } from '../ui/deployScreens';
 import { deployPlan, unansweredDeployStops, type DeployStopId } from '../core/deployPlan';
-import type {
-  DeployAdapterChoice,
-  DeployPlanConfirmStop,
-  DeployPlanTarget,
-  DeployPreflightCheck,
-  DeployRunResultData,
-  DeployRunStep,
-  DeploySetupStep,
-  DeployTargetRow,
-} from '../ui/screens/contract';
+import type { DeployPlanConfirmStop } from '../ui/screens/contract';
 import { CHECKBOX_INSTRUCTIONS, CHECKBOX_THEME, LIST_THEME } from '../ui/promptStyle';
 import { keypressConfirm } from '../ui/keypressConfirm';
 import {
@@ -132,34 +122,14 @@ export interface DeployCliOptions {
    */
   devMode?: boolean;
   /**
-   * Ask this run's questions in a browser instead of at the TTY.
-   *
-   * Changes only where a question is RENDERED. The same plan decides which
-   * questions exist, the same answers reach the same code, and nothing about
-   * what is decrypted, committed, pushed or written to `.capy/deploy.json`
-   * moves.
-   */
-  web?: boolean;
-  /**
    * Describe the route instead of travelling it.
    *
-   * The SAME stop array the browser screens are served, so a headless caller
+   * The route as a stop array, so a headless caller
    * can see which stops argv already settled and which it would be asked
    * about. Printed before any network call and before anything is decrypted,
    * because a plan you had to deploy to obtain is not a plan.
-   *
-   * (argv wiring for this — and for `--web` — lives in src/index.ts, which the
-   * coordinator owns; both are threaded here and settable by any caller.)
    */
   json?: boolean;
-  /**
-   * The platform answer from earlier in the run, when `capy deploy` reached
-   * here through the destination picker. It is a stop this run really
-   * travelled, so the rail continues rather than restarting.
-   */
-  platformAnswer?: string;
-  /** The mode answer, when that question was really asked. */
-  modeAnswer?: string;
   /**
    * Write and verify the target's configuration, but skip the platform
    * deploy/redeploy (CAP-679). The user, or the platform's own auto-deploy,
@@ -167,16 +137,6 @@ export interface DeployCliOptions {
    */
   noDeploy?: boolean;
 }
-
-/** Whether a question is asked in a browser, and what the rail already holds. */
-interface WebContext {
-  web?: boolean;
-  platformAnswer?: string;
-  modeAnswer?: string;
-}
-
-/** Open the user's browser by default; CAPY_WEB_NO_OPEN lets CI / headless in. */
-const openBrowser = (): boolean => !process.env.CAPY_WEB_NO_OPEN;
 
 /**
  * Dokploy only: resolves the org system store's API key ONCE for this whole
@@ -935,223 +895,6 @@ async function promptVercelGitBranch(
 }
 
 /**
- * The adapter list the picker offers, planned rows included.
- *
- * Announced-but-unbuilt adapters are offered and immediately refused — the
- * terminal renders them disabled with the `capy export` pipeline that stands in
- * until they land. Keeping them is right: "Fly.io is coming" is the answer a
- * Fly user actually has.
- */
-/**
- * Adapters whose settings step has no browser screen yet. They are left out of
- * the browser's adapter list, and a run that already knows it is one of them
- * asks its questions in the terminal instead.
- */
-const TERMINAL_ONLY_SETUP: ReadonlySet<string> = new Set(['dokploy']);
-
-function adapterChoices(): DeployAdapterChoice[] {
-  return [
-    ...ALL_ADAPTERS.filter((a) => !TERMINAL_ONLY_SETUP.has(a.id)).map((a) => ({
-      id: a.id,
-      label: a.label,
-      detail: [a.description],
-    })),
-    ...listPlanned()
-      .filter((p) => !ALL_ADAPTERS.some((a) => a.id === p.id))
-      .map((p) => ({
-        id: p.id,
-        label: p.label,
-        detail: [p.description],
-        planned: true,
-        plannedCommand: p.fallbackHint,
-      })),
-  ];
-}
-
-/**
- * Settings defaults for the browser, with the terminal's own precedence.
- *
- * Every line here is the `default:` of one inquirer prompt, lifted verbatim —
- * saved value first, then what the adapter sniffed out of the directory, then
- * the CLI's fallback. Two lists of defaults would be two answers to "what does
- * this box start as", and the box is what a target gets saved with.
- */
-export function settingsDefaults(
-  adapterId: string,
-  cwd: string,
-  existingOpts: Record<string, string>,
-  detectedOpts: Record<string, string>,
-): Record<string, string> {
-  switch (adapterId) {
-    case 'cf-worker':
-      return {
-        workerName: existingOpts.workerName ?? detectedOpts.workerName ?? '',
-        workerDir: existingOpts.workerDir ?? detectedOpts.workerDir ?? '.',
-      };
-    case 'cf-pages':
-      return {
-        projectName: existingOpts.projectName ?? detectedOpts.projectName ?? '',
-        buildCwd: existingOpts.buildCwd ?? detectedOpts.buildCwd ?? '.',
-        buildCmd: existingOpts.buildCmd ?? detectedOpts.buildCmd ?? 'bun run build',
-        distDir: existingOpts.distDir ?? detectedOpts.distDir ?? 'dist',
-      };
-    case 'vercel':
-      return {
-        projectDir: existingOpts.projectDir ?? detectedOpts.projectDir ?? '.',
-        vercelEnv: existingOpts.vercelEnv ?? 'preview',
-        // The terminal asks this in a separate prompt one question later, with
-        // the saved value as its `preferred`. Here it is the same step, which
-        // is the point: a *git* branch asked one prompt after a *capy* branch,
-        // in almost the same words, is the failure this screen exists to stop.
-        gitBranch: existingOpts.gitBranch ?? '',
-      };
-    case 'aws-ssm':
-      return {
-        region:
-          existingOpts.region ?? detectedOpts.region ?? detectAwsRegion() ?? 'us-east-1',
-        pathPrefix:
-          existingOpts.pathPrefix ??
-          detectedOpts.pathPrefix ??
-          `/capy/${basename(cwd).toLowerCase().replace(/[^a-z0-9-]/g, '-')}/`,
-        naming: existingOpts.naming ?? detectedOpts.naming ?? 'verbatim',
-      };
-    case 'dokploy':
-      // tokenEnv is no longer asked by default (CAP-664: the org system
-      // store is the default source) — only an EXISTING target's own value
-      // is shown here, never defaulted to the fallback env var name.
-      //
-      // CAP-679 follow-up (item 6, validator fix-first): the terminal picker
-      // now asks Compose vs. Application up front (`resolveAdapterOptions`'s
-      // dokploy branch) and defaults `kind`/`composeId` from an existing
-      // target. This is the web surface's copy of that same default — the
-      // web flow doesn't have its own Dokploy settings screen (it isn't
-      // being built here), but keeping these two defaults in sync means
-      // neither surface silently disagrees about what a re-edit starts from
-      // if/when one is added.
-      return {
-        baseUrl: existingOpts.baseUrl ?? '',
-        applicationId: existingOpts.applicationId ?? '',
-        composeId: existingOpts.composeId ?? '',
-        kind: existingOpts.applicationId && !existingOpts.composeId ? 'application' : 'compose',
-        ...(existingOpts.tokenEnv ? { tokenEnv: existingOpts.tokenEnv } : {}),
-      };
-    default:
-      return {};
-  }
-}
-
-/**
- * Which variables are pre-ticked, and what chose them.
- *
- * The same two lines the checkbox prompt computes. `presetLabel` is the
- * parenthetical in its message, which is the only thing on that prompt saying
- * why anything is ticked at all — and on a build-time adapter what is ticked
- * decides what ends up in a bundle the browser downloads.
- */
-function presumedVars(
-  adapter: DeployAdapter,
-  branchVars: string[],
-  existing?: TargetConfig,
-): { defaultPicks: string[]; presetLabel: string } {
-  const cls = classify(branchVars);
-  const presumedRelevant = adapter.presumeVars
-    ? adapter.presumeVars(cls)
-    : adapter.varKind === 'build-time'
-      ? cls.buildTime
-      : cls.runtime;
-  return {
-    defaultPicks: existing?.vars ?? presumedRelevant,
-    presetLabel: adapter.presumeVars
-      ? 'all vars'
-      : adapter.varKind === 'build-time'
-        ? 'VITE_/NEXT_PUBLIC_/PUBLIC_/REACT_APP_'
-        : 'non-public-prefixed',
-  };
-}
-
-/**
- * The PR base the CI question defaults to: the branch you are on, then the
- * target's saved value, then main/master. The terminal's own fallback chain.
- */
-function defaultPrBase(cwd: string, existing?: TargetConfig): string {
-  const local = listLocalBranches(cwd);
-  return (
-    currentBranch(cwd) ??
-    existing?.gitBaseBranch ??
-    (local.includes('main') ? 'main' : local.includes('master') ? 'master' : 'main')
-  );
-}
-
-/**
- * Everything downstream of the adapter, resolved once it is known.
- *
- * Async because `adapter.detect(cwd)` is, and because the adapter can be
- * chosen IN the browser — so this runs in the wizard's reducer, exactly where
- * the terminal runs it: one line after the picker.
- */
-function adapterContextFor(
-  cwd: string,
-  branchVars: string[],
-  existing?: TargetConfig,
-): (id: string) => Promise<WebDeployAdapterContext> {
-  return async (id: string) => {
-    const adapter = getAdapter(id);
-    if (!adapter) throw new Error(`Unknown adapter: ${id}`);
-    const detected = await adapter.detect(cwd);
-    const detectedOpts = (detected.options ?? {}) as Record<string, string>;
-    const existingOpts = (existing?.options ?? {}) as Record<string, string>;
-    const { defaultPicks, presetLabel } = presumedVars(adapter, branchVars, existing);
-
-    // Drift, so the checkbox can mark what appeared and what vanished rather
-    // than presenting a stale list as if it were current.
-    const known = existing?.knownVars ?? branchVars;
-    const { added, removed } = existing
-      ? reconcileVars(existing.vars, known, branchVars)
-      : { added: [] as string[], removed: [] as string[] };
-
-    return {
-      id,
-      label: adapter.label,
-      detail: [adapter.description],
-      detected: detected.summary,
-      defaults: settingsDefaults(id, cwd, existingOpts, detectedOpts),
-      vars: [
-        ...branchVars.map((name) => ({
-          name,
-          buildTime: isBuildTime(name),
-          checked: defaultPicks.includes(name),
-          addedSinceSave: added.includes(name),
-        })),
-        // A variable the project no longer has cannot ship, but dropping it
-        // from the list is how a removed secret goes unnoticed.
-        ...removed.map((name) => ({
-          name,
-          buildTime: isBuildTime(name),
-          checked: false,
-          goneSinceSave: true,
-        })),
-      ],
-      presetLabel,
-      delivery: {
-        mode: existing?.mode ?? adapter.defaultMode,
-        prBase: defaultPrBase(cwd, existing),
-        ciOnly: adapter.ciOnly,
-      },
-      gitBranches: listAllBranches(cwd),
-      // The terminal presents a guessed region and a real one identically, so
-      // a wrong region is only found once the parameters land in it.
-      regionDetected: Boolean(existingOpts.region ?? detectedOpts.region ?? detectAwsRegion()),
-      exampleVar: classify(branchVars).runtime[0] ?? 'DATABASE_URL',
-    };
-  };
-}
-
-/** How this picker run was reached, for the browser's copy and its rail. */
-interface WebPickerOptions extends WebContext {
-  intent?: 'create' | 'edit' | 'reconfirm';
-}
-
-/**
  * Which adapter this run targets. An existing target's kind wins (the picker
  * is re-editing it), then a caller-preselected id, and only then does the
  * interactive "Where are you deploying?" list get asked — planned-but-unshipped
@@ -1712,7 +1455,6 @@ async function runPicker(
   existing?: TargetConfig,
   /** When set, skip adapter-selection (caller has already picked). */
   preselectedAdapterId?: string,
-  web?: WebPickerOptions,
 ): Promise<TargetConfig | null> {
   // Scope the picker to the ACTIVE branch's vars. keep.lock's `variables` is the
   // union across EVERY branch, so it would offer vars that only exist on
@@ -1726,65 +1468,6 @@ async function runPicker(
   // production call.
   const branchVarSet = new Set(Object.keys(new FileManager(cwd).readEnvFile()));
   const branchVars = keep.variables.filter((v) => branchVarSet.has(v));
-
-  // Dokploy has no browser settings screen yet (browser screens are built in
-  // the Keep workbench first), so its setup stays in the terminal.
-  const knownAdapterId = existing?.kind ?? preselectedAdapterId;
-  const browserSetup = !!web?.web && !(knownAdapterId && TERMINAL_ONLY_SETUP.has(knownAdapterId));
-  if (web?.web && !browserSetup) {
-    console.log(`  ${DIM('Dokploy setup runs in the terminal.')}`);
-  }
-
-  if (web?.web && browserSetup) {
-    // Same computation, same defaults, same validators — only the surface the
-    // questions are drawn on differs. The route is declared before the first
-    // page opens, including the adapter stop a preselected run never visits.
-    if (branchVars.length === 0) {
-      throw new Error(
-        `no variables on the active branch — run \`capy\` to sync, or switch branches.`,
-      );
-    }
-    const adapterId = existing?.kind ?? preselectedAdapterId;
-    const intent = web.intent ?? (existing ? 'edit' : 'create');
-    const steps: DeploySetupStep[] = [];
-    if (!adapterId) steps.push('adapter');
-    steps.push('branch', 'settings');
-    // A re-confirm is the same variable question with the drift spelled out.
-    steps.push(intent === 'reconfirm' ? 'drift' : 'variables');
-    steps.push('delivery', 'name');
-
-    const { setUpDeployTargetInBrowser } = await import('../ui/deployScreens');
-    const picked = await setUpDeployTargetInBrowser({
-      intent,
-      steps,
-      platformAnswer: web.platformAnswer,
-      modeAnswer: web.modeAnswer,
-      adapters: adapterId ? undefined : adapterChoices(),
-      adapterId,
-      capyBranches: keep.branches,
-      branch:
-        existing?.branch ??
-        (keep.branches.includes('production') ? 'production' : keep.branches[0] ?? 'development'),
-      existingNames: listTargets(cwd).map((t) => t.name),
-      existingName: existing?.name,
-      resolveAdapter: adapterContextFor(cwd, branchVars, existing),
-      open: openBrowser(),
-    });
-    // Cancelling is a refusal: nothing is saved and nothing is deployed. The
-    // caller stops rather than falling through with a half-built target.
-    if (picked.cancelled) return null;
-
-    return {
-      name: picked.name.trim(),
-      kind: picked.adapterId,
-      branch: picked.branch,
-      vars: picked.vars,
-      knownVars: branchVars,
-      options: picked.options,
-      mode: picked.mode,
-      gitBaseBranch: picked.gitBaseBranch,
-    };
-  }
 
   // 1. Pick adapter (when not pre-selected). Real adapters are selectable;
   // planned-but-not-shipped ones appear disabled with a fallback hint, so
@@ -1942,109 +1625,8 @@ function renderResult(result: DeployResult): void {
 
 // ── Subcommand: list / remove ──────────────────────────────────────────────
 
-/**
- * Saved targets as rows the browser can draw.
- *
- * Two fields the terminal listing omits are first-class here, and both decide
- * what a deploy actually does: `mode` (whether Capy ships live or opens a PR)
- * and `prBase` (what that PR opens against). A target saved before `mode`
- * existed resolves to `direct`, so the printed listing can show a row whose
- * next `capy deploy` performs a live vendor deploy with nothing on screen
- * having said so.
- *
- * Variable NAMES only — `.capy/deploy.json` holds no value, which is why it is
- * committed to the repository.
- */
-function targetRows(cwd: string, targets: TargetConfig[]): DeployTargetRow[] {
-  const keep = readKeep(cwd);
-  const branchVarSet = new Set(Object.keys(new FileManager(cwd).readEnvFile()));
-  const currentVars = (keep?.variables ?? []).filter((v) => branchVarSet.has(v));
-  return targets.map((t) => {
-    const adapter = getAdapter(t.kind);
-    const known = t.knownVars ?? currentVars;
-    const { added, removed, drifted } = reconcileVars(t.vars, known, currentVars);
-    return {
-      name: t.name,
-      kind: t.kind,
-      // Absent when the id is no longer in the registry: the terminal prints
-      // the raw id and says nothing else, so the row reads like any other
-      // right up until a deploy dies on `Unknown adapter`.
-      adapterLabel: adapter?.label,
-      branch: t.branch,
-      mode: t.mode,
-      prBase: t.gitBaseBranch,
-      options: Object.entries(t.options).map(([key, value]) => ({
-        key,
-        value: String(value),
-      })),
-      vars: t.vars,
-      drift: drifted ? { added, removed } : undefined,
-    };
-  });
-}
-
-export async function deployList(
-  cwd: string = process.cwd(),
-  opts: { web?: boolean } = {},
-): Promise<number> {
+export async function deployList(cwd: string = process.cwd()): Promise<number> {
   const targets = listTargets(cwd);
-
-  if (opts.web) {
-    // The printed listing stops. Here it answers: the rows carry mode, PR base
-    // and the drift the CLI otherwise only computes mid-deploy, and editing or
-    // removing one is the same act as `capy deploy --edit` and
-    // `capy deploy targets-remove <name>` — both named on the page.
-    const keep = readKeep(cwd);
-    const { chooseDeployTargetInBrowser } = await import('../ui/deployScreens');
-    let picked: { action: string | null; target: string };
-    try {
-      picked = await chooseDeployTargetInBrowser({
-        projectName: basename(cwd),
-        configPath: deployConfigPath(cwd),
-        purpose: 'browse',
-        targets: targetRows(cwd, targets),
-        allow: ['edit', 'remove', 'new'],
-        open: openBrowser(),
-      });
-    } catch (err) {
-      // The screen resolves every refusal — closed window, deadline, Ctrl-C —
-      // so anything that reaches here is the SERVER, not the user. A listing
-      // that never opened must not exit 0 with nothing on screen.
-      console.error(`${RED('✗')} could not open the targets page: ${err instanceof Error ? err.message : err}`);
-      return 1;
-    }
-
-    // Nobody chose a row. A listing that ends having changed nothing is an
-    // ending, and it says so rather than returning silently.
-    if (picked.action === null) {
-      console.log('No changes.');
-      return 0;
-    }
-
-    if (picked.action === 'remove') return deployRemove(picked.target, cwd);
-    if (picked.action === 'edit' || picked.action === 'new') {
-      if (!keep) {
-        console.error(
-          `No keep.lock in ${basename(cwd)}. Run ${B('capy')} here first to sync.`,
-        );
-        return 1;
-      }
-      const edited = await runPicker(
-        cwd,
-        keep,
-        picked.action === 'edit' ? getTarget(cwd, picked.target) ?? undefined : undefined,
-        undefined,
-        { web: true, intent: picked.action === 'edit' ? 'edit' : 'create' },
-      );
-      if (!edited) {
-        console.log('No changes.');
-        return 0;
-      }
-      upsertTarget(cwd, edited);
-      console.log(GREEN(`✓ Saved target "${edited.name}" to .capy/deploy.json`));
-    }
-    return 0;
-  }
 
   if (targets.length === 0) {
     console.log(`No targets configured. Run ${B('capy deploy')} to set one up.`);
@@ -2067,42 +1649,8 @@ export async function deployList(
 export async function deployRemove(
   name: string,
   cwd: string = process.cwd(),
-  opts: { web?: boolean; devMode?: boolean; noDeploy?: boolean } = {},
+  opts: { devMode?: boolean; noDeploy?: boolean } = {},
 ): Promise<number> {
-  if (opts.web) {
-    // The terminal removes on a bare argument with no question at all. The
-    // settings behind that name took seven prompts to produce and
-    // `.capy/deploy.json` keeps no history, so the browser wants it typed back.
-    const targets = listTargets(cwd);
-    if (!targets.some((t) => t.name === name)) {
-      console.error(`No target named "${name}".`);
-      return 1;
-    }
-    const { chooseDeployTargetInBrowser } = await import('../ui/deployScreens');
-    const picked = await chooseDeployTargetInBrowser({
-      projectName: basename(cwd),
-      configPath: deployConfigPath(cwd),
-      purpose: 'browse',
-      targets: targetRows(cwd, targets),
-      view: 'confirm-remove',
-      subjectTarget: name,
-      allow: ['remove'],
-      open: openBrowser(),
-    }).catch((err: unknown) => {
-      // An unanswered delete is a refusal and the screen resolves it as one —
-      // clicking "Keep it" ends the run at once, and a window nobody came back
-      // to ends on the screen's deadline. So a throw here is the SERVER, which
-      // is a different fact and must not read as a decline.
-      console.error(`${RED('✗')} could not open the confirm page: ${err instanceof Error ? err.message : err}`);
-      return null;
-    });
-    if (picked === null) return 1;
-    if (picked.action !== 'remove') {
-      console.log(`Kept target ${B(name)}.`);
-      return 0;
-    }
-  }
-
   // Best-effort cleanup for adapters that left something outside
   // `.capy/deploy.json` (Dokploy's Capy-managed env block). Never gates the
   // local removal below — it is an offer, not a precondition.
@@ -2128,12 +1676,7 @@ export async function deployRemove(
           // itself via `resolveOrgContext` — passing `undefined` here still
           // reaches the store, it just skips the keep.lock-org shortcut.
           const orgId = readKeep(cwd)?.orgId;
-          // A SEPARATE interactive flag from the removal `confirm` above: `--web`
-          // suppresses the store's own terminal prompt (it isn't a browser
-          // screen) even though the removal confirm itself already went through
-          // the browser earlier in this function.
-          const secretsInteractive = dokploySecretsMayPrompt(interactive, !!opts.web);
-          const resolvedApiKey = await resolveDokployApiKeyOnce(adapter!, target, orgId, opts.devMode, secretsInteractive);
+          const resolvedApiKey = await resolveDokployApiKeyOnce(adapter!, target, orgId, opts.devMode, interactive);
           return onRemove(target, {
             cwd,
             interactive,
@@ -2270,10 +1813,7 @@ export async function deployRemove(
  * cancels). Requires a TTY for the picker; callers in non-interactive contexts
  * should pre-resolve via a target name instead.
  */
-export async function ensureDeployTarget(
-  cwd: string = process.cwd(),
-  web: WebContext = {},
-): Promise<TargetConfig | null> {
+export async function ensureDeployTarget(cwd: string = process.cwd()): Promise<TargetConfig | null> {
   const existing = listTargets(cwd);
   if (existing.length === 1) return existing[0];
 
@@ -2286,7 +1826,7 @@ export async function ensureDeployTarget(
   }
 
   const setUpNew = async (): Promise<TargetConfig | null> => {
-    const target = await runPicker(cwd, keep, undefined, undefined, web.web ? web : undefined);
+    const target = await runPicker(cwd, keep);
     if (!target) return null;
     upsertTarget(cwd, target);
     console.log(GREEN(`✓ Saved target "${target.name}" to .capy/deploy.json`));
@@ -2296,13 +1836,6 @@ export async function ensureDeployTarget(
   if (existing.length === 0) return setUpNew();
 
   // Multiple saved targets — pick one (or set up a new one).
-  if (web.web) {
-    const picked = await pickTargetInBrowser(cwd, existing);
-    if (picked.action === 'new') return setUpNew();
-    if (picked.action !== 'use') return null;
-    return existing.find((t) => t.name === picked.target) ?? null;
-  }
-
   const ans = await inquirer.prompt([
     {
       type: 'list',
@@ -2323,267 +1856,14 @@ export async function ensureDeployTarget(
   return existing.find((t) => t.name === ans.name) ?? null;
 }
 
-/**
- * The listing, as the answer to "which target?".
- *
- * Three prompts in this command ask that question with three different
- * sentences — `Which target?`, `Which deploy target?`, `Use saved target?` —
- * and they are one question about one list. `filterKind` carries the situation
- * (a run narrowed by `--target <id>`) and the screen supplies one wording for
- * all of them.
- *
- * `null` is the refusal, and it is the ONLY thing an unanswered page produces:
- * the pick view has no Cancel — its two buttons are `Use this target` and `Set
- * up a new target` — so closing the window is the whole vocabulary a user has
- * for "not this". `chooseDeployTargetInBrowser` resolves that rather than
- * rejecting, so it arrives here as an answer and every caller already treats it
- * as one ("Cancelled.", exit 0). A throw from this call is a broken server, and
- * still a throw.
- */
-async function pickTargetInBrowser(
-  cwd: string,
-  targets: TargetConfig[],
-  filterKind?: string,
-): Promise<{ action: 'use' | 'new' | null; target: string }> {
-  const { chooseDeployTargetInBrowser } = await import('../ui/deployScreens');
-  const picked = await chooseDeployTargetInBrowser({
-    projectName: basename(cwd),
-    configPath: deployConfigPath(cwd),
-    purpose: 'pick',
-    filterKind,
-    filterKindLabel: filterKind ? (getAdapter(filterKind)?.label ?? undefined) : undefined,
-    targets: targetRows(cwd, targets),
-    allow: ['use', 'new'],
-    open: openBrowser(),
-  });
-  return {
-    action: picked.action === 'use' || picked.action === 'new' ? picked.action : null,
-    target: picked.target,
-  };
-}
-
-/**
- * The Vercel Preview git branch, asked on the settings step and nowhere else.
- *
- * A target saved before `options.gitBranch` existed scoped its Preview
- * environment to the CAPY branch name, which fails at `vercel env add` with
- * "Branch not found in the connected Git repository" whenever the two names do
- * not coincide. The terminal heals it with a three-prompt free-text-or-list
- * question; here it is one step, on the page that states in as many words that
- * this is a git branch rather than a capy branch.
- *
- * The whole Vercel settings block comes back rather than `gitBranch` alone:
- * the step also asks which environment this target is, and switching it to
- * Production is a legitimate answer to a target whose Preview branch is
- * missing. Taking only the branch would discard that silently and leave the
- * run stuck on the same question next time.
- */
-async function promptVercelGitBranchInBrowser(
-  cwd: string,
-  keep: KeepInfo,
-  target: TargetConfig,
-): Promise<Record<string, unknown> | null> {
-  const branchVarSet = new Set(Object.keys(new FileManager(cwd).readEnvFile()));
-  const branchVars = keep.variables.filter((v) => branchVarSet.has(v));
-  const { setUpDeployTargetInBrowser } = await import('../ui/deployScreens');
-  const answered = await setUpDeployTargetInBrowser({
-    intent: 'edit',
-    steps: ['settings'],
-    adapterId: target.kind,
-    capyBranches: keep.branches,
-    branch: target.branch,
-    existingNames: listTargets(cwd).map((t) => t.name),
-    existingName: target.name,
-    resolveAdapter: adapterContextFor(cwd, branchVars, target),
-    open: openBrowser(),
-  });
-  return answered.cancelled ? null : answered.options;
-}
-
-/**
- * The plan gate, on a page.
- *
- * The terminal prints a seven-line block and reads ONE raw keypress. Three
- * things move here and nothing else does: every preflight check keeps a row
- * rather than only the first failure being printed, `delete` asks a second
- * question before removing a target that took seven prompts to build, and the
- * three endings a gate can have are never rendered as each other.
- *
- * `edit` is an ANSWER the caller acts on — it re-enters the picker and comes
- * back here — not a way out of the browser.
- */
-async function confirmDeployOnScreen(
-  cwd: string,
-  target: TargetConfig,
-  adapter: DeployAdapter,
-  mode: DeployMode,
-  options: DeployCliOptions,
-  web: WebContext,
-  preflight: { ok: boolean; reason?: string; hint?: string },
-  changeGate?: { baseBranch: string; changed: boolean },
-): Promise<{ action: 'confirm' | 'edit' | 'delete' | 'cancel'; force: boolean }> {
-  const saved = getTarget(cwd, target.name) !== null;
-  const branchVarSet = new Set(Object.keys(new FileManager(cwd).readEnvFile()));
-  const keep = readKeep(cwd);
-  const currentVars = (keep?.variables ?? []).filter((v) => branchVarSet.has(v));
-  const { added, removed, drifted } = reconcileVars(
-    target.vars,
-    target.knownVars ?? currentVars,
-    currentVars,
-  );
-
-  const plan: DeployPlanTarget = {
-    name: target.name,
-    adapterId: adapter.id,
-    adapterLabel: adapter.label,
-    branch: target.branch,
-    mode,
-    prBase: mode === 'ci' ? target.gitBaseBranch : undefined,
-    options: Object.entries(target.options).map(([key, value]) => ({
-      key,
-      value: String(value),
-    })),
-    vars: target.vars,
-    saved,
-  };
-
-  // One row, because one check is what the adapter reports: `preflight()`
-  // returns the FIRST problem it hits and stops. Inventing per-check rows the
-  // adapter never ran would be the browser claiming knowledge the CLI has not
-  // got.
-  const checks: DeployPreflightCheck[] = [
-    {
-      id: 'preflight',
-      label: `${adapter.label} preflight`,
-      state: preflight.ok ? 'ok' : 'fail',
-      detail: preflight.reason,
-      fix: preflight.hint,
-    },
-  ];
-
-  const { confirmDeployInBrowser } = await import('../ui/deployScreens');
-  const out = await confirmDeployInBrowser({
-    target: plan,
-    action: mode,
-    dryRun: !!options.dryRun,
-    preflight: checks,
-    // Preflight is the only place Capy learns whether the vendor session the
-    // user established by hand actually exists.
-    signedIn: preflight.ok,
-    drift: drifted ? { added, removed } : undefined,
-    changeGate,
-    modeAnswer: web.modeAnswer,
-    // Past the change gate the plan was already approved and the secrets are
-    // already decrypted: there is no picker left to re-enter and no target
-    // that could be deleted without stranding the run half-done.
-    allow: changeGate ? ['deploy'] : ['deploy', 'edit', 'delete'],
-    open: openBrowser(),
-  });
-
-  if (out.cancelled || out.decision === null) return { action: 'cancel', force: false };
-  if (out.decision === 'edit') return { action: 'edit', force: false };
-  if (out.decision === 'delete') return { action: 'delete', force: false };
-  return { action: 'confirm', force: out.force };
-}
-
-/**
- * The step log, as a page.
- *
- * `renderResult` prints a glyph, a label and a dim detail per step and then
- * returns an exit code, and the exit code is where it goes wrong: a CI run
- * that pushed secrets and opened a pull request has not deployed, and a run
- * whose change gate found nothing has not even queued one. Both print ticks
- * and exit 0. The outcome is computed here, from what actually happened.
- */
-async function showRunResult(
-  cwd: string,
-  target: TargetConfig,
-  adapter: DeployAdapter,
-  mode: DeployMode,
-  options: DeployCliOptions,
-  result: DeployResult,
-  extra: {
-    stashed: boolean;
-    keepLockChanged: boolean;
-    baseBranch: string;
-    pr?: { branch: string; base: string; url?: string; title?: string; manualUrl?: string };
-  },
-): Promise<void> {
-  const steps: DeployRunStep[] = result.steps.map((s, i) => ({
-    id: `${i}`,
-    label: stripAnsiText(s.label),
-    status: s.status,
-    detail: s.detail === undefined ? undefined : stripAnsiText(s.detail),
-    url: s.url,
-  }));
-
-  const outcome: DeployRunResultData['outcome'] = options.dryRun
-    ? 'dry-run'
-    : !result.ok
-      ? 'failed'
-      : mode !== 'ci'
-        ? 'deployed'
-        : extra.keepLockChanged
-          ? 'opened-pr'
-          : 'nothing-to-deploy';
-
-  // The epilogue's first line is its own heading in the terminal, so it stays
-  // the heading here rather than the browser inventing one.
-  let epilogue: DeployRunResultData['epilogue'];
-  if (result.epilogue) {
-    const lines = stripAnsiText(result.epilogue).split('\n');
-    const first = lines.findIndex((l) => l.trim() !== '');
-    epilogue = {
-      title: (lines[first] ?? '').trim(),
-      snippet: lines.slice(first + 1).join('\n').replace(/^\n+/, ''),
-    };
-  }
-
-  const { showDeployRunResultInBrowser } = await import('../ui/deployScreens');
-  await showDeployRunResultInBrowser(
-    {
-      outcome,
-      projectName: basename(cwd),
-      target: {
-        name: target.name,
-        adapterLabel: adapter.label,
-        branch: target.branch,
-        mode,
-        prBase: mode === 'ci' ? target.gitBaseBranch : undefined,
-        adhoc: getTarget(cwd, target.name) === null,
-      },
-      steps,
-      epilogue,
-      git: mode === 'direct' ? { stashed: extra.stashed } : undefined,
-      pr: extra.pr,
-      stall:
-        outcome === 'nothing-to-deploy'
-          ? {
-              code: 'no-secret-changes',
-              title: 'Nothing will deploy',
-              detail: `The keep.lock this deploy would commit is identical to the one already on origin/${extra.baseBranch}, so no pull request was opened and nothing will rebuild.`,
-              remedy: `capy deploy ${target.name} --force`,
-            }
-          : undefined,
-      nonTty: {
-        command: `capy deploy ${target.name} --yes`,
-        why: '--yes is not optional off a TTY: without it the confirm resolves to cancel and the run exits 0 having deployed nothing.',
-      },
-    },
-    { open: openBrowser() },
-  );
-}
-
 /** The terminal's own colours, off anything on its way into a payload. */
 const stripAnsiText = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, '');
 
 /**
  * The route this invocation would travel, and what is still unanswered on it.
  *
- * One builder, one array: `deployPlan` is what the three browser screens draw
- * and this is what `--json` emits, so the rail a person reads and the array an
- * agent parses cannot describe different routes. `unanswered` is DERIVED from
- * the same array rather than recomputed, for the same reason.
+ * One builder, one array: this is what `--json` emits. `unanswered` is DERIVED
+ * from the same array rather than recomputed, so the two cannot disagree.
  *
  * Only argv and `.capy/deploy.json` settle a stop here. Nothing is guessed: a
  * stop no flag answered comes back in `unanswered`, which is precisely the
@@ -2609,8 +1889,6 @@ export function describeDeployRoute(
   const targetAdapter = !saved && options.target ? getAdapter(options.target) : null;
 
   const answers: Partial<Record<DeployStopId, string>> = {
-    ...(options.platformAnswer ? { platform: stripAnsiText(options.platformAnswer) } : {}),
-    ...(options.modeAnswer ? { mode: stripAnsiText(options.modeAnswer) } : {}),
     ...(saved
       ? {
           platform: stripAnsiText(savedAdapter?.label ?? saved.kind),
@@ -2625,7 +1903,7 @@ export function describeDeployRoute(
         : {}),
   };
   const skipped: DeployStopId[] = [
-    ...(options.modeAnswer ? [] : (['mode'] as DeployStopId[])),
+    'mode' as DeployStopId,
     ...(!saved && options.target ? (['name'] as DeployStopId[]) : []),
   ];
 
@@ -2651,34 +1929,15 @@ export function describeDeployRoute(
 /**
  * Whether to touch `keep.lock`'s `changed_at` and re-trigger CI when the
  * decrypted secrets did not actually change vs. `baseBranch` — `--force`,
- * or (only absent that) a confirm, on the terminal or the browser page,
- * whichever is asking this run's questions. Declining (or nobody able to
- * ask — no TTY, no `--web`) leaves it false, the CLI's own default.
+ * or (only absent that) a confirm on the terminal. Declining (or nobody able
+ * to ask — no TTY) leaves it false, the CLI's own default.
  */
 async function resolveForceRedeploy(
   options: DeployCliOptions,
-  web: WebContext,
-  cwd: string,
-  target: TargetConfig,
-  adapter: DeployAdapter,
-  mode: DeployMode,
-  preflight: PreflightResult,
   baseBranch: string,
 ): Promise<boolean> {
   if (options.force) return true;
   if (options.yes) return false;
-  if (web.web) {
-    // Its own gate, because the change gate can only be evaluated after the
-    // secrets are decrypted — the terminal asks it here for the same reason.
-    // Declining is the CLI's own default of `false`, and the page says out
-    // loud what the terminal leaves implicit: without a forced redeploy this
-    // run pushes the secrets, opens no pull request, and nothing deploys.
-    const gate = await confirmDeployOnScreen(cwd, target, adapter, mode, options, web, preflight, {
-      baseBranch,
-      changed: false,
-    });
-    return gate.action === 'confirm' && gate.force;
-  }
   if (process.stdin.isTTY) {
     const ans = await inquirer.prompt([
       {
@@ -2734,10 +1993,7 @@ async function resolveCiGateOutcome(
   baseBranch: string,
   target: TargetConfig,
   adapter: DeployAdapter,
-  mode: DeployMode,
   options: DeployCliOptions,
-  web: WebContext,
-  preflight: PreflightResult,
 ): Promise<CiGateOutcome> {
   const fetched = fetchRemoteBranch(cwd, baseBranch);
   if (!fetched.ok) {
@@ -2773,7 +2029,7 @@ async function resolveCiGateOutcome(
 
   // No secret change vs the target. --force (or a confirm) touches
   // keep.lock's changed_at so there's a real diff to PR + re-trigger CI.
-  const force = await resolveForceRedeploy(options, web, cwd, target, adapter, mode, preflight, baseBranch);
+  const force = await resolveForceRedeploy(options, baseBranch);
   if (force) return { kind: 'proceed', baseKeep };
 
   console.log(
@@ -2816,9 +2072,6 @@ function buildFinalCiKeep(
     : { ok: true, keepLockChanged: true, deployKeepContent: touchDeployKeep(baseKeep, target.vars, target.branch) };
 }
 
-/** Everything `deployRemove` needs after `showRunResult`'s `pr` field. */
-type OpenedPr = { branch: string; base: string; url?: string; title?: string; manualUrl?: string };
-
 /**
  * Commit the deploy-PR keep.lock in the isolated worktree, push it, and open
  * the PR — the part of the CI-mode flow that happens INSIDE the worktree
@@ -2832,7 +2085,7 @@ async function commitAndOpenDeployPr(
   msg: string,
   target: TargetConfig,
   deployKeepContent: string,
-): Promise<{ ok: true; openedPr?: OpenedPr; prUrl?: string } | { ok: false }> {
+): Promise<{ ok: true; prUrl?: string } | { ok: false }> {
   try {
     const relKeep = repoRelPath(cwd, 'keep.lock');
     writeFileSync(join(wt, relKeep), deployKeepContent);
@@ -2861,11 +2114,11 @@ async function commitAndOpenDeployPr(
     const pr = createPr(wt, title, body, baseBranch);
     if (pr.ok) {
       console.log(`  ${GREEN('✓')} PR      ${pr.url ?? '(open)'}`);
-      return { ok: true, openedPr: { branch: branchName, base: baseBranch, url: pr.url, title }, prUrl: pr.url };
+      return { ok: true, prUrl: pr.url };
     }
     if (pr.manualHint) {
       console.log(`  ${YELLOW('!')} ${pr.manualHint}`);
-      return { ok: true, openedPr: { branch: branchName, base: baseBranch, title } };
+      return { ok: true };
     }
     console.error(`${RED('✗')} gh pr create: ${pr.error}`);
     return { ok: false };
@@ -2889,7 +2142,7 @@ async function openCiDeployPr(
   msg: string,
   target: TargetConfig,
   deployKeepContent: string,
-): Promise<{ ok: true; openedPr?: OpenedPr } | { ok: false }> {
+): Promise<{ ok: true } | { ok: false }> {
   const now = new Date();
   const ts = now.toISOString().slice(0, 10).replace(/-/g, '') + '-' + now.toISOString().slice(11, 19).replace(/:/g, '');
   const rand = Math.random().toString(36).slice(2, 6);
@@ -2910,7 +2163,315 @@ async function openCiDeployPr(
   if (committed.prUrl) console.log(`    ${committed.prUrl}`);
   console.log(`    ${DIM('branch')}    ${branchName} ${DIM(`→ ${baseBranch}`)}`);
   console.log('');
-  return { ok: true, openedPr: committed.openedPr };
+  return { ok: true };
+}
+
+// ── Target resolution steps ────────────────────────────────────────────────
+
+/** A step either yields a value or ends the run with an exit code. */
+type StepResult<T> = { ok: true; value: T } | { ok: false; code: number };
+
+const stepOk = <T,>(value: T): StepResult<T> => ({ ok: true, value });
+const stepStop = (code: number): StepResult<never> => ({ ok: false, code });
+
+/** Runs the picker and saves what it built; cancelling ends the run with 0. */
+async function buildAndSaveTarget(
+  cwd: string,
+  keep: KeepInfo,
+  existing: TargetConfig | undefined,
+  preselectedAdapterId: string | undefined,
+  announceSaved: boolean,
+): Promise<StepResult<TargetConfig>> {
+  const built = await runPicker(cwd, keep, existing, preselectedAdapterId);
+  if (!built) {
+    console.log('Cancelled.');
+    return stepStop(0);
+  }
+  upsertTarget(cwd, built);
+  if (announceSaved) console.log(GREEN(`✓ Saved target "${built.name}" to .capy/deploy.json`));
+  return stepOk(built);
+}
+
+/** `--target <id> --yes`: a transient target built from auto-detected defaults. */
+async function adhocTarget(cwd: string, keep: KeepInfo, adapter: DeployAdapter): Promise<TargetConfig> {
+  const detected = await adapter.detect(cwd);
+  const cls = classify(keep.variables);
+  return {
+    name: `${adapter.id}-adhoc`,
+    kind: adapter.id,
+    branch: keep.branches.includes('production') ? 'production' : keep.branches[0] ?? 'development',
+    vars: adapter.presumeVars
+      ? adapter.presumeVars(cls)
+      : adapter.varKind === 'build-time'
+        ? cls.buildTime
+        : cls.runtime,
+    options: detected.options ?? {},
+    ...(adapter.ciOnly ? { mode: 'ci' as const } : {}),
+  };
+}
+
+/** A saved target of this adapter's kind, or `'__new__'` to re-enter the picker. */
+async function chooseSavedTarget(
+  sameKind: readonly TargetConfig[],
+  adapter: DeployAdapter,
+): Promise<TargetConfig | '__new__'> {
+  if (sameKind.length === 1) {
+    const ans = await inquirer.prompt([
+      {
+        type: 'list',
+        name: 'pick',
+        message: `Use saved target?`,
+        theme: LIST_THEME,
+        choices: [
+          {
+            name: `${sameKind[0].name}  ${DIM(`(branch=${sameKind[0].branch}, mode=${sameKind[0].mode ?? 'direct'})`)}`,
+            value: '__use__',
+          },
+          { name: '+ new target (re-enter picker)', value: '__new__' },
+        ],
+        default: '__use__',
+      } as any,
+    ]);
+    return ans.pick === '__use__' ? sameKind[0] : '__new__';
+  }
+  if (sameKind.length > 1) {
+    const ans = await inquirer.prompt([
+      {
+        type: 'list',
+        name: 'pick',
+        message: `Use a saved ${adapter.label} target?`,
+        theme: LIST_THEME,
+        choices: [
+          ...sameKind.map((t) => ({
+            name: `${t.name}  ${DIM(`(branch=${t.branch}, mode=${t.mode ?? 'direct'})`)}`,
+            value: t.name,
+          })),
+          new inquirer.Separator() as any,
+          { name: '+ new target (re-enter picker)', value: '__new__' },
+        ],
+      } as any,
+    ]);
+    return ans.pick === '__new__' ? '__new__' : sameKind.find((t) => t.name === ans.pick)!;
+  }
+  return '__new__';
+}
+
+/** `--target <id>`: ad-hoc with `--yes`, otherwise offer saved targets of that kind first. */
+async function resolveTargetById(
+  cwd: string,
+  keep: KeepInfo,
+  targetId: string,
+  options: DeployCliOptions,
+): Promise<StepResult<TargetConfig>> {
+  const adapter = getAdapter(targetId);
+  if (!adapter) {
+    console.error(
+      `Unknown adapter "${targetId}". Known: ${ALL_ADAPTERS.map((a) => a.id).join(', ')}`,
+    );
+    return stepStop(1);
+  }
+  if (options.yes) return stepOk(await adhocTarget(cwd, keep, adapter));
+
+  // Interactive but adapter is pre-chosen — handoff path from the
+  // existing platform picker. If the user already saved targets for
+  // this adapter, offer them first so day-2 doesn't re-fill the whole
+  // picker. New target is always available as a "+ new" option.
+  const sameKind = listTargets(cwd).filter((t) => t.kind === adapter.id);
+  const chosen = await chooseSavedTarget(sameKind, adapter);
+  if (chosen !== '__new__') return stepOk(chosen);
+  return buildAndSaveTarget(cwd, keep, undefined, adapter.id, true);
+}
+
+/** No name, no `--target`: picker on first use or `--edit`, the only saved target, or a list. */
+async function resolveTargetInteractively(
+  cwd: string,
+  keep: KeepInfo,
+  options: DeployCliOptions,
+): Promise<StepResult<TargetConfig>> {
+  const targets = listTargets(cwd);
+  if (targets.length === 0 || options.edit) {
+    return buildAndSaveTarget(cwd, keep, options.edit && targets.length === 1 ? targets[0] : undefined, undefined, true);
+  }
+  if (targets.length === 1) return stepOk(targets[0]);
+
+  const ans = await inquirer.prompt([
+    {
+      type: 'list',
+      name: 'name',
+      message: 'Which target?',
+      theme: LIST_THEME,
+      choices: [
+        ...targets.map((t) => ({
+          name: `${t.name}  ${DIM(`(${t.kind}, branch=${t.branch})`)}`,
+          value: t.name,
+        })),
+        new inquirer.Separator() as any,
+        { name: '+ new target', value: '__new__' },
+      ],
+    },
+  ]);
+  if (ans.name === '__new__') return buildAndSaveTarget(cwd, keep, undefined, undefined, false);
+  return stepOk(targets.find((t) => t.name === ans.name)!);
+}
+
+/** explicit name → load from config; `--target=id` → ad-hoc; else the picker. */
+async function resolveTarget(
+  cwd: string,
+  keep: KeepInfo,
+  nameArg: string | undefined,
+  options: DeployCliOptions,
+): Promise<StepResult<TargetConfig>> {
+  if (nameArg) {
+    const target = getTarget(cwd, nameArg);
+    if (!target) {
+      console.error(`No target named "${nameArg}". Run \`capy deploy list\`.`);
+      return stepStop(1);
+    }
+    return stepOk(target);
+  }
+  if (options.target) return resolveTargetById(cwd, keep, options.target, options);
+  return resolveTargetInteractively(cwd, keep, options);
+}
+
+/**
+ * Heal Vercel Preview targets saved before options.gitBranch existed. The
+ * old fallback scoped the Preview env to the CAPY branch name, which fails
+ * at `vercel env add` with "Branch not found in the connected Git
+ * repository" whenever the names don't coincide. Ask once and persist.
+ */
+async function healVercelGitBranch(
+  cwd: string,
+  target: TargetConfig,
+  options: DeployCliOptions,
+): Promise<StepResult<TargetConfig>> {
+  const targetOpts = target.options as Record<string, unknown>;
+  if (!(target.kind === 'vercel' && targetOpts.vercelEnv === 'preview' && !targetOpts.gitBranch)) {
+    return stepOk(target);
+  }
+  if (options.yes) {
+    console.error(
+      `${RED('✗')} target "${target.name}" is missing options.gitBranch ` +
+        `(the git branch its Vercel Preview env is wired to).`,
+    );
+    console.error(`\nRun \`capy deploy --edit\` once interactively to set it.`);
+    return stepStop(1);
+  }
+  const gitBranch = await promptVercelGitBranch(cwd);
+  const healed: TargetConfig = { ...target, options: { ...target.options, gitBranch } };
+  upsertTarget(cwd, healed);
+  console.log(
+    GREEN(
+      gitBranch
+        ? `✓ Saved gitBranch=${gitBranch} to target "${healed.name}"`
+        : `✓ Saved vercelEnv=${targetOpts.vercelEnv} to target "${healed.name}"`,
+    ),
+  );
+  return stepOk(healed);
+}
+
+/**
+ * Var-set reconcile: the saved selection can go stale when the project's
+ * variables change. Re-confirm rather than silently deploying a stale set —
+ * dropping a newly-added secret, or shipping a removed one.
+ */
+async function reconcileTargetVars(
+  cwd: string,
+  keep: KeepInfo,
+  target: TargetConfig,
+  options: DeployCliOptions,
+): Promise<StepResult<TargetConfig>> {
+  const branchVarSet = new Set(Object.keys(new FileManager(cwd).readEnvFile()));
+  const currentVars = keep.variables.filter((v) => branchVarSet.has(v));
+  // Legacy targets have no `knownVars` baseline; treat current as known so we
+  // don't false-flag intentionally-unselected vars as "newly added".
+  const known = target.knownVars ?? currentVars;
+  const { added, removed, drifted } = reconcileVars(target.vars, known, currentVars);
+  if (!drifted) return stepOk(target);
+
+  if (added.length)
+    console.log(`  ${YELLOW('!')} new project var(s) not in this target: ${B(added.join(', '))}`);
+  if (removed.length)
+    console.log(`  ${YELLOW('!')} target var(s) no longer in the project: ${B(removed.join(', '))}`);
+  if (!options.yes && !options.dryRun && process.stdin.isTTY) {
+    // Only the variable list changed, so only the variables are asked about.
+    // Every other setting (adapter, branch, options, mode, name) is kept.
+    const includedNew = added.length ? await pickNewVars(target, added) : [];
+    const updated = applyVarDrift(target, currentVars, includedNew);
+    upsertTarget(cwd, updated);
+    console.log(GREEN(`✓ Updated target "${updated.name}" in .capy/deploy.json`));
+    return stepOk(updated);
+  }
+  if (options.yes && added.length) {
+    console.error(
+      `${RED('✗')} the project gained variable(s) since this target was saved: ${added.join(', ')}.\n` +
+        `    Re-run \`capy deploy ${target.name}\` interactively to include or skip them — refusing to silently drop a secret.`,
+    );
+    return stepStop(1);
+  }
+  if (options.yes && removed.length) {
+    // Non-interactive: a removed var can't be pushed; drop it and carry on.
+    return stepOk({ ...target, vars: target.vars.filter((v) => currentVars.includes(v)), knownVars: currentVars });
+  }
+  return stepOk(target);
+}
+
+/**
+ * Confirm-or-edit loop. Single-keypress picker (c/e/d/esc) so the user can fix
+ * a saved target inline instead of having to abort, run `capy deploy --edit`,
+ * then re-run.
+ */
+async function confirmOrEdit(
+  cwd: string,
+  keep: KeepInfo,
+  target: TargetConfig,
+  adapter: DeployAdapter,
+  mode: DeployMode,
+  adapterCallCtx: { orgId: string | undefined; devMode: boolean | undefined; interactive: boolean; resolvedApiKey: ResolveDokployApiKeyResult | undefined },
+): Promise<StepResult<TargetConfig>> {
+  const summary =
+    mode === 'ci'
+      ? `Open a deploy PR (commit keep.lock + push secrets, no live deploy)?`
+      : `Deploy now (commit keep.lock + ship from HEAD; your WIP is stashed and restored)?`;
+  const action = await keypressConfirm({ message: summary });
+  if (action === 'confirm') return stepOk(target);
+  if (action === 'cancel') {
+    console.log('Cancelled.');
+    return stepStop(0);
+  }
+  if (action === 'delete') {
+    // Only saved targets can be deleted; ad-hoc transient ones aren't on
+    // disk. Either way, stop after delete — there's nothing left to do.
+    const removed = removeTarget(cwd, target.name);
+    if (removed) {
+      console.log(`Removed target ${B(target.name)}.`);
+    } else {
+      console.log(`(target was not saved — nothing to delete)`);
+    }
+    return stepStop(0);
+  }
+  if (action === 'edit') {
+    const edited = await runPicker(cwd, keep, target);
+    if (!edited) {
+      console.log('Cancelled.');
+      return stepStop(0);
+    }
+    upsertTarget(cwd, edited);
+    console.log(GREEN(`✓ Saved target "${edited.name}" to .capy/deploy.json`));
+    renderPlan(edited, adapter);
+    // Re-run preflight after edit — paths/options may have changed.
+    // Reuses the SAME resolvedApiKey from above: it was resolved once
+    // for this command, and an edit here changes vars/branch/mode, never
+    // the Dokploy token source.
+    const recheck = await adapter.preflight(edited, { cwd, ...adapterCallCtx });
+    if (!recheck.ok) {
+      console.error(`${RED('✗')} preflight: ${recheck.reason}`);
+      if (recheck.hint) console.error('\n' + recheck.hint);
+      return stepStop(1);
+    }
+    // Loop back to the confirm prompt with the edited target.
+    return confirmOrEdit(cwd, keep, edited, adapter, mode, adapterCallCtx);
+  }
+  return confirmOrEdit(cwd, keep, target, adapter, mode, adapterCallCtx);
 }
 
 // ── Main: capy deploy [name] ───────────────────────────────────────────────
@@ -2936,191 +2497,14 @@ export async function deployCommand(
     return 1;
   }
 
-  // Where this run's questions are drawn, and what the rail already holds
-  // from the stops travelled before this command was entered.
-  const web: WebContext = {
-    web: options.web,
-    platformAnswer: options.platformAnswer,
-    modeAnswer: options.modeAnswer,
-  };
-
   // Resolve target: explicit name → load from config; --target=id → ad-hoc;
   // else picker (or confirm-last if a single target exists and no --edit).
-  let target: TargetConfig | null = null;
+  const resolved = await resolveTarget(cwd, keep, nameArg, options);
+  if (!resolved.ok) return resolved.code;
 
-  if (nameArg) {
-    target = getTarget(cwd, nameArg);
-    if (!target) {
-      console.error(`No target named "${nameArg}". Run \`capy deploy list\`.`);
-      return 1;
-    }
-  } else if (options.target) {
-    const adapter = getAdapter(options.target);
-    if (!adapter) {
-      console.error(
-        `Unknown adapter "${options.target}". Known: ${ALL_ADAPTERS.map((a) => a.id).join(', ')}`,
-      );
-      return 1;
-    }
-    if (options.yes) {
-      // Ad-hoc CI path: build a transient target from auto-detected defaults.
-      const detected = await adapter.detect(cwd);
-      const cls = classify(keep.variables);
-      target = {
-        name: `${adapter.id}-adhoc`,
-        kind: adapter.id,
-        branch: keep.branches.includes('production') ? 'production' : keep.branches[0] ?? 'development',
-        vars: adapter.presumeVars
-          ? adapter.presumeVars(cls)
-          : adapter.varKind === 'build-time'
-            ? cls.buildTime
-            : cls.runtime,
-        options: detected.options ?? {},
-        ...(adapter.ciOnly ? { mode: 'ci' as const } : {}),
-      };
-    } else {
-      // Interactive but adapter is pre-chosen — handoff path from the
-      // existing platform picker. If the user already saved targets for
-      // this adapter, offer them first so day-2 doesn't re-fill the whole
-      // picker. New target is always available as a "+ new" option.
-      const sameKind = listTargets(cwd).filter((t) => t.kind === adapter.id);
-      let chosen: TargetConfig | '__new__' | null = '__new__';
-      if (web.web && sameKind.length > 0) {
-        const picked = await pickTargetInBrowser(cwd, sameKind, adapter.id);
-        chosen =
-          picked.action === 'new'
-            ? '__new__'
-            : picked.action === 'use'
-              ? sameKind.find((t) => t.name === picked.target) ?? null
-              : null;
-      } else if (sameKind.length === 1) {
-        const ans = await inquirer.prompt([
-          {
-            type: 'list',
-            name: 'pick',
-            message: `Use saved target?`,
-            theme: LIST_THEME,
-            choices: [
-              {
-                name: `${sameKind[0].name}  ${DIM(`(branch=${sameKind[0].branch}, mode=${sameKind[0].mode ?? 'direct'})`)}`,
-                value: '__use__',
-              },
-              { name: '+ new target (re-enter picker)', value: '__new__' },
-            ],
-            default: '__use__',
-          } as any,
-        ]);
-        chosen = ans.pick === '__use__' ? sameKind[0] : '__new__';
-      } else if (sameKind.length > 1) {
-        const ans = await inquirer.prompt([
-          {
-            type: 'list',
-            name: 'pick',
-            message: `Use a saved ${adapter.label} target?`,
-            theme: LIST_THEME,
-            choices: [
-              ...sameKind.map((t) => ({
-                name: `${t.name}  ${DIM(`(branch=${t.branch}, mode=${t.mode ?? 'direct'})`)}`,
-                value: t.name,
-              })),
-              new inquirer.Separator() as any,
-              { name: '+ new target (re-enter picker)', value: '__new__' },
-            ],
-          } as any,
-        ]);
-        chosen =
-          ans.pick === '__new__'
-            ? '__new__'
-            : sameKind.find((t) => t.name === ans.pick)!;
-      }
-      if (chosen === null) {
-        console.log('Cancelled.');
-        return 0;
-      }
-      if (chosen !== '__new__') {
-        target = chosen;
-      } else {
-        const built = await runPicker(cwd, keep, undefined, adapter.id, web.web ? web : undefined);
-        if (!built) {
-          console.log('Cancelled.');
-          return 0;
-        }
-        target = built;
-        upsertTarget(cwd, target);
-        console.log(GREEN(`✓ Saved target "${target.name}" to .capy/deploy.json`));
-      }
-    }
-  } else {
-    // No name, no --target. Interactive.
-    const targets = listTargets(cwd);
-    if (targets.length === 0 || options.edit) {
-      const built = await runPicker(
-        cwd,
-        keep,
-        options.edit && targets.length === 1 ? targets[0] : undefined,
-        undefined,
-        web.web ? web : undefined,
-      );
-      if (!built) {
-        console.log('Cancelled.');
-        return 0;
-      }
-      target = built;
-      upsertTarget(cwd, target);
-      console.log(GREEN(`✓ Saved target "${target.name}" to .capy/deploy.json`));
-    } else if (targets.length === 1) {
-      target = targets[0];
-    } else if (web.web) {
-      const picked = await pickTargetInBrowser(cwd, targets);
-      if (picked.action === 'new') {
-        const built = await runPicker(cwd, keep, undefined, undefined, web);
-        if (!built) {
-          console.log('Cancelled.');
-          return 0;
-        }
-        target = built;
-        upsertTarget(cwd, target);
-      } else if (picked.action === 'use') {
-        target = targets.find((t) => t.name === picked.target) ?? null;
-      }
-      if (!target) {
-        console.log('Cancelled.');
-        return 0;
-      }
-    } else {
-      const ans = await inquirer.prompt([
-        {
-          type: 'list',
-          name: 'name',
-          message: 'Which target?',
-          theme: LIST_THEME,
-          choices: [
-            ...targets.map((t) => ({
-              name: `${t.name}  ${DIM(`(${t.kind}, branch=${t.branch})`)}`,
-              value: t.name,
-            })),
-            new inquirer.Separator() as any,
-            { name: '+ new target', value: '__new__' },
-          ],
-        },
-      ]);
-      if (ans.name === '__new__') {
-        const built = await runPicker(cwd, keep);
-        if (!built) {
-          console.log('Cancelled.');
-          return 0;
-        }
-        target = built;
-        upsertTarget(cwd, target);
-      } else {
-        target = targets.find((t) => t.name === ans.name)!;
-      }
-    }
-  }
-
-  const adapter = getAdapter(target.kind);
+  const adapter = getAdapter(resolved.value.kind);
   if (!adapter) {
-    console.error(`Unknown adapter "${target.kind}" in target "${target.name}".`);
+    console.error(`Unknown adapter "${resolved.value.kind}" in target "${resolved.value.name}".`);
     return 1;
   }
 
@@ -3135,145 +2519,54 @@ export async function deployCommand(
   {
     const activeBranch = new ProjectManager(cwd).deriveActiveBranch();
     // Unknown is deliberately NOT refused here (unlike `pushKeepTransform`'s
-    // stricter guard at the actual write point) — a project with no branch
-    // signal at all (plaintext `.env`, several keep.lock branches; common in
-    // tests and some early setups) stays silent exactly as it did before
-    // this check existed. A KNOWN mismatch is always refused.
-    const branchProblem = activeBranch ? branchPushProblem(activeBranch, target.branch) : null;
+    // stricter guard at the actual write point). A KNOWN mismatch is always refused.
+    const branchProblem = activeBranch ? branchPushProblem(activeBranch, resolved.value.branch) : null;
     if (branchProblem) {
       console.error(`${RED('✗')} ${describeBranchProblem(branchProblem)}`);
       console.error(
-        `\nRun \`capy checkout ${target.branch}\` first, or edit the target with \`capy deploy --edit\`.`,
+        `\nRun \`capy checkout ${resolved.value.branch}\` first, or edit the target with \`capy deploy --edit\`.`,
       );
       return 1;
     }
   }
 
-  // Heal Vercel Preview targets saved before options.gitBranch existed. The
-  // old fallback scoped the Preview env to the CAPY branch name, which fails
-  // at `vercel env add` with "Branch not found in the connected Git
-  // repository" whenever the names don't coincide. Ask once and persist.
-  const targetOpts = target.options as Record<string, unknown>;
-  if (
-    target.kind === 'vercel' &&
-    targetOpts.vercelEnv === 'preview' &&
-    !targetOpts.gitBranch
-  ) {
-    if (options.yes) {
-      console.error(
-        `${RED('✗')} target "${target.name}" is missing options.gitBranch ` +
-          `(the git branch its Vercel Preview env is wired to).`,
-      );
-      console.error(`\nRun \`capy deploy --edit\` once interactively to set it.`);
-      return 1;
-    }
-    if (web.web) {
-      // One step of the setup screen — which is where this question belongs:
-      // the page states in as many words that this is a GIT branch and not the
-      // capy branch, which is the confusion that produced the gap being healed.
-      const healed = await promptVercelGitBranchInBrowser(cwd, keep, target);
-      if (!healed) {
-        console.log('Cancelled.');
-        return 0;
-      }
-      // Production is not branch-scoped, so a switch to it drops the key
-      // rather than leaving a stale one behind — the same reason the picker
-      // omits it.
-      delete targetOpts.gitBranch;
-      Object.assign(targetOpts, healed);
-    } else {
-      targetOpts.gitBranch = await promptVercelGitBranch(cwd);
-    }
-    upsertTarget(cwd, target);
-    console.log(
-      GREEN(
-        targetOpts.gitBranch
-          ? `✓ Saved gitBranch=${targetOpts.gitBranch} to target "${target.name}"`
-          : `✓ Saved vercelEnv=${targetOpts.vercelEnv} to target "${target.name}"`,
-      ),
-    );
-  }
+  // Heal Vercel Preview targets saved before options.gitBranch existed.
+  const healed = await healVercelGitBranch(cwd, resolved.value, options);
+  if (!healed.ok) return healed.code;
 
   // Var-set reconcile: the saved selection can go stale when the
-  // project's variables change. Re-confirm rather than silently deploying a
-  // stale set — dropping a newly-added secret, or shipping a removed one.
-  {
-    const branchVarSet = new Set(Object.keys(new FileManager(cwd).readEnvFile()));
-    const currentVars = keep.variables.filter((v) => branchVarSet.has(v));
-    // Legacy targets have no `knownVars` baseline; treat current as known so we
-    // don't false-flag intentionally-unselected vars as "newly added".
-    const known = target.knownVars ?? currentVars;
-    const { added, removed, drifted } = reconcileVars(target.vars, known, currentVars);
-    if (drifted) {
-      if (added.length)
-        console.log(`  ${YELLOW('!')} new project var(s) not in this target: ${B(added.join(', '))}`);
-      if (removed.length)
-        console.log(`  ${YELLOW('!')} target var(s) no longer in the project: ${B(removed.join(', '))}`);
-      if (!options.yes && !options.dryRun && !web.web && process.stdin.isTTY) {
-        // Only the variable list changed, so only the variables are asked about.
-        // Every other setting (adapter, branch, options, mode, name) is kept.
-        const includedNew = added.length ? await pickNewVars(target, added) : [];
-        target = applyVarDrift(target, currentVars, includedNew);
-        upsertTarget(cwd, target);
-        console.log(GREEN(`✓ Updated target "${target.name}" in .capy/deploy.json`));
-      } else if (!options.yes && !options.dryRun && web.web) {
-        console.log(`  ${DIM('The project\'s variables changed — re-confirm this target.')}`);
-        const reconfirmed = await runPicker(
-          cwd,
-          keep,
-          target,
-          undefined,
-          web.web ? { ...web, intent: 'reconfirm' } : undefined,
-        );
-        if (!reconfirmed) {
-          console.log('Cancelled.');
-          return 0;
-        }
-        target = reconfirmed;
-        upsertTarget(cwd, target);
-        console.log(GREEN(`✓ Updated target "${target.name}" in .capy/deploy.json`));
-      } else if (options.yes && added.length) {
-        console.error(
-          `${RED('✗')} the project gained variable(s) since this target was saved: ${added.join(', ')}.\n` +
-            `    Re-run \`capy deploy ${target.name}\` interactively to include or skip them — refusing to silently drop a secret.`,
-        );
-        return 1;
-      } else if (options.yes && removed.length) {
-        // Non-interactive: a removed var can't be pushed; drop it and carry on.
-        target = { ...target, vars: target.vars.filter((v) => currentVars.includes(v)), knownVars: currentVars };
-      }
-    }
-  }
+  // project's variables change.
+  const reconciled = await reconcileTargetVars(cwd, keep, healed.value, options);
+  if (!reconciled.ok) return reconciled.code;
 
-  renderPlan(target, adapter);
+  renderPlan(reconciled.value, adapter);
 
   // CI-only adapters (Vercel) always take the CI/PR path, even if a legacy or
   // ad-hoc target carries a stale 'direct' mode — capy never runs their CLI.
-  const mode: DeployMode = adapter.ciOnly ? 'ci' : (target.mode ?? 'direct');
+  const mode: DeployMode = adapter.ciOnly ? 'ci' : (reconciled.value.mode ?? 'direct');
 
   // Dokploy only: resolve the org system store's API key ONCE for this whole
   // command and reuse it across preflight, the edit-loop's re-preflight, and
   // deploy — so the store is asked (and an admin prompted) at most once, no
   // matter how many of those run. `undefined` for every other adapter; they
-  // never read `ctx.resolvedApiKey`. Never prompts under `--web` (a browser
-  // run — the store's own prompt renders on a terminal, not a screen),
-  // `--yes`, or `--dry-run` (a preview must never save a new key) — see
+  // never read `ctx.resolvedApiKey`. Never prompts under `--yes` or
+  // `--dry-run` (a preview must never save a new key) — see
   // `dokploySecretsMayPrompt`'s own doc. Never resolves at all when the
   // target's shape is already broken — `resolveDokployApiKeyOnce` skips it,
   // and `preflight()`'s own shape check fails first regardless of any token.
   const secretsInteractive = dokploySecretsMayPrompt(
     process.stdin.isTTY === true,
-    !!web.web || !!options.yes || !!options.dryRun,
+    !!options.yes || !!options.dryRun,
   );
-  const dokployApiKey = await resolveDokployApiKeyOnce(adapter, target, keep.orgId, options.devMode, secretsInteractive);
+  const dokployApiKey = await resolveDokployApiKeyOnce(adapter, reconciled.value, keep.orgId, options.devMode, secretsInteractive);
   const adapterCallCtx = { orgId: keep.orgId, devMode: options.devMode, interactive: secretsInteractive, resolvedApiKey: dokployApiKey };
 
   // Preflight (fail BEFORE decryption). At a terminal, a failed preflight is
   // not a dead end: the user can edit the target (e.g. a wrong composeId) and
-  // preflight runs again. Non-interactive runs (--yes, --dry-run, --json,
-  // --web, no TTY) refuse exactly as before.
+  // preflight runs again. Non-interactive runs (--yes, --dry-run, --json, no
+  // TTY) refuse exactly as before.
   const canFixInteractively =
-    process.stdin.isTTY === true && !options.yes && !options.dryRun && !options.json && !web.web;
+    process.stdin.isTTY === true && !options.yes && !options.dryRun && !options.json;
   const preflightOrEdit = async (
     t: TargetConfig,
   ): Promise<{ ok: true; target: TargetConfig; preflight: PreflightResult } | { ok: false }> => {
@@ -3286,16 +2579,15 @@ export async function deployCommand(
     const action = await keypressConfirm({ message: 'Preflight failed. Press e to edit this target, c to check again, esc to cancel.' });
     if (action === 'confirm') return preflightOrEdit(t);
     if (action !== 'edit') return { ok: false };
-    const edited = await runPicker(cwd, keep, t, undefined, undefined);
+    const edited = await runPicker(cwd, keep, t);
     if (!edited) return { ok: false };
     upsertTarget(cwd, edited);
     console.log(GREEN(`✓ Saved target "${edited.name}" to .capy/deploy.json`));
     renderPlan(edited, adapter);
     return preflightOrEdit(edited);
   };
-  const preflightOutcome = await preflightOrEdit(target);
+  const preflightOutcome = await preflightOrEdit(reconciled.value);
   if (!preflightOutcome.ok) return 1;
-  target = preflightOutcome.target;
   const preflight = preflightOutcome.preflight;
   for (const w of preflight.warnings ?? []) {
     console.log(`  ${YELLOW('!')} ${w.message}`);
@@ -3308,58 +2600,12 @@ export async function deployCommand(
   // Confirm-or-edit loop. Single-keypress picker (c/e/d/esc) so the user
   // can fix a saved target inline instead of having to abort, run
   // `capy deploy --edit`, then re-run.
-  if (!options.yes && !options.dryRun) {
-    while (true) {
-      const summary =
-        mode === 'ci'
-          ? `Open a deploy PR (commit keep.lock + push secrets, no live deploy)?`
-          : `Deploy now (commit keep.lock + ship from HEAD; your WIP is stashed and restored)?`;
-      // Same four answers, drawn on a page instead of read off one keypress —
-      // and `delete` gets the second question the keypress never asked.
-      const action = web.web
-        ? (await confirmDeployOnScreen(cwd, target, adapter, mode, options, web, preflight)).action
-        : await keypressConfirm({ message: summary });
-      if (action === 'confirm') break;
-      if (action === 'cancel') {
-        console.log('Cancelled.');
-        return 0;
-      }
-      if (action === 'delete') {
-        // Only saved targets can be deleted; ad-hoc transient ones aren't on
-        // disk. Either way, stop after delete — there's nothing left to do.
-        const removed = removeTarget(cwd, target.name);
-        if (removed) {
-          console.log(`Removed target ${B(target.name)}.`);
-        } else {
-          console.log(`(target was not saved — nothing to delete)`);
-        }
-        return 0;
-      }
-      if (action === 'edit') {
-        const edited = await runPicker(cwd, keep, target, undefined, web.web ? web : undefined);
-        if (!edited) {
-          console.log('Cancelled.');
-          return 0;
-        }
-        target = edited;
-        upsertTarget(cwd, target);
-        console.log(GREEN(`✓ Saved target "${target.name}" to .capy/deploy.json`));
-        renderPlan(target, adapter);
-        // Re-run preflight after edit — paths/options may have changed.
-        // Reuses the SAME resolvedApiKey from above: it was resolved once
-        // for this command, and an edit here changes vars/branch/mode, never
-        // the Dokploy token source.
-        const recheck = await adapter.preflight(target, { cwd, ...adapterCallCtx });
-        if (!recheck.ok) {
-          console.error(`${RED('✗')} preflight: ${recheck.reason}`);
-          if (recheck.hint) console.error('\n' + recheck.hint);
-          return 1;
-        }
-        // Loop back to confirm prompt with the edited target.
-        continue;
-      }
-    }
-  }
+  const confirmed: StepResult<TargetConfig> =
+    !options.yes && !options.dryRun
+      ? await confirmOrEdit(cwd, keep, preflightOutcome.target, adapter, mode, adapterCallCtx)
+      : { ok: true, value: preflightOutcome.target };
+  if (!confirmed.ok) return confirmed.code;
+  const target = confirmed.value;
 
   const msg = `chore(deploy): ${target.name} → ${target.branch} (${target.kind})`;
   const baseBranch = target.gitBaseBranch ?? 'main';
@@ -3371,7 +2617,7 @@ export async function deployCommand(
   //    — `gateOutcome` stays `null` and the fallback below covers them.
   const ciGated = gitOk && mode === 'ci' && !options.dryRun;
   const gateOutcome: CiGateOutcome | null = ciGated
-    ? await resolveCiGateOutcome(cwd, baseBranch, target, adapter, mode, options, web, preflight)
+    ? await resolveCiGateOutcome(cwd, baseBranch, target, adapter, options)
     : null;
   if (gateOutcome?.kind === 'error') return 1;
   if (gateOutcome?.kind === 'unchanged') return 0;
@@ -3476,13 +2722,6 @@ export async function deployCommand(
   renderResult(result);
   if (!result.ok) {
     await unwindGitState(cwd, null, directStashed);
-    if (web.web) {
-      await showRunResult(cwd, target, adapter, mode, options, result, {
-        stashed: directStashed,
-        keepLockChanged,
-        baseBranch,
-      });
-    }
     return 1;
   }
   if (mode === 'direct') await unwindGitState(cwd, null, directStashed);
@@ -3513,28 +2752,14 @@ export async function deployCommand(
     await recordDeployTargetsCi(cwd, target, adapter, valueHashes, deployToken?.deployId, options.devMode, !!options.noDeploy);
   }
 
-  // The pull request this run opened, for the result page. Held rather than
-  // printed-and-forgotten: `✓ PR (open)` with no URL row is the terminal
-  // saying a pull request exists and giving you no way to reach it.
-  //
   // CI mode: open the keep.lock PR in an ISOLATED git worktree (see
   // `openCiDeployPr`). The user's working tree and current branch are NEVER
   // touched — no stash, no checkout-back, nothing to strand on failure.
   const prOutcome =
     mode === 'ci' && !options.dryRun && keepLockChanged
       ? await openCiDeployPr(cwd, baseBranch, msg, target, deployKeepContent)
-      : { ok: true as const, openedPr: undefined as OpenedPr | undefined };
+      : { ok: true as const };
   if (!prOutcome.ok) return 1;
-  const openedPr = prOutcome.openedPr;
-
-  if (web.web) {
-    await showRunResult(cwd, target, adapter, mode, options, result, {
-      stashed: directStashed,
-      keepLockChanged,
-      baseBranch,
-      pr: openedPr,
-    });
-  }
 
   return 0;
 }
