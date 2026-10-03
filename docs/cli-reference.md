@@ -45,6 +45,9 @@ capy edit [name] [options]
 | `--no-push` | piped value: write .env only; do not push to Capy |  |
 | `--json` | emit machine-readable JSON instead of the human UI (piped value) |  |
 | `--non-tty` | treat stdin as not a terminal; never prompt (agents/CI) |  |
+| `--pr` | create a PR with the keep.lock change (answers the prompt) |  |
+| `--no-pr` | do not create a PR with the keep.lock change |  |
+| `--pr-base <branch>` | base branch for the PR (answers the prompt) |  |
 
 JSON support: yes (`--json`)
 
@@ -586,6 +589,9 @@ capy add <vars...> [options]
 | `-f, --force` | overwrite existing values without prompting |  |
 | `--non-tty` | never prompt; resolve from flags or fail fast (agents/CI) |  |
 | `--json` | emit machine-readable JSON instead of the human UI (piped value) |  |
+| `--pr` | create a PR with the keep.lock change (answers the prompt) |  |
+| `--no-pr` | do not create a PR with the keep.lock change |  |
+| `--pr-base <branch>` | base branch for the PR (answers the prompt) |  |
 
 JSON support: yes (`--json`)
 
@@ -602,6 +608,9 @@ capy remove <vars...> [options]
 | `-y, --yes` | skip the confirmation prompt (required non-interactively) |  |
 | `--json` | emit machine-readable JSON instead of the human UI |  |
 | `--non-tty` | never prompt; resolve from flags or fail fast (agents/CI) |  |
+| `--pr` | create a PR with the keep.lock change (answers the prompt) |  |
+| `--no-pr` | do not create a PR with the keep.lock change |  |
+| `--pr-base <branch>` | base branch for the PR (answers the prompt) |  |
 
 JSON support: yes (`--json`)
 
@@ -734,6 +743,14 @@ Every refusal carries a stable `code` — branch on it, never on message text.
 - `VAR_NOT_FOUND`
 - `REMOVE_LOCAL_DRIFT`
 - `REMOVE_NEEDS_TTY`
+- `KEEP_PR_NOT_GIT_REPO`
+- `KEEP_PR_NO_GITHUB_REMOTE`
+- `KEEP_PR_GH_UNAVAILABLE`
+- `KEEP_PR_BASE_UNRESOLVED`
+- `KEEP_PR_READ_FAILED`
+- `KEEP_PR_COMMIT_FAILED`
+- `KEEP_PR_BRANCH_FAILED`
+- `KEEP_PR_CREATE_FAILED`
 - `CI_DEPLOY_TARGETS_RECORD_FAILED`
 - `DEPLOY_STALE_KEEP`
 - `DEPLOY_TOKEN_UNTRACKED`

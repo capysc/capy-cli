@@ -4,9 +4,10 @@
  * `src/git/autoCommitKeep.ts` (which committed keep.lock on whatever branch
  * the user happened to be on, every time secrets changed) is deleted, and no
  * source file imports or calls it — the only committing paths left are
- * `capy deploy` (unchanged) and the `capy edit` exit flow
- * (src/commands/editExitFlow.ts), both of which commit into an isolated
- * worktree on an explicit action, never onto the user's own checkout.
+ * `capy deploy` (unchanged) and the keep.lock PR step
+ * (src/commands/keepLockPr.ts, used by add/edit/remove), which builds its
+ * commit on GitHub through `gh api` on an explicit action, never onto the
+ * user's own checkout.
  */
 import { describe, test, expect } from 'bun:test';
 import { existsSync, readdirSync, readFileSync, statSync } from 'fs';

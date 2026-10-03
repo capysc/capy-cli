@@ -127,7 +127,7 @@ export function touchDeployKeep(baseKeep: KeepFile, _vars: string[], _branch: st
  * (a deletion).
  *
  * Captured immutably per save so the exit-time PR flow
- * (commands/editExitFlow.ts) can replay every save, in order, onto whatever
+ * (commands/keepLockPr.ts) can replay every save, in order, onto whatever
  * keep.lock the chosen target git branch actually has — which can differ
  * from what this edit session saw, since other pushes may have landed on
  * other branches while the session was open.
@@ -165,7 +165,7 @@ function resolveEntryForFold(
  * same variable/other branch, or any other variable — untouched. A save
  * whose every touched variable already matches the target's value_hash
  * resolves to exactly the target's own entries, so it serializes identically
- * to `keep` — the caller's no-diff check (editExitFlow.ts) skips committing it.
+ * to `keep` — the caller's no-diff check (keepLockPr.ts) skips committing it.
  */
 export function foldEditSaveIntoKeep(keep: KeepFile, record: EditSaveRecord): KeepFile {
   const variables = record.entries.reduce<Record<string, KeepVariableEntry[]>>(

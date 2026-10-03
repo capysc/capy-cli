@@ -636,6 +636,24 @@ export const ERROR_CODES = {
   REMOVE_LOCAL_DRIFT: 'REMOVE_LOCAL_DRIFT',
   /** `capy remove` needs a human (confirmation) and there is no TTY, and `--yes` wasn't passed. */
   REMOVE_NEEDS_TTY: 'REMOVE_NEEDS_TTY',
+  // --- keep.lock PR step (capy add / edit / remove, CAP-699) ---
+  // Reported as `keep_lock.error.code`: the secret change itself still succeeded.
+  /** keep.lock PR step: the working directory is not inside a git repository. */
+  KEEP_PR_NOT_GIT_REPO: 'KEEP_PR_NOT_GIT_REPO',
+  /** keep.lock PR step: there is no `origin` remote, or it is not a github.com repository. */
+  KEEP_PR_NO_GITHUB_REMOTE: 'KEEP_PR_NO_GITHUB_REMOTE',
+  /** keep.lock PR step: the `gh` CLI is missing or not logged in. */
+  KEEP_PR_GH_UNAVAILABLE: 'KEEP_PR_GH_UNAVAILABLE',
+  /** keep.lock PR step: `--pr` had no `--pr-base` and the repo's default branch could not be resolved, or the base branch does not exist. */
+  KEEP_PR_BASE_UNRESOLVED: 'KEEP_PR_BASE_UNRESOLVED',
+  /** keep.lock PR step: reading the repo, its branches, the base head or the base keep.lock from GitHub failed. */
+  KEEP_PR_READ_FAILED: 'KEEP_PR_READ_FAILED',
+  /** keep.lock PR step: creating the blob, tree or commit on GitHub failed. */
+  KEEP_PR_COMMIT_FAILED: 'KEEP_PR_COMMIT_FAILED',
+  /** keep.lock PR step: creating the PR branch (git ref) on GitHub failed. */
+  KEEP_PR_BRANCH_FAILED: 'KEEP_PR_BRANCH_FAILED',
+  /** keep.lock PR step: opening the pull request on GitHub failed. */
+  KEEP_PR_CREATE_FAILED: 'KEEP_PR_CREATE_FAILED',
   // --- CI-mode target recording (CAP-687) ---
   /**
    * A CI-mode deploy delivered successfully (its PR's keep.lock already
