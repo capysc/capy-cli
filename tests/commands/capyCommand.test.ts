@@ -385,15 +385,22 @@ describe('CapyCommand', () => {
     });
 
     test('should complete initialization flow successfully', async () => {
-      await (capyCommand as any).initializeProject();
+      const pairSpy = spyOn(capyCommand as any, 'executePairCommand').mockResolvedValue(undefined);
 
-      expect(mockAuthService.authenticate).toHaveBeenCalled();
-      expect(mockServiceClient.setTokenProvider).toHaveBeenCalled();
-      expect(mockPromptEngine.promptForProjectName).toHaveBeenCalledWith('test-project');
-      expect(mockServiceClient.initializeProject).toHaveBeenCalledWith('test-project', 'org-123');
-      expect(mockFileManager.writeKeepFile).toHaveBeenCalled();
-      // v4: init no longer calls getDecryptData — new projects have nothing to fetch
-      expect(mockFileManager.ensureCapyGitignore).toHaveBeenCalled();
+      try {
+        await (capyCommand as any).initializeProject();
+
+        expect(mockAuthService.authenticate).toHaveBeenCalled();
+        expect(pairSpy).not.toHaveBeenCalled();
+        expect(mockServiceClient.setTokenProvider).toHaveBeenCalled();
+        expect(mockPromptEngine.promptForProjectName).toHaveBeenCalledWith('test-project');
+        expect(mockServiceClient.initializeProject).toHaveBeenCalledWith('test-project', 'org-123');
+        expect(mockFileManager.writeKeepFile).toHaveBeenCalled();
+        // v4: init no longer calls getDecryptData — new projects have nothing to fetch
+        expect(mockFileManager.ensureCapyGitignore).toHaveBeenCalled();
+      } finally {
+        pairSpy.mockRestore();
+      }
     });
 
     test('pairs missing selected-org credentials once, then continues initialization', async () => {
@@ -897,14 +904,19 @@ describe('CapyCommand', () => {
     test('should complete sync flow — no changes', async () => {
       // With empty keep.lock and no local env, everything is up to date
       const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
+      const pairSpy = spyOn(capyCommand as any, 'executePairCommand').mockResolvedValue(undefined);
 
-      await (capyCommand as any).syncProject(mockProjectState);
+      try {
+        await (capyCommand as any).syncProject(mockProjectState);
 
-      // syncProject tries authenticateSilent first
-      expect(mockAuthService.authenticateSilent).toHaveBeenCalledWith('org-123');
-      expect(consoleSpy).toHaveBeenCalledWith('Everything is up to date!');
-
-      consoleSpy.mockRestore();
+        // syncProject tries authenticateSilent first
+        expect(mockAuthService.authenticateSilent).toHaveBeenCalledWith('org-123');
+        expect(pairSpy).not.toHaveBeenCalled();
+        expect(consoleSpy).toHaveBeenCalledWith('Everything is up to date!');
+      } finally {
+        pairSpy.mockRestore();
+        consoleSpy.mockRestore();
+      }
     });
 
     test('pairs root-only partial selected-org credentials once, then continues the existing sync flow', async () => {
