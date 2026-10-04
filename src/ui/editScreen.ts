@@ -3,6 +3,9 @@
 
 import { formatSnippet } from '../commands/statusCommand';
 import { formatRelativeTime } from './relativeTime';
+import { isRevealKey, stepEditBuffer } from './editBuffer';
+import { OldValueView, canReveal, renderInlineValue as inlineValue, valueDialogRows } from './valueDialog';
+import { ERROR_CODES } from '../types/index';
 
 const ESC = '\x1b';
 const HIDE_CURSOR = `${ESC}[?25l`;
@@ -162,32 +165,28 @@ export function updatedLabelForRow(row: EditRow, mode: { localMode?: boolean }):
  * stray escape sequence in the paste can't corrupt the value or the terminal.
  */
 export function sanitizePastedText(raw: string): string {
-  let out = '';
-  for (const ch of raw.replace(/\r\n?/g, '\n')) {
-    const code = ch.charCodeAt(0);
-    if (code === 0x0a || code === 0x09 || (code >= 0x20 && code !== 0x7f)) {
-      out += ch;
-    }
-  }
-  return out;
+  return Array.from(raw.replace(/\r\n?/g, '\n'))
+    .filter((ch) => {
+      const code = ch.charCodeAt(0);
+      return code === 0x0a || code === 0x09 || (code >= 0x20 && code !== 0x7f);
+    })
+    .join('');
 }
 
-/**
- * Collapses a (possibly multi-line) value to a single visible line for the
- * single-row TUI table: newlines render as a ↵ marker and tabs as a space.
- * Length is preserved 1:1 so callers that pan/clip by character offset stay
- * correct.
- */
-export function renderInlineValue(value: string): string {
-  return value.replace(/\n/g, '↵').replace(/\t/g, ' ');
-}
+/** One line for a (possibly multi-line) value, length preserved: see ./valueDialog. */
+export const renderInlineValue = inlineValue;
 
 export class EditScreen {
   private state: EditState = { projectName: '', branch: '', rows: [], remoteAvailable: false };
   private ctx: EditContext | null = null;
   private cursorIndex = 0;
   private revealed = new Set<string>();
-  private editing: { key: string; buffer: string } | null = null;
+  /**
+   * The value dialog (shared layout: ui/valueDialog.ts). `buffer` is what has been
+   * typed (it always starts empty); `oldValue` is the current value, held in memory
+   * only to show on Ctrl+R; `isNew` is a variable that does not exist yet.
+   */
+  private editing: { key: string; buffer: string; oldValue: string | undefined; isNew: boolean; revealed: boolean } | null = null;
   private statusMessage: { text: string; isError: boolean } | null = null;
   private scrollOffset = 0;
   private onDataHandler: ((data: Buffer) => void) | null = null;
@@ -208,7 +207,10 @@ export class EditScreen {
     this.cursorIndex = Math.max(0, focusIndex);
     this.revealed.clear();
     const entering = state.entryKey !== undefined && state.rows.some((r) => r.key === state.entryKey);
-    this.editing = entering && state.entryKey !== undefined ? { key: state.entryKey, buffer: '' } : null;
+    this.editing =
+      entering && state.entryKey !== undefined
+        ? { key: state.entryKey, buffer: '', oldValue: undefined, isNew: true, revealed: false }
+        : null;
     this.statusMessage = null;
     this.scrollOffset = 0;
     this.cleanedUp = false;
@@ -373,7 +375,7 @@ export class EditScreen {
     if (key === 'e' || key === 'E') {
       const row = this.state.rows[this.cursorIndex];
       if (!row) return;
-      this.editing = { key: row.key, buffer: row.localValue ?? '' };
+      this.editing = { key: row.key, buffer: '', oldValue: row.localValue ?? row.remoteValue, isNew: false, revealed: false };
       this.statusMessage = null;
       this.popupOpen = true;
       this.popupPanOffset = 0;
@@ -437,7 +439,7 @@ export class EditScreen {
     if (!this.editing) return;
     const appended = sanitizePastedText(pasted);
     if (appended) {
-      this.editing.buffer += appended;
+      this.editing = { ...this.editing, buffer: this.editing.buffer + appended };
       this.draw();
     }
   }
@@ -452,31 +454,26 @@ export class EditScreen {
       return;
     }
 
-    // Enter
+    // Enter: saves what was typed. An empty box has nothing to save (Esc cancels).
     if (key === '\r' || key === '\n') {
-      void this.commitEdit();
+      if (this.editing.buffer !== '') void this.commitEdit();
       return;
     }
 
-    // Backspace / Delete
-    if (key === '\x7f' || key === '\b') {
-      this.editing.buffer = this.editing.buffer.slice(0, -1);
-      this.draw();
+    // Ctrl+R shows or hides both rows (on screen only); nothing to show for a new variable until something is typed.
+    if (isRevealKey(key)) {
+      if (canReveal(this.oldValueView(this.editing), this.editing.buffer)) {
+        this.editing = { ...this.editing, revealed: !this.editing.revealed };
+        this.draw();
+      }
       return;
     }
 
-    // Ignore other control sequences (arrow keys etc)
-    if (key.startsWith(ESC)) return;
-
-    // Append printable characters (treat the buffer as a stream — works for
-    // multi-byte paste too since paste arrives as one chunk)
-    let appended = '';
-    for (const ch of key) {
-      const code = ch.charCodeAt(0);
-      if (code >= 0x20 && code !== 0x7f) appended += ch;
-    }
-    if (appended) {
-      this.editing.buffer += appended;
+    // Backspace, arrows (ignored) and printable text, every letter included:
+    // one shared rule with the `capy secrets` edit dialog (see editBuffer.ts).
+    const next = stepEditBuffer(this.editing.buffer, key);
+    if (next !== this.editing.buffer) {
+      this.editing = { ...this.editing, buffer: next };
       this.draw();
     }
   }
@@ -634,7 +631,10 @@ export class EditScreen {
       const n = this.pendingEdits.size;
       lines.push(`${m}${YELLOW}${n} uncommitted change${n === 1 ? '' : 's'}.${RESET} ${BOLD}c${RESET}${DIM} ${this.state.localMode ? 'commit' : 'commit & push'} · ${RESET}${BOLD}d${RESET}${DIM} discard · ${RESET}${BOLD}k${RESET}${DIM} keep working${RESET}`);
     } else if (this.editing) {
-      lines.push(`${m}${DIM}Type new value · ${RESET}${BOLD}Enter${RESET}${DIM} save · ${RESET}${BOLD}Esc${RESET}${DIM} cancel${RESET}`);
+      const revealHintText = canReveal(this.oldValueView(this.editing), this.editing.buffer)
+        ? `${BOLD}ctrl+r${RESET}${DIM} ${this.editing.revealed ? 'hide' : 'reveal'} · ${RESET}`
+        : ''; // COPY-FLAG
+      lines.push(`${m}${DIM}Type new value · ${RESET}${revealHintText}${BOLD}Enter${RESET}${DIM} save · ${RESET}${BOLD}Esc${RESET}${DIM} cancel${RESET}`);
     } else if (this.popupOpen) {
       const row = this.state.rows[this.cursorIndex];
       const isRevealed = row ? this.revealed.has(row.key) : false;
@@ -663,14 +663,11 @@ export class EditScreen {
 
   private buildTopCells(): { value: string; action: string }[] {
     const total = this.state.rows.length;
-    let drift = 0;
-    let conflicts = 0;
-    let unknown = 0;
-    for (const r of this.state.rows) {
-      if (r.status === 'local' || r.status === 'remote') drift++;
-      else if (r.status === 'conflict') conflicts++;
-      else if (r.status === 'unknown') unknown++;
-    }
+    const countOf = (statuses: readonly EditRow['status'][]): number =>
+      this.state.rows.filter((r) => statuses.includes(r.status)).length;
+    const drift = countOf(['local', 'remote']);
+    const conflicts = countOf(['conflict']);
+    const unknown = countOf(['unknown']);
 
     return [
       { value: this.state.branch, action: 'active branch' },
@@ -745,6 +742,17 @@ export class EditScreen {
     lines.push(`${indent}${inner}${BOLD}${this.truncate(row.key, contentWidth)}${RESET}`);
     lines.push('');
 
+    // Editing this row: the shared Old value / New value rows replace the details.
+    if (this.editing && this.editing.key === row.key) {
+      const rows = valueDialogRows({
+        old: this.oldValueView(this.editing),
+        revealed: this.editing.revealed,
+        buffer: this.editing.buffer,
+        width: ruleWidth - inner.length,
+      });
+      return [...lines, ...rows.map((r) => `${indent}${inner}${r}`), '', rule];
+    }
+
     const fieldVal = (label: string, value: string) =>
       `${indent}${inner}${DIM}${this.pad(label, labelW)}${RESET}${value}`;
 
@@ -763,17 +771,18 @@ export class EditScreen {
     return lines;
   }
 
-  // Renders the value field as a single line of at most `width` visible chars.
-  // Handles edit mode (shows the buffer with a cursor marker), masked state,
-  // and revealed state with horizontal panning when the value overflows.
-  private renderValueField(row: EditRow, width: number): string {
-    if (this.editing && this.editing.key === row.key) {
-      const display = `> ${renderInlineValue(this.editing.buffer)}_`;
-      if (display.length <= width) return display;
-      // Keep the cursor (end of buffer) visible — clip from the left.
-      return '…' + display.slice(display.length - width + 1);
-    }
+  /** What the Old value row says: nothing for a new variable, the current value, or why there is none. */
+  private oldValueView(editing: { oldValue: string | undefined; isNew: boolean }): OldValueView {
+    if (editing.isNew) return { kind: 'none' };
+    return editing.oldValue === undefined
+      ? { kind: 'unavailable', code: ERROR_CODES.VARIABLE_NOT_FOUND }
+      : { kind: 'value', value: editing.oldValue };
+  }
 
+  // Renders the value field as a single line of at most `width` visible chars.
+  // Handles the masked state and the revealed state with horizontal panning
+  // when the value overflows. (Editing has its own rows: see `buildPopup`.)
+  private renderValueField(row: EditRow, width: number): string {
     const isRevealed = this.revealed.has(row.key);
     if (!isRevealed) {
       return this.maskedSnippet(row);

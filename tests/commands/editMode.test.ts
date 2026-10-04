@@ -190,9 +190,11 @@ describe('capy edit NAME on a terminal: the TUI starts on NAME (spec test 2)', (
     expect(highlightedLine(frame)).not.toContain('ALPHA');
   });
 
-  test('an unknown name opens its value entry, pre-filled with the name', async () => {
+  test('an unknown name opens its value entry: the empty New value row, and no Old value (none)', async () => {
     const frame = await firstFrame(focusedOn(base(), 'DELTA'));
     expect(frame).toContain('DELTA');
-    expect(frame).toContain('> _'); // the empty value entry is open
+    expect(frame).toContain('New value'); // the empty value entry is open
+    expect(frame).toContain('new value'); // its placeholder
+    expect(frame).toContain('(none)'); // a new variable has no old value
   });
 });

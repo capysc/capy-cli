@@ -21,7 +21,7 @@
  */
 import { ERROR_CODES } from '../types/index';
 import { EXIT_NEEDS_INPUT } from '../ui/interactive';
-import type { KeepLockPrOutcome } from './keepLockPr';
+import type { KeepLockPrOutcome, KeepLockPreviewOutcome } from './keepLockPr';
 
 /** 1 MiB. A value over this is refused without reading further. */
 export const MAX_PIPED_BYTES = 1024 * 1024;
@@ -156,6 +156,18 @@ export function refusePiped(json: boolean, code: string, error: string): never {
   process.exit(exitCodeForRefusal(code));
 }
 
+/** Why each interactive path cannot preview. Minimal and neutral. */
+export const DRY_RUN_UNSUPPORTED_MESSAGES = {
+  edit: "--dry-run isn't available in the interactive editor. Pipe a value with capy edit NAME --dry-run.", // COPY-FLAG
+  add: "--dry-run isn't available for an interactive add. Pipe a value with: <cmd> | capy add NAME --dry-run", // COPY-FLAG
+  remove: "--dry-run isn't available at the confirmation prompt. Add --yes, --json or --non-tty to preview.", // COPY-FLAG
+} as const;
+
+/** `DRY_RUN_UNSUPPORTED`, exit 1, before any prompt or screen. `--json`: `{ ok:false, code, error }`. */
+export function refuseDryRunUnsupported(json: boolean, message: string): never {
+  return refusePiped(json, ERROR_CODES.DRY_RUN_UNSUPPORTED, message);
+}
+
 /**
  * `INVALID_FORMAT` for a bad variable name. The argument is NOT echoed: a
  * `NAME=value` typed by mistake must not be printed back.
@@ -186,13 +198,59 @@ export function pipedSuccessLine(result: PipedSuccess): string {
   return `✓ Set ${result.name} on ${result.branch} ${where}`;
 }
 
+/** The dry-run line: what would happen, and that nothing did. */
+export function pipedDryRunLine(result: { readonly name: string; readonly branch: string; readonly action: PipedAction }): string {
+  if (result.action === 'unchanged') {
+    return `Dry run: ${result.name} on ${result.branch} already has this value. Nothing would change.`; // COPY-FLAG
+  }
+  const verb = result.action === 'created' ? 'create' : 'update';
+  return `Dry run: would ${verb} ${result.name} on ${result.branch}. Nothing was changed.`; // COPY-FLAG
+}
+
+/**
+ * `--dry-run` of a piped write. `--json`: the real envelope plus `dry_run: true`, with
+ * `action` what WOULD happen, `pushed: false` and `keep_lock` the preview. Human: one stderr line.
+ */
+export function reportPipedDryRun(
+  json: boolean,
+  result: { readonly name: string; readonly branch: string; readonly action: PipedAction },
+  preview: KeepLockPreviewOutcome,
+): void {
+  if (json) {
+    console.log(
+      JSON.stringify(
+        {
+          ok: true,
+          name: result.name,
+          branch: result.branch,
+          action: result.action,
+          pushed: false,
+          dry_run: true,
+          keep_lock: preview.keep_lock,
+          ...(preview.unanswered === undefined ? {} : { unanswered: preview.unanswered }),
+        },
+        null,
+        2,
+      ),
+    );
+    return;
+  }
+  console.error(pipedDryRunLine(result));
+}
+
 /**
  * `--json`: pure JSON on stdout, with `keep_lock` (and `unanswered`) when the
  * keep.lock PR step ran. Human: one line on stderr.
  */
-export function reportPipedSuccess(json: boolean, result: PipedSuccess, keepLock?: KeepLockPrOutcome): void {
+export function reportPipedSuccess(
+  json: boolean,
+  result: PipedSuccess,
+  keepLock?: KeepLockPrOutcome,
+  /** Extra top-level JSON fields (e.g. `warnings`). Never printed in human mode. */
+  extra: object = {},
+): void {
   if (json) {
-    const payload = { ok: true, ...result };
+    const payload = { ok: true, ...result, ...extra };
     console.log(
       JSON.stringify(
         keepLock === undefined

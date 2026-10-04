@@ -88,7 +88,7 @@ export class ConnectCommand {
       return await this.executeDiscovery(mod, provider, discoveryCtx, effective);
     }
 
-    const ctx = await resolveContext({ devMode: this.devMode });
+    const ctx = await resolveContext({ devMode: this.devMode, dryRun: effective.dryRun === true });
 
     // Import-kind connectors (CAP-662: `dokploy`) pull MANY variables in one
     // run rather than linking one existing one, so they skip the var-picking

@@ -2,6 +2,7 @@ import { SecretIndexRow, SecretIndexSkipped } from '../service/serviceClient';
 import { resolveOrgContext } from '../core/orgContext';
 import { Spinner } from '../ui/spinner';
 import { CapyError, ERROR_CODES } from '../types/index';
+import { rowIdOf } from './secretsRowId';
 
 export interface SecretsOpts {
   json?: boolean;
@@ -9,6 +10,10 @@ export interface SecretsOpts {
   project?: string;
   /** Keep only rows with at least one location on this branch — exact, case-sensitive match. */
   branch?: string;
+  /** Keep only rows with exactly this NAME (case-sensitive). */
+  name?: string;
+  /** The global `--dry-run`: the screen's edit flow only plans, and says so. Has no effect on `--json`. */
+  dryRun?: boolean;
 }
 
 /**
@@ -74,8 +79,14 @@ export class SecretsCommand {
       if (interactive) {
         const { createLocationDecryptor } = await import('./secretsValueDecryptor');
         const { runSecretsScreen } = await import('../ui/secretsScreenDriver');
+        const { createEditActions } = await import('./secretsEditActions');
         spinner?.stop();
-        await runSecretsScreen(rows, createLocationDecryptor(orgId, userId, serviceClient));
+        await runSecretsScreen(
+          rows,
+          createLocationDecryptor(orgId, userId, serviceClient),
+          createEditActions(orgId, userId, serviceClient, opts.dryRun === true),
+          opts.dryRun === true,
+        );
         return;
       }
 
@@ -89,8 +100,9 @@ export class SecretsCommand {
   private filterRows(rows: readonly SecretIndexRow[], opts: SecretsOpts): SecretIndexRow[] {
     const projectFilter = opts.project;
     const branchFilter = opts.branch;
-    if (!projectFilter && !branchFilter) return [...rows];
-    return rows.filter((row) =>
+    const named = opts.name === undefined ? [...rows] : rows.filter((row) => row.name === opts.name);
+    if (!projectFilter && !branchFilter) return named;
+    return named.filter((row) =>
       row.locations.some(
         (loc) =>
           (!projectFilter || loc.project_name === projectFilter) &&
@@ -100,7 +112,9 @@ export class SecretsCommand {
   }
 
   private emitJsonOutput(rows: readonly SecretIndexRow[], skipped: readonly SecretIndexSkipped[], orgId: string): void {
-    console.log(JSON.stringify({ ok: true, org_id: orgId, rows, skipped }, null, 2));
+    // `row_id`: an opaque, stable handle for (name, value) that `capy secrets set --row` takes. Never a slice of the value's hash.
+    const withIds = rows.map((row) => ({ ...row, row_id: rowIdOf(row.name, row.value_hash) }));
+    console.log(JSON.stringify({ ok: true, org_id: orgId, rows: withIds, skipped }, null, 2));
 
     // Names only, never a value — always stderr, so stdout stays pure JSON
     // whether this is an explicit --json call or the automatic non-TTY one.

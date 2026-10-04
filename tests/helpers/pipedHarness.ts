@@ -43,9 +43,9 @@ import type { KeepFile } from '../../src/types/index';
 export const PROD_CLI = join(__dirname, '../../dist/index.js');
 export const DEV_CLI = join(__dirname, '../../dist/index-dev.js');
 
-const ORG_ID = 'org_test_piped';
+export const ORG_ID = 'org_test_piped';
 const WORKOS_ORG_ID = 'org_workos_test_piped';
-const PROJECT_ID = 'proj_test_piped';
+export const PROJECT_ID = 'proj_test_piped';
 const USER_ID = 'user_test_piped';
 export const BRANCH = 'production';
 
@@ -72,8 +72,20 @@ export interface Harness {
   pushCount(): number;
   /** From now on, `POST /secrets/:project` answers 500. */
   failPushes(): void;
+  /** Makes the mock answer `GET /orgs/:org/secrets` (the `capy secrets` index) with this body. */
+  setSecretsIndex(body: unknown): void;
+  /** Makes the mock answer `GET /orgs/:org/repos` with this body. */
+  setOrgRepos(body: unknown): void;
+  /** Makes the mock answer `GET /secrets/:project?branch=<branch>` with this body. */
+  setBranchData(project: string, branch: string, body: unknown): void;
+  /** How `PUT /orgs/:org/projects/:project/repos` answers: `ok`, `mismatch` (other repos known), `500`, or `hang` (never). Default `ok`. */
+  setRepoPutMode(mode: 'ok' | 'mismatch' | '500' | 'hang'): void;
+  /** The `PUT .../repos` requests the mock has received (parsed bodies). */
+  repoPuts(): readonly unknown[];
+  /** Directory for extra files (a fake `gh`, its log). */
+  readonly root: string;
   /** Run the built cli. `stdin: undefined` closes stdin immediately (like `</dev/null`). */
-  run(args: readonly string[], stdin?: Buffer | string, cli?: string): Promise<CliResult>;
+  run(args: readonly string[], stdin?: Buffer | string, cli?: string, env?: Readonly<Record<string, string>>): Promise<CliResult>;
   /** Decrypts what `.env` currently holds for `name`, or undefined. */
   envValue(name: string): string | undefined;
   /** The raw text of keep.lock as the cli left it. */
@@ -154,7 +166,7 @@ interface MockService {
   readonly url: string;
 }
 
-async function startMockService(requestLog: string, failFlag: string): Promise<MockService> {
+async function startMockService(requestLog: string, failFlag: string, root: string): Promise<MockService> {
   const server = createServer(async (req, res) => {
     const body = await text(req);
     const path = req.url ?? '';
@@ -163,6 +175,33 @@ async function startMockService(requestLog: string, failFlag: string): Promise<M
       res.writeHead(status, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(payload));
     };
+    const fixture = (name: string): unknown | undefined =>
+      existsSync(join(root, name)) ? JSON.parse(readFileSync(join(root, name), 'utf8')) : undefined;
+    if (req.method === 'GET' && /^\/orgs\/[^/]+\/secrets$/.test(path)) {
+      const body = fixture('secrets-index.json');
+      return body === undefined ? send(404, { error: 'no index fixture' }) : send(200, body);
+    }
+    if (req.method === 'GET' && /^\/orgs\/[^/]+\/repos$/.test(path)) {
+      const body = fixture('org-repos.json');
+      return body === undefined ? send(404, { error: 'no repos fixture' }) : send(200, body);
+    }
+    if (req.method === 'PUT' && /^\/orgs\/[^/]+\/projects\/[^/]+\/repos$/.test(path)) {
+      const mode = existsSync(join(root, 'repo-put-mode')) ? readFileSync(join(root, 'repo-put-mode'), 'utf8') : 'ok';
+      if (mode === 'hang') return undefined; // never answers; the harness closes the connection on dispose
+      if (mode === '500') return send(500, { code: 'SERVICE_ERROR', error: 'mock repo failure' });
+      const put = JSON.parse(body) as { host: string; owner: string; name: string; path: string };
+      return send(200, {
+        ok: true,
+        link: { ...put, project_id: 'p', github_repo_id: null, first_seen_at: '', last_seen_at: '' },
+        known_repos: mode === 'mismatch' ? [{ host: 'github.com', owner: 'someone-else', name: 'copied-from', path: '.' }] : [],
+      });
+    }
+    if (req.method === 'GET' && /^\/secrets\/[^/?]+\?/.test(path)) {
+      const [project, query] = path.slice('/secrets/'.length).split('?');
+      const branch = new URLSearchParams(query).get('branch') ?? '';
+      const data = fixture(`branch-${project}-${branch}.json`);
+      return data === undefined ? send(404, { error: 'no branch fixture' }) : send(200, data);
+    }
     if (path.endsWith('/co-decrypt')) return send(200, { plaintext: (JSON.parse(body) as { ciphertext: string }).ciphertext });
     if (path.endsWith('/wrap')) return send(200, { ciphertext: (JSON.parse(body) as { plaintext: string }).plaintext });
     if (path.startsWith('/secrets/') && req.method === 'POST') {
@@ -190,7 +229,7 @@ export async function createHarness(): Promise<Harness> {
   mkdirSync(project, { recursive: true });
   writeFileSync(requestLog, '');
 
-  const mock = await startMockService(requestLog, failFlag);
+  const mock = await startMockService(requestLog, failFlag, root);
   const projectKey = seedHome(home, mock.url);
   seedProject(project);
 
@@ -200,7 +239,7 @@ export async function createHarness(): Promise<Harness> {
       .filter((line) => line.length > 0)
       .map((line) => JSON.parse(line) as RecordedRequest);
 
-  const run: Harness['run'] = async (args, stdin, cli = PROD_CLI) => {
+  const run: Harness['run'] = async (args, stdin, cli = PROD_CLI, extraEnv = {}) => {
     const started = Date.now();
     const child = spawn('node', [cli, ...args], {
       cwd: project,
@@ -211,6 +250,7 @@ export async function createHarness(): Promise<Harness> {
         USERPROFILE: home,
         CAPY_WEB_NO_OPEN: '1',
         CAPY_NO_AUTOCOMMIT: '1',
+        ...extraEnv,
       },
     });
     // A writer that stops reading mid-pipe (the cap) closes the pipe: EPIPE is expected, not a failure.
@@ -228,6 +268,15 @@ export async function createHarness(): Promise<Harness> {
     requests,
     pushCount: () => requests().filter((r) => r.method === 'POST' && r.path.startsWith('/secrets/')).length,
     failPushes: () => writeFileSync(failFlag, '1'),
+    setSecretsIndex: (body) => writeFileSync(join(root, 'secrets-index.json'), JSON.stringify(body)),
+    setOrgRepos: (body) => writeFileSync(join(root, 'org-repos.json'), JSON.stringify(body)),
+    setBranchData: (projectId, branch, body) => writeFileSync(join(root, `branch-${projectId}-${branch}.json`), JSON.stringify(body)),
+    setRepoPutMode: (mode) => writeFileSync(join(root, 'repo-put-mode'), mode),
+    repoPuts: () =>
+      requests()
+        .filter((r) => r.method === 'PUT' && /\/projects\/[^/]+\/repos$/.test(r.path))
+        .map((r) => JSON.parse(r.body) as unknown),
+    root,
     run,
     envValue: (name) => {
       const files = new FileManager(project);

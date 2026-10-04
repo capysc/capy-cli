@@ -16,8 +16,9 @@ import { setSyncKeepHash, KeepFile } from '../types/index';
 import { reportKeepLockHuman, refuseBadPrFlags, runKeepLockPrStep, type PrFlags } from './keepLockPr';
 import { startSaveLog } from './sessionSaveLog';
 import { decideEditMode, editPipedCommand, refuseEditNeedsTty } from './editPiped';
-import { refuseInvalidName } from './pipedValue';
+import { DRY_RUN_UNSUPPORTED_MESSAGES, refuseDryRunUnsupported, refuseInvalidName } from './pipedValue';
 import { isValidVarName } from './pipedWrite';
+import { printRepoLinkWarnings, reportRepoLink } from '../core/repoLinkReporter';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -131,6 +132,8 @@ export interface EditOpts {
   nonTty?: boolean;
   /** `--pr` / `--no-pr` / `--pr-base`: answers the keep.lock PR step. */
   pr?: PrFlags;
+  /** The global `--dry-run`: piped mode previews; the TUI refuses (`DRY_RUN_UNSUPPORTED`). */
+  dryRun?: boolean;
 }
 
 export class EditCommand {
@@ -201,6 +204,10 @@ export class EditCommand {
       nonTty: opts.nonTty === true,
     });
     if (mode === 'refuse') return refuseEditNeedsTty(opts.json === true);
+    // The TUI would really save: a dry run never runs for real, and has no way to preview it. Before any screen.
+    if (mode === 'tui' && opts.dryRun === true) {
+      return refuseDryRunUnsupported(opts.json === true, DRY_RUN_UNSUPPORTED_MESSAGES.edit);
+    }
     if (opts.name !== undefined && !isValidVarName(opts.name)) return refuseInvalidName(opts.json === true);
     if (mode === 'piped' && opts.name !== undefined) {
       return editPipedCommand(opts.name, {
@@ -208,6 +215,7 @@ export class EditCommand {
         push: opts.noPush !== true,
         devMode: this.devMode,
         pr: opts.pr,
+        dryRun: opts.dryRun === true,
       });
     }
 
@@ -430,7 +438,13 @@ export class EditCommand {
       },
     };
 
+    // CAP-697: started now, collected after the TUI closes (it has long since finished by then).
+    const repoLinkPending = serviceClient
+      ? reportRepoLink({ cwd: process.cwd(), orgId, projectId, projectName: keep.project_name, client: serviceClient })
+      : undefined;
+
     await screen.run(state, editContext);
+    if (repoLinkPending) printRepoLinkWarnings(await repoLinkPending);
     // The TUI has already released stdin (raw mode off, its key listener
     // removed) by the time `run` resolves, so the prompts in keepLockPr.ts start
     // from a clean terminal.

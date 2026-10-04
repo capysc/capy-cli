@@ -1,6 +1,6 @@
 import { CapyError, ERROR_CODES } from '../types';
 import { resolveContext, writeAndSync, type ResolvedContext } from './connectors/shared';
-import { MAX_PIPED_BYTES, readPipedValue, refuseInvalidName, refusePiped } from './pipedValue';
+import { DRY_RUN_UNSUPPORTED_MESSAGES, MAX_PIPED_BYTES, readPipedValue, refuseDryRunUnsupported, refuseInvalidName, refusePiped } from './pipedValue';
 import { runPipedWrite, variableExists } from './pipedWrite';
 import {
   recordsForWrite,
@@ -24,6 +24,8 @@ export interface AddOpts {
   json?: boolean;
   /** `--pr` / `--no-pr` / `--pr-base`: answers the keep.lock PR step. */
   pr?: PrFlags;
+  /** The global `--dry-run`: a piped add previews; an interactive add refuses (`DRY_RUN_UNSUPPORTED`). */
+  dryRun?: boolean;
 }
 
 const VAR_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -74,6 +76,9 @@ export class AddCommand {
 
     // `<cmd> | capy add NAME`: the value comes from stdin and nothing prompts.
     if (isPipedAdd()) return this.executePiped(names, opts);
+
+    // The prompts would really save: a dry run never runs for real. Before any prompt.
+    if (opts.dryRun === true) return refuseDryRunUnsupported(opts.json === true, DRY_RUN_UNSUPPORTED_MESSAGES.add);
 
     if (names.length === 0) {
       throw new CapyError('No variable name given.', ERROR_CODES.INVALID_FORMAT);
@@ -142,6 +147,7 @@ export class AddCommand {
       devMode: this.devMode,
       command: 'add',
       pr: opts.pr,
+      dryRun: opts.dryRun === true,
       gate: (ctx) =>
         variableExists(ctx, name) && opts.force !== true
           ? {

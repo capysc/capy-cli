@@ -15,6 +15,11 @@ import { ACCENT } from './ui/colors';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
+/** Commander accumulator for repeatable options whose values are taken whole (e.g. --row, --exclude). */
+function collectRepeatable(val: string, acc: string[]): string[] {
+  return acc.concat(val);
+}
+
 /** Commander accumulator for repeatable, comma-splittable options (e.g. --project). */
 function collectProjects(val: string, acc: string[]): string[] {
   return acc.concat(val.split(',').map((s) => s.trim()).filter(Boolean));
@@ -323,6 +328,8 @@ program
       noPush: options.push === false,
       nonTty: options.nonTty,
       pr: prFlagsFromCommand(command, options.prBase),
+      // The program-level `--dry-run`, wherever it was typed.
+      dryRun: command.optsWithGlobals().dryRun === true,
     });
   });
 
@@ -754,16 +761,60 @@ program
     await cmd.execute({ json: options.json });
   });
 
-program
+const secretsCmd = program
   .command('secrets')
   .description('List every secret name across the active organization, grouped by value (read-only, never shows a value)')
   .option('--json', 'emit machine-readable JSON instead of the human UI')
   .option('--project <name>', 'only rows with a location in this project')
   .option('--branch <name>', 'only rows with a location on this branch')
-  .action(async (options) => {
+  .option('--name <NAME>', 'only rows with exactly this secret name') // COPY-FLAG
+  .action(async (options, command) => {
     const { SecretsCommand } = await import('./commands/secretsCommand');
     const cmd = new SecretsCommand(process.env.CAPY_API_URL, true);
-    await cmd.execute({ json: options.json, project: options.project, branch: options.branch });
+    await cmd.execute({ json: options.json, project: options.project, branch: options.branch, name: options.name, dryRun: command.optsWithGlobals().dryRun === true });
+  });
+
+secretsCmd
+  .command('set <name>')
+  // COPY-FLAG: minimal-neutral. Agent mode: never prompts; the value is read from stdin only.
+  .description('Set one secret to a new value (read from stdin) in several locations and open keep.lock PRs. Never prompts.')
+  .option('--json', 'emit machine-readable JSON instead of the human UI')
+  // COPY-FLAG: the option descriptions of `secrets set` are minimal and neutral.
+  .option('--row <row_id>', 'change this row of that name (repeatable; ids from `capy secrets --name NAME --json`)', collectRepeatable, [])
+  .option('--all-rows', 'change every row of that name')
+  .option('--exclude <project:branch>', 'leave this location out (repeatable)', collectRepeatable, [])
+  .addOption(new Option('--no-pr-for <owner/name>', 'do not open a PR in this repo (repeatable)').argParser(collectRepeatable).default([]))
+  .option('--no-pr', 'do not open any PR')
+  .option('--confirm <plan_id>', 'run the plan that --dry-run printed (required for a real run)')
+  .addHelpText(
+    'after',
+    // COPY-FLAG
+    '\n' +
+      'Agents: look the rows up, show the human a table, let the human pick the row(s), dry run, get approval, then run with --confirm. Never pick a row yourself.\n' +
+      '  capy secrets --name NAME --json\n' +
+      '  <cmd> | capy secrets set NAME --row <row_id> --dry-run --json\n' +
+      '  <cmd> | capy secrets set NAME --row <row_id> --confirm <plan_id> --json\n',
+  )
+  .action(async (name: string, options: any, command: any) => {
+    // `--json` is also a `capy secrets` option, which Commander lets the parent claim;
+    // `--dry-run` is the program-level flag. Read both from the merged options.
+    const merged = command.optsWithGlobals();
+    const { secretsSetCommand } = await import('./commands/secretsSetCommand');
+    const code = await secretsSetCommand(
+      name,
+      {
+        json: merged.json === true,
+        dryRun: merged.dryRun === true,
+        confirm: options.confirm,
+        row: options.row,
+        allRows: options.allRows === true,
+        exclude: options.exclude,
+        noPrFor: options.prFor,
+        noPr: options.pr === false,
+      },
+      true,
+    );
+    process.exit(code);
   });
 
 program
@@ -946,6 +997,7 @@ program
       nonTty: options.nonTty,
       json: options.json,
       pr: prFlagsFromCommand(command, options.prBase),
+      dryRun: merged.dryRun === true,
     });
   });
 
@@ -967,6 +1019,7 @@ program
       json: options.json,
       nonTty: options.nonTty,
       pr: prFlagsFromCommand(command, options.prBase),
+      dryRun: command.optsWithGlobals().dryRun === true,
     });
   });
 

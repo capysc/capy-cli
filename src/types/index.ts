@@ -694,6 +694,35 @@ export const ERROR_CODES = {
   ADD_VAR_EXISTS: 'ADD_VAR_EXISTS',
   /** `--web` was passed. The browser screens were removed and the command is not run. Exit 1. */
   WEB_MODE_REMOVED: 'WEB_MODE_REMOVED',
+  // --- Project → repo links (CAP-697) and shared secret edits (CAP-698) ---
+  // The first four match the service copy's order and spelling.
+  /** A keep.lock's project is already linked to other repos, none of them this one (likely a copied keep.lock). A warning, never a failure. */
+  KEEP_LOCK_REPO_MISMATCH: 'KEEP_LOCK_REPO_MISMATCH',
+  /** `capy secrets set NAME`: NAME matches more than one row (distinct values) and neither `--row` nor `--all-rows` was given. Exit 3. */
+  SECRET_AMBIGUOUS: 'SECRET_AMBIGUOUS',
+  /** `capy secrets set --confirm <plan_id>`: the plan recomputed now is not the plan that was confirmed. Nothing was changed. */
+  PLAN_CHANGED: 'PLAN_CHANGED',
+  /** `PUT /orgs/:orgId/projects/:projectId/repos` refused a project that is not a repo project (e.g. the system store). */
+  PROJECT_KIND_UNSUPPORTED: 'PROJECT_KIND_UNSUPPORTED',
+  // Added by CAP-698 beyond the service copy (the service copy needs them only if the service ever sends them).
+  /** `capy secrets set NAME` without `--dry-run` and without `--confirm <plan_id>`. The refusal carries the plan. Exit 3. */
+  PLAN_CONFIRM_REQUIRED: 'PLAN_CONFIRM_REQUIRED',
+  /** `capy secrets set NAME`: no row has that name, or a `--row` id matches no row. */
+  SECRET_NOT_FOUND: 'SECRET_NOT_FOUND',
+  /** `capy secrets set NAME`: the selection (rows minus `--exclude`) left no location to change. */
+  SECRETS_NOTHING_SELECTED: 'SECRETS_NOTHING_SELECTED',
+  /** `capy secrets set NAME`: the run finished but at least one location or repo failed. Exit 1. */
+  SECRETS_PARTIAL: 'SECRETS_PARTIAL',
+  /** `GET /orgs/:orgId/repos` answered 404: the service predates project -> repo links. Never a failure of the command that asked. */
+  REPO_LINKS_UNSUPPORTED: 'REPO_LINKS_UNSUPPORTED',
+  /** `--dry-run` on a path that would prompt (the `capy edit` TUI, an interactive `capy add`, `capy remove`'s confirmation): it cannot preview, and a dry run never runs for real. Exit 1. */
+  DRY_RUN_UNSUPPORTED: 'DRY_RUN_UNSUPPORTED',
+  /** A `gh` call (the GitHub reads and writes of the keep.lock PR step, `capy secrets`) did not answer in time and was stopped. */
+  GITHUB_TIMEOUT: 'GITHUB_TIMEOUT',
+  /** The Capy service answered 429 (too many requests) and the bounded retries ran out. Decided by the status code. */
+  RATE_LIMITED: 'RATE_LIMITED',
+  /** GitHub refused with a rate limit (429, or 403 with a `retry-after` / `x-ratelimit-remaining: 0` header) and the bounded retries ran out. */
+  GITHUB_RATE_LIMITED: 'GITHUB_RATE_LIMITED',
 } as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES];

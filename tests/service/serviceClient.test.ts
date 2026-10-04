@@ -1,5 +1,5 @@
 import { jest, describe, test, expect, beforeEach } from 'bun:test';
-import { ServiceClient, classifyResponse } from '../../src/service/serviceClient';
+import { ServiceClient, classifyResponse, rateInfoOf } from '../../src/service/serviceClient';
 import { ServiceToken, CapyError, ERROR_CODES } from '../../src/types/index';
 
 describe('classifyResponse', () => {
@@ -405,4 +405,73 @@ describe('ServiceClient', () => {
     });
   });
 
+});
+
+describe('ServiceClient.getOrgRepos (REPO_LINKS_UNSUPPORTED)', () => {
+  const client = () => new ServiceClient('http://localhost:3002');
+
+  test('a 404 (the service predates the route) is REPO_LINKS_UNSUPPORTED, decided by the status and whatever the body says', async () => {
+    mockFetch.mockResolvedValueOnce(mockFetchResponse({ error: 'Project not found' }, false, 404));
+    const err = await client().getOrgRepos('org1').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(CapyError);
+    expect((err as CapyError).code).toBe(ERROR_CODES.REPO_LINKS_UNSUPPORTED);
+    expect((err as CapyError).details?.status).toBe(404);
+  });
+
+  test('a 404 the server attributes to the org stays ORG_NOT_FOUND', async () => {
+    mockFetch.mockResolvedValueOnce(mockFetchResponse({ error: 'x', code: 'ORG_NOT_FOUND' }, false, 404));
+    const err = await client().getOrgRepos('org1').catch((e: unknown) => e);
+    expect((err as CapyError).code).toBe(ERROR_CODES.ORG_NOT_FOUND);
+  });
+
+  test('a 403 stays PERMISSION_DENIED and a 500 stays SERVICE_ERROR', async () => {
+    mockFetch.mockResolvedValueOnce(mockFetchResponse({ error: 'no', code: 'PERMISSION_DENIED' }, false, 403));
+    expect(((await client().getOrgRepos('org1').catch((e: unknown) => e)) as CapyError).code).toBe(ERROR_CODES.PERMISSION_DENIED);
+    mockFetch.mockResolvedValueOnce(mockFetchResponse({ error: 'boom' }, false, 500));
+    expect(((await client().getOrgRepos('org1').catch((e: unknown) => e)) as CapyError).code).toBe(ERROR_CODES.SERVICE_ERROR);
+  });
+
+  test('a 200 returns the links untouched', async () => {
+    mockFetch.mockResolvedValueOnce(mockFetchResponse({ org_id: 'org1', repos: [] }));
+    expect(await client().getOrgRepos('org1')).toEqual({ org_id: 'org1', repos: [] });
+  });
+});
+
+// ── Rate-limit headers (CAP-698) ────────────────────────────────────────────
+
+describe('rate-limit headers as structured fields', () => {
+  const withHeaders = (data: unknown, headers: Record<string, string>, ok = true, status = 200): Response =>
+    ({ ...(mockFetchResponse(data, ok, status) as object), headers: new Headers(headers) }) as unknown as Response;
+  const client = () => new ServiceClient('http://localhost:3002');
+
+  test('rateInfoOf reads RateLimit-Remaining and RateLimit-Reset (seconds) into remaining and an absolute resetAt', () => {
+    expect(rateInfoOf(withHeaders({}, { 'RateLimit-Remaining': '7', 'RateLimit-Reset': '12' }), 1000)).toEqual({ remaining: 7, resetAt: 13_000 });
+  });
+
+  test('either header missing or not a number: no reading', () => {
+    expect(rateInfoOf(withHeaders({}, { 'RateLimit-Remaining': '7' }), 1000)).toBeUndefined();
+    expect(rateInfoOf(withHeaders({}, { 'RateLimit-Remaining': 'lots', 'RateLimit-Reset': '12' }), 1000)).toBeUndefined();
+    expect(rateInfoOf(mockFetchResponse({}), 1000)).toBeUndefined(); // a response with no headers object at all
+  });
+
+  test('getDecryptData and pushSecrets hand the reading to the optional callback; callers that pass none are unaffected', async () => {
+    const seen = jest.fn();
+    mockFetch.mockResolvedValueOnce(withHeaders({ env_file: '', permissions: [] }, { 'RateLimit-Remaining': '41', 'RateLimit-Reset': '30' }));
+    await client().getDecryptData('p1', 'main', undefined, true, seen);
+    mockFetch.mockResolvedValueOnce(withHeaders({ keep_hash: 'h' }, { 'RateLimit-Remaining': '40', 'RateLimit-Reset': '29' }));
+    await client().pushSecrets('p1', '{}', 'blob', 'main', seen);
+    expect(seen.mock.calls.map((c) => (c[0] as { remaining: number }).remaining)).toEqual([41, 40]);
+    mockFetch.mockResolvedValueOnce(withHeaders({ keep_hash: 'h' }, { 'RateLimit-Remaining': '1', 'RateLimit-Reset': '1' }));
+    expect(await client().pushSecrets('p1', '{}', 'blob', 'main')).toEqual({ keep_hash: 'h' });
+  });
+
+  test('a 429 is RATE_LIMITED with the wait it asked for in structured details (Retry-After first, else RateLimit-Reset)', async () => {
+    mockFetch.mockResolvedValueOnce(withHeaders({ error: 'x' }, { 'Retry-After': '3', 'RateLimit-Reset': '9' }, false, 429));
+    const a = (await client().pushSecrets('p1', '{}', 'b', 'main').catch((e: unknown) => e)) as CapyError;
+    expect(a.code).toBe(ERROR_CODES.RATE_LIMITED);
+    expect(a.details).toMatchObject({ status: 429, retry_after_ms: 3000 });
+    mockFetch.mockResolvedValueOnce(withHeaders({ error: 'x' }, { 'RateLimit-Remaining': '0', 'RateLimit-Reset': '9' }, false, 429));
+    const b = (await client().pushSecrets('p1', '{}', 'b', 'main').catch((e: unknown) => e)) as CapyError;
+    expect(b.details).toMatchObject({ retry_after_ms: 9000 });
+  });
 });

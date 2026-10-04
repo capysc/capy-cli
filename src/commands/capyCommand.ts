@@ -47,6 +47,7 @@ import { compareSecrets, hashValue, formatSnippet } from './statusCommand';
 import { ACCENT } from '../ui/colors';
 import { installSyncHooks } from '../git/syncHooks';
 import { initProjectQuestion } from '../ui/projectQuestions';
+import { reportRepoLinkForCommand } from '../core/repoLinkReporter';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -167,6 +168,17 @@ export class CapyCommand {
       }
 
       await this.syncProject(projectState);
+      // CAP-697: auth is established by now. Reporting never changes this command's output or exit code.
+      if (!isLocalOnly() && projectState.organizationId && projectState.projectId) {
+        await reportRepoLinkForCommand({
+          cwd: process.cwd(),
+          orgId: projectState.organizationId,
+          projectId: projectState.projectId,
+          projectName: projectState.projectName,
+          client: this.serviceClient,
+          dryRun: this.options.dryRun === true,
+        });
+      }
       const { printExpiryWarnings } = await import('./connectors/shared');
       printExpiryWarnings();
     } catch (error: any) {
