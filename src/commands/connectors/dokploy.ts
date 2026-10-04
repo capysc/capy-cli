@@ -63,6 +63,7 @@ import { listOrgProjectsOrUnavailable } from '../capyCommand';
 import { commitDiscoveryChanges, defaultDiscoveryCommitBranchName, isValidDiscoveryCommitBranchName, snapshotPathStatus } from '../../git/discoveryCommit';
 import { fingerprint, writeImportedAndSync, writeImportOutcome, ResolvedContext } from './shared';
 import { ConnectOpts, ConnectorModule, ConnectResult, ImportOutcome, ImportWarning, RotateResult } from './registry';
+import { discoveryProjectQuestion } from '../../ui/projectQuestions';
 import {
   CandidateRepo,
   DISCOVERY_PROJECT_NAME_MAX_LENGTH,
@@ -569,17 +570,13 @@ async function defaultAskDiscoveryBaseUrl(): Promise<string> {
 export const DISCOVERY_NEW_PROJECT = '__capy_discovery_new_project__';
 
 // COPY-FLAG: new user-facing string, minimal/neutral wording.
-async function defaultAskExistingOrNewProject(
+export async function defaultAskExistingOrNewProject(
   existing: ReadonlyArray<{ id: string; name: string }>,
   defaultName: string,
 ): Promise<string> {
   const inquirer = (await import('inquirer')).default;
-  const choices = [
-    { name: `New project (${defaultName})`, value: DISCOVERY_NEW_PROJECT },
-    ...existing.map((p) => ({ name: p.name, value: p.id })),
-  ];
   const { projectChoice } = await inquirer.prompt([
-    { type: 'list', name: 'projectChoice', message: 'Which project should this folder use?', choices, default: DISCOVERY_NEW_PROJECT },
+    discoveryProjectQuestion(existing, defaultName, DISCOVERY_NEW_PROJECT),
   ]);
   return projectChoice;
 }
@@ -900,12 +897,6 @@ export function createDokployConnector(deps: DokployConnectorDeps = {}): Connect
     },
 
     async import(ctx: ResolvedContext, opts: ConnectOpts): Promise<ImportOutcome> {
-      // No `--web` branching here by design: browser screens are a separate
-      // surface (built in the Keep workbench, later phase — see
-      // docs/dokploy-deploy-adapter.md's "Browser setup" section for the
-      // equivalent stance on the deploy side). `--web` flows through
-      // unchanged, exactly as the shared `connect` code path already handles
-      // it for every connector.
       // `--environment` is a DISCOVERY-mode concept (there is no "plan" to
       // filter for a single-service import) — refused outright, zero
       // requests, before anything else. Never true for discovery's OWN
@@ -938,13 +929,11 @@ export function createDokployConnector(deps: DokployConnectorDeps = {}): Connect
 
       // Resolved BEFORE any Dokploy request — a missing/refused token still
       // means zero requests (see the class doc's "READ-ONLY" note). A
-      // SEPARATE interactive flag from the one above: `--web` (the store's
-      // prompt is a raw terminal prompt, not a browser screen), `--json`
-      // (machine output must never have a prompt interleaved with it) and
-      // `--dry-run` (a preview must never have the side effect of saving a
-      // new key into the org store) all suppress ONLY this prompt, not the
-      // settings prompts above.
-      const secretsInteractive = dokploySecretsMayPrompt(interactive, !!opts.web || !!opts.json || dryRun);
+      // SEPARATE interactive flag from the one above: `--json` (machine output
+      // must never have a prompt interleaved with it) and `--dry-run` (a
+      // preview must never have the side effect of saving a new key into the
+      // org store) suppress ONLY this prompt, not the settings prompts above.
+      const secretsInteractive = dokploySecretsMayPrompt(interactive, !!opts.json || dryRun);
       const resolved = await resolveDokployApiKey({
         tokenEnv,
         env: deps.env ?? process.env,
@@ -1107,8 +1096,8 @@ export function createDokployConnector(deps: DokployConnectorDeps = {}): Connect
       }
 
       // Same suppression rule as the single-service import: never prompt for
-      // the key under --web/--json/--dry-run.
-      const secretsInteractive = dokploySecretsMayPrompt(interactive, !!opts.web || !!opts.json || dryRun);
+      // the key under --json/--dry-run.
+      const secretsInteractive = dokploySecretsMayPrompt(interactive, !!opts.json || dryRun);
       const resolved = await resolveDokployApiKey({
         tokenEnv,
         env: deps.env ?? process.env,

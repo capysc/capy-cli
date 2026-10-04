@@ -582,9 +582,6 @@ capy add <vars...> [options]
 
 | Option | Description | Default |
 |---|---|---|
-| `--reason <text>` | short note shown on the intake page |  |
-| `--help-url <NAME=URL>` | per-variable "where to find this" link, e.g. STRIPE_SECRET_KEY=https://dashboard.stripe.com/apikeys (repeatable) | `[]` |
-| `--no-open` | do not auto-open the browser; print the URL only |  |
 | `--no-push` | write to .env only; do not push to Capy |  |
 | `-f, --force` | overwrite existing values without prompting |  |
 | `--non-tty` | never prompt; resolve from flags or fail fast (agents/CI) |  |
@@ -760,6 +757,7 @@ Every refusal carries a stable `code` — branch on it, never on message text.
 - `STDIN_TOO_LARGE`
 - `ADD_STDIN_ONE_NAME`
 - `ADD_VAR_EXISTS`
+- `WEB_MODE_REMOVED`
 
 ## Conventions
 

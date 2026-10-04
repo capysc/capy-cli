@@ -19,6 +19,11 @@ const ALLOWED_DEPS = [
   'commander',
   'dotenv',
   'inquirer',
+  // Not a screens dependency, and not a new package: the searchable
+  // pickers build on inquirer's own prompt core. It was already installed
+  // as an inquirer dependency at the same version; declaring it only makes
+  // the direct import explicit.
+  '@inquirer/core',
   'open',
   'proper-lockfile',
   // Not a screens dependency: `capy transport` and `capy pair` (CAP-684)

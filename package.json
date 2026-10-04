@@ -51,6 +51,7 @@
     "build:binary": "node scripts/build-binary.mjs"
   },
   "dependencies": {
+    "@inquirer/core": "^10.3.2",
     "commander": "^11.0.0",
     "dotenv": "^16.3.0",
     "inquirer": "^12.9.6",

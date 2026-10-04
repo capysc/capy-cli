@@ -40,13 +40,13 @@ function classifyStatus(
 }
 
 /**
- * Decrypts `.env`. A value this profile holds no key for is skipped (and named
- * in `undecryptableKeys`); plaintext values pass through.
+ * Decrypts `.env`. A value this profile holds no key for is skipped;
+ * plaintext values pass through.
  */
 function decryptLocalEnv(
   fileManager: FileManager,
   projectKey: string,
-): { localPlaintext: Record<string, string>; undecryptableKeys: string[] } {
+): { localPlaintext: Record<string, string> } {
   const decrypted = Object.entries(fileManager.readEnvFile()).map(([key, value]) => {
     if (!value.startsWith('capy:')) return { key, plain: value as string | undefined };
     try {
@@ -59,39 +59,16 @@ function decryptLocalEnv(
     localPlaintext: Object.fromEntries(
       decrypted.flatMap(({ key, plain }) => (plain === undefined ? [] : [[key, plain] as const])),
     ),
-    undecryptableKeys: decrypted.filter(({ plain }) => plain === undefined).map(({ key }) => key),
   };
 }
-
-/**
- * Why there is no other copy to compare against, when there is none. The
- * terminal renders all three the same way — `{n} ? / remote unavailable` —
- * so an offline run, a project nobody has pushed and a cold local cache are
- * indistinguishable. Minted where the condition is actually known.
- */
-type RemoteGap = 'never_pushed' | 'fetch_failed' | 'local_mode';
 
 interface Baseline {
   remotePlaintext: Record<string, string>;
   remoteAvailable: boolean;
-  remoteGap: RemoteGap | undefined;
-  /**
-   * Whether the comparison ran against the on-disk cache rather than the
-   * service. A warm cache computes the whole status column while offline with
-   * nothing on screen to say so.
-   */
-  remoteFromCache: boolean;
 }
 
-function baselineUnavailable(localMode: boolean, remoteFromCache: boolean): Baseline {
-  // Remote fetch failed (server mode) — fall back to pinned-only.
-  return {
-    remotePlaintext: {},
-    remoteAvailable: false,
-    remoteGap: localMode ? 'local_mode' : 'fetch_failed',
-    remoteFromCache,
-  };
-}
+/** Remote fetch failed (server mode), or nothing to compare against: fall back to pinned-only. */
+const BASELINE_UNAVAILABLE: Baseline = { remotePlaintext: {}, remoteAvailable: false };
 
 async function loadBaseline(args: {
   localMode: boolean;
@@ -105,20 +82,12 @@ async function loadBaseline(args: {
 }): Promise<Baseline> {
   const { localMode, serviceClient, fileManager, projectKey, keep, branch, orgId, projectId } = args;
   const keepHash = SyncEngine.computeKeepHash(keep, branch);
-  const remoteFromCache = probeCache(localMode, orgId, projectId, keepHash);
-  if (remoteFromCache === undefined) return baselineUnavailable(localMode, false);
+  if (cacheProbeThrew(localMode, orgId, projectId, keepHash)) return BASELINE_UNAVAILABLE;
   try {
     const blob = localMode
       ? readSecretsLocal(orgId, projectId, keepHash)
       : await fetchSecretsWithCache(serviceClient!, orgId, projectId, keepHash);
-    if (!blob?.env_file) {
-      return {
-        remotePlaintext: {},
-        remoteAvailable: false,
-        remoteGap: localMode ? 'local_mode' : 'never_pushed',
-        remoteFromCache,
-      };
-    }
+    if (!blob?.env_file) return BASELINE_UNAVAILABLE;
     const encrypted = fileManager.parseEnvContent(blob.env_file);
     const remotePlaintext = Object.fromEntries(
       Object.entries(encrypted).flatMap(([key, value]) => {
@@ -131,33 +100,23 @@ async function loadBaseline(args: {
     );
     // Remote column only applies to server mode; local mode uses the
     // committed baseline with local-mode wording instead.
-    return { remotePlaintext, remoteAvailable: !localMode, remoteGap: undefined, remoteFromCache };
+    return { remotePlaintext, remoteAvailable: !localMode };
   } catch {
-    return baselineUnavailable(localMode, remoteFromCache);
+    return BASELINE_UNAVAILABLE;
   }
 }
 
-/** Whether the keep cache already holds this keep hash; `undefined` when the probe itself threw. */
-function probeCache(localMode: boolean, orgId: string, projectId: string, keepHash: string): boolean | undefined {
+/** Whether probing the keep cache for this keep hash threw (the baseline is then unavailable). */
+function cacheProbeThrew(localMode: boolean, orgId: string, projectId: string, keepHash: string): boolean {
   try {
-    return localMode ? false : readKeepCache(orgId, projectId, keepHash) !== null;
+    if (!localMode) readKeepCache(orgId, projectId, keepHash);
+    return false;
   } catch {
-    return undefined;
+    return true;
   }
 }
 
 export interface EditOpts {
-  /**
-   * Render the variable table and the value editor as compiled screens in a
-   * local browser instead of the alternate-screen TUI.
-   *
-   * Agent-only, and the reason it exists: the TUI has no TTY guard. Run it
-   * headlessly and it writes an entire ANSI screen into the agent's captured
-   * stdout and then blocks forever on a stdin that never delivers a key.
-   */
-  web?: boolean;
-  /** false when --no-open was passed: print the URL, do not open a browser. */
-  open?: boolean;
   /**
    * The variable to work on (`capy edit NAME`). With a terminal: the TUI opens
    * with the cursor on it, and an unknown name opens its new-variable entry.
@@ -238,7 +197,6 @@ export class EditCommand {
     // Decided first: before anything is drawn, and before any auth or network call.
     const mode = decideEditMode({
       hasName: opts.name !== undefined,
-      web: opts.web === true,
       stdinIsTTY: process.stdin.isTTY === true,
       nonTty: opts.nonTty === true,
     });
@@ -297,18 +255,16 @@ export class EditCommand {
     const projectKey = await this.resolveKey({ localMode, orgId, projectId, userId, serviceClient, keep, branch });
     if (projectKey === undefined) return;
 
-    // Decrypt local .env values. `undecryptableKeys`: local ciphertext this
-    // profile does not hold the key for. The TUI drops these on the floor and
-    // says nothing, and the next commit then deletes their pins — so the
-    // browser table names them.
-    const { localPlaintext, undecryptableKeys } = decryptLocalEnv(fileManager, projectKey);
+    // Decrypt local .env values. Local ciphertext this profile does not hold
+    // the key for is skipped.
+    const { localPlaintext } = decryptLocalEnv(fileManager, projectKey);
 
     // Baseline the working copy is compared against:
     //  - remote mode: the latest committed blob fetched from the server.
     //  - local mode:  the committed blob from the local keep cache (no server).
     // In both cases it lands in `remotePlaintext` so the TUI's reclassify can
     // compare working-vs-baseline.
-    const { remotePlaintext, remoteAvailable, remoteGap, remoteFromCache } = await loadBaseline({
+    const { remotePlaintext, remoteAvailable } = await loadBaseline({
       localMode,
       serviceClient,
       fileManager,
@@ -366,9 +322,8 @@ export class EditCommand {
       localMode,
     };
     // `capy edit NAME` on a terminal: the cursor starts on NAME (a new name opens
-    // its value entry). `--web` opens the browser editor unfocused: focusing it
-    // needs a change to the compiled Keep screen, which is not part of this work.
-    const state = opts.name !== undefined && !opts.web ? focusedOn(baseState, opts.name) : baseState;
+    // its value entry).
+    const state = opts.name !== undefined ? focusedOn(baseState, opts.name) : baseState;
 
     const screen = new EditScreen();
     const printExpiryAfter = async () => {
@@ -475,35 +430,10 @@ export class EditCommand {
       },
     };
 
-    // `--web` changes only where the questions are ASKED. The commit callback
-    // above is the same object either way, so the crypto, the push, and the
-    // keep rewrite are one code path with one browser-shaped front end and
-    // one terminal-shaped one.
-    if (opts.web) {
-      const { runSecretEditorInBrowser } = await import('../ui/secretTableScreen');
-      await runSecretEditorInBrowser(
-        {
-          projectName: keep.project_name,
-          branch,
-          mode: localMode ? 'local' : 'server',
-          rows,
-          remoteAvailable,
-          remoteGap,
-          remoteFromCache,
-          undecryptableKeys,
-          // Open the user's browser by default; CAPY_WEB_NO_OPEN lets CI and
-          // headless runs drive the loopback without hijacking a real browser.
-          open: opts.open !== false && !process.env.CAPY_WEB_NO_OPEN,
-        },
-        editContext,
-      );
-    } else {
-      await screen.run(state, editContext);
-    }
-    // Same exit behavior in both modes: asked in the terminal, even after a
-    // --web session's browser tab has closed. The TUI has already released
-    // stdin (raw mode off, its key listener removed) by the time `run`
-    // resolves, so the prompts in keepLockPr.ts start from a clean terminal.
+    await screen.run(state, editContext);
+    // The TUI has already released stdin (raw mode off, its key listener
+    // removed) by the time `run` resolves, so the prompts in keepLockPr.ts start
+    // from a clean terminal.
     const outcome = await runKeepLockPrStep({
       command: 'edit',
       cwd: process.cwd(),
