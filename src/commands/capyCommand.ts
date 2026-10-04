@@ -123,11 +123,16 @@ export class CapyCommand {
    * local-key conflict checks; this caller never supplies `--force` and
    * attempts it only once per command path.
    */
-  private async pairMissingOrgCredentials(orgId: string, userId: string): Promise<boolean> {
-    if (hasOrgKey(orgId, userId)) return true;
+  private async pairMissingOrgCredentials(orgId: string, userId: string): Promise<void> {
+    if (hasOrgKey(orgId, userId)) return;
     console.log('No credentials for this organization on this device. Starting device pairing...');
     await this.executePairCommand(userId);
-    return hasOrgKey(orgId, userId);
+    if (hasOrgKey(orgId, userId)) return;
+    throw new CapyError(
+      `Pairing completed, but this device still has no credentials for organization ${orgId}.\n\n` +
+      '  On an authorized device, share this organization for pairing, then run capy again.',
+      ERROR_CODES.PAIR_NO_KEYS,
+    );
   }
 
   private async executePairCommand(expectedUserId: string): Promise<void> {
@@ -496,14 +501,7 @@ export class CapyCommand {
     // User has access to an existing org but lacks credentials on this device.
     // Pairing covers both empty and partial local state, preserving its own
     // conflict protection instead of skipping recovery based on local.key.
-    const orgKeyPresent = await this.pairMissingOrgCredentials(selectedOrg.id, authResult.user_id!);
-    if (!orgKeyPresent) {
-      throw new CapyError(
-        `Pairing completed, but this device still has no credentials for "${selectedOrg.name}".\n\n` +
-        '  On an authorized device, share this organization for pairing, then run capy again.',
-        ERROR_CODES.PAIR_NO_KEYS,
-      );
-    }
+    await this.pairMissingOrgCredentials(selectedOrg.id, authResult.user_id!);
 
     // Discover existing projects in the org. If any exist, give the user the
     // choice to bootstrap one of them OR create a new project. This is the path

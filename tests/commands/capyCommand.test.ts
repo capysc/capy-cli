@@ -38,6 +38,7 @@ mock.module('../../src/crypto/keyResolver', () => ({
 mock.module('../../src/config/globalConfig', () => ({
   writeKeepCache: mock(() => undefined),
   fetchSecretsWithCache: mock(async () => null),
+  hasLocalRoot: mock(() => false),
 }));
 mock.module('inquirer', () => ({
   default: {
@@ -906,9 +907,11 @@ describe('CapyCommand', () => {
       consoleSpy.mockRestore();
     });
 
-    test('pairs a device without selected-org credentials once, then continues the existing sync flow', async () => {
+    test('pairs root-only partial selected-org credentials once, then continues the existing sync flow', async () => {
       const { hasOrgKey } = await import('../../src/crypto/keyResolver');
+      const { hasLocalRoot } = await import('../../src/config/globalConfig');
       (hasOrgKey as any).mockReturnValueOnce(false).mockReturnValue(true);
+      (hasLocalRoot as any).mockReturnValue(true);
       const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
       const pairSpy = spyOn(capyCommand as any, 'executePairCommand').mockResolvedValue(undefined);
 
@@ -918,6 +921,44 @@ describe('CapyCommand', () => {
         expect(pairSpy).toHaveBeenCalledWith('user-456');
         expect(consoleSpy).toHaveBeenCalledWith('No credentials for this organization on this device. Starting device pairing...');
         expect(consoleSpy).toHaveBeenCalledWith('Everything is up to date!');
+      } finally {
+        (hasOrgKey as any).mockReturnValue(true);
+        (hasLocalRoot as any).mockReturnValue(false);
+        pairSpy.mockRestore();
+        consoleSpy.mockRestore();
+      }
+    });
+
+    test('keeps supported key-only legacy storage without pairing', async () => {
+      const { hasOrgKey } = await import('../../src/crypto/keyResolver');
+      const { hasLocalRoot } = await import('../../src/config/globalConfig');
+      (hasOrgKey as any).mockReturnValue(true);
+      (hasLocalRoot as any).mockReturnValue(false);
+      const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
+      const pairSpy = spyOn(capyCommand as any, 'executePairCommand').mockResolvedValue(undefined);
+
+      try {
+        await (capyCommand as any).syncProject(mockProjectState);
+        expect(pairSpy).not.toHaveBeenCalled();
+      } finally {
+        pairSpy.mockRestore();
+        consoleSpy.mockRestore();
+      }
+    });
+
+    test('stops sync with PAIR_NO_KEYS when pairing has no selected-org credentials', async () => {
+      const { hasOrgKey, resolveProjectKey } = await import('../../src/crypto/keyResolver');
+      (hasOrgKey as any).mockReturnValue(false);
+      (resolveProjectKey as any).mockClear();
+      const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
+      const pairSpy = spyOn(capyCommand as any, 'executePairCommand').mockResolvedValue(undefined);
+
+      try {
+        await expect((capyCommand as any).syncProject(mockProjectState)).rejects.toMatchObject({
+          code: ERROR_CODES.PAIR_NO_KEYS,
+        });
+        expect(pairSpy).toHaveBeenCalledTimes(1);
+        expect(resolveProjectKey).not.toHaveBeenCalled();
       } finally {
         (hasOrgKey as any).mockReturnValue(true);
         pairSpy.mockRestore();
@@ -1432,7 +1473,11 @@ describe('CapyCommand', () => {
       const pairSpy = spyOn(capyCommand as any, 'executePairCommand').mockResolvedValue(undefined);
 
       try {
-        await expect((capyCommand as any).initializeProject()).rejects.toThrow('Pairing completed');
+        const initialization = (capyCommand as any).initializeProject();
+        await expect(initialization).rejects.toThrow('Pairing completed');
+        await expect(initialization).rejects.toMatchObject({
+          code: ERROR_CODES.PAIR_NO_KEYS,
+        });
         expect(pairSpy).toHaveBeenCalledTimes(1);
         expect(pairSpy).toHaveBeenCalledWith('user-456');
         expect(mockServiceClient.initializeProject).not.toHaveBeenCalled();
@@ -1448,11 +1493,15 @@ describe('CapyCommand', () => {
       (hasOrgKey as any).mockReturnValue(false);
 
       const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
+      const pairSpy = spyOn(capyCommand as any, 'executePairCommand').mockRejectedValue(
+        new CapyError('Pairing cancelled. No session or keys were installed.', ERROR_CODES.AUTH_FAILED),
+      );
 
       try {
         await (capyCommand as any).initializeProject().catch(() => {});
       } finally {
         (hasOrgKey as any).mockReturnValue(true);
+        pairSpy.mockRestore();
         consoleSpy.mockRestore();
       }
 
