@@ -13,11 +13,12 @@ const RED = `${ESC}[31m`;
 const CYAN = `${ESC}[36m`;
 
 /** Status codes. Every code is its own on-screen word except `behind`, shown as BEHIND_LABEL. */
-export type StatusWord = 'in sync' | 'local' | 'remote' | 'conflict' | 'behind' | 'unknown';
+export type StatusWord = 'in sync' | 'deployed' | 'local' | 'remote' | 'conflict' | 'behind' | 'unknown';
 
 export function statusColor(status: StatusWord): string {
   switch (status) {
     case 'in sync':
+    case 'deployed':
       return GREEN;
     case 'local':
     case 'behind':

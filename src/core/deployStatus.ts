@@ -14,15 +14,16 @@ import type { TargetConfig } from '../deploy/adapter';
 import { unrecordedTargetsFor } from '../deploy/configuredTargets';
 
 // ── On-screen words: each lives in ONE constant so a wording decision is a
-// one-line change. COPY-FLAG: Vince is re-deciding BEHIND_LABEL and
-// TARGET_STATUS_HEADING (2026-10-04); `—` is his word.
+// one-line change. All four are Vince's words (2026-10-04).
 
-/** A target holds an older value than Capy has (code `behind`). */
+/** A target holds an older value than Capy has, or none (code `behind`). Used by both screens. */
 export const BEHIND_LABEL = 'not deployed';
 /** `capy secrets`' heading for the target-status column (its details-view label is the lowercase form). */
 export const TARGET_STATUS_HEADING = 'DEPLOY STATUS';
 /** A row with no Capy target. */
 export const NO_TARGET_LABEL = '—';
+/** `capy secrets` only: every Capy target has the current value. (`capy edit` says `in sync`: it compares local with Capy.) */
+export const DEPLOYED_LABEL = 'deployed';
 
 /**
  * The value hash each of `varName`'s targets on `branch` last received, from a
@@ -54,7 +55,7 @@ export function anyTargetBehind(deployedHashes: readonly (string | null)[] | und
 /** The STATUS a `capy secrets` row can have: an org-wide row has no local copy, so only these three. */
 export type SecretRowStatus =
   | { readonly kind: 'no target' }
-  | { readonly kind: 'in sync' }
+  | { readonly kind: 'deployed' }
   | { readonly kind: 'unknown' }
   | { readonly kind: 'behind'; readonly behind: number; readonly total: number };
 
@@ -63,20 +64,28 @@ export type SecretRowStatus =
  * value; `unknown` when a location's targets were not sent (a server that
  * predates CAP-676), so it can't be told; `no target` when the row has no
  * Capy deploy target at all — Capy only knows its own targets, so a value
- * used elsewhere (or only locally) is never called in sync (Vince,
- * 2026-10-04); `in sync` when every target has the current value.
+ * used elsewhere (or only locally) is never called deployed (Vince,
+ * 2026-10-04); `deployed` when every target has the current value.
  */
 export function secretRowStatus(row: SecretIndexRow): SecretRowStatus {
   if (row.locations.some((loc) => loc.targets === undefined)) return { kind: 'unknown' };
   const targets = row.locations.flatMap((loc) => loc.targets ?? []);
   if (targets.length === 0) return { kind: 'no target' };
   const behind = targets.filter((t) => t.stale).length;
-  return behind > 0 ? { kind: 'behind', behind, total: targets.length } : { kind: 'in sync' };
+  return behind > 0 ? { kind: 'behind', behind, total: targets.length } : { kind: 'deployed' };
 }
 
 /** The text a person sees, without colour: `—` for no target, `<BEHIND_LABEL> (1 of 3)` when more than one target is involved, plain `<BEHIND_LABEL>` for one. */
 export function formatSecretRowStatus(status: SecretRowStatus): string {
   if (status.kind === 'no target') return NO_TARGET_LABEL;
+  if (status.kind === 'deployed') return DEPLOYED_LABEL;
   if (status.kind !== 'behind') return status.kind;
   return status.total > 1 ? `${BEHIND_LABEL} (${status.behind} of ${status.total})` : BEHIND_LABEL;
+}
+
+/** The `--json` `status` string: the on-screen words (Vince, 2026-10-04), with `no target` for the `—` row. */
+export function secretRowStatusJson(status: SecretRowStatus): string {
+  if (status.kind === 'behind') return BEHIND_LABEL;
+  if (status.kind === 'deployed') return DEPLOYED_LABEL;
+  return status.kind;
 }

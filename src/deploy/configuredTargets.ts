@@ -7,7 +7,7 @@
  * `capy deploy dokploy --discover` PR that never merges never counts.
  *
  * `capy edit` reads this directly. `capy secrets` only reads the server, so
- * `recordConfiguredTargets` (run after a bare `capy` sync) adds one
+ * `recordConfiguredTargets` adds one
  * placeholder record per configured (variable, target) that has none:
  * `{ provider, target }` with no `deployed_value_hash`, which the server's
  * index already reports as stale. The first real `capy deploy` to that target
@@ -122,7 +122,10 @@ export interface ConfiguredTargetsClient {
 }
 
 /**
- * After a bare `capy` sync: record configured-but-never-pushed targets on
+ * NOT WIRED: held until Vince approves an automatic server write (2026-10-04).
+ * Meant to run after a bare `capy` sync, as one call in capyCommand.ts.
+ *
+ * Records configured-but-never-pushed targets on
  * the server, so `capy secrets` sees them. Builds on the SERVER's own keep
  * file (it holds CI-mode records the local keep.lock may not have yet) and
  * re-sends that branch's blob unchanged. One write per branch, only when a

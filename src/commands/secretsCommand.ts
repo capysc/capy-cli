@@ -3,12 +3,12 @@ import { resolveOrgContext } from '../core/orgContext';
 import { Spinner } from '../ui/spinner';
 import { CapyError, ERROR_CODES } from '../types/index';
 import { rowIdOf } from './secretsRowId';
-import { secretRowStatus, type SecretRowStatus } from '../core/deployStatus';
+import { secretRowStatus, secretRowStatusJson, type SecretRowStatus } from '../core/deployStatus';
 
-/** `status` (`no target` | `in sync` | `behind` | `unknown` — stable codes, not on-screen words) plus, when some target lags, how many of how many. `no target`: the row has no Capy deploy target, so Capy can't say. */
+/** `status` (`deployed` | `not deployed` | `no target` | `unknown` — the on-screen words) plus, when some target lags, how many of how many. `no target`: the row has no Capy deploy target, so Capy can't say. */
 function statusFields(status: SecretRowStatus): Record<string, string | number> {
-  if (status.kind !== 'behind') return { status: status.kind };
-  return { status: status.kind, targets_not_deployed: status.behind, targets_total: status.total };
+  if (status.kind !== 'behind') return { status: secretRowStatusJson(status) };
+  return { status: secretRowStatusJson(status), targets_not_deployed: status.behind, targets_total: status.total };
 }
 
 export interface SecretsOpts {

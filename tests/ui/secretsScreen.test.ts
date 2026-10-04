@@ -23,7 +23,7 @@ import {
   LocationDecryptResult,
 } from '../../src/ui/secretsScreen';
 import type { SecretIndexLocation, SecretIndexRow } from '../../src/service/serviceClient';
-import { BEHIND_LABEL, TARGET_STATUS_HEADING } from '../../src/core/deployStatus';
+import { BEHIND_LABEL, DEPLOYED_LABEL, TARGET_STATUS_HEADING } from '../../src/core/deployStatus';
 
 // A very long, obviously-fake secret used everywhere a "real" value is
 // needed — never a plausible credential, never logged.
@@ -226,11 +226,11 @@ describe('STATUS column (CAP-702)', () => {
     expect(cell(r)).toBe(`${YELLOW}● ${BEHIND_LABEL} (1 of 3)${ANSI_RESET}`);
   });
 
-  test('every target current reads "● in sync" in green', () => {
-    expect(cell(row({ locations: [loc({ targets: [current('prod')] })] }))).toBe(`${GREEN}● in sync${ANSI_RESET}`);
+  test('every target current reads "● deployed" in green', () => {
+    expect(cell(row({ locations: [loc({ targets: [current('prod')] })] }))).toBe(`${GREEN}● ${DEPLOYED_LABEL}${ANSI_RESET}`);
   });
 
-  test('a row with no Capy deploy target reads a grey "—", never "in sync"', () => {
+  test('a row with no Capy deploy target reads a grey "—", never deployed', () => {
     expect(cell(row({ locations: [loc({ targets: [] }), loc({ branch: 'staging', targets: [] })] }))).toBe(`${DIM}—${ANSI_RESET}`);
   });
 
