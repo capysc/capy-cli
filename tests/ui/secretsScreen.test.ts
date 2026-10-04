@@ -6,6 +6,7 @@ import {
   applyValueResult,
   resolveSecretValue,
   render,
+  formatMiddleCell,
   filteredRows,
   filteredRowsWithReasons,
   formatUsersCell,
@@ -182,42 +183,64 @@ describe('multi-key chunks reach the reducer in order (paste / fast-typing bug)'
   });
 });
 
-describe('handleKey — column cycling (CAP-679: CONNECTOR/TARGET/INTEGRATIONS replace SERVICE)', () => {
-  test('CONNECTOR is the default (first-shown) column', () => {
+describe('handleKey — column cycling (CAP-702: PROJECT first, STATUS added)', () => {
+  test('PROJECT is the default (first-shown) column', () => {
     const s0 = initialSecretsScreenState([row()]);
-    expect(s0.column).toBe('connector');
+    expect(s0.column).toBe('project');
   });
 
-  test('Tab cycles CONNECTOR -> TARGET -> INTEGRATIONS -> USERS -> BRANCH -> PROJECT -> CONNECTOR (wrapping)', () => {
-    const s0 = initialSecretsScreenState([row()]);
-    const s1 = handleKey(s0, KEY_TAB).state;
-    expect(s1.column).toBe('target');
-    const s2 = handleKey(s1, KEY_TAB).state;
-    expect(s2.column).toBe('integrations');
-    const s3 = handleKey(s2, KEY_TAB).state;
-    expect(s3.column).toBe('users');
-    const s4 = handleKey(s3, KEY_TAB).state;
-    expect(s4.column).toBe('branch');
-    const s5 = handleKey(s4, KEY_TAB).state;
-    expect(s5.column).toBe('project');
-    const s6 = handleKey(s5, KEY_TAB).state;
-    expect(s6.column).toBe('connector');
+  test('Tab cycles PROJECT -> BRANCH -> STATUS -> CONNECTOR -> TARGET -> INTEGRATIONS -> USERS -> PROJECT (wrapping)', () => {
+    const order = ['branch', 'status', 'connector', 'target', 'integrations', 'users', 'project'];
+    const states = order.reduce<SecretsScreenState[]>(
+      (acc) => [...acc, handleKey(acc[acc.length - 1], KEY_TAB).state],
+      [initialSecretsScreenState([row()])],
+    );
+    expect(states.slice(1).map((st) => st.column)).toEqual(order as SecretsScreenState['column'][]);
   });
 
   test('Shift-Tab cycles backwards, wrapping the other way', () => {
-    const s0 = initialSecretsScreenState([row()]);
-    const s1 = handleKey(s0, KEY_SHIFT_TAB).state;
-    expect(s1.column).toBe('project');
-    const s2 = handleKey(s1, KEY_SHIFT_TAB).state;
-    expect(s2.column).toBe('branch');
-    const s3 = handleKey(s2, KEY_SHIFT_TAB).state;
-    expect(s3.column).toBe('users');
-    const s4 = handleKey(s3, KEY_SHIFT_TAB).state;
-    expect(s4.column).toBe('integrations');
-    const s5 = handleKey(s4, KEY_SHIFT_TAB).state;
-    expect(s5.column).toBe('target');
-    const s6 = handleKey(s5, KEY_SHIFT_TAB).state;
-    expect(s6.column).toBe('connector');
+    const order = ['users', 'integrations', 'target', 'connector', 'status', 'branch', 'project'];
+    const states = order.reduce<SecretsScreenState[]>(
+      (acc) => [...acc, handleKey(acc[acc.length - 1], KEY_SHIFT_TAB).state],
+      [initialSecretsScreenState([row()])],
+    );
+    expect(states.slice(1).map((st) => st.column)).toEqual(order as SecretsScreenState['column'][]);
+  });
+});
+
+describe('STATUS column (CAP-702)', () => {
+  const stale = (target: string) => ({ provider: 'dokploy', target, stale: true });
+  const current = (target: string) => ({ provider: 'dokploy', target, stale: false });
+
+  test('a row with one target that lags reads "not deployed"', () => {
+    expect(formatMiddleCell(row({ locations: [loc({ targets: [stale('prod')] })] }), 'status', 30)).toBe('not deployed');
+  });
+
+  test('a multi-target row counts lagging targets across every location', () => {
+    const r = row({ locations: [loc({ targets: [stale('prod'), current('preview')] }), loc({ branch: 'staging', targets: [current('staging')] })] });
+    expect(formatMiddleCell(r, 'status', 30)).toBe('not deployed (1 of 3)');
+  });
+
+  test('every target current, or no targets at all, reads "in sync"', () => {
+    expect(formatMiddleCell(row({ locations: [loc({ targets: [current('prod')] })] }), 'status', 30)).toBe('in sync');
+    expect(formatMiddleCell(row({ locations: [loc({ targets: [] })] }), 'status', 30)).toBe('in sync');
+  });
+
+  test('a server that sent no targets reads "unknown" — it cannot be told', () => {
+    expect(formatMiddleCell(row({ locations: [loc()] }), 'status', 30)).toBe('unknown');
+  });
+
+  test('the STATUS header and cell render when the column is selected', () => {
+    const r = row({ name: 'ROW', locations: [loc({ targets: [stale('prod'), current('preview')] })] });
+    const frame = stripAnsiForTest(render({ ...initialSecretsScreenState([r]), column: 'status' }, 100, 20));
+    expect(frame).toContain('STATUS ⇥');
+    expect(frame.split('\n').find((l) => l.includes('ROW'))).toContain('not deployed (1 of 2)');
+  });
+
+  test('the details view shows the row status', () => {
+    const r = row({ name: 'ROW', locations: [loc({ targets: [stale('prod')] })] });
+    const frame = stripAnsiForTest(render(handleKey(initialSecretsScreenState([r]), ENTER).state, 100, 30));
+    expect(frame).toMatch(/status\s+not deployed/);
   });
 });
 
@@ -938,7 +961,7 @@ describe('CAP-679 rendering: "+N" survives truncation, INTEGRATIONS overflow, po
         loc({ connector: { provider: 'dokploy' }, service: { provider: 'dokploy', name: 'other' } }),
       ],
     });
-    const frame = render(initialSecretsScreenState([target]), 100, 20);
+    const frame = render({ ...initialSecretsScreenState([target]), column: 'connector' }, 100, 20);
     const stripped = stripAnsiForTest(frame);
     const line = stripped.split('\n').find((l) => l.includes('ROW'));
     expect(line).toBeDefined();
@@ -960,7 +983,7 @@ describe('CAP-679 rendering: "+N" survives truncation, INTEGRATIONS overflow, po
         }),
       ],
     });
-    const s = pressKeys(initialSecretsScreenState([target]), KEY_TAB); // connector -> target
+    const s: SecretsScreenState = { ...initialSecretsScreenState([target]), column: 'target' };
     const frame = render(s, 100, 20);
     const stripped = stripAnsiForTest(frame);
     const line = stripped.split('\n').find((l) => l.includes('ROW'));
@@ -985,7 +1008,7 @@ describe('CAP-679 rendering: "+N" survives truncation, INTEGRATIONS overflow, po
         }),
       ],
     });
-    const s = pressKeys(initialSecretsScreenState([manyProvidersRow]), KEY_TAB, KEY_TAB); // connector -> target -> integrations
+    const s: SecretsScreenState = { ...initialSecretsScreenState([manyProvidersRow]), column: 'integrations' };
     const frame = render(s, 100, 20);
     const stripped = stripAnsiForTest(frame);
     const line = stripped.split('\n').find((l) => l.includes('ROW'));
@@ -997,7 +1020,7 @@ describe('CAP-679 rendering: "+N" survives truncation, INTEGRATIONS overflow, po
 
   test('INTEGRATIONS shows "—" when a row has neither a connector nor a target', () => {
     const target = row({ name: 'ROW', locations: [loc({ service: null })] });
-    const s = pressKeys(initialSecretsScreenState([target]), KEY_TAB, KEY_TAB);
+    const s: SecretsScreenState = { ...initialSecretsScreenState([target]), column: 'integrations' };
     const frame = render(s, 100, 20);
     const stripped = stripAnsiForTest(frame);
     const line = stripped.split('\n').find((l) => l.includes('ROW'));
@@ -1014,14 +1037,14 @@ describe('CAP-679 rendering: "+N" survives truncation, INTEGRATIONS overflow, po
     expect(frame).toContain('[dokploy] backend-preview');
   });
 
-  test('the details popup spells out a stale target with "(stale)"', () => {
+  test('the details popup spells out a stale target with "(not deployed)" (CAP-702)', () => {
     const target = row({
       name: 'ROW',
       locations: [loc({ targets: [{ provider: 'aws-ecs', target: 'prod-cluster', stale: true }] })],
     });
     const s1 = handleKey(initialSecretsScreenState([target]), ENTER).state;
     const frame = render(s1, 100, 30);
-    expect(frame).toContain('targets: [aws-ecs] prod-cluster (stale)');
+    expect(frame).toContain('targets: [aws-ecs] prod-cluster (not deployed)');
   });
 
   test('the details popup spells out a pending target with "(pending)"', () => {
@@ -1034,7 +1057,7 @@ describe('CAP-679 rendering: "+N" survives truncation, INTEGRATIONS overflow, po
     expect(frame).toContain('targets: [dokploy] backend-preview (pending)');
   });
 
-  test('the details popup lists a non-stale target with no "(stale)" marker', () => {
+  test('the details popup lists a non-stale target with no "(not deployed)" marker', () => {
     const target = row({
       name: 'ROW',
       locations: [loc({ targets: [{ provider: 'aws-ecs', target: 'prod-cluster', stale: false }] })],
@@ -1042,7 +1065,7 @@ describe('CAP-679 rendering: "+N" survives truncation, INTEGRATIONS overflow, po
     const s1 = handleKey(initialSecretsScreenState([target]), ENTER).state;
     const frame = render(s1, 100, 30);
     expect(frame).toContain('targets: [aws-ecs] prod-cluster');
-    expect(frame).not.toContain('(stale)');
+    expect(frame).not.toContain('(not deployed)');
   });
 
   test('the details popup shows nothing target-related for a location with no targets', () => {

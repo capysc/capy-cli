@@ -24,6 +24,7 @@ import { normalizeQuery, textMatches } from './searchMatch';
 import { CANCELLED_NOTHING, DRY_RUN_LABEL } from '../commands/secretsSetText';
 import type { RunProgress } from '../commands/secretsSet';
 import { clipLine } from './pickerTable';
+import { NOT_DEPLOYED, formatSecretRowStatus, secretRowStatus } from '../core/deployStatus';
 import {
   EditEffect,
   EditFlow,
@@ -180,9 +181,9 @@ function tokenizeFrom(chunk: string, index: number): readonly string[] {
 
 // ── Column cycling ───────────────────────────────────────────────────────────
 
-export type ColumnMode = 'connector' | 'target' | 'integrations' | 'users' | 'branch' | 'project';
-/** Tab cycles forward through this order (wrapping); Shift-Tab backward. CONNECTOR is the default/first-shown column (CAP-679 — "service" was a misnomer for what's really an inbound connector, and is gone as a column). */
-export const COLUMN_ORDER: readonly ColumnMode[] = ['connector', 'target', 'integrations', 'users', 'branch', 'project'];
+export type ColumnMode = 'project' | 'branch' | 'status' | 'connector' | 'target' | 'integrations' | 'users';
+/** Tab cycles forward through this order (wrapping); Shift-Tab backward. PROJECT is the default/first-shown column (CAP-702, Vince 2026-10-03). */
+export const COLUMN_ORDER: readonly ColumnMode[] = ['project', 'branch', 'status', 'connector', 'target', 'integrations', 'users'];
 
 function nextColumn(column: ColumnMode, dir: 1 | -1): ColumnMode {
   const idx = COLUMN_ORDER.indexOf(column);
@@ -230,7 +231,7 @@ export interface SecretsScreenState {
 export function initialSecretsScreenState(rows: readonly SecretIndexRow[], dryRun: boolean = false): SecretsScreenState {
   return {
     rows,
-    column: 'connector',
+    column: COLUMN_ORDER[0],
     cursorIndex: 0,
     search: { query: '' },
     popup: null,
@@ -741,6 +742,7 @@ export function formatMiddleCell(row: SecretIndexRow, column: ColumnMode, width:
   if (column === 'integrations') return formatIntegrationsCellFitted(row, width);
   if (column === 'users') return formatUsersCell(row);
   if (column === 'branch') return formatBranchCell(row);
+  if (column === 'status') return formatSecretRowStatus(secretRowStatus(row));
   return formatProjectCell(row);
 }
 
@@ -990,6 +992,7 @@ function buildPopupLines(row: SecretIndexRow, popup: PopupState, width: number):
     '',
     field('value', renderPopupValueLine(popup, valueWidth)),
     field('updated', formatUpdatedCell(row)),
+    field('status', formatSecretRowStatus(secretRowStatus(row))),
     '',
     `${indent}${inner}${BOLD}locations${RESET}`,
   ];
@@ -997,7 +1000,7 @@ function buildPopupLines(row: SecretIndexRow, popup: PopupState, width: number):
   // Per-location: project · branch (protected marker), the CONNECTOR that
   // brought the value IN (renamed from "service" — CAP-679), when it
   // changed, and — only when this location has any — every TARGET it was
-  // pushed OUT to, each spelled out with its full "(stale)" wording (the
+  // pushed OUT to, each spelled out with its full "(not deployed)" wording (the
   // table's own TARGET column uses a compact `*` instead; there's no room
   // pressure here to justify that shorthand).
   const locationLines: readonly string[] = row.locations.map((loc) => {
@@ -1008,7 +1011,7 @@ function buildPopupLines(row: SecretIndexRow, popup: PopupState, width: number):
     const targetsLabel =
       targets.length > 0
         ? ` · targets: ${targets
-            .map((t) => `[${t.provider}] ${t.target}${t.stale ? ' (stale)' : ''}${t.pending ? ' (pending)' : ''}`)
+            .map((t) => `[${t.provider}] ${t.target}${t.stale ? ` (${NOT_DEPLOYED})` : ''}${t.pending ? ' (pending)' : ''}`)
             .join(', ')}`
         : '';
     return `${indent}${inner}${truncate(`${loc.project_name} · ${loc.branch}`, contentWidth)}${protMarker} ${DIM}· ${connectorLabel} · ${updated}${targetsLabel}${RESET}`;

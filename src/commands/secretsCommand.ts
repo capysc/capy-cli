@@ -3,6 +3,13 @@ import { resolveOrgContext } from '../core/orgContext';
 import { Spinner } from '../ui/spinner';
 import { CapyError, ERROR_CODES } from '../types/index';
 import { rowIdOf } from './secretsRowId';
+import { secretRowStatus, type SecretRowStatus } from '../core/deployStatus';
+
+/** `status` plus, when some target lags, how many of how many. */
+function statusFields(status: SecretRowStatus): Record<string, string | number> {
+  if (status.kind !== 'not deployed') return { status: status.kind };
+  return { status: status.kind, targets_not_deployed: status.behind, targets_total: status.total };
+}
 
 export interface SecretsOpts {
   json?: boolean;
@@ -113,7 +120,15 @@ export class SecretsCommand {
 
   private emitJsonOutput(rows: readonly SecretIndexRow[], skipped: readonly SecretIndexSkipped[], orgId: string): void {
     // `row_id`: an opaque, stable handle for (name, value) that `capy secrets set --row` takes. Never a slice of the value's hash.
-    const withIds = rows.map((row) => ({ ...row, row_id: rowIdOf(row.name, row.value_hash) }));
+    // CAP-702, additive: `status` is the STATUS column's value; each target's `up_to_date` says it has the current value (`deployed` already means "not --no-deploy").
+    const withIds = rows.map((row) => ({
+      ...row,
+      row_id: rowIdOf(row.name, row.value_hash),
+      ...statusFields(secretRowStatus(row)),
+      locations: row.locations.map((loc) =>
+        loc.targets === undefined ? loc : { ...loc, targets: loc.targets.map((t) => ({ ...t, up_to_date: !t.stale })) },
+      ),
+    }));
     console.log(JSON.stringify({ ok: true, org_id: orgId, rows: withIds, skipped }, null, 2));
 
     // Names only, never a value — always stderr, so stdout stays pure JSON
