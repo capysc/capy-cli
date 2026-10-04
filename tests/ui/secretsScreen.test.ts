@@ -7,6 +7,7 @@ import {
   resolveSecretValue,
   render,
   formatMiddleCell,
+  buildLocationTable,
   filteredRows,
   filteredRowsWithReasons,
   formatUsersCell,
@@ -322,6 +323,34 @@ describe('STATUS column (CAP-702)', () => {
       expect(tableLines(opened([KEY_TAB, KEY_TAB, KEY_TAB]))[0]).toContain(`${TARGET_STATUS_HEADING} ⇥`);
       expect(tableLines(opened([KEY_SHIFT_TAB]))[0]).toContain('TARGET ⇥');
     });
+
+    test('full width: UPDATED ends at the right edge, the middle column takes the slack', () => {
+      const short = [loc({ project_name: 'web', branch: 'main', changed_at: '2026-06-15T10:00:00.000Z', targets: [current('a')] })];
+      const lines = buildLocationTable(short, 'status', 80).map(stripAnsiForTest);
+      lines.forEach((l) => expect(l.trimEnd().length).toBeLessThanOrEqual(80));
+      expect(lines[0].length).toBe(80);
+      expect(lines[1].length).toBe(80);
+      // UPDATED is the last column, sized to its widest cell, so it is flush with the edge.
+      const updatedX = lines[0].indexOf('UPDATED');
+      expect(80 - updatedX).toBe(Math.max('UPDATED'.length, lines[1].slice(updatedX).trimEnd().length));
+      // The slack went to the middle column, not to LOCATION.
+      expect(lines[1].indexOf('●')).toBe('web · main'.length + 2);
+    });
+
+    for (const column of ['status', 'connector', 'target'] as const) {
+      test(`${column}: every value starts exactly under the first letter of its header`, () => {
+        const lines = buildLocationTable(locs, column, 90).map(stripAnsiForTest);
+        const [header, ...body] = lines;
+        const middleX = header.indexOf(column === 'status' ? TARGET_STATUS_HEADING : column.toUpperCase());
+        const updatedX = header.indexOf('UPDATED');
+        body.forEach((l) => {
+          expect(l[middleX - 1]).toBe(' ');
+          expect(l[middleX]).not.toBe(' ');
+          expect(l[updatedX - 1]).toBe(' ');
+          expect(l[updatedX]).not.toBe(' ');
+        });
+      });
+    }
 
     test('Tab in the details view leaves the main table column alone', () => {
       expect(opened([KEY_TAB]).column).toBe(initialSecretsScreenState([]).column);

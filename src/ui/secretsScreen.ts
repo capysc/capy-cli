@@ -1092,10 +1092,13 @@ export function buildLocationTable(locations: readonly SecretIndexLocation[], co
   const middleHeading = `${LOCATION_COLUMN_HEADINGS[column]} ⇥`;
   const widest = (cells: readonly string[], heading: string) => Math.max(visLen(heading), ...cells.map(visLen));
 
+  // Full width: UPDATED sits at the right edge, LOCATION takes what it needs
+  // (giving way first when narrow), and the middle column takes the slack.
   const updatedW = widest(updatedCells, 'UPDATED');
   const minLocationW = 6;
-  const middleW = Math.max(8, Math.min(widest(middleCells, middleHeading), width - updatedW - minLocationW - gap.length * 2));
-  const locationW = Math.max(minLocationW, Math.min(widest(locationCells, 'LOCATION'), width - middleW - updatedW - gap.length * 2));
+  const middleNeed = Math.max(8, Math.min(widest(middleCells, middleHeading), width - updatedW - minLocationW - gap.length * 2));
+  const locationW = Math.max(minLocationW, Math.min(widest(locationCells, 'LOCATION'), width - middleNeed - updatedW - gap.length * 2));
+  const middleW = Math.max(middleNeed, width - locationW - updatedW - gap.length * 2);
 
   const header = `${DIM}${pad('LOCATION', locationW)}${gap}${pad(middleHeading, middleW)}${gap}${pad('UPDATED', updatedW)}${RESET}`;
   const body = locations.map(
