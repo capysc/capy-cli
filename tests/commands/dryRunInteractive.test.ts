@@ -28,11 +28,29 @@ class ExitSignal extends Error {
   }
 }
 
+// The real descriptors, so afterEach puts back exactly what was there. A
+// value-only descriptor defaults to writable:false, which leaks into later
+// files in the same bun process (they assign isTTY directly and would throw).
+const ORIGINAL_STDOUT_TTY = Object.getOwnPropertyDescriptor(process.stdout, 'isTTY');
+const ORIGINAL_STDIN_TTY = Object.getOwnPropertyDescriptor(process.stdin, 'isTTY');
+
 function setTTY(on: boolean): void {
-  Object.defineProperty(process.stdout, 'isTTY', { value: on, configurable: true });
-  Object.defineProperty(process.stdin, 'isTTY', { value: on, configurable: true });
+  Object.defineProperty(process.stdout, 'isTTY', { value: on, configurable: true, writable: true });
+  Object.defineProperty(process.stdin, 'isTTY', { value: on, configurable: true, writable: true });
 }
-afterEach(() => setTTY(false));
+
+function restoreTTY(stream: NodeJS.WriteStream | NodeJS.ReadStream, original: PropertyDescriptor | undefined): void {
+  if (original === undefined) {
+    Reflect.deleteProperty(stream, 'isTTY');
+    return;
+  }
+  Object.defineProperty(stream, 'isTTY', original);
+}
+
+afterEach(() => {
+  restoreTTY(process.stdout, ORIGINAL_STDOUT_TTY);
+  restoreTTY(process.stdin, ORIGINAL_STDIN_TTY);
+});
 
 async function capture(fn: () => Promise<void>) {
   const exitSpy = spyOn(process, 'exit').mockImplementation(((code?: number) => {

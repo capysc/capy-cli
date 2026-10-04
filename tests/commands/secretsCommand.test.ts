@@ -137,8 +137,8 @@ async function capture(fn: () => Promise<void>): Promise<{ exitCode?: number; st
 
 /** Sets BOTH `process.stdout.isTTY` and `process.stdin.isTTY` — the command only treats a run as "a real terminal" when both are true. */
 function setTTY(stdoutIsTty: boolean, stdinIsTty: boolean): void {
-  Object.defineProperty(process.stdout, 'isTTY', { value: stdoutIsTty, configurable: true });
-  Object.defineProperty(process.stdin, 'isTTY', { value: stdinIsTty, configurable: true });
+  Object.defineProperty(process.stdout, 'isTTY', { value: stdoutIsTty, configurable: true, writable: true });
+  Object.defineProperty(process.stdin, 'isTTY', { value: stdinIsTty, configurable: true, writable: true });
 }
 
 const loc = (over: Partial<FakeLocation> = {}): FakeLocation => ({
