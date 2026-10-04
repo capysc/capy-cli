@@ -413,7 +413,9 @@ export const DISCOVERY_PROJECT_NAME_MAX_LENGTH = 255;
 
 export type DiscoveryServiceKind = 'application' | 'compose';
 
-interface ServiceDetail {
+export interface ServiceDetail {
+  /** Dokploy PROJECT id (CAP-703); `projectName` alone is not unique. */
+  projectId?: string;
   projectName: string;
   environmentId: string;
   environmentName: string;
@@ -425,6 +427,8 @@ interface ServiceDetail {
   repository?: string;
   branch?: string;
   composePath?: string;
+  /** Application only (CAP-703): the build directory within the repo. UNVERIFIED live — see `DokployApplication.buildPath`. */
+  buildPath?: string;
   rawEnv: string | null;
 }
 
@@ -453,6 +457,7 @@ function serviceDisplayName(ref: { name?: string; appName?: string; id: string }
 
 /** Every service across every project/environment, with full detail (`GET application.one`/`GET compose.one` each). Sequential — deterministic call order for tests, and gentle on the Dokploy instance. */
 interface ServiceRefContext {
+  projectId: string;
   projectName: string;
   environmentId: string;
   environmentName: string;
@@ -466,6 +471,7 @@ function flattenServiceRefs(projects: readonly DokployProjectSummary[]): readonl
   return projects.flatMap((project) =>
     project.environments.flatMap((env) => [
       ...env.applications.map((ref) => ({
+        projectId: project.projectId,
         projectName: project.name,
         environmentId: env.environmentId,
         environmentName: env.name,
@@ -474,6 +480,7 @@ function flattenServiceRefs(projects: readonly DokployProjectSummary[]): readonl
         serviceName: serviceDisplayName(ref),
       })),
       ...env.composes.map((ref) => ({
+        projectId: project.projectId,
         projectName: project.name,
         environmentId: env.environmentId,
         environmentName: env.name,
@@ -485,43 +492,59 @@ function flattenServiceRefs(projects: readonly DokployProjectSummary[]): readonl
   );
 }
 
-async function fetchAllServiceDetails(client: DiscoveryDokployClient): Promise<readonly ServiceDetail[]> {
+/**
+ * Every service with its full detail. `onProgress` (CAP-703) is told after
+ * each service has been read, so a caller can report progress somewhere that
+ * is not stdout.
+ */
+export async function fetchAllServiceDetails(
+  client: DiscoveryDokployClient,
+  onProgress?: (done: number, total: number) => void,
+  /** Only these service ids are read in full (a plan names a few of them); the rest are skipped without a request. */
+  only?: ReadonlySet<string>,
+): Promise<readonly ServiceDetail[]> {
   const projects = await client.listProjects();
-  const refs = flattenServiceRefs(projects);
+  const refs = flattenServiceRefs(projects).filter((ref) => only === undefined || only.has(ref.serviceId));
   // Sequential (not parallel): deterministic call order for tests, and
   // gentle on the Dokploy instance. A `.reduce` over a promise keeps that
   // order without a mutable accumulator — same pattern the single-service
   // import's own conflict-classification reduce uses.
   return refs.reduce<Promise<readonly ServiceDetail[]>>(async (accPromise, ref) => {
     const acc = await accPromise;
-    if (ref.serviceKind === 'application') {
-      const app = await client.getApplication(ref.serviceId);
-      return [
-        ...acc,
-        {
-          ...ref,
-          sourceType: app.sourceType,
-          owner: app.owner,
-          repository: app.repository,
-          branch: app.branch,
-          rawEnv: app.env,
-        },
-      ];
-    }
-    const compose = await client.getCompose(ref.serviceId);
-    return [
-      ...acc,
-      {
-        ...ref,
-        sourceType: compose.sourceType,
-        owner: compose.owner,
-        repository: compose.repository,
-        branch: compose.branch,
-        composePath: compose.composePath,
-        rawEnv: compose.env,
-      },
-    ];
+    const detail = await fetchOneServiceDetail(client, ref);
+    onProgress?.(acc.length + 1, refs.length);
+    return [...acc, detail];
   }, Promise.resolve([]));
+}
+
+async function fetchOneServiceDetail(client: DiscoveryDokployClient, ref: ServiceRefContext): Promise<ServiceDetail> {
+  if (ref.serviceKind === 'application') {
+    const app = await client.getApplication(ref.serviceId);
+    return {
+      ...ref,
+      sourceType: app.sourceType,
+      owner: app.owner,
+      repository: app.repository,
+      branch: app.branch,
+      buildPath: app.buildPath,
+      rawEnv: app.env,
+    };
+  }
+  const compose = await client.getCompose(ref.serviceId);
+  return {
+    ...ref,
+    sourceType: compose.sourceType,
+    owner: compose.owner,
+    repository: compose.repository,
+    branch: compose.branch,
+    composePath: compose.composePath,
+    rawEnv: compose.env,
+  };
+}
+
+/** The one rule for "this service tracks a git repo": an owner and a repository, and not a `raw` source. Shared by `capy connect dokploy --discover` and `capy deploy dokploy --discover`. */
+export function hasGitSource(detail: Pick<ServiceDetail, 'owner' | 'repository' | 'sourceType'>): boolean {
+  return !!detail.owner && !!detail.repository && detail.sourceType?.toLowerCase() !== 'raw';
 }
 
 function matchDetail(
@@ -534,8 +557,7 @@ function matchDetail(
     serviceKind: detail.serviceKind,
     serviceId: detail.serviceId,
   };
-  const hasGitSource = !!detail.owner && !!detail.repository && detail.sourceType?.toLowerCase() !== 'raw';
-  if (!hasGitSource) {
+  if (!hasGitSource(detail)) {
     return { kind: 'unmatched', value: { ...base, reason: 'no_git_source' } };
   }
   const hit = repos.find(
@@ -1187,10 +1209,16 @@ export type DiscoveryOutcome =
       cancelled?: boolean;
       /** One entry per repo touched by the plan (dry run: every repo the plan would touch) — see `DiscoveryRepoCommitResult`'s own doc. Absent only when nothing was ever going to be committed (no matched repos at all). */
       commits?: readonly DiscoveryRepoCommitResult[];
+      /** CAP-703: `{ base_url: true }` when this run saved the Dokploy base URL to the org system variable. */
+      saved?: { readonly base_url: true };
+      /** CAP-703: `BASE_URL_NOT_SAVED` / `BASE_URL_DIFFERS_FROM_STORED`, as codes. */
+      notices?: ReadonlyArray<{ readonly code: string; readonly reason?: string; readonly stored?: string; readonly used?: string }>;
     }
   | {
       ok: false;
       /** Stable refusal code — branch on this, never on `message`. */
       code: string;
       message: string;
+      /** CAP-703: what a caller must still supply, as flags (`DOKPLOY_SETTINGS_MISSING`). */
+      unanswered?: ReadonlyArray<{ readonly id: string; readonly flag: string; readonly hint: string }>;
     };

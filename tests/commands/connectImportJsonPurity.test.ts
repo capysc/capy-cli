@@ -68,7 +68,6 @@ const successOutcome = (): ImportOutcome => ({
   unchanged: [],
   skipped: [],
   warnings: [{ code: 'DOKPLOY_PLAINTEXT_REMAINS', names: ['API_KEY'] }],
-  deployTargetSaved: false,
 });
 
 function fakeImportModule(outcome: ImportOutcome): ConnectorModule {

@@ -6,12 +6,13 @@
  * of the target org's Dokploy services is a Compose service, not an
  * Application).
  *
- * This is the PULL half of the Dokploy integration; `capy deploy` (the PUSH
- * half, see `../../deploy/adapters/dokploy.ts` and
- * `docs/dokploy-deploy-adapter.md`) delivers Capy's own runtime pair back out
- * to an Application only — there is no compose deploy adapter, so a compose
- * import never offers a deploy target (see `maybeOfferDeployTarget`'s call
- * site in `import()`, below).
+ * This is the PULL half of the Dokploy integration: "connect is for
+ * retrieval, target is for deploy" (Vince, 2026-10-03). It imports values
+ * (and keep.lock connector entries) and NEVER creates, offers or writes a
+ * deploy target — `capy deploy dokploy --discover` (CAP-703) is what creates
+ * targets, and it pushes no values. `capy deploy` (the PUSH half, see
+ * `../../deploy/adapters/dokploy.ts` and `docs/dokploy-deploy-adapter.md`)
+ * delivers Capy's own runtime pair back out.
  *
  * Import is READ-ONLY on the Dokploy side: the only call this file ever makes
  * is `GET application.one` or `GET compose.one` — never a write. The API
@@ -61,6 +62,7 @@ import { assertProjectNameAllowed, isReservedProjectName, PROJECT_NAME_RESERVED_
 import { findDirtyBranchIssue } from '../checkoutCommand';
 import { listOrgProjectsOrUnavailable } from '../capyCommand';
 import { commitDiscoveryChanges, defaultDiscoveryCommitBranchName, isValidDiscoveryCommitBranchName, snapshotPathStatus } from '../../git/discoveryCommit';
+import { BaseUrlStore, Unanswered, offerSaveAskedBaseUrl, realBaseUrlStoreOpener, resolveDokployBaseUrl, settingsUnanswered } from '../../deploy/dokployBaseUrl';
 import { fingerprint, writeImportedAndSync, writeImportOutcome, ResolvedContext } from './shared';
 import { ConnectOpts, ConnectorModule, ConnectResult, ImportOutcome, ImportWarning, RotateResult } from './registry';
 import { discoveryProjectQuestion } from '../../ui/projectQuestions';
@@ -96,8 +98,8 @@ interface DokployTargetOptions {
 // ── Settings resolution ─────────────────────────────────────────────────────
 
 export type DokploySettingsResult =
-  | { ok: true; baseUrl: string; applicationId: string; tokenEnv: string }
-  | { ok: false; code: 'DOKPLOY_TARGET_AMBIGUOUS' | 'DOKPLOY_SETTINGS_MISSING'; message: string };
+  | { ok: true; baseUrl: string; applicationId: string; tokenEnv: string; /** CAP-703: the URL was typed at a prompt (so it may be offered to the org). */ baseUrlAsked?: true }
+  | { ok: false; code: 'DOKPLOY_TARGET_AMBIGUOUS' | 'DOKPLOY_SETTINGS_MISSING'; message: string; unanswered?: readonly Unanswered[] };
 
 export interface DokploySettingsDeps {
   pickTarget: (names: readonly string[]) => Promise<string>;
@@ -164,6 +166,7 @@ export async function resolveDokploySettings(
       ok: false,
       code: 'DOKPLOY_SETTINGS_MISSING',
       message: 'No Dokploy settings found. Pass --base-url <url> and --application <id>, or run this interactively.',
+      unanswered: settingsUnanswered({ baseUrl: !opts.baseUrl, service: !opts.application }),
     };
   }
   const asked = await deps.askSettings();
@@ -172,15 +175,17 @@ export async function resolveDokploySettings(
     baseUrl: asked.baseUrl.trim(),
     applicationId: asked.applicationId.trim(),
     tokenEnv: tokenEnvFlag || DEFAULT_TOKEN_ENV,
+    baseUrlAsked: true,
   };
 }
 
 export type DokploySourceResult =
-  | { ok: true; baseUrl: string; source: DokployImportSource; tokenEnv: string }
+  | { ok: true; baseUrl: string; source: DokployImportSource; tokenEnv: string; baseUrlAsked?: true }
   | {
       ok: false;
       code: 'DOKPLOY_SOURCE_AMBIGUOUS' | 'DOKPLOY_TARGET_AMBIGUOUS' | 'DOKPLOY_SETTINGS_MISSING';
       message: string;
+      unanswered?: readonly Unanswered[];
     };
 
 export interface DokploySourceDeps extends DokploySettingsDeps {
@@ -193,7 +198,13 @@ export interface DokploySourceDeps extends DokploySettingsDeps {
 /** `resolveDokploySettings`'s application result, reshaped as a `DokployImportSource`. */
 function settingsToSource(r: DokploySettingsResult): DokploySourceResult {
   if (!r.ok) return r;
-  return { ok: true, baseUrl: r.baseUrl, source: { kind: 'application', id: r.applicationId }, tokenEnv: r.tokenEnv };
+  return {
+    ok: true,
+    baseUrl: r.baseUrl,
+    source: { kind: 'application', id: r.applicationId },
+    tokenEnv: r.tokenEnv,
+    ...(r.baseUrlAsked ? { baseUrlAsked: true as const } : {}),
+  };
 }
 
 /**
@@ -244,6 +255,7 @@ export async function resolveDokployImportSource(
         ok: false,
         code: 'DOKPLOY_SETTINGS_MISSING',
         message: 'No Dokploy base URL. Pass --base-url <url>, or run this interactively.',
+        unanswered: settingsUnanswered({ baseUrl: true }),
       };
     }
     const asked = await deps.askComposeSettings();
@@ -252,6 +264,7 @@ export async function resolveDokployImportSource(
       baseUrl: asked.baseUrl.trim(),
       source: { kind: 'compose', id: asked.composeId.trim() },
       tokenEnv,
+      baseUrlAsked: true,
     };
   }
 
@@ -265,6 +278,7 @@ export async function resolveDokployImportSource(
       code: 'DOKPLOY_SETTINGS_MISSING',
       message:
         'No Dokploy settings found. Pass --base-url <url> and --application <id> or --compose <id>, or run this interactively.',
+      unanswered: settingsUnanswered({ baseUrl: !opts.baseUrl, service: true }),
     };
   }
 
@@ -276,6 +290,7 @@ export async function resolveDokployImportSource(
       baseUrl: asked.baseUrl.trim(),
       source: { kind: 'compose', id: asked.composeId.trim() },
       tokenEnv,
+      baseUrlAsked: true,
     };
   }
   return settingsToSource(await resolveDokploySettings(opts, dokployTargets, interactive, deps));
@@ -351,58 +366,6 @@ async function fetchComposeEnv(client: DokployClient, composeId: string): Promis
   }
 }
 
-// ── Deploy-target offer ─────────────────────────────────────────────────────
-
-function uniqueTargetName(existing: readonly TargetConfig[], base: string): string {
-  const names = new Set(existing.map((t) => t.name));
-  if (!names.has(base)) return base;
-  const numbered = (n: number): string => (names.has(`${base}-${n}`) ? numbered(n + 1) : `${base}-${n}`);
-  return numbered(2);
-}
-
-interface DeployTargetOfferArgs {
-  importedNames: readonly string[];
-  applicationId: string;
-  baseUrl: string;
-  tokenEnv: string;
-  branch: string;
-  allTargets: readonly TargetConfig[];
-  interactive: boolean;
-  cwd: string;
-  confirm: (message: string, defaultValue: boolean) => Promise<boolean>;
-}
-
-/**
- * After a successful import, offer to save a Dokploy deploy target for the
- * SAME application — so `capy deploy` can ship Capy's runtime pair back to
- * it. Only offered when nothing imported (nothing to offer) and only asked
- * interactively; non-interactive never asks and never saves.
- */
-async function maybeOfferDeployTarget(args: DeployTargetOfferArgs): Promise<boolean> {
-  if (args.importedNames.length === 0) return false;
-  const already = args.allTargets.some(
-    (t) => t.kind === 'dokploy' && (t.options as DokployTargetOptions).applicationId === args.applicationId,
-  );
-  if (already || !args.interactive) return false;
-
-  // COPY-FLAG: new user-facing string, minimal/neutral wording.
-  const yes = await args.confirm(
-    'Save a Dokploy deploy target for this application, so `capy deploy` can ship the runtime pair to it?',
-    false,
-  );
-  if (!yes) return false;
-
-  const { upsertTarget } = await import('../../deploy/config');
-  upsertTarget(args.cwd, {
-    name: uniqueTargetName(args.allTargets, 'dokploy'),
-    kind: 'dokploy',
-    branch: args.branch,
-    vars: [...args.importedNames],
-    options: { baseUrl: args.baseUrl, applicationId: args.applicationId, tokenEnv: args.tokenEnv },
-  });
-  return true;
-}
-
 // ── Connector ────────────────────────────────────────────────────────────────
 
 export interface DokployConnectorDeps {
@@ -424,6 +387,12 @@ export interface DokployConnectorDeps {
   askSourceKind?: () => Promise<'application' | 'compose'>;
   /** Discovery mode only. Injectable for tests. Real `inquirer` input otherwise: the base URL to scan when nothing else resolves it. */
   askDiscoveryBaseUrl?: () => Promise<string>;
+  /**
+   * Opens the org system store for the Dokploy base URL variable (`_CONNECTOR_DOKPLOY_BASE_URL`). Opt-in like
+   * `getConnectorSecret`: every test constructs the connector without it and never touches the store; the
+   * exported `dokployConnector` singleton wires the real one.
+   */
+  openBaseUrlStore?: (orgId: string, devMode: boolean) => Promise<BaseUrlStore>;
   /** Discovery mode only. Injectable for tests. Real `inquirer` list otherwise: which candidate wins one mapping collision. */
   pickCollisionWinner?: (collision: DiscoveryCollision) => Promise<string>;
   /**
@@ -807,7 +776,6 @@ async function runOverwriteImport(args: {
             ...(dollarWarnedNames.length > 0 ? [{ code: 'DOKPLOY_VALUE_HAS_DOLLAR', names: dollarWarnedNames }] : []),
             ...(quotedNames.length > 0 ? [{ code: 'DOKPLOY_VALUE_QUOTED', names: quotedNames }] : []),
           ],
-          deployTargetSaved: false,
         };
       }
     } else if (!promptable && !opts.yes) {
@@ -854,8 +822,22 @@ async function runOverwriteImport(args: {
       ...(quotedNames.length > 0 ? [{ code: 'DOKPLOY_VALUE_QUOTED', names: quotedNames }] : []),
       ...(written.length > 0 && !dryRun ? [{ code: 'DOKPLOY_PLAINTEXT_REMAINS', names: written.map((w) => w.varName) }] : []),
     ],
-    deployTargetSaved: false,
   };
+}
+
+/** The stored base URL for a run that was not given `--base-url`; `undefined` when a flag was given, the variable is unset, or it cannot be read. */
+async function storedBaseUrlFor(
+  opts: ConnectOpts,
+  orgId: string,
+  openBaseUrlStore: DokployConnectorDeps['openBaseUrlStore'],
+): Promise<string | undefined> {
+  if (opts.baseUrl?.trim() || openBaseUrlStore === undefined) return undefined;
+  const resolved = await resolveDokployBaseUrl({
+    dryRun: true,
+    openStore: () => openBaseUrlStore(orgId, !!opts.devMode),
+    savedTargetUrl: () => undefined,
+  });
+  return resolved.ok ? resolved.baseUrl : undefined;
 }
 
 export function createDokployConnector(deps: DokployConnectorDeps = {}): ConnectorModule {
@@ -915,16 +897,20 @@ export function createDokployConnector(deps: DokployConnectorDeps = {}): Connect
       const dryRun = !!opts.dryRun;
 
       const { listTargets } = await import('../../deploy/config');
-      const allTargets = listTargets(cwd());
-      const dokployTargets = allTargets.filter((t) => t.kind === 'dokploy');
+      const dokployTargets = listTargets(cwd()).filter((t) => t.kind === 'dokploy');
 
-      const settings = await resolveDokployImportSource(opts, dokployTargets, interactive, {
+      // CAP-703: with no `--base-url`, the org system variable (`_CONNECTOR_DOKPLOY_BASE_URL`) comes before a saved
+      // target and the interactive ask - the same shared resolver, read-only here (the discover commands save it).
+      const storedBaseUrl = await storedBaseUrlFor(opts, ctx.orgId, deps.openBaseUrlStore);
+      const settings = await resolveDokployImportSource(storedBaseUrl === undefined ? opts : { ...opts, baseUrl: storedBaseUrl }, dokployTargets, interactive, {
         pickTarget,
         askSettings,
         askComposeSettings,
         askSourceKind,
       });
-      if (!settings.ok) return { ok: false, code: settings.code, message: settings.message };
+      if (!settings.ok) {
+        return { ok: false, code: settings.code, message: settings.message, ...(settings.unanswered === undefined ? {} : { unanswered: settings.unanswered }) };
+      }
       const { baseUrl, source, tokenEnv } = settings;
 
       // Resolved BEFORE any Dokploy request — a missing/refused token still
@@ -955,6 +941,15 @@ export function createDokployConnector(deps: DokployConnectorDeps = {}): Connect
           ? await fetchComposeEnv(client, source.id)
           : await fetchApplicationEnv(client, source.id);
       if (!envResult.ok) return { ok: false, code: envResult.code, message: envResult.message };
+      // CAP-703: a URL typed at a prompt is offered to the org once Dokploy has answered with it - saved only when the
+      // variable is unset and the caller is an org admin (never overwritten), a dry run saves nothing.
+      if (settings.baseUrlAsked === true && !dryRun) {
+        const openStore = deps.openBaseUrlStore;
+        await offerSaveAskedBaseUrl({
+          baseUrl,
+          openStore: openStore === undefined ? undefined : () => openStore(ctx.orgId, !!opts.devMode),
+        });
+      }
       const sourceEnv = envResult.env;
       // CAP-673: `service_name` is free (same response as `env`, above);
       // `dokploy_project`/`environment` are only known when the caller
@@ -1032,24 +1027,6 @@ export function createDokployConnector(deps: DokployConnectorDeps = {}): Connect
           : []),
       ];
 
-      // Compose has no deploy target in this change — there is no compose
-      // deploy adapter yet, so it is never offered, regardless of TTY. A dry
-      // run never saves anything either way (Vince's rule: changes nothing).
-      const deployTargetSaved =
-        !dryRun && source.kind === 'application'
-          ? await maybeOfferDeployTarget({
-              importedNames: imported.map((i) => i.varName),
-              applicationId: source.id,
-              baseUrl,
-              tokenEnv,
-              branch: ctx.branch,
-              allTargets,
-              interactive,
-              cwd: cwd(),
-              confirm,
-            })
-          : false;
-
       return {
         ok: true,
         ...(source.kind === 'application' ? { applicationId: source.id } : {}),
@@ -1059,7 +1036,6 @@ export function createDokployConnector(deps: DokployConnectorDeps = {}): Connect
         unchangedEntries,
         skipped,
         warnings,
-        deployTargetSaved,
         ...(dryRun ? { wouldAsk } : {}),
       };
     },
@@ -1079,21 +1055,37 @@ export function createDokployConnector(deps: DokployConnectorDeps = {}): Connect
       const dokployTargets = listTargets(cwd()).filter((t) => t.kind === 'dokploy');
 
       const tokenEnv = opts.tokenEnv?.trim() || DEFAULT_TOKEN_ENV;
-      const flagBaseUrl = opts.baseUrl?.trim();
+      // The one shared base-URL resolver: --base-url, then the org system
+      // variable, then the saved deploy target, else a structured refusal.
+      const openBaseUrlStore = deps.openBaseUrlStore;
       const savedBaseUrl = (dokployTargets[0]?.options as DokployTargetOptions | undefined)?.baseUrl;
-      const baseUrl = flagBaseUrl || savedBaseUrl;
-      const resolvedBaseUrl: string | null = baseUrl
-        ? baseUrl
-        : interactive
+      const baseUrlResolution = await resolveDokployBaseUrl({
+        flag: opts.baseUrl,
+        dryRun,
+        openStore: openBaseUrlStore === undefined ? undefined : () => openBaseUrlStore(ctx.orgId, !!opts.devMode),
+        savedTargetUrl: () => savedBaseUrl,
+      });
+      // A direct caller at a real terminal may still be asked; the CLI never is (see `ConnectCommand`).
+      const asked: string | null =
+        !baseUrlResolution.ok && baseUrlResolution.code === 'DOKPLOY_SETTINGS_MISSING' && interactive
           ? (await askDiscoveryBaseUrl()).trim()
           : null;
-      if (!resolvedBaseUrl) {
+      if (!baseUrlResolution.ok && !asked) {
         return {
           ok: false,
-          code: 'DOKPLOY_SETTINGS_MISSING',
-          message: 'No Dokploy base URL. Pass --base-url <url>, or run this interactively.',
+          code: baseUrlResolution.code,
+          message: baseUrlResolution.error,
+          ...(baseUrlResolution.unanswered === undefined ? {} : { unanswered: baseUrlResolution.unanswered }),
         };
       }
+      const resolvedBaseUrl: string = baseUrlResolution.ok ? baseUrlResolution.baseUrl : (asked as string);
+      // Reported in the discover output: `saved: { base_url: true }` and the coded notices.
+      const baseUrlReport = baseUrlResolution.ok
+        ? {
+            ...(baseUrlResolution.saved === undefined ? {} : { saved: baseUrlResolution.saved }),
+            ...(baseUrlResolution.notices.length === 0 ? {} : { notices: baseUrlResolution.notices }),
+          }
+        : {};
 
       // Same suppression rule as the single-service import: never prompt for
       // the key under --json/--dry-run.
@@ -1141,7 +1133,7 @@ export function createDokployConnector(deps: DokployConnectorDeps = {}): Connect
         // Vince's rule: a dry run changes nothing — never asks for a
         // branch name either; the DEFAULT is what it previews.
         const commits = commitPreviewForFolders(plan.folders, defaultDiscoveryCommitBranchName());
-        return { ok: true, dryRun: true, plan, ...(commits.length > 0 ? { commits } : {}) };
+        return { ok: true, dryRun: true, plan, ...(commits.length > 0 ? { commits } : {}), ...baseUrlReport };
       }
 
       // `--json` must never have a prompt interleaved with it, same reason
@@ -1178,7 +1170,7 @@ export function createDokployConnector(deps: DokployConnectorDeps = {}): Connect
 
       const resolvedFolders = applyCollisionResolutions(plan.folders, resolution.resolutions);
       if (resolvedFolders.length === 0) {
-        return { ok: true, dryRun: false, plan, applied: [] };
+        return { ok: true, dryRun: false, plan, applied: [], ...baseUrlReport };
       }
 
       // A real (non-dry-run) run must never write without confirmation.
@@ -1193,7 +1185,7 @@ export function createDokployConnector(deps: DokployConnectorDeps = {}): Connect
       if (promptable && !opts.yes) {
         const proceed = await confirm(discoveryConfirmMessage(resolvedFolders, !!opts.overwrite, environmentFilter), false);
         if (!proceed) {
-          return { ok: true, dryRun: false, plan, applied: [], cancelled: true };
+          return { ok: true, dryRun: false, plan, applied: [], cancelled: true, ...baseUrlReport };
         }
       } else if (!promptable && !opts.yes) {
         return {
@@ -1267,7 +1259,7 @@ export function createDokployConnector(deps: DokployConnectorDeps = {}): Connect
       // something local for this step to pin.
       const commits = commitForAppliedRepos(applied, beforeStatusByRepo, commitBranchName);
 
-      return { ok: true, dryRun: false, plan, applied, ...(commits.length > 0 ? { commits } : {}) };
+      return { ok: true, dryRun: false, plan, applied, ...(commits.length > 0 ? { commits } : {}), ...baseUrlReport };
     },
   };
   return connector;
@@ -1966,20 +1958,29 @@ function buildRealDiscoverySequenceDeps(
 }
 
 /**
+ * The real org system store read for the Dokploy IMPORT key (`_CONNECTOR_DOKPLOY_API_KEY`).
+ * Shared by `capy connect dokploy` and `capy deploy dokploy --discover`, which read the same
+ * Dokploy inventory with the same key.
+ *
+ * CAP-679 follow-up: import's own direction — see
+ * `system/systemStore.ts#getDirectionalConnectorSecret`'s doc, and
+ * `deploy/adapters/dokploy.ts`'s `dokployAdapter` for the symmetric
+ * deploy-side wiring.
+ */
+export async function dokployConnectorSecret(name: string, opts: DokploySystemStoreCallOptions): Promise<string | null> {
+  const { getDirectionalConnectorSecret } = await import('../../system/systemStore');
+  return getDirectionalConnectorSecret(name, DOKPLOY_TARGET_SECRET_NAME, {
+    ...opts,
+    missingWithFallbackCode: ERROR_CODES.DOKPLOY_CONNECTOR_KEY_MISSING,
+  });
+}
+
+/**
  * The `capy connect dokploy` production instance — the only place this file
  * wires the org system store for real (every other construction, including
  * every test, gets the safe env-only default — see `DokployConnectorDeps`).
  */
 export const dokployConnector: ConnectorModule = createDokployConnector({
-  getConnectorSecret: async (name, opts) => {
-    // CAP-679 follow-up: import's own direction — see
-    // `system/systemStore.ts#getDirectionalConnectorSecret`'s doc, and
-    // `deploy/adapters/dokploy.ts`'s `dokployAdapter` for the symmetric
-    // deploy-side wiring.
-    const { getDirectionalConnectorSecret } = await import('../../system/systemStore');
-    return getDirectionalConnectorSecret(name, DOKPLOY_TARGET_SECRET_NAME, {
-      ...opts,
-      missingWithFallbackCode: ERROR_CODES.DOKPLOY_CONNECTOR_KEY_MISSING,
-    });
-  },
+  getConnectorSecret: dokployConnectorSecret,
+  openBaseUrlStore: (orgId, devMode) => realBaseUrlStoreOpener(orgId, devMode)(),
 });

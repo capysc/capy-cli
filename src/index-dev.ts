@@ -345,8 +345,18 @@ const deploy = program
   .option('--mode <mode>', 'skip mode picker: "connector" or "token"')
   .option('--scope <scope>', 'gh-actions: "repo" or "env"')
   .option('--env-name <name>', 'gh-actions: env name when --scope env')
+  // COPY-FLAG: the option descriptions of `deploy <target> --discover` are minimal and neutral.
+  .option('--discover', 'dokploy: find the services that match Capy projects and print JSON (never prompts)')
+  .option('--plan <file>', 'dokploy --discover: the plan file to check (see schemas.deploy_dokploy_plan in `capy help --json`)')
+  .option('--confirm <plan_id>', 'dokploy --discover: write the plan that --dry-run printed (one PR per repo)')
+  .option('--base-url <url>', 'dokploy --discover: the Dokploy dashboard URL (else the org system variable _CONNECTOR_DOKPLOY_BASE_URL)')
   .action(async (target: string | undefined, options: any, cmd: any) => {
     const merged = cmd.optsWithGlobals ? cmd.optsWithGlobals() : options;
+
+    // `capy-dev deploy dokploy --discover` (CAP-703): always JSON, never prompts.
+    const { routeDeployDiscover } = await import('./commands/deployDiscover/route');
+    const discoverCode = await routeDeployDiscover(target, options, (options.dryRun ?? merged.dryRun) === true, true);
+    if (discoverCode !== undefined) process.exit(discoverCode);
 
     // CI/explicit connector path — go straight to the adapter flow (devMode).
     if (options.target || options.connect || target) {
@@ -1047,7 +1057,8 @@ program
   )
   .option(
     '-y, --yes',
-    'dokploy import/discover: skip the confirmation prompt (import: --overwrite\'s clear/replace/import ask; discover: the real-run "proceed?" ask) — required non-interactively',
+    // COPY-FLAG: discover never prompts (it always prints JSON), so `--yes` is what lets it write.
+    'dokploy import/discover: skip the confirmation prompt (import: --overwrite\'s clear/replace/import ask) — discover never prompts and needs --yes to write',
   )
   .option(
     '--overwrite',

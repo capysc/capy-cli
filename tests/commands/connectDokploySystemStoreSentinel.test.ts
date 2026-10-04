@@ -6,8 +6,9 @@
  * with the org system store's `getConnectorSecret` returning a sentinel API
  * token. Proves the token never lands on any output surface OR in any file
  * this run writes — `.env`/keep.lock (via `writeImportedAndSync`) and
- * `.capy/deploy.json` (via the deploy-target offer, `maybeOfferDeployTarget`
- * → `upsertTarget`).
+ * `.capy/deploy.json` (CAP-703: an import no longer writes one at all, so this
+ * file's own assertion is that none exists — a target is `capy deploy dokploy
+ * --discover`'s job, never a connector import's).
  *
  * The token is deliberately DIFFERENT from the imported app variable's
  * value, so a pass here can't be an accident of both sentinels happening to
@@ -31,7 +32,7 @@ import type { KeepFile } from '../../src/types/index';
 const TOKEN_SENTINEL = 'sk_store_token_never_leak_4d2';
 const APP_VALUE_SENTINEL = 'app-env-value-not-the-token';
 
-/** Fakes a real TTY — needed for the interactive deploy-target offer to even ask. */
+/** Fakes a real TTY — so a deploy-target question, if one ever came back, WOULD be asked. */
 async function withTTY<T>(fn: () => Promise<T>): Promise<T> {
   const saved = process.stdin.isTTY;
   Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });
@@ -90,7 +91,7 @@ function scriptedFetch(): FetchLike {
 }
 
 describe('capy connect dokploy — system store token never appears in output or files (CAP-664)', () => {
-  test('the sentinel is on none of: console.log, console.error, process.stdout.write, keep.lock, or .capy/deploy.json', async () => {
+  test('the sentinel is on none of: console.log, console.error, process.stdout.write, or keep.lock — and no deploy.json is written', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'capy-connect-dokploy-store-sentinel-'));
 
     const logMock = mock((..._a: unknown[]) => {});
@@ -111,8 +112,8 @@ describe('capy connect dokploy — system store token never appears in output or
         cwd: dir,
         getConnectorSecret,
         selectVars: async (candidates: readonly string[]) => candidates,
-        // Say yes to the deploy-target offer, so `.capy/deploy.json` gets
-        // written too (the offer only fires when something was imported).
+        // Would say yes to a deploy-target offer, if one still existed
+        // (CAP-703 removed it): the assertion below is that no target is written.
         confirm: async () => true,
       });
 
@@ -146,13 +147,8 @@ describe('capy connect dokploy — system store token never appears in output or
       expect(existsSync(keepLockPath)).toBe(true);
       expect(readFileSync(keepLockPath, 'utf-8')).not.toContain(TOKEN_SENTINEL);
 
-      const deployJsonPath = join(dir, '.capy', 'deploy.json');
-      expect(existsSync(deployJsonPath)).toBe(true);
-      const deployJson = readFileSync(deployJsonPath, 'utf-8');
-      expect(deployJson).not.toContain(TOKEN_SENTINEL);
-      // The saved target stores the app's connection details — never the
-      // token — so `applicationId` legitimately appears; the token must not.
-      expect(deployJson).toContain('app_1');
+      // CAP-703: connect imports values; it never writes a deploy target.
+      expect(existsSync(join(dir, '.capy', 'deploy.json'))).toBe(false);
     } finally {
       logSpy.mockRestore();
       errSpy.mockRestore();
