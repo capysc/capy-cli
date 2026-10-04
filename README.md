@@ -36,7 +36,7 @@
 
 Capy is a secrets toolchain with git-style primitives — branch, sync, deploy, revoke — end-to-end encrypted on your machine and fully revocable for humans and agents. Your `.env` becomes versioned state your team can commit, roll back, and offboard without rotating a single key.
 
-→ [Compare Capy to Doppler, Infisical, dotenvx, AWS Secrets Manager, and SOPS](https://docs.capy.sc/comparisons).
+→ [Compare Capy to Doppler, Infisical, AWS Secrets Manager, and SOPS](https://docs.capy.sc/comparisons).
 
 ## Install
 
