@@ -55,7 +55,7 @@ import {
   resolveBases,
   runSecretSet,
 } from './secretsSet';
-import { renderSecretSetConfirmation, stoppingAfter } from './secretsSetText';
+import { renderSecretSetConfirmation, stoppingAfter, TERMINAL_STYLE } from './secretsSetText';
 import { PoolItem, runPool } from '../utils/pool';
 
 export interface SecretsSetOpts {
@@ -453,6 +453,7 @@ export async function runSecretsSet(name: string, opts: SecretsSetOpts, io: Secr
           unchanged: result.unchanged,
           prs: result.prs,
           no_pr: result.no_pr,
+          ...(result.skipped !== undefined ? { skipped: result.skipped } : {}),
           failed: result.failed,
           ...(cancelled.length > 0 ? { cancelled } : {}),
           not_linked: planning.notLinked,
@@ -463,7 +464,7 @@ export async function runSecretsSet(name: string, opts: SecretsSetOpts, io: Secr
       ),
     );
   } else {
-    console.log(renderSecretSetConfirmation(result));
+    console.log(renderSecretSetConfirmation(result, process.stdout.isTTY ? TERMINAL_STYLE : undefined));
   }
   return failed ? 1 : 0;
 }

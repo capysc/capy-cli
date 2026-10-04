@@ -16,7 +16,7 @@ import {
   tokenizeKeys,
 } from '../../src/ui/secretsScreen';
 import type { EditFlow } from '../../src/ui/secretsEditFlow';
-import { renderSecretSetConfirmation } from '../../src/commands/secretsSetText';
+import { renderSecretSetConfirmation, TERMINAL_STYLE } from '../../src/commands/secretsSetText';
 import type { SecretSetResult } from '../../src/commands/secretsSet';
 import type { OrgRepoLink, SecretIndexRow } from '../../src/service/serviceClient';
 import { ERROR_CODES } from '../../src/types/index';
@@ -274,6 +274,51 @@ describe('the confirmation', () => {
         'until its PR is merged and pulled.',
       ].join('\n'),
     );
+  });
+
+  test('repos that needed no PR are listed under a Skipped heading and description, after the PRs', () => {
+    const text = renderSecretSetConfirmation({
+      ...base,
+      prs: [pr('SlideSpeak/slidespeak-monorepo', 8401)],
+      no_pr: [{ repo: 'SlideSpeak/onbrand', reason: 'NO_DIFF_VS_BASE' }],
+      skipped: [{ repo: 'SlideSpeak/voice-cloner-server', reason: 'NOTHING_CHANGED' }],
+    });
+    expect(text).toBe(`✓ ANTHROPIC_API_KEY updated in 6 locations.
+
+Pull requests (merge each to update that repo's keep.lock):
+
+  SlideSpeak/slidespeak-monorepo
+    https://github.com/SlideSpeak/slidespeak-monorepo/pull/8401
+
+Skipped
+Nothing changed in these repos, so no pull request was opened.
+
+  SlideSpeak/onbrand
+  SlideSpeak/voice-cloner-server
+
+The new value is saved in Capy now. Each repo keeps using the old value
+until its PR is merged and pulled.`);
+  });
+
+  test('in a terminal only the skipped repos are grey; the heading and description are not', () => {
+    const text = renderSecretSetConfirmation(
+      { ...base, prs: [pr('SlideSpeak/slidespeak-monorepo', 1)], skipped: [{ repo: 'SlideSpeak/onbrand', reason: 'NOTHING_CHANGED' }] },
+      TERMINAL_STYLE,
+    );
+    expect(text).toContain('\nSkipped\nNothing changed in these repos, so no pull request was opened.\n');
+    expect(text).toContain('\x1b[90m  SlideSpeak/onbrand\x1b[0m');
+    expect(text).not.toContain('\x1b[90m  SlideSpeak/slidespeak-monorepo');
+  });
+
+  test('every repo skipped: no pull request section, just the Skipped list', () => {
+    const text = renderSecretSetConfirmation({
+      ...base,
+      updated: [],
+      unchanged: refs(2),
+      skipped: [{ repo: 'SlideSpeak/onbrand', reason: 'NOTHING_CHANGED' }],
+    });
+    expect(text).not.toContain('Pull requests');
+    expect(text).toContain('Skipped\nNothing changed in these repos, so no pull request was opened.\n\n  SlideSpeak/onbrand');
   });
 
   test('the two-repo example from the brief, exactly', () => {

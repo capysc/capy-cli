@@ -25,7 +25,7 @@ import { OldValueView, canReveal, revealHint, valueDialogRows } from './valueDia
 import type { ValueState } from './secretsScreen';
 import { sanitizePastedText } from './editScreen';
 import { CONFIRM_MESSAGE } from '../commands/keepLockPr';
-import { CANCELLED_NOTHING, STOPPING_AGAIN, STOPPING_NOW, stoppingAfter, DryRunView, renderDryRunPlan, renderSecretSetConfirmation } from '../commands/secretsSetText';
+import { CANCELLED_NOTHING, STOPPING_AGAIN, STOPPING_NOW, stoppingAfter, DryRunView, renderDryRunPlan, renderSecretSetConfirmation, TERMINAL_STYLE } from '../commands/secretsSetText';
 import { RepoTarget, RunProgress, SecretSetResult, SetLocation, planRepos, repoKey, repoLabel } from '../commands/secretsSet';
 import { TableColumn, clipLine, pickerTableLines } from './pickerTable';
 import type { OrgRepoLink, SecretIndexRow } from '../service/serviceClient';
@@ -402,7 +402,7 @@ export type RunFinished =
 
 function finishedText(name: string, finished: RunFinished): string {
   if (!finished.ok) return `✗ ${name} was not updated. (${finished.code})`; // COPY-FLAG
-  return 'plan' in finished ? renderDryRunPlan(finished.plan) : renderSecretSetConfirmation(finished.result);
+  return 'plan' in finished ? renderDryRunPlan(finished.plan) : renderSecretSetConfirmation(finished.result, TERMINAL_STYLE);
 }
 
 /** The run finished. Dropped unless the flow is still running. */
