@@ -324,41 +324,38 @@ describe('STATUS column (CAP-702)', () => {
       expect(tableLines(opened([KEY_SHIFT_TAB]))[0]).toContain('TARGET ⇥');
     });
 
-    test('full width: UPDATED ends at the right edge, the middle column takes the slack', () => {
-      const short = [loc({ project_name: 'web', branch: 'main', changed_at: '2026-06-15T10:00:00.000Z', targets: [current('a')] })];
-      const lines = buildLocationTable(short, 'status', 80).map(stripAnsiForTest);
-      lines.forEach((l) => expect(l.trimEnd().length).toBeLessThanOrEqual(80));
-      expect(lines[0].length).toBe(80);
-      expect(lines[1].length).toBe(80);
-      // UPDATED is the last column, sized to its widest cell, so it is flush with the edge.
-      const updatedX = lines[0].indexOf('UPDATED');
-      expect(80 - updatedX).toBe(Math.max('UPDATED'.length, lines[1].slice(updatedX).trimEnd().length));
-      // The slack went to the middle column, not to LOCATION.
-      expect(lines[1].indexOf('●')).toBe('web · main'.length + 2);
-    });
-
-    for (const column of ['status', 'connector', 'target'] as const) {
-      test(`${column}: every value starts exactly under the first letter of its header`, () => {
-        const lines = buildLocationTable(locs, column, 90).map(stripAnsiForTest);
-        const [header, ...body] = lines;
-        const middleX = header.indexOf(column === 'status' ? TARGET_STATUS_HEADING : column.toUpperCase());
-        const updatedX = header.indexOf('UPDATED');
-        body.forEach((l) => {
-          expect(l[middleX - 1]).toBe(' ');
-          expect(l[middleX]).not.toBe(' ');
-          expect(l[updatedX - 1]).toBe(' ');
-          expect(l[updatedX]).not.toBe(' ');
+    for (const width of [80, 120, 160]) {
+      for (const column of ['status', 'connector', 'target'] as const) {
+        test(`width ${width}, ${column}: the locations table uses the main table's column positions`, () => {
+          const keys = { status: [], connector: [KEY_TAB], target: [KEY_TAB, KEY_TAB] }[column];
+          const lines = stripAnsiForTest(render(opened(keys), width, 60)).split('\n');
+          const mainHeader = lines.find((l) => l.includes('NAME') && l.includes('UPDATED'))!;
+          const detailsHeader = lines.find((l) => l.includes('LOCATION'))!;
+          const mainMiddleX = mainHeader.indexOf('PROJECT ⇥');
+          const middleWord = column === 'status' ? TARGET_STATUS_HEADING : column.toUpperCase();
+          expect(detailsHeader.indexOf(`${middleWord} ⇥`)).toBe(mainMiddleX);
+          expect(detailsHeader.indexOf('UPDATED')).toBe(mainHeader.indexOf('UPDATED'));
+          // The UPDATED column has the main table's width: both headers end at the same column.
+          expect(detailsHeader.length).toBe(mainHeader.length);
+          // Every location row's values start exactly under its headers.
+          const start = lines.indexOf(detailsHeader);
+          lines.slice(start + 1, start + 1 + locs.length).forEach((l) => {
+            expect(l[mainMiddleX - 1]).toBe(' ');
+            expect(l[mainMiddleX]).not.toBe(' ');
+            expect(l[mainHeader.indexOf('UPDATED')]).not.toBe(' ');
+          });
         });
-      });
+      }
     }
 
     test('Tab in the details view leaves the main table column alone', () => {
       expect(opened([KEY_TAB]).column).toBe(initialSecretsScreenState([]).column);
     });
 
-    test('narrow: LOCATION is truncated first, the badge stays whole', () => {
-      const [, first] = tableLines(opened(), 50);
-      expect(first).toContain('…');
+    test('narrow: LOCATION shrinks to the NAME column, the project name first so the branch stays readable', () => {
+      const long = [loc({ project_name: 'slidespeak-monorepo/backend/deployment', branch: 'preview', targets: [stale('p')] })];
+      const [, first] = buildLocationTable(long, 'status', 66, 5).map(stripAnsiForTest);
+      expect(first).toContain('… · preview');
       expect(first).toContain(`● ${BEHIND_LABEL}`);
     });
 

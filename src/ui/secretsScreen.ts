@@ -911,6 +911,19 @@ function searchBarLine(state: SecretsScreenState, matchedCount: number): string 
   return `${DIM}search:${RESET} ${queryDisplay}${caret} ${DIM}${countLabel}${RESET}`;
 }
 
+/**
+ * The main list's column widths for `available` columns: NAME, the
+ * Tab-switched middle column, UPDATED. The details view's locations table
+ * uses the same widths so its columns line up with the list's (CAP-702).
+ */
+export function mainTableLayout(available: number): { readonly nameW: number; readonly middleW: number; readonly updatedW: number; readonly gap: string } {
+  const nameW = Math.max(16, Math.floor(available * 0.4));
+  const updatedW = 14;
+  const gap = '  ';
+  const middleW = Math.max(10, available - nameW - updatedW - gap.length * 2);
+  return { nameW, middleW, updatedW, gap };
+}
+
 /** Pure render — a total function of state + terminal size. Never mutates `state`; any "clamping" of a display-only quantity (e.g. panning past the end of a value) is a local `const`, never written back. */
 export function render(state: SecretsScreenState, termWidth: number, termHeight: number): string {
   if (state.edit) return renderEditScreen(state.edit, termWidth, termHeight, state.dryRun);
@@ -927,10 +940,7 @@ export function render(state: SecretsScreenState, termWidth: number, termHeight:
     '',
   ];
 
-  const nameW = Math.max(16, Math.floor(available * 0.4));
-  const updatedW = 14;
-  const gap = '  ';
-  const middleW = Math.max(10, available - nameW - updatedW - gap.length * 2);
+  const { nameW, middleW, updatedW, gap } = mainTableLayout(available);
 
   const headerLine = pad('NAME', nameW) + gap + pad(columnHeaderLabel(state.column), middleW) + gap + pad('UPDATED', updatedW);
   // Everything pushed before the body, in one array — `preBodyLines.length`
@@ -1035,7 +1045,7 @@ function buildPopupLines(row: SecretIndexRow, popup: PopupState, width: number):
     `${indent}${inner}${BOLD}locations${RESET}`,
   ];
 
-  const locationLines = buildLocationTable(row.locations, popup.locationColumn, contentWidth).map((l) => `${indent}${inner}${l}`);
+  const locationLines = buildLocationTable(row.locations, popup.locationColumn, width, indent.length + inner.length).map((l) => `${indent}${inner}${l}`);
 
   const usersHeaderLines: readonly string[] = ['', `${indent}${inner}${BOLD}users${RESET}`];
   const userLines: readonly string[] =
@@ -1078,32 +1088,31 @@ function locationMiddleCell(loc: SecretIndexLocation, column: LocationColumn): s
 }
 
 /**
- * LOCATION (always) · a Tab-switched middle column · UPDATED. Padded by
- * visible width; when narrow, LOCATION gives way first, then the middle
- * column.
+ * LOCATION (always) · a Tab-switched middle column · UPDATED, on the main
+ * list's own column positions (`mainTableLayout(available)`): the middle and
+ * UPDATED columns start where the list's do, at the same widths, and
+ * LOCATION fills the NAME column's space less the details view's `indent`.
+ * When narrow, the project name shrinks first so the branch stays readable.
  */
-export function buildLocationTable(locations: readonly SecretIndexLocation[], column: LocationColumn, width: number): readonly string[] {
-  const gap = '  ';
+export function buildLocationTable(
+  locations: readonly SecretIndexLocation[],
+  column: LocationColumn,
+  available: number,
+  indent: number,
+): readonly string[] {
+  const { nameW, middleW, updatedW, gap } = mainTableLayout(available);
+  const locationW = Math.max(1, nameW - indent);
   const protectedMark = ` ${DIM}(protected)${RESET}`;
   const locationTail = (loc: SecretIndexLocation) => ` · ${loc.branch}${loc.protected ? protectedMark : ''}`;
-  const locationCells = locations.map((loc) => `${loc.project_name}${locationTail(loc)}`);
-  const middleCells = locations.map((loc) => locationMiddleCell(loc, column));
-  const updatedCells = locations.map((loc) => (loc.changed_at ? formatRelativeTime(loc.changed_at) : '—'));
   const middleHeading = `${LOCATION_COLUMN_HEADINGS[column]} ⇥`;
-  const widest = (cells: readonly string[], heading: string) => Math.max(visLen(heading), ...cells.map(visLen));
-
-  // Full width: UPDATED sits at the right edge, LOCATION takes what it needs
-  // (giving way first when narrow), and the middle column takes the slack.
-  const updatedW = widest(updatedCells, 'UPDATED');
-  const minLocationW = 6;
-  const middleNeed = Math.max(8, Math.min(widest(middleCells, middleHeading), width - updatedW - minLocationW - gap.length * 2));
-  const locationW = Math.max(minLocationW, Math.min(widest(locationCells, 'LOCATION'), width - middleNeed - updatedW - gap.length * 2));
-  const middleW = Math.max(middleNeed, width - locationW - updatedW - gap.length * 2);
 
   const header = `${DIM}${pad('LOCATION', locationW)}${gap}${pad(middleHeading, middleW)}${gap}${pad('UPDATED', updatedW)}${RESET}`;
-  const body = locations.map(
-    (loc, i) => `${pad(fitLocation(loc.project_name, [locationTail(loc), ` · ${loc.branch}`], locationW), locationW)}${gap}${pad(middleCells[i], middleW)}${gap}${DIM}${pad(updatedCells[i], updatedW)}${RESET}`,
-  );
+  const body = locations.map((loc) => {
+    const location = pad(fitLocation(loc.project_name, [locationTail(loc), ` · ${loc.branch}`], locationW), locationW);
+    const middle = pad(locationMiddleCell(loc, column), middleW);
+    const updated = pad(loc.changed_at ? formatRelativeTime(loc.changed_at) : '—', updatedW);
+    return `${location}${gap}${middle}${gap}${DIM}${updated}${RESET}`;
+  });
   return [header, ...body];
 }
 
