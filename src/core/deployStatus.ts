@@ -63,9 +63,10 @@ export type SecretRowStatus =
   | { readonly kind: 'unknown' }
   | { readonly kind: 'deployed' | 'behind'; readonly locations: number; readonly total: number };
 
-type LocationState = 'unknown' | 'none' | 'deployed' | 'behind';
+/** One location's DEPLOY STATUS: `none` when it has no Capy target. */
+export type LocationState = 'unknown' | 'none' | 'deployed' | 'behind';
 
-function locationState(loc: SecretIndexLocation): LocationState {
+export function locationState(loc: SecretIndexLocation): LocationState {
   if (loc.targets === undefined) return 'unknown';
   if (loc.targets.length === 0) return 'none';
   return loc.targets.some((t) => t.stale) ? 'behind' : 'deployed';

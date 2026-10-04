@@ -24,7 +24,7 @@ import { normalizeQuery, textMatches } from './searchMatch';
 import { CANCELLED_NOTHING, DRY_RUN_LABEL } from '../commands/secretsSetText';
 import type { RunProgress } from '../commands/secretsSet';
 import { clipLine } from './pickerTable';
-import { BEHIND_LABEL, TARGET_STATUS_HEADING, formatSecretRowStatus, secretRowStatus } from '../core/deployStatus';
+import { BEHIND_LABEL, DEPLOYED_LABEL, NO_TARGET_LABEL, TARGET_STATUS_HEADING, formatSecretRowStatus, locationState, secretRowStatus } from '../core/deployStatus';
 import { statusBadge, statusColor } from './statusBadge';
 import {
   EditEffect,
@@ -217,6 +217,17 @@ export interface PopupState {
   readonly revealed: boolean;
   readonly value: ValueState;
   readonly panOffset: number;
+  /** The locations table's switchable middle column (Tab / Shift-Tab while the details view is open). */
+  readonly locationColumn: LocationColumn;
+}
+
+/** The details view's locations table: Tab cycles its middle column through this order (wrapping); DEPLOY STATUS first. */
+export type LocationColumn = 'status' | 'connector' | 'target';
+export const LOCATION_COLUMN_ORDER: readonly LocationColumn[] = ['status', 'connector', 'target'];
+
+function nextLocationColumn(column: LocationColumn, dir: 1 | -1): LocationColumn {
+  const idx = LOCATION_COLUMN_ORDER.indexOf(column);
+  return LOCATION_COLUMN_ORDER[(idx + dir + LOCATION_COLUMN_ORDER.length) % LOCATION_COLUMN_ORDER.length];
 }
 
 export interface SearchState {
@@ -476,6 +487,12 @@ function handlePopupKey(state: SecretsScreenState, key: string): SecretsScreenSt
   if (key === KEY_END || key === KEY_END2) {
     return { ...state, popup: { ...popup, panOffset: Number.MAX_SAFE_INTEGER } };
   }
+  if (key === KEY_TAB) {
+    return { ...state, popup: { ...popup, locationColumn: nextLocationColumn(popup.locationColumn, 1) } };
+  }
+  if (key === KEY_SHIFT_TAB) {
+    return { ...state, popup: { ...popup, locationColumn: nextLocationColumn(popup.locationColumn, -1) } };
+  }
   return state;
 }
 
@@ -535,6 +552,7 @@ function handleListKey(state: SecretsScreenState, key: string): ReduceResult {
       revealed: false,
       value: { status: 'loading' },
       panOffset: 0,
+      locationColumn: LOCATION_COLUMN_ORDER[0],
     };
     return { state: { ...state, popup }, effect: { type: 'fetchValue', row } };
   }
@@ -1017,25 +1035,7 @@ function buildPopupLines(row: SecretIndexRow, popup: PopupState, width: number):
     `${indent}${inner}${BOLD}locations${RESET}`,
   ];
 
-  // Per-location: project · branch (protected marker), the CONNECTOR that
-  // brought the value IN (renamed from "service" — CAP-679), when it
-  // changed, and — only when this location has any — every TARGET it was
-  // pushed OUT to, each spelled out with its full "(not deployed)" wording (the
-  // table's own TARGET column uses a compact `*` instead; there's no room
-  // pressure here to justify that shorthand).
-  const locationLines: readonly string[] = row.locations.map((loc) => {
-    const protMarker = loc.protected ? ` ${DIM}(protected)${RESET}` : '';
-    const connectorLabel = formatLocationConnectorLabel(loc);
-    const updated = loc.changed_at ? formatRelativeTime(loc.changed_at) : '—';
-    const targets = loc.targets ?? [];
-    const targetsLabel =
-      targets.length > 0
-        ? ` · targets: ${targets
-            .map((t) => `[${t.provider}] ${t.target}${t.stale ? ` ${statusColor('behind')}(${BEHIND_LABEL})${DIM}` : ''}${t.pending ? ' (pending)' : ''}`)
-            .join(', ')}`
-        : '';
-    return `${indent}${inner}${truncate(`${loc.project_name} · ${loc.branch}`, contentWidth)}${protMarker} ${DIM}· ${connectorLabel} · ${updated}${targetsLabel}${RESET}`;
-  });
+  const locationLines = buildLocationTable(row.locations, popup.locationColumn, contentWidth).map((l) => `${indent}${inner}${l}`);
 
   const usersHeaderLines: readonly string[] = ['', `${indent}${inner}${BOLD}users${RESET}`];
   const userLines: readonly string[] =
@@ -1044,6 +1044,79 @@ function buildPopupLines(row: SecretIndexRow, popup: PopupState, width: number):
       : row.users.map((u) => `${indent}${inner}${truncate(u.email, contentWidth)}`);
 
   return [...topLines, ...locationLines, ...usersHeaderLines, ...userLines, '', rule];
+}
+
+// ── Details view: locations table (CAP-702) ─────────────────────────────────
+
+const LOCATION_COLUMN_HEADINGS: Readonly<Record<LocationColumn, string>> = {
+  status: TARGET_STATUS_HEADING,
+  connector: 'CONNECTOR',
+  target: 'TARGET',
+};
+
+/** One location's DEPLOY STATUS badge — the row's words and colours. */
+function locationStatusBadge(loc: SecretIndexLocation): string {
+  const state = locationState(loc);
+  if (state === 'none') return `${DIM}${NO_TARGET_LABEL}${RESET}`;
+  if (state === 'unknown') return statusBadge('unknown');
+  return statusBadge(state, state === 'behind' ? BEHIND_LABEL : DEPLOYED_LABEL);
+}
+
+/** Every target this location was pushed to, `[provider] target`, a lagging one marked in yellow; `—` if none. */
+function locationTargetsLabel(loc: SecretIndexLocation): string {
+  const targets = loc.targets ?? [];
+  if (targets.length === 0) return '—';
+  return targets
+    .map((t) => `[${t.provider}] ${t.target}${t.stale ? ` ${statusColor('behind')}(${BEHIND_LABEL})${RESET}` : ''}${t.pending ? ' (pending)' : ''}`)
+    .join(', ');
+}
+
+function locationMiddleCell(loc: SecretIndexLocation, column: LocationColumn): string {
+  if (column === 'status') return locationStatusBadge(loc);
+  if (column === 'connector') return formatLocationConnectorLabel(loc);
+  return locationTargetsLabel(loc);
+}
+
+/**
+ * LOCATION (always) · a Tab-switched middle column · UPDATED. Padded by
+ * visible width; when narrow, LOCATION gives way first, then the middle
+ * column.
+ */
+export function buildLocationTable(locations: readonly SecretIndexLocation[], column: LocationColumn, width: number): readonly string[] {
+  const gap = '  ';
+  const protectedMark = ` ${DIM}(protected)${RESET}`;
+  const locationTail = (loc: SecretIndexLocation) => ` · ${loc.branch}${loc.protected ? protectedMark : ''}`;
+  const locationCells = locations.map((loc) => `${loc.project_name}${locationTail(loc)}`);
+  const middleCells = locations.map((loc) => locationMiddleCell(loc, column));
+  const updatedCells = locations.map((loc) => (loc.changed_at ? formatRelativeTime(loc.changed_at) : '—'));
+  const middleHeading = `${LOCATION_COLUMN_HEADINGS[column]} ⇥`;
+  const widest = (cells: readonly string[], heading: string) => Math.max(visLen(heading), ...cells.map(visLen));
+
+  const updatedW = widest(updatedCells, 'UPDATED');
+  const minLocationW = 6;
+  const middleW = Math.max(8, Math.min(widest(middleCells, middleHeading), width - updatedW - minLocationW - gap.length * 2));
+  const locationW = Math.max(minLocationW, Math.min(widest(locationCells, 'LOCATION'), width - middleW - updatedW - gap.length * 2));
+
+  const header = `${DIM}${pad('LOCATION', locationW)}${gap}${pad(middleHeading, middleW)}${gap}${pad('UPDATED', updatedW)}${RESET}`;
+  const body = locations.map(
+    (loc, i) => `${pad(fitLocation(loc.project_name, [locationTail(loc), ` · ${loc.branch}`], locationW), locationW)}${gap}${pad(middleCells[i], middleW)}${gap}${DIM}${pad(updatedCells[i], updatedW)}${RESET}`,
+  );
+  return [header, ...body];
+}
+
+/**
+ * `project · branch` in `width`: the project name shrinks first (with `…`) so
+ * the branch stays readable. `tails` is tried in order (with the protected
+ * marker, then without); only when none fits is the whole cell cut.
+ */
+function fitLocation(project: string, tails: readonly string[], width: number): string {
+  const [tail, ...rest] = tails;
+  if (tail === undefined) return truncate(project, width);
+  const full = `${project}${tail}`;
+  if (visLen(full) <= width) return full;
+  const room = width - visLen(tail);
+  if (room >= 4) return `${project.slice(0, room - 1)}…${tail}`;
+  return rest.length > 0 ? fitLocation(project, rest, width) : truncate(full, width);
 }
 
 function renderPopupValueLine(popup: PopupState, width: number): string {
@@ -1069,7 +1142,7 @@ function footerLine(state: SecretsScreenState): string {
   if (state.popup) {
     const revealLabel = state.popup.revealed ? 'hide' : 'reveal';
     const panHint = state.popup.revealed ? `${DIM} · ${RESET}${BOLD}←/→${RESET}${DIM} pan${RESET}` : '';
-    return `${BOLD}r${RESET}${DIM} ${revealLabel}${RESET}${panHint}${DIM} · ${RESET}${BOLD}e${RESET}${DIM} edit${RESET}${DIM} · ${RESET}${BOLD}esc${RESET}${DIM}/${RESET}${BOLD}q${RESET}${DIM} close${RESET}`; // COPY-FLAG
+    return `${BOLD}r${RESET}${DIM} ${revealLabel}${RESET}${panHint}${DIM} · ${RESET}${BOLD}tab${RESET}${DIM} column · ${RESET}${BOLD}e${RESET}${DIM} edit${RESET}${DIM} · ${RESET}${BOLD}esc${RESET}${DIM}/${RESET}${BOLD}q${RESET}${DIM} close${RESET}`; // COPY-FLAG
   }
   const editHint = state.search.query === '' ? `${BOLD}ctrl+e${RESET}${DIM} edit · ${RESET}` : '';
   return `${DIM}↑↓ navigate · ${RESET}${BOLD}tab${RESET}${DIM} column · ${RESET}${BOLD}enter${RESET}${DIM} inspect · ${RESET}${editHint}${BOLD}esc${RESET}${DIM} clear/quit${RESET}`; // COPY-FLAG

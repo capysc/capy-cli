@@ -278,7 +278,64 @@ describe('STATUS column (CAP-702)', () => {
     expect(stripAnsiForTest(frame)).toContain(`${TARGET_STATUS_HEADING.toLowerCase()}  `);
     expect(stripAnsiForTest(frame)).toContain(`● ${BEHIND_LABEL}`);
     expect(frame).toContain(`${YELLOW}● ${BEHIND_LABEL}${ANSI_RESET}`);
-    expect(frame).toContain(`${YELLOW}(${BEHIND_LABEL})`);
+    const targetFrame = render(pressKeys(initialSecretsScreenState([r]), ENTER, KEY_TAB, KEY_TAB), 100, 30);
+    expect(targetFrame).toContain(`${YELLOW}(${BEHIND_LABEL})`);
+  });
+
+  describe('details view locations table', () => {
+    const locs = [
+      loc({ project_name: 'web', branch: 'production', protected: true, changed_at: '2026-06-15T10:00:00.000Z', targets: [stale('prod')], connector: { provider: 'dokploy' } }),
+      loc({ project_name: 'web', branch: 'preview', targets: [current('preview')] }),
+      loc({ project_name: 'api', branch: 'staging', targets: [] }),
+    ];
+    const opened = (keys: string[] = []) => pressKeys(initialSecretsScreenState([row({ name: 'ROW', locations: locs })]), ENTER, ...keys);
+    const tableLines = (st: SecretsScreenState, width = 100) => {
+      const lines = stripAnsiForTest(render(st, width, 40)).split('\n');
+      const start = lines.findIndex((l) => l.includes('LOCATION'));
+      return lines.slice(start, start + 1 + locs.length);
+    };
+
+    test('DEPLOY STATUS is the default middle column, one badge per location, in location order', () => {
+      const [header, ...body] = tableLines(opened());
+      expect(header).toContain(`${TARGET_STATUS_HEADING} ⇥`);
+      expect(header).toContain('UPDATED');
+      expect(body[0]).toContain('web · production (protected)');
+      expect(body[0]).toContain(`● ${BEHIND_LABEL}`);
+      expect(body[1]).toContain(`● ${DEPLOYED_LABEL}`);
+      expect(body[2]).toContain('api · staging');
+      expect(body[2]).toContain('—');
+      expect(body[2]).not.toContain('●');
+    });
+
+    test('columns line up by visible width: every row starts UPDATED where the header does', () => {
+      const [header, ...body] = tableLines(opened());
+      const col = header.indexOf('UPDATED');
+      expect(body[0].slice(col).trim()).not.toBe('');
+      body.forEach((l) => expect(l[col - 1]).toBe(' '));
+    });
+
+    test('Tab cycles DEPLOY STATUS → CONNECTOR → TARGET → DEPLOY STATUS; Shift-Tab goes back', () => {
+      expect(tableLines(opened([KEY_TAB]))[0]).toContain('CONNECTOR ⇥');
+      expect(tableLines(opened([KEY_TAB]))[1]).toContain('[dokploy]');
+      expect(tableLines(opened([KEY_TAB, KEY_TAB]))[0]).toContain('TARGET ⇥');
+      expect(tableLines(opened([KEY_TAB, KEY_TAB]))[3]).toContain('—');
+      expect(tableLines(opened([KEY_TAB, KEY_TAB, KEY_TAB]))[0]).toContain(`${TARGET_STATUS_HEADING} ⇥`);
+      expect(tableLines(opened([KEY_SHIFT_TAB]))[0]).toContain('TARGET ⇥');
+    });
+
+    test('Tab in the details view leaves the main table column alone', () => {
+      expect(opened([KEY_TAB]).column).toBe(initialSecretsScreenState([]).column);
+    });
+
+    test('narrow: LOCATION is truncated first, the badge stays whole', () => {
+      const [, first] = tableLines(opened(), 50);
+      expect(first).toContain('…');
+      expect(first).toContain(`● ${BEHIND_LABEL}`);
+    });
+
+    test('the details footer mentions tab', () => {
+      expect(stripAnsiForTest(render(opened(), 100, 40))).toContain('tab column');
+    });
   });
 });
 
@@ -1070,7 +1127,7 @@ describe('CAP-679 rendering: "+N" survives truncation, INTEGRATIONS overflow, po
       name: 'ROW',
       locations: [loc({ connector: { provider: 'dokploy' }, service: { provider: 'dokploy', name: 'backend-preview' } })],
     });
-    const s1 = handleKey(initialSecretsScreenState([target]), ENTER).state;
+    const s1 = pressKeys(initialSecretsScreenState([target]), ENTER, KEY_TAB); // details → CONNECTOR column
     const frame = render(s1, 100, 30);
     expect(frame).toContain('[dokploy] backend-preview');
   });
@@ -1080,9 +1137,9 @@ describe('CAP-679 rendering: "+N" survives truncation, INTEGRATIONS overflow, po
       name: 'ROW',
       locations: [loc({ targets: [{ provider: 'aws-ecs', target: 'prod-cluster', stale: true }] })],
     });
-    const s1 = handleKey(initialSecretsScreenState([target]), ENTER).state;
+    const s1 = pressKeys(initialSecretsScreenState([target]), ENTER, KEY_TAB, KEY_TAB); // details → TARGET column
     const frame = render(s1, 100, 30);
-    expect(stripAnsiForTest(frame)).toContain(`targets: [aws-ecs] prod-cluster (${BEHIND_LABEL})`);
+    expect(stripAnsiForTest(frame)).toContain(`[aws-ecs] prod-cluster (${BEHIND_LABEL})`);
   });
 
   test('the details popup spells out a pending target with "(pending)"', () => {
@@ -1090,9 +1147,9 @@ describe('CAP-679 rendering: "+N" survives truncation, INTEGRATIONS overflow, po
       name: 'ROW',
       locations: [loc({ targets: [{ provider: 'dokploy', target: 'backend-preview', stale: false, pending: true }] })],
     });
-    const s1 = handleKey(initialSecretsScreenState([target]), ENTER).state;
+    const s1 = pressKeys(initialSecretsScreenState([target]), ENTER, KEY_TAB, KEY_TAB);
     const frame = render(s1, 100, 30);
-    expect(frame).toContain('targets: [dokploy] backend-preview (pending)');
+    expect(frame).toContain('[dokploy] backend-preview (pending)');
   });
 
   test('the details popup lists a non-stale target with no behind marker', () => {
@@ -1100,9 +1157,9 @@ describe('CAP-679 rendering: "+N" survives truncation, INTEGRATIONS overflow, po
       name: 'ROW',
       locations: [loc({ targets: [{ provider: 'aws-ecs', target: 'prod-cluster', stale: false }] })],
     });
-    const s1 = handleKey(initialSecretsScreenState([target]), ENTER).state;
+    const s1 = pressKeys(initialSecretsScreenState([target]), ENTER, KEY_TAB, KEY_TAB);
     const frame = render(s1, 100, 30);
-    expect(frame).toContain('targets: [aws-ecs] prod-cluster');
+    expect(frame).toContain('[aws-ecs] prod-cluster');
     expect(frame).not.toContain(`(${BEHIND_LABEL})`);
   });
 
@@ -1111,5 +1168,6 @@ describe('CAP-679 rendering: "+N" survives truncation, INTEGRATIONS overflow, po
     const s1 = handleKey(initialSecretsScreenState([target]), ENTER).state;
     const frame = render(s1, 100, 30);
     expect(frame).not.toContain('targets:');
+    expect(stripAnsiForTest(frame)).not.toMatch(/\[[a-z-]+\]/); // no `[provider]` label anywhere
   });
 });
