@@ -211,36 +211,53 @@ describe('handleKey — column cycling (CAP-702: PROJECT first, STATUS added)', 
 describe('STATUS column (CAP-702)', () => {
   const stale = (target: string) => ({ provider: 'dokploy', target, stale: true });
   const current = (target: string) => ({ provider: 'dokploy', target, stale: false });
+  const YELLOW = `${ESC}[33m`;
+  const GREEN = `${ESC}[32m`;
+  const DIM = `${ESC}[90m`;
+  const cell = (r: SecretIndexRow) => formatMiddleCell(r, 'status', 30);
 
-  test('a row with one target that lags reads "not deployed"', () => {
-    expect(formatMiddleCell(row({ locations: [loc({ targets: [stale('prod')] })] }), 'status', 30)).toBe('not deployed');
+  test('a row with one target that lags reads "● not deployed" in yellow, like capy edit', () => {
+    expect(cell(row({ locations: [loc({ targets: [stale('prod')] })] }))).toBe(`${YELLOW}● not deployed${ANSI_RESET}`);
   });
 
-  test('a multi-target row counts lagging targets across every location', () => {
+  test('a multi-target row counts lagging targets across every location, same yellow badge', () => {
     const r = row({ locations: [loc({ targets: [stale('prod'), current('preview')] }), loc({ branch: 'staging', targets: [current('staging')] })] });
-    expect(formatMiddleCell(r, 'status', 30)).toBe('not deployed (1 of 3)');
+    expect(cell(r)).toBe(`${YELLOW}● not deployed (1 of 3)${ANSI_RESET}`);
   });
 
-  test('every target current, or no targets at all, reads "in sync"', () => {
-    expect(formatMiddleCell(row({ locations: [loc({ targets: [current('prod')] })] }), 'status', 30)).toBe('in sync');
-    expect(formatMiddleCell(row({ locations: [loc({ targets: [] })] }), 'status', 30)).toBe('in sync');
+  test('every target current, or no targets at all, reads "● in sync" in green', () => {
+    expect(cell(row({ locations: [loc({ targets: [current('prod')] })] }))).toBe(`${GREEN}● in sync${ANSI_RESET}`);
+    expect(cell(row({ locations: [loc({ targets: [] })] }))).toBe(`${GREEN}● in sync${ANSI_RESET}`);
   });
 
-  test('a server that sent no targets reads "unknown" — it cannot be told', () => {
-    expect(formatMiddleCell(row({ locations: [loc()] }), 'status', 30)).toBe('unknown');
+  test('a server that sent no targets reads "● unknown", dim — it cannot be told', () => {
+    expect(cell(row({ locations: [loc()] }))).toBe(`${DIM}● unknown${ANSI_RESET}`);
   });
 
-  test('the STATUS header and cell render when the column is selected', () => {
+  test('the STATUS header and cell render when the column is selected, padded by visible width', () => {
     const r = row({ name: 'ROW', locations: [loc({ targets: [stale('prod'), current('preview')] })] });
-    const frame = stripAnsiForTest(render({ ...initialSecretsScreenState([r]), column: 'status' }, 100, 20));
-    expect(frame).toContain('STATUS ⇥');
-    expect(frame.split('\n').find((l) => l.includes('ROW'))).toContain('not deployed (1 of 2)');
+    const frame = render({ ...initialSecretsScreenState([r]), column: 'status' }, 100, 20);
+    const stripped = stripAnsiForTest(frame);
+    expect(stripped).toContain('STATUS ⇥');
+    const line = stripped.split('\n').find((l) => l.includes('ROW'));
+    expect(line).toContain('● not deployed (1 of 2)');
+    const header = stripped.split('\n').find((l) => l.includes('STATUS ⇥'));
+    // The UPDATED column starts at the same visible offset on the header and the row: colour codes don't shift it.
+    expect(line!.indexOf('—', line!.indexOf('(1 of 2)'))).toBe(header!.indexOf('UPDATED'));
   });
 
-  test('the details view shows the row status', () => {
+  test('the highlighted row stays highlighted after its coloured STATUS badge', () => {
     const r = row({ name: 'ROW', locations: [loc({ targets: [stale('prod')] })] });
-    const frame = stripAnsiForTest(render(handleKey(initialSecretsScreenState([r]), ENTER).state, 100, 30));
-    expect(frame).toMatch(/status\s+not deployed/);
+    const frame = render({ ...initialSecretsScreenState([r]), column: 'status' }, 100, 20);
+    expect(frame).toContain(`${YELLOW}● not deployed${ANSI_RESET}${ESC}[7m`);
+  });
+
+  test('the details view shows the row status badge, and a lagging target in yellow', () => {
+    const r = row({ name: 'ROW', locations: [loc({ targets: [stale('prod')] })] });
+    const frame = render(handleKey(initialSecretsScreenState([r]), ENTER).state, 100, 30);
+    expect(stripAnsiForTest(frame)).toMatch(/status\s+● not deployed/);
+    expect(frame).toContain(`${YELLOW}● not deployed${ANSI_RESET}`);
+    expect(frame).toContain(`${YELLOW}(not deployed)`);
   });
 });
 
@@ -1044,7 +1061,7 @@ describe('CAP-679 rendering: "+N" survives truncation, INTEGRATIONS overflow, po
     });
     const s1 = handleKey(initialSecretsScreenState([target]), ENTER).state;
     const frame = render(s1, 100, 30);
-    expect(frame).toContain('targets: [aws-ecs] prod-cluster (not deployed)');
+    expect(stripAnsiForTest(frame)).toContain('targets: [aws-ecs] prod-cluster (not deployed)');
   });
 
   test('the details popup spells out a pending target with "(pending)"', () => {

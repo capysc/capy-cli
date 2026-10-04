@@ -25,6 +25,7 @@ import { CANCELLED_NOTHING, DRY_RUN_LABEL } from '../commands/secretsSetText';
 import type { RunProgress } from '../commands/secretsSet';
 import { clipLine } from './pickerTable';
 import { NOT_DEPLOYED, formatSecretRowStatus, secretRowStatus } from '../core/deployStatus';
+import { statusBadge, statusColor } from './statusBadge';
 import {
   EditEffect,
   EditFlow,
@@ -742,8 +743,14 @@ export function formatMiddleCell(row: SecretIndexRow, column: ColumnMode, width:
   if (column === 'integrations') return formatIntegrationsCellFitted(row, width);
   if (column === 'users') return formatUsersCell(row);
   if (column === 'branch') return formatBranchCell(row);
-  if (column === 'status') return formatSecretRowStatus(secretRowStatus(row));
+  if (column === 'status') return secretRowStatusBadge(row);
   return formatProjectCell(row);
+}
+
+/** The STATUS cell: the same coloured `● status` badge `capy edit` shows (CAP-702). */
+function secretRowStatusBadge(row: SecretIndexRow): string {
+  const status = secretRowStatus(row);
+  return statusBadge(status.kind, formatSecretRowStatus(status));
 }
 
 /** Most recent `changed_at` across a row's locations, or undefined if none carry one. */
@@ -914,7 +921,8 @@ export function render(state: SecretsScreenState, termWidth: number, termHeight:
     const middleCell = pad(formatMiddleCell(row, state.column, middleW), middleW);
     const updatedCell = pad(formatUpdatedCell(row), updatedW);
     const line = nameCell + gap + middleCell + gap + updatedCell;
-    return isSelected ? INVERSE + padVis(line, available) + RESET : line;
+    // A coloured cell's own RESET would end the highlight mid-row, so the highlight is re-applied after each one.
+    return isSelected ? INVERSE + padVis(line, available).replaceAll(RESET, RESET + INVERSE) + RESET : line;
   });
 
   const withPopup: readonly string[] =
@@ -992,7 +1000,7 @@ function buildPopupLines(row: SecretIndexRow, popup: PopupState, width: number):
     '',
     field('value', renderPopupValueLine(popup, valueWidth)),
     field('updated', formatUpdatedCell(row)),
-    field('status', formatSecretRowStatus(secretRowStatus(row))),
+    field('status', secretRowStatusBadge(row)),
     '',
     `${indent}${inner}${BOLD}locations${RESET}`,
   ];
@@ -1011,7 +1019,7 @@ function buildPopupLines(row: SecretIndexRow, popup: PopupState, width: number):
     const targetsLabel =
       targets.length > 0
         ? ` · targets: ${targets
-            .map((t) => `[${t.provider}] ${t.target}${t.stale ? ` (${NOT_DEPLOYED})` : ''}${t.pending ? ' (pending)' : ''}`)
+            .map((t) => `[${t.provider}] ${t.target}${t.stale ? ` ${statusColor(NOT_DEPLOYED)}(${NOT_DEPLOYED})${DIM}` : ''}${t.pending ? ' (pending)' : ''}`)
             .join(', ')}`
         : '';
     return `${indent}${inner}${truncate(`${loc.project_name} · ${loc.branch}`, contentWidth)}${protMarker} ${DIM}· ${connectorLabel} · ${updated}${targetsLabel}${RESET}`;

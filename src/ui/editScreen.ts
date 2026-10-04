@@ -3,6 +3,7 @@
 
 import { formatSnippet, hashValue } from '../commands/statusCommand';
 import { anyTargetBehind } from '../core/deployStatus';
+import { statusBadge } from './statusBadge';
 import { formatRelativeTime } from './relativeTime';
 import { isRevealKey, stepEditBuffer } from './editBuffer';
 import { OldValueView, canReveal, renderInlineValue as inlineValue, valueDialogRows } from './valueDialog';
@@ -30,7 +31,6 @@ const BOLD = `${ESC}[1m`;
 const GREEN = `${ESC}[32m`;
 const YELLOW = `${ESC}[33m`;
 const RED = `${ESC}[31m`;
-const CYAN = `${ESC}[36m`;
 
 const MARGIN = 2;
 const NO_VALUE = '—';
@@ -837,21 +837,7 @@ export class EditScreen {
   }
 
   private statusBadge(status: EditRow['status']): string {
-    switch (status) {
-      case 'in sync':
-        return `${GREEN}● in sync${RESET}`;
-      case 'local':
-        return `${YELLOW}● local${RESET}`;
-      case 'remote':
-        return `${CYAN}● remote${RESET}`;
-      case 'conflict':
-        return `${RED}● conflict${RESET}`;
-      case 'not deployed':
-        return `${YELLOW}● not deployed${RESET}`;
-      case 'unknown':
-      default:
-        return `${DIM}● unknown${RESET}`;
-    }
+    return statusBadge(status);
   }
 
   // --- helpers ---
