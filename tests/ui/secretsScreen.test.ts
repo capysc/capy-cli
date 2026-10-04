@@ -225,9 +225,12 @@ describe('STATUS column (CAP-702)', () => {
     expect(cell(r)).toBe(`${YELLOW}● not deployed (1 of 3)${ANSI_RESET}`);
   });
 
-  test('every target current, or no targets at all, reads "● in sync" in green', () => {
+  test('every target current reads "● in sync" in green', () => {
     expect(cell(row({ locations: [loc({ targets: [current('prod')] })] }))).toBe(`${GREEN}● in sync${ANSI_RESET}`);
-    expect(cell(row({ locations: [loc({ targets: [] })] }))).toBe(`${GREEN}● in sync${ANSI_RESET}`);
+  });
+
+  test('a row with no Capy deploy target reads a grey "—", never "in sync"', () => {
+    expect(cell(row({ locations: [loc({ targets: [] }), loc({ branch: 'staging', targets: [] })] }))).toBe(`${DIM}—${ANSI_RESET}`);
   });
 
   test('a server that sent no targets reads "● unknown", dim — it cannot be told', () => {
@@ -238,10 +241,10 @@ describe('STATUS column (CAP-702)', () => {
     const r = row({ name: 'ROW', locations: [loc({ targets: [stale('prod'), current('preview')] })] });
     const frame = render({ ...initialSecretsScreenState([r]), column: 'status' }, 100, 20);
     const stripped = stripAnsiForTest(frame);
-    expect(stripped).toContain('STATUS ⇥');
+    expect(stripped).toContain('DEPLOY STATUS ⇥');
     const line = stripped.split('\n').find((l) => l.includes('ROW'));
     expect(line).toContain('● not deployed (1 of 2)');
-    const header = stripped.split('\n').find((l) => l.includes('STATUS ⇥'));
+    const header = stripped.split('\n').find((l) => l.includes('DEPLOY STATUS ⇥'));
     // The UPDATED column starts at the same visible offset on the header and the row: colour codes don't shift it.
     expect(line!.indexOf('—', line!.indexOf('(1 of 2)'))).toBe(header!.indexOf('UPDATED'));
   });
@@ -255,7 +258,7 @@ describe('STATUS column (CAP-702)', () => {
   test('the details view shows the row status badge, and a lagging target in yellow', () => {
     const r = row({ name: 'ROW', locations: [loc({ targets: [stale('prod')] })] });
     const frame = render(handleKey(initialSecretsScreenState([r]), ENTER).state, 100, 30);
-    expect(stripAnsiForTest(frame)).toMatch(/status\s+● not deployed/);
+    expect(stripAnsiForTest(frame)).toMatch(/deploy status\s+● not deployed/);
     expect(frame).toContain(`${YELLOW}● not deployed${ANSI_RESET}`);
     expect(frame).toContain(`${YELLOW}(not deployed)`);
   });

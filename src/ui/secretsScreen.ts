@@ -186,6 +186,17 @@ export type ColumnMode = 'project' | 'branch' | 'status' | 'connector' | 'target
 /** Tab cycles forward through this order (wrapping); Shift-Tab backward. PROJECT is the default/first-shown column (CAP-702, Vince 2026-10-03). */
 export const COLUMN_ORDER: readonly ColumnMode[] = ['project', 'branch', 'status', 'connector', 'target', 'integrations', 'users'];
 
+/** What each column is called on screen. `status` is DEPLOY STATUS (Vince, 2026-10-04): it describes Capy's own deploy targets only. */
+const COLUMN_HEADINGS: Readonly<Record<ColumnMode, string>> = {
+  project: 'PROJECT',
+  branch: 'BRANCH',
+  status: 'DEPLOY STATUS',
+  connector: 'CONNECTOR',
+  target: 'TARGET',
+  integrations: 'INTEGRATIONS',
+  users: 'USERS',
+};
+
 function nextColumn(column: ColumnMode, dir: 1 | -1): ColumnMode {
   const idx = COLUMN_ORDER.indexOf(column);
   const nextIdx = (idx + dir + COLUMN_ORDER.length) % COLUMN_ORDER.length;
@@ -750,6 +761,7 @@ export function formatMiddleCell(row: SecretIndexRow, column: ColumnMode, width:
 /** The STATUS cell: the same coloured `● status` badge `capy edit` shows (CAP-702). */
 function secretRowStatusBadge(row: SecretIndexRow): string {
   const status = secretRowStatus(row);
+  if (status.kind === 'no target') return `${DIM}${formatSecretRowStatus(status)}${RESET}`;
   return statusBadge(status.kind, formatSecretRowStatus(status));
 }
 
@@ -862,7 +874,7 @@ function buildNameCell(left: string, tag: string, width: number): string {
 }
 
 function columnHeaderLabel(column: ColumnMode): string {
-  return `${column.toUpperCase()} ⇥`;
+  return `${COLUMN_HEADINGS[column]} ⇥`;
 }
 
 /**
@@ -987,7 +999,7 @@ function buildPopupLines(row: SecretIndexRow, popup: PopupState, width: number):
   const inner = '   ';
   const ruleWidth = Math.max(10, width - indent.length);
   const rule = `${indent}${DIM}╶${'─'.repeat(Math.max(0, ruleWidth - 2))}╴${RESET}`;
-  const labelW = 9;
+  const labelW = 15;
   const contentWidth = Math.max(20, ruleWidth - inner.length - 1);
   const valueWidth = Math.max(10, contentWidth - labelW);
 
@@ -1000,7 +1012,7 @@ function buildPopupLines(row: SecretIndexRow, popup: PopupState, width: number):
     '',
     field('value', renderPopupValueLine(popup, valueWidth)),
     field('updated', formatUpdatedCell(row)),
-    field('status', secretRowStatusBadge(row)),
+    field('deploy status', secretRowStatusBadge(row)),
     '',
     `${indent}${inner}${BOLD}locations${RESET}`,
   ];

@@ -379,7 +379,7 @@ describe('SecretsCommand', () => {
     expect(current.status).toBe('in sync');
     expect(current.targets_not_deployed).toBeUndefined();
     expect(current.locations[0].targets[0].up_to_date).toBe(true);
-    expect(noTargets.status).toBe('in sync');
+    expect(noTargets.status).toBe('no target');
   });
 });
 

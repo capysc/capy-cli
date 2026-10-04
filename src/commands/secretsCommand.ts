@@ -5,7 +5,7 @@ import { CapyError, ERROR_CODES } from '../types/index';
 import { rowIdOf } from './secretsRowId';
 import { secretRowStatus, type SecretRowStatus } from '../core/deployStatus';
 
-/** `status` plus, when some target lags, how many of how many. */
+/** `status` (`no target` | `in sync` | `not deployed` | `unknown`) plus, when some target lags, how many of how many. `no target`: the row has no Capy deploy target, so Capy can't say. */
 function statusFields(status: SecretRowStatus): Record<string, string | number> {
   if (status.kind !== 'not deployed') return { status: status.kind };
   return { status: status.kind, targets_not_deployed: status.behind, targets_total: status.total };
