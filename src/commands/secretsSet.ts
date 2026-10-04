@@ -612,7 +612,8 @@ export async function runSecretSet(req: SetRequest, env: SetEnv, hooks: RunHooks
 // Real environment
 // ---------------------------------------------------------------------------
 
-function realGithub(): GithubApi | undefined {
+/** The real GitHub API through the user's own `gh` login, or `undefined` when `gh` is not installed. */
+export function realGithub(): GithubApi | undefined {
   const gh = resolveGh();
   // Asynchronous: the screen keeps drawing (and reading keys) while `gh` runs, and calls can overlap.
   return gh === null ? undefined : createGhApi(spawnGhRunnerAsync(gh));

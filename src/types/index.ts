@@ -723,6 +723,27 @@ export const ERROR_CODES = {
   RATE_LIMITED: 'RATE_LIMITED',
   /** GitHub refused with a rate limit (429, or 403 with a `retry-after` / `x-ratelimit-remaining: 0` header) and the bounded retries ran out. */
   GITHUB_RATE_LIMITED: 'GITHUB_RATE_LIMITED',
+  // --- `capy deploy dokploy --discover` (CAP-703) ---
+  /** A plan entry's `service_id` names no Dokploy service (path-precise: `entries[i].service_id`). */
+  SERVICE_NOT_FOUND: 'SERVICE_NOT_FOUND',
+  /** Two plan entries assign the same (project_id, branch) (path-precise: the later `entries[i]`). */
+  DUPLICATE_ENTRY: 'DUPLICATE_ENTRY',
+  /** A plan entry would add a Dokploy target to a project branch that already has a Dokploy target for a DIFFERENT service. */
+  TARGET_EXISTS: 'TARGET_EXISTS',
+  /** A plan entry's project has no GitHub repo link, so no deploy.json PR can be opened for it. */
+  NO_REPO_LINK: 'NO_REPO_LINK',
+  /** A plan entry's service tracks a repo that is not one of its project's linked repos. */
+  REPO_MISMATCH: 'REPO_MISMATCH',
+  /** `--plan <file>` could not be read as a file. */
+  PLAN_FILE_UNREADABLE: 'PLAN_FILE_UNREADABLE',
+  /** The plan failed validation; the refusal carries `errors: [{ path, code }]`. Nothing was changed. */
+  PLAN_INVALID: 'PLAN_INVALID',
+  /** `--confirm <plan_id>` without `--plan <file>`. */
+  PLAN_REQUIRED: 'PLAN_REQUIRED',
+  /** `--discover` on a `capy deploy` target that has no discovery (only `dokploy` has one). */
+  DISCOVER_UNSUPPORTED_TARGET: 'DISCOVER_UNSUPPORTED_TARGET',
+  /** `--confirm` wrote some repos' deploy.json PRs and at least one repo failed; the refusal lists `failed: [{ repo, code }]`. Exit 1. */
+  DISCOVER_PARTIAL: 'DISCOVER_PARTIAL',
 } as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES];

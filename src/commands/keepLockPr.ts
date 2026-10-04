@@ -243,11 +243,18 @@ export function filterBranches(branches: readonly string[], term: string | undef
   return needle.length === 0 ? branches : branches.filter((b) => b.toLowerCase().includes(needle));
 }
 
-/** `capy/keep-lock-<UTC yyyymmdd-hhmmss>-<4 hex chars>` — deterministic shape, unique per run. */
-export function newPrBranchName(now: Date = new Date(), rand: string = randomBytes(2).toString('hex')): string {
+/**
+ * `capy/<kind>-<UTC yyyymmdd-hhmmss>-<4 hex chars>` — deterministic shape, unique per run.
+ * `kind` is `keep-lock` unless a caller opens a different kind of PR (`dokploy-targets`).
+ */
+export function newPrBranchName(
+  now: Date = new Date(),
+  rand: string = randomBytes(2).toString('hex'),
+  kind: string = 'keep-lock',
+): string {
   const iso = now.toISOString();
   const stamp = `${iso.slice(0, 10).replace(/-/g, '')}-${iso.slice(11, 19).replace(/:/g, '')}`;
-  return `capy/keep-lock-${stamp}-${rand}`;
+  return `capy/${kind}-${stamp}-${rand}`;
 }
 
 const PR_TITLE = 'chore(capy): update keep.lock'; // COPY-FLAG
@@ -324,6 +331,14 @@ function failApi(failure: ApiFailure, stepCode: string): Failure {
   if (failure.kind === 'GH_UNAVAILABLE') return failWith(ERROR_CODES.KEEP_PR_GH_UNAVAILABLE);
   if (failure.kind === 'RATE_LIMITED') return failWith(ERROR_CODES.GITHUB_RATE_LIMITED);
   return failWith(failure.kind === 'TIMEOUT' ? ERROR_CODES.GITHUB_TIMEOUT : stepCode);
+}
+
+/**
+ * The code a failed GitHub call carries: `gh` missing / not logged in, a timeout and a rate limit have their own,
+ * everything else is `stepCode`. Decided by the failure's kind, never by text.
+ */
+export function codeForApiFailure(failure: ApiFailure, stepCode: string): string {
+  return failureCode(failApi(failure, stepCode));
 }
 
 interface Target {
@@ -423,13 +438,20 @@ async function planCommit(target: Target, base: string, specs: readonly KeepLock
   return ok({ files: changed, headCommit: head.value.commitSha, baseTree: head.value.treeSha, bases: bases.value });
 }
 
+/** What a pull request that writes files says about itself. Names only: never a value. */
+interface PullWording {
+  readonly commitMessage: string;
+  readonly title: string;
+  readonly body: string;
+}
+
 /** blob(s) -> tree -> commit -> ref -> pull. Each failing step is its own code. */
-async function publish(
+async function publishFiles(
   target: Target,
   base: string,
-  plan: Plan,
+  plan: Pick<Plan, 'files' | 'headCommit' | 'baseTree'>,
   branch: string,
-  wording: { readonly command: KeepLockCommandName; readonly records: readonly EditSaveRecord[] },
+  wording: PullWording,
 ): Promise<KeepLockReport> {
   const { github, repo } = target;
   const blobs = await Promise.all(plan.files.map((f) => github.createBlob(repo, f.content)));
@@ -445,7 +467,7 @@ async function publish(
   );
   if (!tree.ok) return failApi(tree, ERROR_CODES.KEEP_PR_COMMIT_FAILED).report;
   const commit = await github.createCommit(repo, {
-    message: buildCommitMessage(wording.records),
+    message: wording.commitMessage,
     tree: tree.value.sha,
     parent: plan.headCommit,
   });
@@ -453,13 +475,28 @@ async function publish(
   const ref = await github.createRef(repo, branch, commit.value.sha);
   if (!ref.ok) return failApi(ref, ERROR_CODES.KEEP_PR_BRANCH_FAILED).report;
   const pull = await github.createPull(repo, {
-    title: PR_TITLE,
-    body: buildPrBody(wording.command, wording.records, plan.files.map((f) => f.path)),
+    title: wording.title,
+    body: wording.body,
     head: branch,
     base,
   });
   if (!pull.ok) return failApi(pull, ERROR_CODES.KEEP_PR_CREATE_FAILED).report;
   return { changed: true, committed: true, pr_url: pull.value.url, base };
+}
+
+/** The keep.lock PR: `publishFiles` with the keep.lock wording. */
+async function publish(
+  target: Target,
+  base: string,
+  plan: Plan,
+  branch: string,
+  wording: { readonly command: KeepLockCommandName; readonly records: readonly EditSaveRecord[] },
+): Promise<KeepLockReport> {
+  return publishFiles(target, base, plan, branch, {
+    commitMessage: buildCommitMessage(wording.records),
+    title: PR_TITLE,
+    body: buildPrBody(wording.command, wording.records, plan.files.map((f) => f.path)),
+  });
 }
 
 async function openPr(
@@ -559,6 +596,61 @@ export async function openKeepLockPullRequest(
     const report = await publish(target, base.base, plan.value, branch, { command: req.command, records });
     if (report.changed && report.committed) {
       return { ok: true, pr_url: report.pr_url, base: base.base, paths: plan.value.files.map((f) => f.path), bases: plan.value.bases };
+    }
+    return { ok: false, code: report.changed && !report.committed && report.error ? report.error.code : ERROR_CODES.KEEP_PR_CREATE_FAILED };
+  } catch {
+    return { ok: false, code: ERROR_CODES.KEEP_PR_CREATE_FAILED };
+  }
+}
+
+/** Whole files to write onto a repo's base branch as ONE pull request (the files are already the final content). */
+export interface FilesPullRequest {
+  readonly repo: RepoRef;
+  /** The PR base. Absent: the repo's default branch. */
+  readonly base?: string;
+  readonly files: ReadonlyArray<{ readonly path: string; readonly content: string }>;
+  readonly commitMessage: string;
+  readonly title: string;
+  readonly body: string;
+}
+
+export type FilesPullRequestResult =
+  | { readonly ok: true; readonly pr_url: string; readonly base: string; readonly paths: readonly string[] }
+  | { readonly ok: false; readonly code: string };
+
+/**
+ * Opens ONE pull request that writes every file in `files` (one blob each, one tree, one commit), on
+ * `base` (default: the repo's default branch). The same remote sequence as `openKeepLockPullRequest`
+ * (`publishFiles`), for content that is not a keep.lock fold (`.capy/deploy.json`). Never prompts, never
+ * throws; a failure is its own code.
+ */
+export async function openFilesPullRequest(
+  req: FilesPullRequest,
+  deps: Pick<KeepLockPrDeps, 'branchName'> & { readonly github: GithubApi },
+): Promise<FilesPullRequestResult> {
+  try {
+    const target: Target = { repo: req.repo, github: deps.github };
+    const base =
+      req.base !== undefined ? { ok: true as const, base: req.base } : await resolveDefaultBase(deps.github, req.repo);
+    if (!base.ok) return { ok: false, code: base.code };
+    const head = await deps.github.getBranchHead(req.repo, base.base);
+    if (!head.ok) {
+      return {
+        ok: false,
+        code: failureCode(failApi(head, head.kind === 'NOT_FOUND' ? ERROR_CODES.KEEP_PR_BASE_UNRESOLVED : ERROR_CODES.KEEP_PR_READ_FAILED)),
+      };
+    }
+    const branch = deps.branchName();
+    if (!isValidBranchName(branch)) return { ok: false, code: ERROR_CODES.KEEP_PR_BRANCH_FAILED };
+    const report = await publishFiles(
+      target,
+      base.base,
+      { files: req.files, headCommit: head.value.commitSha, baseTree: head.value.treeSha },
+      branch,
+      { commitMessage: req.commitMessage, title: req.title, body: req.body },
+    );
+    if (report.changed && report.committed) {
+      return { ok: true, pr_url: report.pr_url, base: base.base, paths: req.files.map((f) => f.path) };
     }
     return { ok: false, code: report.changed && !report.committed && report.error ? report.error.code : ERROR_CODES.KEEP_PR_CREATE_FAILED };
   } catch {

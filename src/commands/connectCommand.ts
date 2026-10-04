@@ -1,10 +1,15 @@
 import { resolveContext, writeAndSync, writeImportOutcome, ResolvedContext } from './connectors/shared';
 import { listProviders, loadProvider, ConnectOpts, ConnectorModule } from './connectors/registry';
-import { isInteractive } from '../ui/interactive';
+import { EXIT_NEEDS_INPUT, isInteractive } from '../ui/interactive';
 import { resolveOrgContext } from '../core/orgContext';
 import type { DiscoveryContext } from './connectors/dokployDiscovery';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
+
+/** A refusal that only a flag (or a person) can answer exits `EXIT_NEEDS_INPUT`, so an agent branches on it; every other refusal exits 1. */
+function exitCodeForRefusalCode(code: string): number {
+  return code === 'DOKPLOY_SETTINGS_MISSING' ? EXIT_NEEDS_INPUT : 1;
+}
 
 /**
  * Discovery's own context — org + auth + serviceClient, exactly what
@@ -84,8 +89,13 @@ export class ConnectCommand {
     // context instead: org + auth + serviceClient only, no project key, no
     // `.env` decrypt — see `resolveDiscoveryContext`'s own doc.
     if (effective.discover && mod.discover) {
+      // Discover mode (Vince, 2026-10-03): ALWAYS prints exactly what
+      // `--json` prints, in a terminal or not, and never prompts — every
+      // choice comes from flags (`--base-url`, `--yes`, …) or is refused
+      // with a code.
+      const discoveryOpts: ConnectOpts = { ...effective, json: true, nonTty: true };
       const discoveryCtx = await resolveDiscoveryContext(this.devMode);
-      return await this.executeDiscovery(mod, provider, discoveryCtx, effective);
+      return await this.executeDiscovery(mod, provider, discoveryCtx, discoveryOpts);
     }
 
     const ctx = await resolveContext({ devMode: this.devMode, dryRun: effective.dryRun === true });
@@ -178,11 +188,21 @@ export class ConnectCommand {
 
     if (!outcome.ok) {
       if (opts.json) {
-        console.log(JSON.stringify({ ok: false, code: outcome.code, message: outcome.message }));
+        console.log(
+          JSON.stringify({
+            ok: false,
+            code: outcome.code,
+            message: outcome.message,
+            ...(outcome.unanswered === undefined ? {} : { unanswered: outcome.unanswered }),
+          }),
+        );
       } else {
-        console.error(`\n  ${outcome.message}\n`);
+        console.error(`\n  ${outcome.message}`);
+        // The refusal says what is still needed, as flags: print each hint beside it.
+        (outcome.unanswered ?? []).forEach((u) => console.error(`  ${u.flag}: ${u.hint}`));
+        console.error('');
       }
-      process.exitCode = 1;
+      process.exitCode = exitCodeForRefusalCode(outcome.code);
       return { linked: false };
     }
 
@@ -217,7 +237,6 @@ export class ConnectCommand {
           skipped: outcome.skipped,
           warnings: outcome.warnings,
           pushed,
-          deployTargetSaved: outcome.deployTargetSaved,
         }),
       );
       return { linked: wrote };
@@ -262,9 +281,6 @@ export class ConnectCommand {
     for (const w of outcome.warnings) {
       console.log(`  ⚠ ${w.code}: ${w.names.join(', ')}`);
     }
-    if (outcome.deployTargetSaved) {
-      console.log(`  Saved a Dokploy deploy target for application ${outcome.applicationId}.`);
-    }
     console.log('');
     return { linked: wrote };
   }
@@ -284,11 +300,18 @@ export class ConnectCommand {
 
     if (!outcome.ok) {
       if (opts.json) {
-        console.log(JSON.stringify({ ok: false, code: outcome.code, message: outcome.message }));
+        console.log(
+          JSON.stringify({
+            ok: false,
+            code: outcome.code,
+            message: outcome.message,
+            ...(outcome.unanswered === undefined ? {} : { unanswered: outcome.unanswered }),
+          }),
+        );
       } else {
         console.error(`\n  ${outcome.message}\n`);
       }
-      process.exitCode = 1;
+      process.exitCode = exitCodeForRefusalCode(outcome.code);
       return { linked: false };
     }
 
@@ -392,6 +415,8 @@ export class ConnectCommand {
           provider,
           dryRun: outcome.dryRun,
           cancelled: !!outcome.cancelled,
+          ...(outcome.saved === undefined ? {} : { saved: outcome.saved }),
+          ...(outcome.notices === undefined ? {} : { notices: outcome.notices }),
           plan: planForOutput,
           ...(appliedForOutput ? { applied: appliedForOutput } : {}),
           ...(commitsForOutput ? { commits: commitsForOutput } : {}),

@@ -978,6 +978,25 @@ async function resolveDokployApiKeyForPicker(
   });
 }
 
+/**
+ * The org system variable for the Dokploy URL, read through the shared resolver (CAP-703); `undefined` when it is
+ * unset, cannot be read (not an admin) or there is no org. Never prompts.
+ */
+async function storedDokployBaseUrl(orgId: string | undefined): Promise<string | undefined> {
+  if (orgId === undefined) return undefined;
+  try {
+    const { resolveDokployBaseUrl, realBaseUrlStoreOpener } = await import('../deploy/dokployBaseUrl');
+    const resolved = await resolveDokployBaseUrl({
+      dryRun: true,
+      openStore: realBaseUrlStoreOpener(orgId, false),
+      savedTargetUrl: () => undefined,
+    });
+    return resolved.ok ? resolved.baseUrl : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** `new URL(raw).host`, or `undefined` for anything that doesn't parse — never throws. */
 function hostOf(raw: string | undefined): string | undefined {
   if (!raw) return undefined;
@@ -1004,6 +1023,8 @@ async function askDokployKindAndBaseUrl(
   id: string,
   existingOpts: Record<string, string>,
   existingKind: DokployServiceKind,
+  /** The org system variable `_CONNECTOR_DOKPLOY_BASE_URL`, offered as the default when the target has no URL of its own (CAP-703). */
+  storedBaseUrl?: string,
 ): Promise<DokployServiceUrlOk> {
   const ans = (await inquirer.prompt([
     {
@@ -1021,7 +1042,7 @@ async function askDokployKindAndBaseUrl(
       type: 'input',
       name: 'baseUrl',
       message: 'Dokploy URL:',
-      default: existingOpts.baseUrl,
+      default: existingOpts.baseUrl ?? storedBaseUrl,
       validate: (v: string) => baseUrlProblem(v) ?? true,
       filter: (v: string) => v.trim(),
     },
@@ -1091,7 +1112,7 @@ export async function resolveDokployServiceOptions(
     const answer = await askUrlOrId();
 
     if (isBareDokployId(answer)) {
-      return askDokployKindAndBaseUrl(answer, existingOpts, existingKind);
+      return askDokployKindAndBaseUrl(answer, existingOpts, existingKind, await storedDokployBaseUrl(orgId));
     }
 
     const parsed = parseDokployServiceUrl(answer);
@@ -1163,7 +1184,25 @@ export async function resolveDokployServiceOptions(
     return confirmed ? parsed : resolve();
   };
 
-  return resolve();
+  const resolved = await resolve();
+  await offerSaveEnteredDokployUrl(orgId, resolved.baseUrl, existingOpts.baseUrl);
+  return resolved;
+}
+
+/**
+ * CAP-703: the URL the person typed at the setup prompt is offered to the org (the system variable
+ * `_CONNECTOR_DOKPLOY_BASE_URL`) through the shared resolver's save path: only when the variable is unset and the
+ * caller is an org admin, never overwriting. A URL the target already had is not "entered", so it is left alone.
+ * Never fails the setup.
+ */
+async function offerSaveEnteredDokployUrl(orgId: string | undefined, baseUrl: string, existingBaseUrl: string | undefined): Promise<void> {
+  if (orgId === undefined || baseUrl === existingBaseUrl) return;
+  try {
+    const { offerSaveAskedBaseUrl, realBaseUrlStoreOpener } = await import('../deploy/dokployBaseUrl');
+    await offerSaveAskedBaseUrl({ baseUrl, openStore: realBaseUrlStoreOpener(orgId, false) });
+  } catch {
+    // Best effort: a failed offer never fails the target setup.
+  }
 }
 
 /**

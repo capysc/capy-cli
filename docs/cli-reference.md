@@ -2,7 +2,7 @@
 
 # capy CLI reference
 
-Version `0.9.9`. Generated from `capy help --json`.
+Version `0.9.10`. Generated from `capy help --json`.
 
 ## Commands
 
@@ -119,10 +119,23 @@ capy deploy [target] [options]
 | `--env-name <name>` | gh-actions: env name when --scope env |  |
 | `--no-deploy` | write and verify the target, but skip the platform deploy/redeploy (target mode) |  |
 | `--json` | describe the route (unanswered stops + any known branch problem) as JSON instead of travelling it |  |
+| `--discover` | dokploy: find the services that match Capy projects and print JSON (never prompts) |  |
+| `--plan <file>` | dokploy --discover: the plan file to check (see schemas.deploy_dokploy_plan in `capy help --json`) |  |
+| `--confirm <plan_id>` | dokploy --discover: write the plan that --dry-run printed (one PR per repo) |  |
+| `--base-url <url>` | dokploy --discover: the Dokploy dashboard URL (else the org system variable _CONNECTOR_DOKPLOY_BASE_URL) |  |
 
 JSON support: yes (`--json`)
 
 Dry run: yes (`--dry-run`)
+
+Mode: `capy deploy dokploy --discover`
+
+Find the Dokploy services that match Capy projects, check a plan for them, and write the deploy targets as one pull request per repo. Pushes no values.
+
+- Flags: `--discover`, `--plan`, `--confirm`, `--base-url`, `--dry-run`, `--json`
+- Always prints JSON: yes
+- Dry run: yes
+- Plan schema: `schemas.deploy_dokploy_plan` in `capy help --json`
 
 ### `capy deploy revoke`
 
@@ -669,7 +682,7 @@ capy connect [provider] [options]
 | `--json` | emit machine-readable JSON instead of the human UI (import connectors) |  |
 | `--dry-run` | dokploy import/discover: preview the plan only — resolve settings + read Dokploy, write/push nothing |  |
 | `--discover` | dokploy: find every Dokploy service matching a repo under cwd, instead of one named --application/--compose |  |
-| `-y, --yes` | dokploy import/discover: skip the confirmation prompt (import: --overwrite's clear/replace/import ask; discover: the real-run "proceed?" ask) — required non-interactively |  |
+| `-y, --yes` | dokploy import/discover: skip the confirmation prompt (import: --overwrite's clear/replace/import ask) — discover never prompts and needs --yes to write |  |
 | `--overwrite` | dokploy import: set the branch's vars to EXACTLY Dokploy's set — clear names not in Dokploy, replace differing values, import new ones |  |
 | `--environment <names>` | dokploy discover: restrict the plan to these Dokploy environment names, comma-separated (e.g. staging,preview) |  |
 
@@ -707,6 +720,76 @@ capy lock
 _No options._
 
 JSON support: no
+
+## Schemas
+
+JSON Schemas of the files commands read, as published under `schemas` in `capy help --json`.
+
+### `deploy_dokploy_plan`
+
+```json
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "capy deploy dokploy --discover plan",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "entries"
+  ],
+  "properties": {
+    "version": {
+      "const": 1
+    },
+    "entries": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "project_id",
+          "branch",
+          "service_id",
+          "git_branch",
+          "vars"
+        ],
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Capy project id"
+          },
+          "branch": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Capy branch the target ships from"
+          },
+          "service_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Dokploy application or compose service id"
+          },
+          "git_branch": {
+            "type": "string",
+            "minLength": 1,
+            "description": "git branch the Dokploy service tracks (the CI deploy PR base)"
+          },
+          "vars": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+            },
+            "description": "Variable names the target delivers; each must exist on the Capy branch"
+          }
+        }
+      }
+    }
+  }
+}
+```
 
 ## Error codes
 
@@ -808,6 +891,16 @@ Every refusal carries a stable `code` — branch on it, never on message text.
 - `GITHUB_TIMEOUT`
 - `RATE_LIMITED`
 - `GITHUB_RATE_LIMITED`
+- `SERVICE_NOT_FOUND`
+- `DUPLICATE_ENTRY`
+- `TARGET_EXISTS`
+- `NO_REPO_LINK`
+- `REPO_MISMATCH`
+- `PLAN_FILE_UNREADABLE`
+- `PLAN_INVALID`
+- `PLAN_REQUIRED`
+- `DISCOVER_UNSUPPORTED_TARGET`
+- `DISCOVER_PARTIAL`
 
 ## Conventions
 
