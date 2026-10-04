@@ -34,6 +34,8 @@ export interface CliCommandDoc {
   arguments: CliArgumentDoc[];
   options: CliOptionDoc[];
   supportsJson: boolean;
+  /** Honors the global `-d/--dry-run` (previews, or refuses a path that cannot preview with `DRY_RUN_UNSUPPORTED`). */
+  supportsDryRun: boolean;
   subcommands: CliCommandDoc[];
 }
 
@@ -77,6 +79,21 @@ function argumentDoc(arg: Argument): CliArgumentDoc {
   };
 }
 
+/**
+ * The commands that honor the global `--dry-run`. A command is listed only once
+ * it previews or refuses; the rest still ignore the flag.
+ */
+export const DRY_RUN_COMMANDS: ReadonlySet<string> = new Set([
+  'add',
+  'agents',
+  'connect',
+  'deploy',
+  'edit',
+  'remove',
+  'secrets',
+  'secrets set',
+]);
+
 function commandDoc(cmd: Command, parentPath: string): CliCommandDoc {
   const name = cmd.name();
   const path = parentPath ? `${parentPath} ${name}` : name;
@@ -90,6 +107,7 @@ function commandDoc(cmd: Command, parentPath: string): CliCommandDoc {
     arguments: (cmd.registeredArguments ?? []).map(argumentDoc),
     options,
     supportsJson: options.some((o) => o.long === '--json'),
+    supportsDryRun: DRY_RUN_COMMANDS.has(path),
     subcommands,
   };
 }

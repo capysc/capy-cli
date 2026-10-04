@@ -42,6 +42,7 @@ function renderCommand(cmd: CliCommandDoc, depth: number): string {
     '',
     `JSON support: ${cmd.supportsJson ? 'yes (`--json`)' : 'no'}`,
     '',
+    ...(cmd.supportsDryRun === true ? ['Dry run: yes (`--dry-run`)', ''] : []), // COPY-FLAG
   ];
   for (const sub of cmd.subcommands) {
     lines.push(renderCommand(sub, depth + 1));

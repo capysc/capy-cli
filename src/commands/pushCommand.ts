@@ -16,6 +16,7 @@ import { deriveResourceId } from '../crypto/resourceId';
 import { writeKeepCache, LOCAL_USER_ID } from '../config/globalConfig';
 import { isLocalOnly } from '../config/profileConfig';
 import { resolveLocalProjectKey } from '../core/localUnlock';
+import { reportRepoLinkForCommand } from '../core/repoLinkReporter';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -152,6 +153,17 @@ export class PushCommand {
     if (!branch) {
       console.error('No active branch. Run capy to select a branch before pushing.');
       process.exit(1);
+    }
+
+    // CAP-697: report which repo/folder holds this keep.lock (never blocks past its budget).
+    if (!localMode) {
+      await reportRepoLinkForCommand({
+        cwd: process.cwd(),
+        orgId: projectState.organizationId!,
+        projectId: projectState.projectId!,
+        projectName: keep.project_name,
+        client: this.serviceClient,
+      });
     }
 
     // Read and encrypt .env file

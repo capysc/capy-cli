@@ -9,6 +9,7 @@ import { deriveResourceId } from '../../crypto/resourceId';
 import { writeKeepCache } from '../../config/globalConfig';
 import { setSyncKeepHash, KeepFile, ConnectorMetadata, CapyError, ERROR_CODES, AuthResult } from '../../types/index';
 import type { ImportOutcome } from './registry';
+import { reportRepoLinkForCommand, type RepoLinkWarning } from '../../core/repoLinkReporter';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -24,6 +25,8 @@ export interface ResolvedContext {
   projectKey: string;
   keep: KeepFile;
   localPlaintext: Record<string, string>;
+  /** CAP-697: warnings from reporting this project's repo link (empty unless the keep.lock looks copied). */
+  repoLinkWarnings?: readonly RepoLinkWarning[];
 }
 
 /**
@@ -78,6 +81,10 @@ export async function resolveContext(
     refuse?: ContextRefusal;
     /** false: silent auth only, never the browser sign-in (default true). */
     interactive?: boolean;
+    /** The caller emits JSON and carries `ctx.repoLinkWarnings` in it: nothing is printed for them here. */
+    json?: boolean;
+    /** The caller is a dry run: the repo link is not reported. */
+    dryRun?: boolean;
   } = {},
 ): Promise<ResolvedContext> {
   const refuse = opts.refuse ?? exitWithMessage;
@@ -127,6 +134,13 @@ export async function resolveContext(
     refuse: opts.refuse,
   });
 
+  // CAP-697: tell Capy which repo/folder holds this keep.lock. Never blocks past
+  // its budget, never fails or prints on error; a copied keep.lock gets one warning.
+  const repoLink = await reportRepoLinkForCommand(
+    { cwd: process.cwd(), orgId, projectId, projectName: keep.project_name, client: serviceClient, dryRun: opts.dryRun },
+    { json: opts.json },
+  );
+
   return {
     pm,
     fileManager,
@@ -139,6 +153,7 @@ export async function resolveContext(
     projectKey,
     keep,
     localPlaintext: decryptLocalEnv(fileManager, projectKey),
+    repoLinkWarnings: repoLink.warnings,
   };
 }
 

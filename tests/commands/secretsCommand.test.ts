@@ -2,6 +2,7 @@ import { describe, it, expect, spyOn, mock, afterAll, afterEach, beforeEach } fr
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { CapyError, ERROR_CODES } from '../../src/types/index';
+import { rowIdOf } from '../../src/commands/secretsRowId';
 
 /**
  * `capy secrets` — CLI-layer wiring only. CAP-680 removed the static human
@@ -136,8 +137,8 @@ async function capture(fn: () => Promise<void>): Promise<{ exitCode?: number; st
 
 /** Sets BOTH `process.stdout.isTTY` and `process.stdin.isTTY` — the command only treats a run as "a real terminal" when both are true. */
 function setTTY(stdoutIsTty: boolean, stdinIsTty: boolean): void {
-  Object.defineProperty(process.stdout, 'isTTY', { value: stdoutIsTty, configurable: true });
-  Object.defineProperty(process.stdin, 'isTTY', { value: stdinIsTty, configurable: true });
+  Object.defineProperty(process.stdout, 'isTTY', { value: stdoutIsTty, configurable: true, writable: true });
+  Object.defineProperty(process.stdin, 'isTTY', { value: stdinIsTty, configurable: true, writable: true });
 }
 
 const loc = (over: Partial<FakeLocation> = {}): FakeLocation => ({
@@ -187,7 +188,8 @@ describe('SecretsCommand', () => {
     expect(payload).toEqual({
       ok: true,
       org_id: 'org_9',
-      rows: [row({ name: 'X' })],
+      // `row_id` is the one field this command adds to each server row (CAP-698).
+      rows: [{ ...row({ name: 'X' }), row_id: rowIdOf('X', row({ name: 'X' }).value_hash) }],
       skipped: [],
     });
   });
@@ -347,7 +349,7 @@ describe('SecretsCommand', () => {
     // the fake row's own known-safe fields made it into the payload.
     const payload = JSON.parse(stdout);
     expect(payload.rows[0].value_hash).toBe('deadbeefdeadbeef');
-    expect(Object.keys(payload.rows[0])).toEqual(['name', 'value_hash', 'locations', 'users']);
+    expect(Object.keys(payload.rows[0])).toEqual(['name', 'value_hash', 'locations', 'users', 'row_id']);
   });
 });
 

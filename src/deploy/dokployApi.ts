@@ -770,11 +770,9 @@ export async function resolveDokployApiKey(
  * Whether a run may let the org system store prompt a human for a missing
  * Dokploy key. `baseInteractive` is the caller's ordinary TTY check;
  * `suppressed` covers every reason that overrides a real TTY back to "never
- * ask" — shared by `deployCommand.ts` (`--web`, `--yes`, `--dry-run`) and
- * the import connector (`--web`, `--json`, `--dry-run`):
+ * ask" — shared by `deployCommand.ts` (`--yes`, `--dry-run`) and
+ * the import connector (`--json`, `--dry-run`):
  *
- *   - `--web`: the store's own prompt is a raw terminal `inquirer` prompt,
- *     not a browser screen — asking there could hang a browser-driven run.
  *   - `--json` (connector only): machine output must never have a prompt
  *     interleaved with it.
  *   - `--yes` (deploy only): never ask, resolve from what's already there

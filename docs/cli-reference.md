@@ -2,7 +2,7 @@
 
 # capy CLI reference
 
-Version `0.9.8`. Generated from `capy help --json`.
+Version `0.9.9`. Generated from `capy help --json`.
 
 ## Commands
 
@@ -45,8 +45,13 @@ capy edit [name] [options]
 | `--no-push` | piped value: write .env only; do not push to Capy |  |
 | `--json` | emit machine-readable JSON instead of the human UI (piped value) |  |
 | `--non-tty` | treat stdin as not a terminal; never prompt (agents/CI) |  |
+| `--pr` | create a PR with the keep.lock change (answers the prompt) |  |
+| `--no-pr` | do not create a PR with the keep.lock change |  |
+| `--pr-base <branch>` | base branch for the PR (answers the prompt) |  |
 
 JSON support: yes (`--json`)
+
+Dry run: yes (`--dry-run`)
 
 ## `capy branch`
 
@@ -116,6 +121,8 @@ capy deploy [target] [options]
 | `--json` | describe the route (unanswered stops + any known branch problem) as JSON instead of travelling it |  |
 
 JSON support: yes (`--json`)
+
+Dry run: yes (`--dry-run`)
 
 ### `capy deploy revoke`
 
@@ -294,6 +301,8 @@ capy agents [options]
 | `--json` | emit machine-readable JSON instead of the human UI |  |
 
 JSON support: yes (`--json`)
+
+Dry run: yes (`--dry-run`)
 
 ## `capy invite`
 
@@ -506,8 +515,33 @@ capy secrets [options]
 | `--json` | emit machine-readable JSON instead of the human UI |  |
 | `--project <name>` | only rows with a location in this project |  |
 | `--branch <name>` | only rows with a location on this branch |  |
+| `--name <NAME>` | only rows with exactly this secret name |  |
 
 JSON support: yes (`--json`)
+
+Dry run: yes (`--dry-run`)
+
+### `capy secrets set`
+
+Set one secret to a new value (read from stdin) in several locations and open keep.lock PRs. Never prompts.
+
+```
+capy secrets set <name> [options]
+```
+
+| Option | Description | Default |
+|---|---|---|
+| `--json` | emit machine-readable JSON instead of the human UI |  |
+| `--row <row_id>` | change this row of that name (repeatable; ids from `capy secrets --name NAME --json`) | `[]` |
+| `--all-rows` | change every row of that name |  |
+| `--exclude <project:branch>` | leave this location out (repeatable) | `[]` |
+| `--no-pr-for <owner/name>` | do not open a PR in this repo (repeatable) | `[]` |
+| `--no-pr` | do not open any PR |  |
+| `--confirm <plan_id>` | run the plan that --dry-run printed (required for a real run) |  |
+
+JSON support: yes (`--json`)
+
+Dry run: yes (`--dry-run`)
 
 ## `capy grant-branch`
 
@@ -579,15 +613,17 @@ capy add <vars...> [options]
 
 | Option | Description | Default |
 |---|---|---|
-| `--reason <text>` | short note shown on the intake page |  |
-| `--help-url <NAME=URL>` | per-variable "where to find this" link, e.g. STRIPE_SECRET_KEY=https://dashboard.stripe.com/apikeys (repeatable) | `[]` |
-| `--no-open` | do not auto-open the browser; print the URL only |  |
 | `--no-push` | write to .env only; do not push to Capy |  |
 | `-f, --force` | overwrite existing values without prompting |  |
 | `--non-tty` | never prompt; resolve from flags or fail fast (agents/CI) |  |
 | `--json` | emit machine-readable JSON instead of the human UI (piped value) |  |
+| `--pr` | create a PR with the keep.lock change (answers the prompt) |  |
+| `--no-pr` | do not create a PR with the keep.lock change |  |
+| `--pr-base <branch>` | base branch for the PR (answers the prompt) |  |
 
 JSON support: yes (`--json`)
+
+Dry run: yes (`--dry-run`)
 
 ## `capy remove`
 
@@ -602,8 +638,13 @@ capy remove <vars...> [options]
 | `-y, --yes` | skip the confirmation prompt (required non-interactively) |  |
 | `--json` | emit machine-readable JSON instead of the human UI |  |
 | `--non-tty` | never prompt; resolve from flags or fail fast (agents/CI) |  |
+| `--pr` | create a PR with the keep.lock change (answers the prompt) |  |
+| `--no-pr` | do not create a PR with the keep.lock change |  |
+| `--pr-base <branch>` | base branch for the PR (answers the prompt) |  |
 
 JSON support: yes (`--json`)
+
+Dry run: yes (`--dry-run`)
 
 ## `capy connect`
 
@@ -633,6 +674,8 @@ capy connect [provider] [options]
 | `--environment <names>` | dokploy discover: restrict the plan to these Dokploy environment names, comma-separated (e.g. staging,preview) |  |
 
 JSON support: yes (`--json`)
+
+Dry run: yes (`--dry-run`)
 
 ## `capy rotate`
 
@@ -734,6 +777,14 @@ Every refusal carries a stable `code` — branch on it, never on message text.
 - `VAR_NOT_FOUND`
 - `REMOVE_LOCAL_DRIFT`
 - `REMOVE_NEEDS_TTY`
+- `KEEP_PR_NOT_GIT_REPO`
+- `KEEP_PR_NO_GITHUB_REMOTE`
+- `KEEP_PR_GH_UNAVAILABLE`
+- `KEEP_PR_BASE_UNRESOLVED`
+- `KEEP_PR_READ_FAILED`
+- `KEEP_PR_COMMIT_FAILED`
+- `KEEP_PR_BRANCH_FAILED`
+- `KEEP_PR_CREATE_FAILED`
 - `CI_DEPLOY_TARGETS_RECORD_FAILED`
 - `DEPLOY_STALE_KEEP`
 - `DEPLOY_TOKEN_UNTRACKED`
@@ -743,6 +794,20 @@ Every refusal carries a stable `code` — branch on it, never on message text.
 - `STDIN_TOO_LARGE`
 - `ADD_STDIN_ONE_NAME`
 - `ADD_VAR_EXISTS`
+- `WEB_MODE_REMOVED`
+- `KEEP_LOCK_REPO_MISMATCH`
+- `SECRET_AMBIGUOUS`
+- `PLAN_CHANGED`
+- `PROJECT_KIND_UNSUPPORTED`
+- `PLAN_CONFIRM_REQUIRED`
+- `SECRET_NOT_FOUND`
+- `SECRETS_NOTHING_SELECTED`
+- `SECRETS_PARTIAL`
+- `REPO_LINKS_UNSUPPORTED`
+- `DRY_RUN_UNSUPPORTED`
+- `GITHUB_TIMEOUT`
+- `RATE_LIMITED`
+- `GITHUB_RATE_LIMITED`
 
 ## Conventions
 

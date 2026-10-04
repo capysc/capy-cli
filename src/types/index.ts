@@ -381,10 +381,6 @@ export interface CliOptions {
   verbose?: boolean;
   force?: boolean;
   dryRun?: boolean;
-  /** Render bare `capy`'s interactive steps (init trainstops / sync conflict resolver)
-   *  in a local browser instead of TTY prompts. Lazy: the browser only opens when an
-   *  interactive decision is actually reached (a clean sync stays terminal-only). */
-  web?: boolean;
 }
 
 export interface ProjectInitResult {
@@ -450,9 +446,7 @@ export const ERROR_CODES = {
   LOCAL_KEY_BACKEND_ERROR: 'LOCAL_KEY_BACKEND_ERROR',
   // Local-state refusals: the command cannot start because this directory,
   // this branch or this build does not hold what it needs. Nothing has been
-  // asked of the service yet, so none of these is a SERVICE_ERROR — and each
-  // one used to be a bare `console.error` + `process.exit(1)`, which under
-  // `--web` is a decision reported to a stream nobody is reading.
+  // asked of the service yet, so none of these is a SERVICE_ERROR.
   /** The branch has no connector-managed credentials, so there is nothing to rotate. */
   NO_MANAGED_KEYS: 'NO_MANAGED_KEYS',
   /** The branch has no variables at all yet. */
@@ -636,6 +630,24 @@ export const ERROR_CODES = {
   REMOVE_LOCAL_DRIFT: 'REMOVE_LOCAL_DRIFT',
   /** `capy remove` needs a human (confirmation) and there is no TTY, and `--yes` wasn't passed. */
   REMOVE_NEEDS_TTY: 'REMOVE_NEEDS_TTY',
+  // --- keep.lock PR step (capy add / edit / remove, CAP-699) ---
+  // Reported as `keep_lock.error.code`: the secret change itself still succeeded.
+  /** keep.lock PR step: the working directory is not inside a git repository. */
+  KEEP_PR_NOT_GIT_REPO: 'KEEP_PR_NOT_GIT_REPO',
+  /** keep.lock PR step: there is no `origin` remote, or it is not a github.com repository. */
+  KEEP_PR_NO_GITHUB_REMOTE: 'KEEP_PR_NO_GITHUB_REMOTE',
+  /** keep.lock PR step: the `gh` CLI is missing or not logged in. */
+  KEEP_PR_GH_UNAVAILABLE: 'KEEP_PR_GH_UNAVAILABLE',
+  /** keep.lock PR step: `--pr` had no `--pr-base` and the repo's default branch could not be resolved, or the base branch does not exist. */
+  KEEP_PR_BASE_UNRESOLVED: 'KEEP_PR_BASE_UNRESOLVED',
+  /** keep.lock PR step: reading the repo, its branches, the base head or the base keep.lock from GitHub failed. */
+  KEEP_PR_READ_FAILED: 'KEEP_PR_READ_FAILED',
+  /** keep.lock PR step: creating the blob, tree or commit on GitHub failed. */
+  KEEP_PR_COMMIT_FAILED: 'KEEP_PR_COMMIT_FAILED',
+  /** keep.lock PR step: creating the PR branch (git ref) on GitHub failed. */
+  KEEP_PR_BRANCH_FAILED: 'KEEP_PR_BRANCH_FAILED',
+  /** keep.lock PR step: opening the pull request on GitHub failed. */
+  KEEP_PR_CREATE_FAILED: 'KEEP_PR_CREATE_FAILED',
   // --- CI-mode target recording (CAP-687) ---
   /**
    * A CI-mode deploy delivered successfully (its PR's keep.lock already
@@ -680,6 +692,37 @@ export const ERROR_CODES = {
   ADD_STDIN_ONE_NAME: 'ADD_STDIN_ONE_NAME',
   /** `capy add` piped mode: the variable already exists and `--force` was not passed. Exit 3. */
   ADD_VAR_EXISTS: 'ADD_VAR_EXISTS',
+  /** `--web` was passed. The browser screens were removed and the command is not run. Exit 1. */
+  WEB_MODE_REMOVED: 'WEB_MODE_REMOVED',
+  // --- Project → repo links (CAP-697) and shared secret edits (CAP-698) ---
+  // The first four match the service copy's order and spelling.
+  /** A keep.lock's project is already linked to other repos, none of them this one (likely a copied keep.lock). A warning, never a failure. */
+  KEEP_LOCK_REPO_MISMATCH: 'KEEP_LOCK_REPO_MISMATCH',
+  /** `capy secrets set NAME`: NAME matches more than one row (distinct values) and neither `--row` nor `--all-rows` was given. Exit 3. */
+  SECRET_AMBIGUOUS: 'SECRET_AMBIGUOUS',
+  /** `capy secrets set --confirm <plan_id>`: the plan recomputed now is not the plan that was confirmed. Nothing was changed. */
+  PLAN_CHANGED: 'PLAN_CHANGED',
+  /** `PUT /orgs/:orgId/projects/:projectId/repos` refused a project that is not a repo project (e.g. the system store). */
+  PROJECT_KIND_UNSUPPORTED: 'PROJECT_KIND_UNSUPPORTED',
+  // Added by CAP-698 beyond the service copy (the service copy needs them only if the service ever sends them).
+  /** `capy secrets set NAME` without `--dry-run` and without `--confirm <plan_id>`. The refusal carries the plan. Exit 3. */
+  PLAN_CONFIRM_REQUIRED: 'PLAN_CONFIRM_REQUIRED',
+  /** `capy secrets set NAME`: no row has that name, or a `--row` id matches no row. */
+  SECRET_NOT_FOUND: 'SECRET_NOT_FOUND',
+  /** `capy secrets set NAME`: the selection (rows minus `--exclude`) left no location to change. */
+  SECRETS_NOTHING_SELECTED: 'SECRETS_NOTHING_SELECTED',
+  /** `capy secrets set NAME`: the run finished but at least one location or repo failed. Exit 1. */
+  SECRETS_PARTIAL: 'SECRETS_PARTIAL',
+  /** `GET /orgs/:orgId/repos` answered 404: the service predates project -> repo links. Never a failure of the command that asked. */
+  REPO_LINKS_UNSUPPORTED: 'REPO_LINKS_UNSUPPORTED',
+  /** `--dry-run` on a path that would prompt (the `capy edit` TUI, an interactive `capy add`, `capy remove`'s confirmation): it cannot preview, and a dry run never runs for real. Exit 1. */
+  DRY_RUN_UNSUPPORTED: 'DRY_RUN_UNSUPPORTED',
+  /** A `gh` call (the GitHub reads and writes of the keep.lock PR step, `capy secrets`) did not answer in time and was stopped. */
+  GITHUB_TIMEOUT: 'GITHUB_TIMEOUT',
+  /** The Capy service answered 429 (too many requests) and the bounded retries ran out. Decided by the status code. */
+  RATE_LIMITED: 'RATE_LIMITED',
+  /** GitHub refused with a rate limit (429, or 403 with a `retry-after` / `x-ratelimit-remaining: 0` header) and the bounded retries ran out. */
+  GITHUB_RATE_LIMITED: 'GITHUB_RATE_LIMITED',
 } as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES];

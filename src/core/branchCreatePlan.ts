@@ -1,21 +1,15 @@
 /**
  * The route `capy checkout -b <name>` will travel, computed before anything
- * opens.
+ * runs, and printed by `capy checkout -b <name> --json`.
  *
- * ONE function, because the whole claim behind the browser screens is that the
- * rail a person reads and the array a headless caller parses are the same
- * object. Two builders — one for the page, one for `--json` — would make that
- * a promise nobody could keep past the first divergence. So the plan is built
- * here, and both surfaces render what this returns.
+ * ONE function, so the array a headless caller parses is built in one place.
  *
  * The precedence is §8.2's, and it is the reason a stop can arrive already
  * answered: an explicit flag settles a stop before the run starts, existing
- * state settles the next ones, the browser is asked about whatever is left,
- * and a headless run with a blank remaining refuses rather than guessing. A
- * flag-answered stop is `done` carrying the flag that supplied it — never
- * `skipped`, because the plan resolved it rather than dropping it, and
- * "Protection · protected" with no marker is indistinguishable from a question
- * the user answered two seconds ago.
+ * state settles the next ones, and a headless run with a blank remaining
+ * refuses rather than guessing. A flag-answered stop is `done` carrying the
+ * flag that supplied it — never `skipped`, because the plan resolved it rather
+ * than dropping it.
  */
 import type { BranchCreateStop } from '../ui/screens/contract';
 

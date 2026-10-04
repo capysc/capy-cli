@@ -4,9 +4,10 @@
  * (`resolveContext()` + `writeAndSync()`, the same pair `add` and `connect`
  * use), and report what happened. There is no third copy of the save logic.
  *
- * Never prompts, never opens a browser, never records an edit-session save (so
- * no exit-time PR flow). `keep.lock` is left modified in the working tree, same
- * as `capy add`.
+ * Never prompts and never opens a browser. When the write changed keep.lock it
+ * runs the shared keep.lock PR step (keepLockPr.ts), which here is never
+ * interactive: `--pr` / `--no-pr` / `--pr-base` answer it, and without them the
+ * result says which flags would have.
  *
  * The value is only ever an argument to `writeAndSync`. It is not logged, not
  * placed in `process.env`, not written to a temp file, and not part of any
@@ -15,7 +16,16 @@
 import { CapyError, ERROR_CODES } from '../types/index';
 import { hashValue } from './statusCommand';
 import { resolveContext, writeAndSync, type ResolvedContext } from './connectors/shared';
-import { refusePiped, reportPipedSuccess, type PipedAction } from './pipedValue';
+import { refusePiped, reportPipedDryRun, reportPipedSuccess, type PipedAction } from './pipedValue';
+import { repoLinkWarningsField } from '../core/repoLinkReporter';
+import {
+  previewKeepLockPrStep,
+  recordsForWrite,
+  reportKeepLockHuman,
+  runKeepLockPrStep,
+  type KeepLockCommandName,
+  type PrFlags,
+} from './keepLockPr';
 
 const VAR_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
@@ -52,6 +62,12 @@ export interface PipedWriteOpts {
   readonly json: boolean;
   readonly push: boolean;
   readonly devMode: boolean;
+  /** Which command is writing: named in the PR body. */
+  readonly command: KeepLockCommandName;
+  /** `--pr` / `--no-pr` / `--pr-base`. */
+  readonly pr?: PrFlags;
+  /** `--dry-run`: read, validate and say what would happen; change nothing. */
+  readonly dryRun?: boolean;
   /**
    * Called once the context is resolved and before anything is written. Return
    * a refusal `{ code, error }` to stop (e.g. `capy add` without `--force` on an
@@ -80,12 +96,19 @@ async function writeOrFail(
   }
 }
 
+/** The `warnings` JSON field for the repo link, or nothing. */
+function warningsExtra(ctx: ResolvedContext): object {
+  return repoLinkWarningsField({ status: 'reported', warnings: ctx.repoLinkWarnings ?? [] });
+}
+
 /** Sets `name` to `value` and reports the outcome (JSON or one stderr line). Exits on any refusal. */
 export async function runPipedWrite(name: string, value: string, opts: PipedWriteOpts): Promise<void> {
   const ctx = await resolveContext({
     devMode: opts.devMode,
     // Never the browser sign-in: a piped run has no one to sign in.
     interactive: false,
+    json: opts.json,
+    dryRun: opts.dryRun === true,
     refuse: (code, message) => refusePiped(opts.json, code, message),
   });
 
@@ -93,13 +116,36 @@ export async function runPipedWrite(name: string, value: string, opts: PipedWrit
   if (refused) refusePiped(opts.json, refused.code, refused.error);
 
   const action = classifyPipedWrite(ctx, name, value);
+  if (opts.dryRun === true) {
+    // Everything above only read. Nothing below this line runs: no write, no push, no PR.
+    const pinned = ctx.keep.variables[name]?.find((e) => e.branch === ctx.branch)?.value_hash;
+    const wouldChange = action !== 'unchanged' && opts.push && pinned !== hashValue(value);
+    const preview = await previewKeepLockPrStep({ changed: wouldChange, cwd: process.cwd(), flags: opts.pr ?? {} });
+    return reportPipedDryRun(opts.json, { name, branch: ctx.branch, action }, preview);
+  }
   if (action === 'unchanged') {
-    reportPipedSuccess(opts.json, { name, branch: ctx.branch, action, pushed: false });
+    reportPipedSuccess(
+      opts.json,
+      { name, branch: ctx.branch, action, pushed: false },
+      { keep_lock: { changed: false } },
+      warningsExtra(ctx),
+    );
     return;
   }
 
   const failure = await writeOrFail(ctx, name, value, opts.push);
   if (failure) refusePiped(opts.json, failure.code, failure.error);
 
-  reportPipedSuccess(opts.json, { name, branch: ctx.branch, action, pushed: opts.push });
+  // The write is done and reported as a success whatever happens next: the PR
+  // step reports its own failures inside `keep_lock`.
+  const outcome = await runKeepLockPrStep({
+    command: opts.command,
+    cwd: process.cwd(),
+    records: recordsForWrite(ctx.keep, ctx.pm.readKeepFile(), ctx.branch, [name]),
+    localKeep: ctx.keep,
+    flags: opts.pr ?? {},
+    json: opts.json,
+  });
+  reportPipedSuccess(opts.json, { name, branch: ctx.branch, action, pushed: opts.push }, outcome, warningsExtra(ctx));
+  if (!opts.json) reportKeepLockHuman(outcome, { successTo: 'stderr', noteUnanswered: false });
 }

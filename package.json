@@ -1,6 +1,6 @@
 {
   "name": "@capysc/cli",
-  "version": "0.9.8",
+  "version": "0.9.9",
   "description": "Capy CLI - SecretOps for the AI age",
   "main": "dist/index.js",
   "bin": {
@@ -51,6 +51,7 @@
     "build:binary": "node scripts/build-binary.mjs"
   },
   "dependencies": {
+    "@inquirer/core": "^10.3.2",
     "commander": "^11.0.0",
     "dotenv": "^16.3.0",
     "inquirer": "^12.9.6",

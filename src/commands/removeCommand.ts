@@ -17,13 +17,27 @@ import { ProjectManager } from '../core/projectManager';
 import { resolveContext, removeAndSync, listAllVarsOnBranch, ResolvedContext } from './connectors/shared';
 import { hashValue } from './statusCommand';
 import { isInteractive, EXIT_NEEDS_INPUT } from '../ui/interactive';
+import { DRY_RUN_UNSUPPORTED_MESSAGES } from './pipedValue';
 import { listTargets } from '../deploy/config';
 import { CapyError, ERROR_CODES, KeepFile } from '../types/index';
+import {
+  previewKeepLockPrStep,
+  recordsForRemoval,
+  refuseBadPrFlags,
+  reportKeepLockHuman,
+  runKeepLockPrStep,
+  withKeepLock,
+  type PrFlags,
+} from './keepLockPr';
 
 export interface RemoveOpts {
   yes?: boolean;
   json?: boolean;
   nonTty?: boolean;
+  /** `--pr` / `--no-pr` / `--pr-base`: answers the keep.lock PR step. */
+  pr?: PrFlags;
+  /** The global `--dry-run`: say what would be removed; change nothing. The confirmation prompt refuses (`DRY_RUN_UNSUPPORTED`). */
+  dryRun?: boolean;
 }
 
 /** Pure JSON refusal on stdout — never on stderr, so `--json` output stays parseable. */
@@ -115,7 +129,7 @@ async function promptRemovalConfirmation(message: string): Promise<boolean> {
 export async function proceedWithRemoval(
   ctx: ResolvedContext,
   names: readonly string[],
-  opts: { json: boolean; cwd: string },
+  opts: { json: boolean; cwd: string; pr?: PrFlags; nonTty?: boolean; dryRun?: boolean },
 ): Promise<void> {
   const pinned = pinnedHashesFor(ctx.keep, ctx.branch);
   const drifted = computeDrift(pinned, ctx.localPlaintext, names);
@@ -132,16 +146,56 @@ export async function proceedWithRemoval(
 
   const warnings = deployTargetWarnings(opts.cwd, names);
 
+  if (opts.dryRun === true) {
+    // Everything above only read. Nothing below this line runs: no removal, no push, no PR.
+    const preview = await previewKeepLockPrStep({ changed: true, cwd: opts.cwd, flags: opts.pr ?? {} });
+    if (opts.json) {
+      console.log(
+        JSON.stringify(
+          withKeepLock(
+            {
+              removed: names,
+              branch: ctx.branch,
+              dry_run: true,
+              ...(warnings.length > 0 ? { warnings: warnings.map(formatDeployWarning) } : {}),
+            },
+            preview,
+          ),
+          null,
+          2,
+        ),
+      );
+      return;
+    }
+    console.error(`Dry run: would remove ${names.join(', ')} from ${ctx.branch}. Nothing was changed.`); // COPY-FLAG
+    warnings.forEach((w) => console.error(formatDeployWarning(w)));
+    return;
+  }
+
   await removeAndSync(ctx, names);
+
+  // The removal is done whatever the PR step reports (it never throws).
+  const outcome = await runKeepLockPrStep({
+    command: 'remove',
+    cwd: opts.cwd,
+    records: recordsForRemoval(ctx.branch, names),
+    localKeep: ctx.keep,
+    flags: opts.pr ?? {},
+    json: opts.json,
+    nonTty: opts.nonTty,
+  });
 
   if (opts.json) {
     console.log(
       JSON.stringify(
-        {
-          removed: names,
-          branch: ctx.branch,
-          ...(warnings.length > 0 ? { warnings: warnings.map(formatDeployWarning) } : {}),
-        },
+        withKeepLock(
+          {
+            removed: names,
+            branch: ctx.branch,
+            ...(warnings.length > 0 ? { warnings: warnings.map(formatDeployWarning) } : {}),
+          },
+          outcome,
+        ),
         null,
         2,
       ),
@@ -156,6 +210,7 @@ export async function proceedWithRemoval(
   for (const w of warnings) {
     console.error(formatDeployWarning(w));
   }
+  reportKeepLockHuman(outcome, { successTo: 'stdout', noteUnanswered: false });
 }
 
 export class RemoveCommand {
@@ -163,6 +218,12 @@ export class RemoveCommand {
 
   async execute(varNames: string[], opts: RemoveOpts): Promise<void> {
     const json = opts.json === true;
+    // Contradictory PR flags are refused before anything is changed.
+    refuseBadPrFlags(opts.pr ?? {}, json);
+    // The confirmation prompt would really remove: a dry run never runs for real. Before anything else.
+    if (opts.dryRun === true && opts.yes !== true && !json && isInteractive(opts.nonTty)) {
+      refuse(json, new CapyError(DRY_RUN_UNSUPPORTED_MESSAGES.remove, ERROR_CODES.DRY_RUN_UNSUPPORTED));
+    }
     const names = varNames.map((n) => n.trim()).filter(Boolean);
     if (names.length === 0) {
       refuse(json, new CapyError('No variable name given.', ERROR_CODES.INVALID_FORMAT));
@@ -194,7 +255,8 @@ export class RemoveCommand {
 
     const removingAll = allVars.length === names.length && allVars.every((v) => names.includes(v));
 
-    if (!opts.yes) {
+    // A dry run never asks and never needs `--yes`: it only says what would be removed.
+    if (!opts.yes && opts.dryRun !== true) {
       if (json || !isInteractive(opts.nonTty)) {
         refuse(
           json,
@@ -215,7 +277,7 @@ export class RemoveCommand {
     // Everything above is local-only — no auth, no network. Only now do we
     // authenticate and decrypt `.env`, which the drift check and the push
     // both need.
-    const ctx = await resolveContext({ devMode: this.devMode });
-    await proceedWithRemoval(ctx, names, { json, cwd: process.cwd() });
+    const ctx = await resolveContext({ devMode: this.devMode, json, dryRun: opts.dryRun === true });
+    await proceedWithRemoval(ctx, names, { json, cwd: process.cwd(), pr: opts.pr, nonTty: opts.nonTty, dryRun: opts.dryRun === true });
   }
 }

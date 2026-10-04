@@ -34,7 +34,8 @@ import { spawnSync, spawn } from 'child_process';
 import { homedir } from 'os';
 import { basename, join } from 'path';
 import inquirer from 'inquirer';
-import { LIST_THEME } from '../../ui/promptStyle';
+import { searchableSelectQuestion } from '../../ui/searchPrompts';
+import { sortedCopy } from '../dokployApi';
 import {
   DeployAdapter,
   DeployContext,
@@ -199,7 +200,7 @@ async function vercelApi(token: string, path: string): Promise<any> {
   return res.json();
 }
 
-interface PickableProject {
+export interface PickableProject {
   projectId: string;
   projectName: string;
   /** Personal account uid or team id — what project.json calls orgId. */
@@ -280,44 +281,56 @@ type PickerOutcome =
   /** The user asked for the wizard. */
   | { kind: 'declined' };
 
-async function linkByProjectPicker(projectDir: string): Promise<PickerOutcome> {
-  const token = readVercelCliToken();
-  if (!token) return { kind: 'no-token' };
-
-  let projects: PickableProject[];
+/** The project list, or the picker outcome that explains why there isn't one. */
+async function tryListVercelProjects(
+  token: string,
+): Promise<{ readonly projects: PickableProject[] } | { readonly outcome: PickerOutcome }> {
   try {
-    projects = await listAllVercelProjects(token);
+    return { projects: await listAllVercelProjects(token) };
   } catch (e) {
-    return { kind: 'api-error', detail: e instanceof Error ? e.message : String(e) };
+    return { outcome: { kind: 'api-error', detail: e instanceof Error ? e.message : String(e) } };
   }
-  if (projects.length === 0) return { kind: 'no-projects' };
+}
 
-  // Best guess first: a project named like the directory it lives in.
-  const dirName = basename(projectDir);
-  projects.sort((a, b) => {
+/** Best guess first (a project named like the directory it lives in), then by name. The input is not changed. */
+export function orderProjectsForPicker<T extends { readonly projectName: string }>(
+  projects: readonly T[],
+  dirName: string,
+): T[] {
+  return sortedCopy(projects, (a, b) => {
     const aMatch = a.projectName === dirName;
     const bMatch = b.projectName === dirName;
     if (aMatch !== bMatch) return aMatch ? -1 : 1;
     return a.projectName.localeCompare(b.projectName);
   });
+}
+
+/** The Vercel project picker's question: type-to-filter over `scope/project` rows plus the "None of these" row. */
+export function vercelProjectQuestion(projects: readonly PickableProject[]): any {
+  return searchableSelectQuestion<PickableProject | null>({
+    name: 'picked',
+    message: 'Which Vercel project is this?',
+    choices: [
+      ...projects.map((p) => ({ name: `${p.scopeLabel}/${p.projectName}`, value: p })),
+      { name: 'None of these — run `vercel link` instead', value: null },
+    ],
+  });
+}
+
+async function linkByProjectPicker(projectDir: string): Promise<PickerOutcome> {
+  const token = readVercelCliToken();
+  if (!token) return { kind: 'no-token' };
+
+  const listed = await tryListVercelProjects(token);
+  if ('outcome' in listed) return listed.outcome;
+  const projects = orderProjectsForPicker(listed.projects, basename(projectDir));
+  if (projects.length === 0) return { kind: 'no-projects' };
 
   process.stdout.write(
     '\n\x1b[33m▸ This directory is not linked to a Vercel project yet.\x1b[0m\n',
   );
   const ans: { picked: PickableProject | null } = (await inquirer.prompt([
-    {
-      type: 'list',
-      name: 'picked',
-      message: 'Which Vercel project is this?',
-      theme: LIST_THEME,
-      choices: [
-        ...projects.map((p) => ({
-          name: `${p.scopeLabel}/${p.projectName}`,
-          value: p,
-        })),
-        { name: 'None of these — run `vercel link` instead', value: null },
-      ],
-    } as any,
+    vercelProjectQuestion(projects),
   ])) as any;
   if (!ans.picked) return { kind: 'declined' };
 

@@ -13,34 +13,26 @@ import { EditScreen, focusedOn, type EditRow, type EditState } from '../../src/u
 
 const facts = (over: Partial<EditModeFacts>): EditModeFacts => ({
   hasName: false,
-  web: false,
   stdinIsTTY: false,
   nonTty: false,
   ...over,
 });
 
 describe('decideEditMode', () => {
-  test('1. a terminal and no name is the full-table TUI, or the browser editor with --web: unchanged', () => {
+  test('1. a terminal and no name is the full-table TUI: unchanged', () => {
     expect(decideEditMode(facts({ stdinIsTTY: true }))).toBe('tui');
-    expect(decideEditMode(facts({ stdinIsTTY: true, web: true }))).toBe('web');
   });
 
-  test('2. a terminal and a name is still the TUI (focused on NAME), or the browser editor with --web', () => {
+  test('2. a terminal and a name is still the TUI (focused on NAME)', () => {
     expect(decideEditMode(facts({ stdinIsTTY: true, hasName: true }))).toBe('tui');
-    expect(decideEditMode(facts({ stdinIsTTY: true, hasName: true, web: true }))).toBe('web');
   });
 
-  test('a name with stdin not a terminal is piped mode, and --web is ignored', () => {
+  test('a name with stdin not a terminal is piped mode', () => {
     expect(decideEditMode(facts({ hasName: true }))).toBe('piped');
-    expect(decideEditMode(facts({ hasName: true, web: true }))).toBe('piped');
   });
 
   test('7. no name and no terminal is refused (EDIT_NEEDS_TTY) - the hang this fixes', () => {
     expect(decideEditMode(facts({}))).toBe('refuse');
-  });
-
-  test('no name, no terminal, --web stays the headless browser editor agents have always used', () => {
-    expect(decideEditMode(facts({ web: true }))).toBe('web');
   });
 
   test('--non-tty takes the terminal off the table even when stdin is one', () => {
@@ -198,9 +190,11 @@ describe('capy edit NAME on a terminal: the TUI starts on NAME (spec test 2)', (
     expect(highlightedLine(frame)).not.toContain('ALPHA');
   });
 
-  test('an unknown name opens its value entry, pre-filled with the name', async () => {
+  test('an unknown name opens its value entry: the empty New value row, and no Old value (none)', async () => {
     const frame = await firstFrame(focusedOn(base(), 'DELTA'));
     expect(frame).toContain('DELTA');
-    expect(frame).toContain('> _'); // the empty value entry is open
+    expect(frame).toContain('New value'); // the empty value entry is open
+    expect(frame).toContain('new value'); // its placeholder
+    expect(frame).toContain('(none)'); // a new variable has no old value
   });
 });

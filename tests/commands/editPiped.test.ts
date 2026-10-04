@@ -23,6 +23,12 @@ const PEM = [
 
 const FIXTURE_PEM = readFileSync(join(__dirname, '../fixtures/rsa_test_key.pem'), 'utf8');
 
+// Neither --pr nor --no-pr and no terminal: the PR step does not run and says which flags would answer it.
+const UNANSWERED = [
+  { id: 'create_pr', flag: '--pr' },
+  { id: 'pr_base', flag: '--pr-base' },
+];
+
 function parseJson(stdout: string): Record<string, unknown> {
   return JSON.parse(stdout) as Record<string, unknown>;
 }
@@ -46,20 +52,20 @@ describe('capy edit NAME < value (piped)', () => {
     const first = await h().run(['edit', 'SPEC3_TOKEN', '--json'], 'v\n');
     expect(first.code).toBe(0);
     expect(first.stderr).toBe('');
-    expect(parseJson(first.stdout)).toEqual({ ok: true, name: 'SPEC3_TOKEN', branch: BRANCH, action: 'created', pushed: true });
+    expect(parseJson(first.stdout)).toEqual({ ok: true, name: 'SPEC3_TOKEN', branch: BRANCH, action: 'created', pushed: true, keep_lock: { changed: true, committed: false }, unanswered: UNANSWERED });
     expect(h().envValue('SPEC3_TOKEN')).toBe('v');
     expect(h().pushCount()).toBe(1);
 
     const second = await h().run(['edit', 'SPEC3_TOKEN', '--json'], 'w\n');
-    expect(parseJson(second.stdout)).toEqual({ ok: true, name: 'SPEC3_TOKEN', branch: BRANCH, action: 'updated', pushed: true });
+    expect(parseJson(second.stdout)).toEqual({ ok: true, name: 'SPEC3_TOKEN', branch: BRANCH, action: 'updated', pushed: true, keep_lock: { changed: true, committed: false }, unanswered: UNANSWERED });
     expect(h().envValue('SPEC3_TOKEN')).toBe('w');
     expect(h().pushCount()).toBe(2);
 
     const third = await h().run(['edit', 'SPEC3_TOKEN', '--json'], 'w\n');
     expect(third.code).toBe(0);
-    expect(parseJson(third.stdout)).toEqual({ ok: true, name: 'SPEC3_TOKEN', branch: BRANCH, action: 'unchanged', pushed: false });
+    expect(parseJson(third.stdout)).toEqual({ ok: true, name: 'SPEC3_TOKEN', branch: BRANCH, action: 'unchanged', pushed: false, keep_lock: { changed: false } });
     expect(h().pushCount()).toBe(2); // unchanged: no push
-    expect(Object.keys(parseJson(third.stdout)).toSorted()).toEqual(['action', 'branch', 'name', 'ok', 'pushed']);
+    expect(Object.keys(parseJson(third.stdout)).toSorted()).toEqual(['action', 'branch', 'keep_lock', 'name', 'ok', 'pushed']);
   });
 
   test('3b. human mode is one line on stderr and nothing on stdout', async () => {
@@ -160,7 +166,7 @@ describe('capy edit NAME < value (piped)', () => {
     const pushesBefore = h().pushCount();
     const r = await h().run(['edit', 'SPEC8_LOCAL', '--json', '--no-push'], 'local-only\n');
     expect(r.code).toBe(0);
-    expect(parseJson(r.stdout)).toEqual({ ok: true, name: 'SPEC8_LOCAL', branch: BRANCH, action: 'created', pushed: false });
+    expect(parseJson(r.stdout)).toEqual({ ok: true, name: 'SPEC8_LOCAL', branch: BRANCH, action: 'created', pushed: false, keep_lock: { changed: false } });
     expect(h().envValue('SPEC8_LOCAL')).toBe('local-only');
     expect(h().pushCount()).toBe(pushesBefore);
 
@@ -234,5 +240,57 @@ describe('capy edit NAME < value (piped)', () => {
     } finally {
       await bare.dispose();
     }
+  });
+
+  describe('keep.lock PR flags (--pr / --no-pr / --pr-base)', () => {
+    test('--pr with --no-pr is refused before anything is written', async () => {
+      const before = digest(JSON.stringify(h().allFiles().map(([p, b]) => [p, b.toString('base64')])));
+      const pushesBefore = h().pushCount();
+      const r = await h().run(['edit', 'PR_CONFLICT', '--pr', '--no-pr', '--json'], 'v\n');
+      expect(r.code).toBe(1);
+      expect(parseJson(r.stdout)).toMatchObject({ ok: false, code: 'INVALID_FORMAT' });
+      expect(h().pushCount()).toBe(pushesBefore);
+      expect(digest(JSON.stringify(h().allFiles().map(([p, b]) => [p, b.toString('base64')])))).toBe(before);
+    });
+
+    test('--no-pr: the change is reported, no PR, and nothing is left unanswered', async () => {
+      const r = await h().run(['edit', 'PR_NO', '--no-pr', '--json'], 'v\n');
+      expect(r.code).toBe(0);
+      expect(parseJson(r.stdout)).toEqual({
+        ok: true,
+        name: 'PR_NO',
+        branch: BRANCH,
+        action: 'created',
+        pushed: true,
+        keep_lock: { changed: true, committed: false },
+      });
+    });
+
+    test('--pr outside a git repository: the secret change still succeeds (exit 0) with a coded keep_lock.error', async () => {
+      const r = await h().run(['edit', 'PR_NOT_GIT', '--pr', '--pr-base', 'dev', '--json'], 'v\n');
+      expect(r.code).toBe(0);
+      const out = parseJson(r.stdout);
+      expect(out.ok).toBe(true);
+      expect(out.action).toBe('created');
+      expect(h().envValue('PR_NOT_GIT')).toBe('v');
+      expect(out.keep_lock).toMatchObject({ changed: true, committed: false, error: { code: 'KEEP_PR_NOT_GIT_REPO' } });
+      expect(out.unanswered).toBeUndefined();
+    });
+
+    test('--pr-base alone leaves only the create-PR question unanswered', async () => {
+      const r = await h().run(['edit', 'PR_BASE_ONLY', '--pr-base', 'dev', '--json'], 'v\n');
+      expect(r.code).toBe(0);
+      expect(parseJson(r.stdout).unanswered).toEqual([{ id: 'create_pr', flag: '--pr' }]);
+    });
+
+    test('the flags are in the built CLI help', async () => {
+      const r = await h().run(['help', '--json']);
+      const doc = parseJson(r.stdout) as { commands: { name: string; options: { long: string }[] }[]; errorCodes: string[] };
+      for (const name of ['add', 'edit', 'remove']) {
+        const longs = doc.commands.find((c) => c.name === name)?.options.map((o) => o.long) ?? [];
+        expect(longs).toEqual(expect.arrayContaining(['--pr', '--no-pr', '--pr-base']));
+      }
+      expect(doc.errorCodes).toEqual(expect.arrayContaining(['KEEP_PR_NOT_GIT_REPO', 'KEEP_PR_BASE_UNRESOLVED', 'KEEP_PR_CREATE_FAILED']));
+    });
   });
 });
