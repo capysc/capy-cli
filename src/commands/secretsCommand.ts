@@ -5,10 +5,14 @@ import { CapyError, ERROR_CODES } from '../types/index';
 import { rowIdOf } from './secretsRowId';
 import { secretRowStatus, secretRowStatusJson, type SecretRowStatus } from '../core/deployStatus';
 
-/** `status` (`deployed` | `not deployed` | `no target` | `unknown` — the on-screen words) plus, when some target lags, how many of how many. `no target`: the row has no Capy deploy target, so Capy can't say. */
+/**
+ * `status` (`deployed` | `needs deploy` | `no target` | `unknown` — the
+ * on-screen words). For `deployed` / `needs deploy`, `status_locations` is
+ * how many of the row's `locations_total` locations are in that state.
+ */
 function statusFields(status: SecretRowStatus): Record<string, string | number> {
-  if (status.kind !== 'behind') return { status: secretRowStatusJson(status) };
-  return { status: secretRowStatusJson(status), targets_not_deployed: status.behind, targets_total: status.total };
+  if (status.kind === 'no target' || status.kind === 'unknown') return { status: secretRowStatusJson(status) };
+  return { status: secretRowStatusJson(status), status_locations: status.locations, locations_total: status.total };
 }
 
 export interface SecretsOpts {

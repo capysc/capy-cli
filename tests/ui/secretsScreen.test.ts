@@ -221,13 +221,29 @@ describe('STATUS column (CAP-702)', () => {
     expect(cell(row({ locations: [loc({ targets: [stale('prod')] })] }))).toBe(`${YELLOW}● ${BEHIND_LABEL}${ANSI_RESET}`);
   });
 
-  test('a multi-target row counts lagging targets across every location, same yellow badge', () => {
+  test('counts are per LOCATION: one lagging location out of two reads "(1 of 2)", whatever the target count', () => {
     const r = row({ locations: [loc({ targets: [stale('prod'), current('preview')] }), loc({ branch: 'staging', targets: [current('staging')] })] });
+    expect(cell(r)).toBe(`${YELLOW}● ${BEHIND_LABEL} (1 of 2)${ANSI_RESET}`);
+  });
+
+  test('any lagging location outranks deployed ones; locations with no target still count in the total', () => {
+    const r = row({ locations: [loc({ targets: [current('a')] }), loc({ branch: 'b', targets: [stale('b')] }), loc({ branch: 'c', targets: [] })] });
     expect(cell(r)).toBe(`${YELLOW}● ${BEHIND_LABEL} (1 of 3)${ANSI_RESET}`);
+  });
+
+  test('every location lagging: plain badge, no count', () => {
+    const r = row({ locations: [loc({ targets: [stale('a')] }), loc({ branch: 'b', targets: [stale('b'), stale('c')] })] });
+    expect(cell(r)).toBe(`${YELLOW}● ${BEHIND_LABEL}${ANSI_RESET}`);
   });
 
   test('every target current reads "● deployed" in green', () => {
     expect(cell(row({ locations: [loc({ targets: [current('prod')] })] }))).toBe(`${GREEN}● ${DEPLOYED_LABEL}${ANSI_RESET}`);
+  });
+
+  test('AWS_REGION case: 33 locations, one with a current target, reads "deployed (1 of 33)"', () => {
+    const others = Array.from({ length: 32 }, (_, i) => loc({ branch: `b${i}`, targets: [] }));
+    const r = row({ name: 'AWS_REGION', locations: [loc({ targets: [current('backend-preview')] }), ...others] });
+    expect(cell(r)).toBe(`${GREEN}● ${DEPLOYED_LABEL} (1 of 33)${ANSI_RESET}`);
   });
 
   test('a row with no Capy deploy target reads a grey "—", never deployed', () => {
@@ -239,7 +255,7 @@ describe('STATUS column (CAP-702)', () => {
   });
 
   test('the STATUS header and cell render when the column is selected, padded by visible width', () => {
-    const r = row({ name: 'ROW', locations: [loc({ targets: [stale('prod'), current('preview')] })] });
+    const r = row({ name: 'ROW', locations: [loc({ targets: [stale('prod'), current('preview')] }), loc({ branch: 'staging', targets: [] })] });
     const frame = render({ ...initialSecretsScreenState([r]), column: 'status' }, 100, 20);
     const stripped = stripAnsiForTest(frame);
     expect(stripped).toContain(`${TARGET_STATUS_HEADING} ⇥`);

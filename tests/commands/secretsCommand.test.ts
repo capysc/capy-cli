@@ -372,14 +372,16 @@ describe('SecretsCommand', () => {
     const { stdout } = await capture(() => new SecretsCommand().execute({ json: true }));
     const payload = JSON.parse(stdout);
     const [behind, current, noTargets] = payload.rows;
-    expect(behind.status).toBe('not deployed');
-    expect(behind.targets_not_deployed).toBe(1);
-    expect(behind.targets_total).toBe(3);
+    expect(behind.status).toBe('needs deploy');
+    expect(behind.status_locations).toBe(1);
+    expect(behind.locations_total).toBe(2);
     expect(behind.locations[0].targets.map((t: { up_to_date: boolean }) => t.up_to_date)).toEqual([false, true]);
     expect(current.status).toBe('deployed');
-    expect(current.targets_not_deployed).toBeUndefined();
+    expect(current.status_locations).toBe(1);
+    expect(current.locations_total).toBe(1);
     expect(current.locations[0].targets[0].up_to_date).toBe(true);
     expect(noTargets.status).toBe('no target');
+    expect(noTargets.status_locations).toBeUndefined();
   });
 });
 

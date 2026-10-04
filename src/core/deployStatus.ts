@@ -9,7 +9,7 @@
  * platform or claims a release ran.
  */
 import type { KeepFile, TargetDelivery } from '../types/index';
-import type { SecretIndexRow } from '../service/serviceClient';
+import type { SecretIndexLocation, SecretIndexRow } from '../service/serviceClient';
 import type { TargetConfig } from '../deploy/adapter';
 import { unrecordedTargetsFor } from '../deploy/configuredTargets';
 
@@ -17,7 +17,7 @@ import { unrecordedTargetsFor } from '../deploy/configuredTargets';
 // one-line change. All four are Vince's words (2026-10-04).
 
 /** A target holds an older value than Capy has, or none (code `behind`). Used by both screens. */
-export const BEHIND_LABEL = 'not deployed';
+export const BEHIND_LABEL = 'needs deploy';
 /** `capy secrets`' heading for the target-status column (its details-view label is the lowercase form). */
 export const TARGET_STATUS_HEADING = 'DEPLOY STATUS';
 /** A row with no Capy target. */
@@ -52,35 +52,50 @@ export function anyTargetBehind(deployedHashes: readonly (string | null)[] | und
 
 // ── capy secrets ─────────────────────────────────────────────────────────────
 
-/** The STATUS a `capy secrets` row can have: an org-wide row has no local copy, so only these three. */
+/**
+ * The DEPLOY STATUS of a `capy secrets` row. `deployed` and `behind` carry
+ * how many of the row's locations are in that state (`locations`) out of all
+ * of them (`total`), so a value used in 33 places with one current target
+ * reads `deployed (1 of 33)`.
+ */
 export type SecretRowStatus =
   | { readonly kind: 'no target' }
-  | { readonly kind: 'deployed' }
   | { readonly kind: 'unknown' }
-  | { readonly kind: 'behind'; readonly behind: number; readonly total: number };
+  | { readonly kind: 'deployed' | 'behind'; readonly locations: number; readonly total: number };
 
-/**
- * `not deployed` when at least one target on any location lags this row's
- * value; `unknown` when a location's targets were not sent (a server that
- * predates CAP-676), so it can't be told; `no target` when the row has no
- * Capy deploy target at all — Capy only knows its own targets, so a value
- * used elsewhere (or only locally) is never called deployed (Vince,
- * 2026-10-04); `deployed` when every target has the current value.
- */
-export function secretRowStatus(row: SecretIndexRow): SecretRowStatus {
-  if (row.locations.some((loc) => loc.targets === undefined)) return { kind: 'unknown' };
-  const targets = row.locations.flatMap((loc) => loc.targets ?? []);
-  if (targets.length === 0) return { kind: 'no target' };
-  const behind = targets.filter((t) => t.stale).length;
-  return behind > 0 ? { kind: 'behind', behind, total: targets.length } : { kind: 'deployed' };
+type LocationState = 'unknown' | 'none' | 'deployed' | 'behind';
+
+function locationState(loc: SecretIndexLocation): LocationState {
+  if (loc.targets === undefined) return 'unknown';
+  if (loc.targets.length === 0) return 'none';
+  return loc.targets.some((t) => t.stale) ? 'behind' : 'deployed';
 }
 
-/** The text a person sees, without colour: `—` for no target, `<BEHIND_LABEL> (1 of 3)` when more than one target is involved, plain `<BEHIND_LABEL>` for one. */
+/**
+ * Counted per LOCATION (Vince, 2026-10-04): `behind` when any location has a
+ * target that lags (older hash, or none); else `deployed` when some location
+ * has targets and all of them are current; else `no target` — Capy only knows
+ * its own targets, so a value used elsewhere (or only locally) is never
+ * called deployed. `unknown` when a location's targets were not sent (a
+ * server that predates CAP-676), so it can't be told.
+ */
+export function secretRowStatus(row: SecretIndexRow): SecretRowStatus {
+  const states = row.locations.map(locationState);
+  if (states.includes('unknown')) return { kind: 'unknown' };
+  const total = states.length;
+  const behind = states.filter((s) => s === 'behind').length;
+  if (behind > 0) return { kind: 'behind', locations: behind, total };
+  const deployed = states.filter((s) => s === 'deployed').length;
+  if (deployed > 0) return { kind: 'deployed', locations: deployed, total };
+  return { kind: 'no target' };
+}
+
+/** The text a person sees, without colour: `—` for no target; the state's word, plus `(n of m)` locations when not every location is in that state. */
 export function formatSecretRowStatus(status: SecretRowStatus): string {
   if (status.kind === 'no target') return NO_TARGET_LABEL;
-  if (status.kind === 'deployed') return DEPLOYED_LABEL;
-  if (status.kind !== 'behind') return status.kind;
-  return status.total > 1 ? `${BEHIND_LABEL} (${status.behind} of ${status.total})` : BEHIND_LABEL;
+  if (status.kind === 'unknown') return status.kind;
+  const word = status.kind === 'behind' ? BEHIND_LABEL : DEPLOYED_LABEL;
+  return status.locations < status.total ? `${word} (${status.locations} of ${status.total})` : word;
 }
 
 /** The `--json` `status` string: the on-screen words (Vince, 2026-10-04), with `no target` for the `—` row. */
