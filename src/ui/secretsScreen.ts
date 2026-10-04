@@ -24,7 +24,7 @@ import { normalizeQuery, textMatches } from './searchMatch';
 import { CANCELLED_NOTHING, DRY_RUN_LABEL } from '../commands/secretsSetText';
 import type { RunProgress } from '../commands/secretsSet';
 import { clipLine } from './pickerTable';
-import { NOT_DEPLOYED, formatSecretRowStatus, secretRowStatus } from '../core/deployStatus';
+import { BEHIND_LABEL, TARGET_STATUS_HEADING, formatSecretRowStatus, secretRowStatus } from '../core/deployStatus';
 import { statusBadge, statusColor } from './statusBadge';
 import {
   EditEffect,
@@ -186,11 +186,11 @@ export type ColumnMode = 'project' | 'branch' | 'status' | 'connector' | 'target
 /** Tab cycles forward through this order (wrapping); Shift-Tab backward. PROJECT is the default/first-shown column (CAP-702, Vince 2026-10-03). */
 export const COLUMN_ORDER: readonly ColumnMode[] = ['project', 'branch', 'status', 'connector', 'target', 'integrations', 'users'];
 
-/** What each column is called on screen. `status` is DEPLOY STATUS (Vince, 2026-10-04): it describes Capy's own deploy targets only. */
+/** What each column is called on screen. `status` describes Capy's own targets only; its heading is TARGET_STATUS_HEADING. */
 const COLUMN_HEADINGS: Readonly<Record<ColumnMode, string>> = {
   project: 'PROJECT',
   branch: 'BRANCH',
-  status: 'DEPLOY STATUS',
+  status: TARGET_STATUS_HEADING,
   connector: 'CONNECTOR',
   target: 'TARGET',
   integrations: 'INTEGRATIONS',
@@ -1012,7 +1012,7 @@ function buildPopupLines(row: SecretIndexRow, popup: PopupState, width: number):
     '',
     field('value', renderPopupValueLine(popup, valueWidth)),
     field('updated', formatUpdatedCell(row)),
-    field('deploy status', secretRowStatusBadge(row)),
+    field(TARGET_STATUS_HEADING.toLowerCase(), secretRowStatusBadge(row)),
     '',
     `${indent}${inner}${BOLD}locations${RESET}`,
   ];
@@ -1031,7 +1031,7 @@ function buildPopupLines(row: SecretIndexRow, popup: PopupState, width: number):
     const targetsLabel =
       targets.length > 0
         ? ` · targets: ${targets
-            .map((t) => `[${t.provider}] ${t.target}${t.stale ? ` ${statusColor(NOT_DEPLOYED)}(${NOT_DEPLOYED})${DIM}` : ''}${t.pending ? ' (pending)' : ''}`)
+            .map((t) => `[${t.provider}] ${t.target}${t.stale ? ` ${statusColor('behind')}(${BEHIND_LABEL})${DIM}` : ''}${t.pending ? ' (pending)' : ''}`)
             .join(', ')}`
         : '';
     return `${indent}${inner}${truncate(`${loc.project_name} · ${loc.branch}`, contentWidth)}${protMarker} ${DIM}· ${connectorLabel} · ${updated}${targetsLabel}${RESET}`;

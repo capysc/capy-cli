@@ -178,6 +178,13 @@ export class CapyCommand {
           client: this.serviceClient,
           dryRun: this.options.dryRun === true,
         });
+        // CAP-702: configured deploy targets that never got a push read as behind in `capy secrets`. Best-effort, silent.
+        await (await import('../deploy/configuredTargets')).recordConfiguredTargets({
+          cwd: process.cwd(),
+          projectId: projectState.projectId,
+          client: this.serviceClient,
+          dryRun: this.options.dryRun === true,
+        });
       }
       const { printExpiryWarnings } = await import('./connectors/shared');
       printExpiryWarnings();

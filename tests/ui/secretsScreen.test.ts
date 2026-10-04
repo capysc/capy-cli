@@ -23,6 +23,7 @@ import {
   LocationDecryptResult,
 } from '../../src/ui/secretsScreen';
 import type { SecretIndexLocation, SecretIndexRow } from '../../src/service/serviceClient';
+import { BEHIND_LABEL, TARGET_STATUS_HEADING } from '../../src/core/deployStatus';
 
 // A very long, obviously-fake secret used everywhere a "real" value is
 // needed — never a plausible credential, never logged.
@@ -216,13 +217,13 @@ describe('STATUS column (CAP-702)', () => {
   const DIM = `${ESC}[90m`;
   const cell = (r: SecretIndexRow) => formatMiddleCell(r, 'status', 30);
 
-  test('a row with one target that lags reads "● not deployed" in yellow, like capy edit', () => {
-    expect(cell(row({ locations: [loc({ targets: [stale('prod')] })] }))).toBe(`${YELLOW}● not deployed${ANSI_RESET}`);
+  test('a row with one target that lags reads the behind badge in yellow, like capy edit', () => {
+    expect(cell(row({ locations: [loc({ targets: [stale('prod')] })] }))).toBe(`${YELLOW}● ${BEHIND_LABEL}${ANSI_RESET}`);
   });
 
   test('a multi-target row counts lagging targets across every location, same yellow badge', () => {
     const r = row({ locations: [loc({ targets: [stale('prod'), current('preview')] }), loc({ branch: 'staging', targets: [current('staging')] })] });
-    expect(cell(r)).toBe(`${YELLOW}● not deployed (1 of 3)${ANSI_RESET}`);
+    expect(cell(r)).toBe(`${YELLOW}● ${BEHIND_LABEL} (1 of 3)${ANSI_RESET}`);
   });
 
   test('every target current reads "● in sync" in green', () => {
@@ -241,10 +242,10 @@ describe('STATUS column (CAP-702)', () => {
     const r = row({ name: 'ROW', locations: [loc({ targets: [stale('prod'), current('preview')] })] });
     const frame = render({ ...initialSecretsScreenState([r]), column: 'status' }, 100, 20);
     const stripped = stripAnsiForTest(frame);
-    expect(stripped).toContain('DEPLOY STATUS ⇥');
+    expect(stripped).toContain(`${TARGET_STATUS_HEADING} ⇥`);
     const line = stripped.split('\n').find((l) => l.includes('ROW'));
-    expect(line).toContain('● not deployed (1 of 2)');
-    const header = stripped.split('\n').find((l) => l.includes('DEPLOY STATUS ⇥'));
+    expect(line).toContain(`● ${BEHIND_LABEL} (1 of 2)`);
+    const header = stripped.split('\n').find((l) => l.includes(`${TARGET_STATUS_HEADING} ⇥`));
     // The UPDATED column starts at the same visible offset on the header and the row: colour codes don't shift it.
     expect(line!.indexOf('—', line!.indexOf('(1 of 2)'))).toBe(header!.indexOf('UPDATED'));
   });
@@ -252,15 +253,16 @@ describe('STATUS column (CAP-702)', () => {
   test('the highlighted row stays highlighted after its coloured STATUS badge', () => {
     const r = row({ name: 'ROW', locations: [loc({ targets: [stale('prod')] })] });
     const frame = render({ ...initialSecretsScreenState([r]), column: 'status' }, 100, 20);
-    expect(frame).toContain(`${YELLOW}● not deployed${ANSI_RESET}${ESC}[7m`);
+    expect(frame).toContain(`${YELLOW}● ${BEHIND_LABEL}${ANSI_RESET}${ESC}[7m`);
   });
 
   test('the details view shows the row status badge, and a lagging target in yellow', () => {
     const r = row({ name: 'ROW', locations: [loc({ targets: [stale('prod')] })] });
     const frame = render(handleKey(initialSecretsScreenState([r]), ENTER).state, 100, 30);
-    expect(stripAnsiForTest(frame)).toMatch(/deploy status\s+● not deployed/);
-    expect(frame).toContain(`${YELLOW}● not deployed${ANSI_RESET}`);
-    expect(frame).toContain(`${YELLOW}(not deployed)`);
+    expect(stripAnsiForTest(frame)).toContain(`${TARGET_STATUS_HEADING.toLowerCase()}  `);
+    expect(stripAnsiForTest(frame)).toContain(`● ${BEHIND_LABEL}`);
+    expect(frame).toContain(`${YELLOW}● ${BEHIND_LABEL}${ANSI_RESET}`);
+    expect(frame).toContain(`${YELLOW}(${BEHIND_LABEL})`);
   });
 });
 
@@ -1057,14 +1059,14 @@ describe('CAP-679 rendering: "+N" survives truncation, INTEGRATIONS overflow, po
     expect(frame).toContain('[dokploy] backend-preview');
   });
 
-  test('the details popup spells out a stale target with "(not deployed)" (CAP-702)', () => {
+  test('the details popup spells out a stale target with the behind label (CAP-702)', () => {
     const target = row({
       name: 'ROW',
       locations: [loc({ targets: [{ provider: 'aws-ecs', target: 'prod-cluster', stale: true }] })],
     });
     const s1 = handleKey(initialSecretsScreenState([target]), ENTER).state;
     const frame = render(s1, 100, 30);
-    expect(stripAnsiForTest(frame)).toContain('targets: [aws-ecs] prod-cluster (not deployed)');
+    expect(stripAnsiForTest(frame)).toContain(`targets: [aws-ecs] prod-cluster (${BEHIND_LABEL})`);
   });
 
   test('the details popup spells out a pending target with "(pending)"', () => {
@@ -1077,7 +1079,7 @@ describe('CAP-679 rendering: "+N" survives truncation, INTEGRATIONS overflow, po
     expect(frame).toContain('targets: [dokploy] backend-preview (pending)');
   });
 
-  test('the details popup lists a non-stale target with no "(not deployed)" marker', () => {
+  test('the details popup lists a non-stale target with no behind marker', () => {
     const target = row({
       name: 'ROW',
       locations: [loc({ targets: [{ provider: 'aws-ecs', target: 'prod-cluster', stale: false }] })],
@@ -1085,7 +1087,7 @@ describe('CAP-679 rendering: "+N" survives truncation, INTEGRATIONS overflow, po
     const s1 = handleKey(initialSecretsScreenState([target]), ENTER).state;
     const frame = render(s1, 100, 30);
     expect(frame).toContain('targets: [aws-ecs] prod-cluster');
-    expect(frame).not.toContain('(not deployed)');
+    expect(frame).not.toContain(`(${BEHIND_LABEL})`);
   });
 
   test('the details popup shows nothing target-related for a location with no targets', () => {

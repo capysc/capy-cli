@@ -2,6 +2,8 @@
 // `capy secrets`' STATUS column (CAP-702), so both screens colour a status
 // the same way.
 
+import { BEHIND_LABEL } from '../core/deployStatus';
+
 const ESC = '\x1b';
 const RESET = `${ESC}[0m`;
 const DIM = `${ESC}[90m`;
@@ -10,14 +12,15 @@ const YELLOW = `${ESC}[33m`;
 const RED = `${ESC}[31m`;
 const CYAN = `${ESC}[36m`;
 
-export type StatusWord = 'in sync' | 'local' | 'remote' | 'conflict' | 'not deployed' | 'unknown';
+/** Status codes. Every code is its own on-screen word except `behind`, shown as BEHIND_LABEL. */
+export type StatusWord = 'in sync' | 'local' | 'remote' | 'conflict' | 'behind' | 'unknown';
 
 export function statusColor(status: StatusWord): string {
   switch (status) {
     case 'in sync':
       return GREEN;
     case 'local':
-    case 'not deployed':
+    case 'behind':
       return YELLOW;
     case 'remote':
       return CYAN;
@@ -29,7 +32,11 @@ export function statusColor(status: StatusWord): string {
   }
 }
 
-/** `● <label>` in the status's colour. `label` defaults to the status word; `capy secrets` passes `not deployed (1 of 3)`. */
-export function statusBadge(status: StatusWord, label: string = status): string {
+/** `● <label>` in the status's colour. `label` defaults to the status's own word; `capy secrets` passes e.g. `<BEHIND_LABEL> (1 of 3)`. */
+export function statusBadge(status: StatusWord, label: string = statusLabel(status)): string {
   return `${statusColor(status)}● ${label}${RESET}`;
+}
+
+export function statusLabel(status: StatusWord): string {
+  return status === 'behind' ? BEHIND_LABEL : status;
 }

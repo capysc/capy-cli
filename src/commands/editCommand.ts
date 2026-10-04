@@ -10,6 +10,7 @@ import { resolveLocalProjectKey } from '../core/localUnlock';
 import { hashValue } from './statusCommand';
 import { EditScreen, EditRow, EditState, classifyLocalRow, focusedOn, withDeployStatus } from '../ui/editScreen';
 import { deployedHashesFor } from '../core/deployStatus';
+import { readDefaultBranchTargets } from '../deploy/configuredTargets';
 import { formatRelativeTime } from '../ui/relativeTime';
 import { Encryptor } from '../crypto/encryptor';
 import { deriveResourceId } from '../crypto/resourceId';
@@ -314,6 +315,7 @@ export class EditCommand {
     });
 
     const deployKeep = await loadDeployKeep({ localMode, serviceClient, projectId, branch, localKeep: keep });
+    const configuredTargets = readDefaultBranchTargets(process.cwd());
 
     // Build rows for every variable known to any source
     const allKeys = new Set<string>([
@@ -343,7 +345,7 @@ export class EditCommand {
             status: classifyStatus(pinnedHash, localHash, remoteHash, remoteAvailable),
             updatedLabel: changedAt ? formatRelativeTime(changedAt) : '—',
           };
-      const deployedHashes = deployedHashesFor(deployKeep, key, branch);
+      const deployedHashes = deployedHashesFor(deployKeep, key, branch, configuredTargets);
       const base: EditRow = { key, localValue: localVal, remoteValue: remoteVal, status, updatedLabel, changedAt, deployedHashes };
 
       return { ...base, status: withDeployStatus(base, status) };

@@ -39,14 +39,15 @@ export interface EditRow {
   key: string;
   localValue: string | undefined;
   remoteValue: string | undefined;
-  status: 'in sync' | 'local' | 'remote' | 'conflict' | 'not deployed' | 'unknown';
+  status: 'in sync' | 'local' | 'remote' | 'conflict' | 'behind' | 'unknown';
   updatedLabel: string;
   /**
    * CAP-702: `deployed_value_hash` of every deploy target this variable was
-   * pushed to on the active branch. A row that is otherwise in sync reads
-   * `not deployed` while any of these differs from its value's hash.
+   * pushed to on the active branch (`null`: never pushed). A row that is
+   * otherwise in sync reads `behind` while any of these differs from its
+   * value's hash.
    */
-  deployedHashes?: readonly string[];
+  deployedHashes?: readonly (string | null)[];
   /**
    * keep.lock changed_at for this variable on the active branch (ISO8601,
    * server-assigned) — when the value last changed server-side. Drives the
@@ -153,7 +154,7 @@ export function reclassifyRow(
 export function withDeployStatus(row: EditRow, status: EditRow['status']): EditRow['status'] {
   if (status !== 'in sync') return status;
   const value = row.localValue ?? row.remoteValue;
-  return anyTargetBehind(row.deployedHashes, value === undefined ? undefined : hashValue(value)) ? 'not deployed' : status;
+  return anyTargetBehind(row.deployedHashes, value === undefined ? undefined : hashValue(value)) ? 'behind' : status;
 }
 
 function syncStatus(row: EditRow, mode: { localMode?: boolean; remoteAvailable: boolean }): EditRow['status'] {
@@ -176,7 +177,7 @@ function syncStatus(row: EditRow, mode: { localMode?: boolean; remoteAvailable: 
  * wording; otherwise the label says when the value last changed server-side.
  */
 export function updatedLabelForRow(row: EditRow, mode: { localMode?: boolean }): string {
-  if (mode.localMode) return row.status === 'in sync' || row.status === 'not deployed' ? 'committed' : 'uncommitted';
+  if (mode.localMode) return row.status === 'in sync' || row.status === 'behind' ? 'committed' : 'uncommitted';
   return row.changedAt ? formatRelativeTime(row.changedAt) : NO_VALUE;
 }
 

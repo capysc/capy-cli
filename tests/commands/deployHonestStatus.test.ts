@@ -1,4 +1,4 @@
-// CAP-702: honest deploy wording, and the `not deployed` status in `capy edit`.
+// CAP-702: honest deploy wording, and the behind status in `capy edit`.
 // Capy pushes values to the target's store; it never claims a release ran.
 import { describe, it, expect } from 'bun:test';
 import { buildDeployPrBody, pushedLine } from '../../src/commands/deployCommand';
@@ -31,7 +31,7 @@ describe('capy deploy result line (CAP-702)', () => {
   });
 });
 
-describe('capy edit STATUS: not deployed (CAP-702)', () => {
+describe('capy edit STATUS: behind (CAP-702)', () => {
   const value = 'fake-value-one';
   const row = (over: Partial<EditRow> = {}): EditRow => ({
     key: 'API_KEY',
@@ -52,16 +52,16 @@ describe('capy edit STATUS: not deployed (CAP-702)', () => {
     expect(reclassifyRow(row(), server)).toBe('in sync');
   });
 
-  it('in sync but one target holds an older value reads not deployed', () => {
-    expect(reclassifyRow(row({ deployedHashes: [hashValue(value), hashValue('older')] }), server)).toBe('not deployed');
+  it('in sync but one target holds an older value reads behind', () => {
+    expect(reclassifyRow(row({ deployedHashes: [hashValue(value), hashValue('older')] }), server)).toBe('behind');
   });
 
-  it('a value edited in the session becomes not deployed once committed, since no target has it yet', () => {
+  it('a value edited in the session becomes behind once committed, since no target has it yet', () => {
     const edited = row({ localValue: 'fake-new', remoteValue: 'fake-new', deployedHashes: [hashValue(value)] });
-    expect(reclassifyRow(edited, server)).toBe('not deployed');
+    expect(reclassifyRow(edited, server)).toBe('behind');
   });
 
-  it('conflict, local and remote outrank not deployed', () => {
+  it('conflict, local and remote outrank behind', () => {
     const behind = [hashValue('older')];
     expect(reclassifyRow(row({ localValue: 'a', remoteValue: 'b', deployedHashes: behind }), server)).toBe('conflict');
     expect(reclassifyRow(row({ remoteValue: undefined, deployedHashes: behind }), server)).toBe('local');
