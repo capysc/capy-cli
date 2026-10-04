@@ -21,6 +21,25 @@ import { renderInlineValue } from './editScreen';
 import { hashValue } from '../commands/statusCommand';
 import { ACCENT } from './colors';
 import { normalizeQuery, textMatches } from './searchMatch';
+import { CANCELLED_NOTHING, DRY_RUN_LABEL } from '../commands/secretsSetText';
+import type { RunProgress } from '../commands/secretsSet';
+import { clipLine } from './pickerTable';
+import {
+  EditEffect,
+  EditFlow,
+  ReposLoaded,
+  RunFinished,
+  applyBasesLoaded,
+  applyProgress,
+  applyReposLoaded,
+  basesEffectFor,
+  applyOldValue,
+  applyRunFinished,
+  isRunning,
+  renderEdit,
+  startEdit,
+  stepEdit,
+} from './secretsEditFlow';
 
 // ── ANSI (mirrors EditScreen's palette/look-and-feel) ───────────────────────
 
@@ -37,9 +56,17 @@ const RESET = `${ESC}[0m`;
 const DIM = `${ESC}[90m`;
 const BOLD = `${ESC}[1m`;
 const RED = `${ESC}[31m`;
+const YELLOW = `${ESC}[33m`;
+
+// Bracketed paste: the terminal wraps pasted text in markers so a multi-line
+// value (a PEM key) can be taken verbatim by the edit dialog.
+const ENABLE_BRACKETED_PASTE = `${ESC}[?2004h`;
+const DISABLE_BRACKETED_PASTE = `${ESC}[?2004l`;
 
 export const SECRETS_SCREEN_ANSI = {
   ESC,
+  ENABLE_BRACKETED_PASTE,
+  DISABLE_BRACKETED_PASTE,
   HIDE_CURSOR,
   SHOW_CURSOR,
   MOVE_HOME,
@@ -64,6 +91,8 @@ const KEY_TAB = '\t';
 const KEY_ESC = ESC;
 const KEY_ESC_ESC = `${ESC}${ESC}`;
 const KEY_CTRL_C = '\x03';
+/** Ctrl+E: edit the selected row's value, from the list while no filter is typed. The plain `e` is only a hotkey in the details view, where nothing types. */
+const KEY_CTRL_E = '\x05';
 const KEY_BACKSPACE = '\x7f';
 const KEY_BACKSPACE2 = '\b';
 
@@ -187,17 +216,29 @@ export interface SecretsScreenState {
   readonly cursorIndex: number;
   readonly search: SearchState;
   readonly popup: PopupState | null;
+  /** The edit flow (CAP-698), open while a value is being changed; `null` otherwise. */
+  readonly edit: EditFlow | null;
+  /** `capy --dry-run secrets`: the edit flow only plans, and every screen says so. */
+  readonly dryRun: boolean;
   readonly quit: boolean;
+  /** Printed to stdout after the screen is left (the edit confirmation, so it stays in the scrollback). */
+  readonly exitText: string | null;
+  /** A short dim note shown under the list until the next key (e.g. that an edit was cancelled). */
+  readonly note: string | null;
 }
 
-export function initialSecretsScreenState(rows: readonly SecretIndexRow[]): SecretsScreenState {
+export function initialSecretsScreenState(rows: readonly SecretIndexRow[], dryRun: boolean = false): SecretsScreenState {
   return {
     rows,
     column: 'connector',
     cursorIndex: 0,
     search: { query: '' },
     popup: null,
+    edit: null,
+    dryRun,
     quit: false,
+    exitText: null,
+    note: null,
   };
 }
 
@@ -310,7 +351,7 @@ function clampIndex(index: number, length: number): number {
 // ── Effects (data describing a side effect the driver must perform — the
 // reducer itself performs none) ─────────────────────────────────────────────
 
-export type SecretsScreenEffect = { readonly type: 'fetchValue'; readonly row: SecretIndexRow } | null;
+export type SecretsScreenEffect = { readonly type: 'fetchValue'; readonly row: SecretIndexRow } | EditEffect | null;
 
 export interface ReduceResult {
   readonly state: SecretsScreenState;
@@ -320,12 +361,71 @@ export interface ReduceResult {
 const noEffect = (state: SecretsScreenState): ReduceResult => ({ state, effect: null });
 
 /** Pure reducer: `(state, key) => { state, effect }`. Never touches stdin/stdout/network — see module doc. */
-export function handleKey(state: SecretsScreenState, key: string): ReduceResult {
-  if (key === KEY_CTRL_C) return noEffect({ ...state, quit: true });
+export function handleKey(state: SecretsScreenState, rawKey: string): ReduceResult {
+  const key = rawKey;
+  // The note lasts until the next key.
+  if (state.note !== null) return handleKey({ ...state, note: null }, rawKey);
 
-  if (state.popup) return noEffect(handlePopupKey(state, key));
+  // While an edit runs, Ctrl-C and Esc STOP it (never leave the screen hanging, never cut a push in half).
+  if (key === KEY_CTRL_C && !isRunning(state.edit)) return noEffect({ ...state, quit: true });
+
+  if (state.edit) return handleEditFlowKey(state, state.edit, key);
+
+  if (state.popup) {
+    return key === 'e' || key === 'E' || key === KEY_CTRL_E ? openEditOnCursor(state) : noEffect(handlePopupKey(state, key));
+  }
 
   return handleListKey(state, key);
+}
+
+/**
+ * The row under the cursor, as the edit flow's starting point. Its current value
+ * is fetched with the same effect (and so the same decrypt path) the details view
+ * uses, so the dialog's Old value row can show it on request.
+ */
+function openEditOnCursor(state: SecretsScreenState): ReduceResult {
+  const rows = filteredRows(state);
+  const row = rows[clampIndex(state.cursorIndex, rows.length)];
+  return row ? { state: { ...state, popup: null, edit: startEdit(row) }, effect: { type: 'fetchValue', row } } : noEffect(state);
+}
+
+function handleEditFlowKey(state: SecretsScreenState, flow: EditFlow, key: string): ReduceResult {
+  // A dry run only plans (reads): stopping it is immediate and nothing was ever going to change.
+  if (state.dryRun && flow.step === 'running' && (key === KEY_CTRL_C || key === KEY_ESC || key === KEY_ESC_ESC)) {
+    return { state: { ...state, edit: null, note: CANCELLED_NOTHING }, effect: { type: 'cancelRun', phase: 'planning' } };
+  }
+  const step = stepEdit(flow, key);
+  if (step.exitText !== undefined) return noEffect({ ...state, edit: null, quit: true, exitText: step.exitText });
+  return { state: { ...state, edit: step.flow, note: step.note ?? null }, effect: step.effect };
+}
+
+/** The run reported progress (a single re-render). */
+export function applyRunProgress(state: SecretsScreenState, progress: RunProgress): SecretsScreenState {
+  return { ...state, edit: applyProgress(state.edit, progress) };
+}
+
+/** The repo list the `loadRepos` effect asked for. */
+export function applyRepos(state: SecretsScreenState, result: ReposLoaded): SecretsScreenState {
+  return { ...state, edit: applyReposLoaded(state.edit, result) };
+}
+
+/**
+ * The repo table is up: the effect that reads its BASE column, or `null` when
+ * there is nothing to read. The driver performs it right after `applyRepos`.
+ */
+export function pendingBasesEffect(state: SecretsScreenState): SecretsScreenEffect {
+  return basesEffectFor(state.edit);
+}
+
+/** The BASE column's data arrived (a single re-render), possibly starting a run that was waiting for it. */
+export function applyBases(state: SecretsScreenState, bases: Readonly<Record<string, string>>): ReduceResult {
+  const step = applyBasesLoaded(state.edit, bases);
+  return { state: { ...state, edit: step.flow }, effect: step.effect };
+}
+
+/** The run the `runSet` effect started. */
+export function applyRunDone(state: SecretsScreenState, finished: RunFinished): SecretsScreenState {
+  return { ...state, edit: applyRunFinished(state.edit, finished) };
 }
 
 function filteredRowsFor(rows: readonly SecretIndexRow[], query: string): readonly SecretIndexRow[] {
@@ -382,6 +482,9 @@ function handleListKey(state: SecretsScreenState, key: string): ReduceResult {
     if (state.search.query !== '') return noEffect(applyQuery(state, ''));
     return noEffect({ ...state, quit: true });
   }
+
+  // Never while a filter is typed: the search owns the keyboard then. Enter (details), then `e`, edits a filtered row.
+  if (key === KEY_CTRL_E && state.search.query === '') return openEditOnCursor(state);
 
   if (key === KEY_TAB) {
     return noEffect({ ...state, column: nextColumn(state.column, 1) });
@@ -447,9 +550,12 @@ export function applyValueResult(
   forRow: { readonly name: string; readonly value_hash: string },
   result: ValueState,
 ): SecretsScreenState {
-  if (!state.popup) return state;
-  if (state.popup.rowName !== forRow.name || state.popup.rowHash !== forRow.value_hash) return state;
-  return { ...state, popup: { ...state.popup, value: result } };
+  const popup =
+    state.popup !== null && state.popup.rowName === forRow.name && state.popup.rowHash === forRow.value_hash
+      ? { ...state.popup, value: result }
+      : state.popup;
+  // The edit dialog's Old value row is fed by the same fetch (and dropped by the same row guard).
+  return { ...state, popup, edit: applyOldValue(state.edit, forRow, result) };
 }
 
 // ── Value resolution (pure given an injected decryptor — see module doc) ────
@@ -768,6 +874,7 @@ function searchBarLine(state: SecretsScreenState, matchedCount: number): string 
 
 /** Pure render — a total function of state + terminal size. Never mutates `state`; any "clamping" of a display-only quantity (e.g. panning past the end of a value) is a local `const`, never written back. */
 export function render(state: SecretsScreenState, termWidth: number, termHeight: number): string {
+  if (state.edit) return renderEditScreen(state.edit, termWidth, termHeight, state.dryRun);
   const m = ' '.repeat(MARGIN);
   const available = Math.max(40, termWidth - MARGIN * 2);
   const matched = filteredRowsWithReasons(state);
@@ -776,7 +883,7 @@ export function render(state: SecretsScreenState, termWidth: number, termHeight:
   const cursorIndex = clampIndex(state.cursorIndex, rows.length);
 
   const headerLines: readonly string[] = [
-    `${m}${BOLD}capy secrets${RESET} ${DIM}(${state.rows.length} secret${state.rows.length === 1 ? '' : 's'})${RESET}`,
+    `${m}${BOLD}capy secrets${RESET}${dryRunTag(state.dryRun)} ${DIM}(${state.rows.length} secret${state.rows.length === 1 ? '' : 's'})${RESET}`,
     m + searchBarLine(state, rows.length),
     '',
   ];
@@ -821,11 +928,32 @@ export function render(state: SecretsScreenState, termWidth: number, termHeight:
   const bodyOutputLines: readonly string[] =
     rows.length === 0 ? [`${m}${DIM}No secrets match.${RESET}`] : slice.map((line) => m + line);
 
-  const footerLines: readonly string[] = ['', m + footerLine(state)];
+  const noteLines: readonly string[] = state.note === null ? [] : [`${m}${DIM}${state.note}${RESET}`];
+  const footerLines: readonly string[] = ['', ...noteLines, m + footerLine(state)];
 
   const lines: readonly string[] = [...preBodyLines, ...bodyOutputLines, ...footerLines];
 
   return lines.map((l) => l + CLEAR_EOL).join('\n');
+}
+
+/** The marker every screen carries while `--dry-run` is on, so nobody mistakes it for the real thing. */
+function dryRunTag(dryRun: boolean): string {
+  return dryRun ? `  ${BOLD}${YELLOW}${DRY_RUN_LABEL}${RESET}` : '';
+}
+
+/** The edit flow's screen: a header, the step's body, and its key hints. */
+function renderEditScreen(flow: EditFlow, termWidth: number, termHeight: number, dryRun: boolean): string {
+  const m = ' '.repeat(MARGIN);
+  const { lines, footer } = renderEdit(flow, termWidth, termHeight, dryRun);
+  const out: readonly string[] = [
+    `${m}${BOLD}capy secrets${RESET}${dryRunTag(dryRun)}`,
+    '',
+    ...lines.map((l) => m + l),
+    '',
+    m + footer,
+  ];
+  // No line is ever wider than the terminal (a wrapped line would break the layout).
+  return out.map((l) => clipLine(l, termWidth) + CLEAR_EOL).join('\n');
 }
 
 function spliceIn(bodyLines: readonly string[], afterIndex: number, insert: readonly string[]): string[] {
@@ -918,7 +1046,8 @@ function footerLine(state: SecretsScreenState): string {
   if (state.popup) {
     const revealLabel = state.popup.revealed ? 'hide' : 'reveal';
     const panHint = state.popup.revealed ? `${DIM} · ${RESET}${BOLD}←/→${RESET}${DIM} pan${RESET}` : '';
-    return `${BOLD}r${RESET}${DIM} ${revealLabel}${RESET}${panHint}${DIM} · ${RESET}${BOLD}esc${RESET}${DIM}/${RESET}${BOLD}q${RESET}${DIM} close${RESET}`;
+    return `${BOLD}r${RESET}${DIM} ${revealLabel}${RESET}${panHint}${DIM} · ${RESET}${BOLD}e${RESET}${DIM} edit${RESET}${DIM} · ${RESET}${BOLD}esc${RESET}${DIM}/${RESET}${BOLD}q${RESET}${DIM} close${RESET}`; // COPY-FLAG
   }
-  return `${DIM}↑↓ navigate · ${RESET}${BOLD}tab${RESET}${DIM} column · ${RESET}${BOLD}enter${RESET}${DIM} inspect · ${RESET}${BOLD}esc${RESET}${DIM} clear/quit${RESET}`;
+  const editHint = state.search.query === '' ? `${BOLD}ctrl+e${RESET}${DIM} edit · ${RESET}` : '';
+  return `${DIM}↑↓ navigate · ${RESET}${BOLD}tab${RESET}${DIM} column · ${RESET}${BOLD}enter${RESET}${DIM} inspect · ${RESET}${editHint}${BOLD}esc${RESET}${DIM} clear/quit${RESET}`; // COPY-FLAG
 }

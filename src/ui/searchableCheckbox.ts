@@ -35,6 +35,7 @@ import {
   isNumberKey,
 } from '@inquirer/core';
 import { filterByQuery } from './searchMatch';
+import { CHECKBOX_CURSOR } from './promptStyle';
 
 const DIM = (s: string) => `\x1b[90m${s}\x1b[0m`;
 const ACCENT = (s: string) => `\x1b[36m${s}\x1b[0m`;
@@ -178,7 +179,7 @@ export const searchableCheckbox = createPrompt<readonly unknown[], SearchableChe
     const icon = {
       checked: config.theme?.icon?.checked ?? '◉',
       unchecked: config.theme?.icon?.unchecked ?? '◯',
-      cursor: '❯',
+      cursor: CHECKBOX_CURSOR,
     };
     const [status, setStatus] = useState<'idle' | 'done'>('idle');
     const prefix = usePrefix({ status, theme });

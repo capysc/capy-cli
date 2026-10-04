@@ -14,6 +14,7 @@ import { createHash } from 'crypto';
 import { Encryptor } from '../crypto/encryptor';
 import { deriveResourceId } from '../crypto/resourceId';
 import { debug } from '../ui/debug';
+import type { RateInfo } from '../utils/pool';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -223,6 +224,48 @@ export interface SecretIndexResponse {
   skipped: SecretIndexSkipped[];
 }
 
+// ── Project → repo links (CAP-697) ──────────────────────────────────────────
+
+/** What the CLI reports for a project's keep.lock: the `origin` remote's identity and the folder, never a URL. */
+export interface ProjectRepoReport {
+  host: string;
+  owner: string;
+  name: string;
+  /** Folder of the keep.lock relative to the repo root; `.` for the root. */
+  path: string;
+  github_repo_id?: number;
+}
+
+export interface KnownRepo {
+  host: string;
+  owner: string;
+  name: string;
+  path: string;
+}
+
+/** `known_repos` excludes the row just written. */
+export interface ProjectRepoReportResponse {
+  ok: true;
+  link: KnownRepo & { project_id: string; github_repo_id: number | null; first_seen_at: string; last_seen_at: string };
+  known_repos: KnownRepo[];
+}
+
+export interface OrgRepoLink {
+  project_id: string;
+  project_name: string;
+  host: string;
+  owner: string;
+  name: string;
+  path: string;
+  github_repo_id: number | null;
+  last_seen_at: string;
+}
+
+export interface OrgReposResponse {
+  org_id: string;
+  repos: OrgRepoLink[];
+}
+
 /**
  * Async callback that returns the current valid token, refreshing it if
  * needed. ServiceClient calls this before every request — no local token
@@ -230,6 +273,65 @@ export interface SecretIndexResponse {
  * invisible to ServiceClient and callers.
  */
 export type TokenProvider = () => Promise<ServiceToken | null>;
+
+/**
+ * A 404 from the repo-links route means the service predates the route (decided
+ * by the HTTP status the typed error carries, never by its text). A 404 the
+ * server itself attributes to the org (`ORG_NOT_FOUND`) stays that.
+ */
+export function repoLinksUnsupportedOr(err: unknown): unknown {
+  if (!(err instanceof CapyError) || err.details?.status !== 404 || err.code === ERROR_CODES.ORG_NOT_FOUND) return err;
+  return new CapyError('Repo links are not supported by this service.', ERROR_CODES.REPO_LINKS_UNSUPPORTED, err.details); // COPY-FLAG
+}
+
+/** The wait a 429 asked for, in ms (undefined when it did not say). Headers only. */
+function retryAfterMsOf(res: Response): number | undefined {
+  const header = (name: string): number | undefined => {
+    const raw = res.headers?.get?.(name);
+    const n = raw === null || raw === undefined ? NaN : Number(raw);
+    return Number.isFinite(n) && n >= 0 ? n * 1000 : undefined;
+  };
+  return header('retry-after') ?? header('ratelimit-reset');
+}
+
+/**
+ * What the service said is left in the rate-limit window (standard `RateLimit-Remaining` and
+ * `RateLimit-Reset` headers, the reset in seconds), as structured fields. Headers only.
+ */
+export function rateInfoOf(res: Response, now: number = Date.now()): RateInfo | undefined {
+  const header = (name: string): number | undefined => {
+    const raw = res.headers?.get?.(name);
+    const n = raw === null || raw === undefined || raw === '' ? NaN : Number(raw);
+    return Number.isFinite(n) && n >= 0 ? n : undefined;
+  };
+  const remaining = header('ratelimit-remaining');
+  const resetSeconds = header('ratelimit-reset');
+  return remaining === undefined || resetSeconds === undefined ? undefined : { remaining, resetAt: now + resetSeconds * 1000 };
+}
+
+/**
+ * The response body, read within `timeoutMs`. The request's own timer covers the
+ * connection and the headers; this covers a server that answers and then stalls
+ * mid-body, which would otherwise wait forever.
+ */
+function readJsonWithin(res: Response, timeoutMs: number): Promise<unknown> {
+  return new Promise<unknown>((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new CapyError(`Failed to connect to ${B('Capy')} service. Please check your internet connection.`, ERROR_CODES.NETWORK_ERROR, { code: 'ETIMEDOUT' })),
+      timeoutMs,
+    );
+    res.json().then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (err: unknown) => {
+        clearTimeout(timer);
+        reject(err);
+      },
+    );
+  });
+}
 
 export class ServiceClient {
   private apiUrl: string;
@@ -306,7 +408,7 @@ export class ServiceClient {
     }
   }
 
-  private async request<T>(method: string, path: string, body?: unknown, options?: { timeout?: number; _retried?: boolean }): Promise<T> {
+  private async request<T>(method: string, path: string, body?: unknown, options?: { timeout?: number; _retried?: boolean; onRateLimit?: (rate: RateInfo) => void }): Promise<T> {
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
     };
@@ -315,10 +417,13 @@ export class ServiceClient {
       headers['Authorization'] = `Bearer ${token.access_token}`;
     }
 
-    const res = await this.fetchOnce(method, path, headers, body, options?.timeout ?? 30000);
+    const timeoutMs = options?.timeout ?? 30000;
+    const res = await this.fetchOnce(method, path, headers, body, timeoutMs);
+    const rate = options?.onRateLimit === undefined ? undefined : rateInfoOf(res);
+    if (rate !== undefined) options?.onRateLimit?.(rate);
 
     if (!res.ok) {
-      const data = await res.json().catch(() => ({})) as Record<string, any>;
+      const data = await readJsonWithin(res, timeoutMs).catch(() => ({})) as Record<string, any>;
 
       if (res.status === 401) {
         // The provider already refreshes proactively on expiry; a 401 here
@@ -333,6 +438,16 @@ export class ServiceClient {
           `Authentication failed: ${detail}`,
           ERROR_CODES.AUTH_FAILED,
           { status: 401, detail }
+        );
+      }
+
+      if (res.status === 429) {
+        // Too many requests. Decided by the STATUS; the wait the server asked for (`Retry-After`, else
+        // `RateLimit-Reset`, both in seconds) rides along for the caller's bounded retry.
+        throw new CapyError(
+          data.error || 'Too many requests.',
+          ERROR_CODES.RATE_LIMITED,
+          { status: 429, retry_after_ms: retryAfterMsOf(res) },
         );
       }
 
@@ -369,7 +484,7 @@ export class ServiceClient {
       return undefined as T;
     }
 
-    return res.json() as Promise<T>;
+    return readJsonWithin(res, timeoutMs) as Promise<T>;
   }
 
   async initializeProject(projectName: string, organizationId: string): Promise<ProjectInitResult> {
@@ -402,6 +517,7 @@ export class ServiceClient {
     branch?: string,
     keepHash?: string,
     includeLatestHash?: boolean,
+    onRateLimit?: (rate: RateInfo) => void,
   ): Promise<DecryptResponse> {
     try {
       const params: string[] = [];
@@ -416,7 +532,7 @@ export class ServiceClient {
         latest_keep_hash?: string;
         keep_file?: string;
       }>(
-        'GET', `/secrets/${projectId}${query}`,
+        'GET', `/secrets/${projectId}${query}`, undefined, { onRateLimit },
       );
 
       return {
@@ -596,12 +712,13 @@ export class ServiceClient {
     keepFile: string,
     envBlob: string,
     branch: string,
+    onRateLimit?: (rate: RateInfo) => void,
   ): Promise<{ keep_hash: string; keep_file?: string }> {
     return this.request('POST', `/secrets/${projectId}`, {
       keep_file: keepFile,
       env_blob: envBlob,
       branch,
-    });
+    }, { onRateLimit });
   }
 
   /**
@@ -871,5 +988,29 @@ export class ServiceClient {
    */
   async getSecretIndex(orgId: string): Promise<SecretIndexResponse> {
     return this.request('GET', `/orgs/${orgId}/secrets`);
+  }
+
+  /**
+   * CAP-697: records which repo (and folder) holds this project's keep.lock.
+   * Fire-and-forget by design — the caller passes a short `timeoutMs` and
+   * drops any failure. Carries host/owner/name/path and a numeric repo id,
+   * never a URL (so never userinfo).
+   */
+  async putProjectRepo(
+    orgId: string,
+    projectId: string,
+    link: ProjectRepoReport,
+    timeoutMs?: number,
+  ): Promise<ProjectRepoReportResponse> {
+    return this.request('PUT', `/orgs/${orgId}/projects/${projectId}/repos`, link, { timeout: timeoutMs });
+  }
+
+  /** CAP-697: every project → repo link the caller can see (owners, admins and project admins only; a plain member gets a 403). */
+  async getOrgRepos(orgId: string): Promise<OrgReposResponse> {
+    try {
+      return await this.request<OrgReposResponse>('GET', `/orgs/${orgId}/repos`);
+    } catch (err) {
+      throw repoLinksUnsupportedOr(err);
+    }
   }
 }

@@ -15,6 +15,9 @@ export CAPY_NO_AUTOCOMMIT=1
 # (the sign-in callback, the deploy page), where the flag is not theirs to pass.
 export CAPY_WEB_NO_OPEN=1
 
+# No test may report this checkout's repo as a project link (CAP-697); tests that exercise reporting opt back in.
+export CAPY_NO_REPO_LINK=1
+
 FAIL=0
 
 # Files that use mock.module() — must run in isolation
@@ -32,6 +35,7 @@ ISOLATED_FILES=(
   tests/crypto/keyResolverLegacyKeychainMode.test.ts
   tests/crypto/localKey.test.ts
   tests/crypto/keyStability.test.ts
+  tests/crypto/runKeyResolver.test.ts
   tests/crypto/zeroTrust.test.ts
   tests/commands/logoutCleanup.test.ts
   tests/commands/mintDeployTokenScope.test.ts
@@ -67,6 +71,9 @@ ISOLATED_FILES=(
   tests/commands/agentsCommand.test.ts
   tests/commands/transportCommand.test.ts
   tests/commands/pairCommand.test.ts
+  # Reads process.stdout.isTTY/columns/rows directly; on CI's Linux runner an
+  # earlier batch file left isTTY unassignable ("readonly property").
+  tests/ui/terminalQr.test.ts
 )
 
 # Build a grep pattern to exclude isolated files from the batch run

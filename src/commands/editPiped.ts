@@ -54,6 +54,8 @@ export interface EditPipedOpts {
   readonly devMode: boolean;
   /** `--pr` / `--no-pr` / `--pr-base`: answers the keep.lock PR step. */
   readonly pr?: PrFlags;
+  /** `--dry-run`: say what would happen; change nothing. */
+  readonly dryRun?: boolean;
 }
 
 /** `<cmd> | capy edit NAME`: read stdin, set the variable, report. Never prompts. */

@@ -84,6 +84,13 @@ export const CHECKBOX_THEME = {
 };
 
 /**
+ * The cursor glyph in front of the active row of a checkbox list (inquirer's own
+ * default, which `searchableCheckbox` and the `capy secrets` pickers draw). With
+ * `CHECKBOX_THEME.icon` it makes `❯ ◉ FOO` (active, ticked) and `  ◯ BAR`.
+ */
+export const CHECKBOX_CURSOR = '❯';
+
+/**
  * Theme override for `inquirer.prompt({ type: 'list', ... })`. List prompts
  * have no separate indicator — only the cursor — so no override is needed
  * for spacing. Exported so future tweaks land here without churning every
