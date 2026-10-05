@@ -34,6 +34,17 @@ export const stoppingAfter = (inFlight: number): string => `Stopping after the $
 export const STOPPING_NOW = 'Stopping…'; // COPY-FLAG
 export const STOPPING_AGAIN = 'Still waiting for the push in flight.'; // COPY-FLAG
 const CANCELLED_LABEL = 'Cancelled:'; // COPY-FLAG
+const SKIPPED_HEADING = 'Skipped'; // COPY-FLAG
+const SKIPPED_DESCRIPTION = 'Nothing changed in these repos, so no pull request was opened.'; // COPY-FLAG
+
+/** How a skipped repo is drawn: grey in a terminal, plain for agents and pipes. */
+export interface ConfirmationStyle {
+  readonly muted: (text: string) => string;
+}
+
+const PLAIN: ConfirmationStyle = { muted: (text) => text };
+/** Grey, the same 90 the rest of the CLI uses for secondary text. */
+export const TERMINAL_STYLE: ConfirmationStyle = { muted: (text) => `\x1b[90m${text}\x1b[0m` };
 
 const plural = (n: number): string => `${n} location${n === 1 ? '' : 's'}`;
 
@@ -87,8 +98,14 @@ function repoBlocks(result: SecretSetResult): readonly RepoBlock[] {
   return [...prs, ...failed];
 }
 
-/** The whole confirmation, without a trailing newline. */
-export function renderSecretSetConfirmation(result: SecretSetResult): string {
+/** Repos that needed no PR: none of their values changed, or their keep.lock was already up to date. */
+const skippedRepos = (result: SecretSetResult): readonly string[] => [
+  ...result.no_pr.map((n) => n.repo),
+  ...(result.skipped ?? []).map((n) => n.repo),
+];
+
+/** The whole confirmation, without a trailing newline. `style` greys the skipped repos in a terminal. */
+export function renderSecretSetConfirmation(result: SecretSetResult, style: ConfirmationStyle = PLAIN): string {
   const blocks = repoBlocks(result);
   const prSection =
     blocks.length === 0
@@ -98,6 +115,11 @@ export function renderSecretSetConfirmation(result: SecretSetResult): string {
           "Pull requests (merge each to update that repo's keep.lock):",
           ...blocks.flatMap((b) => ['', `  ${b.repo}`, `    ${b.line}`]),
         ];
+  const skipped = skippedRepos(result);
+  const skippedSection =
+    skipped.length === 0
+      ? []
+      : ['', SKIPPED_HEADING, SKIPPED_DESCRIPTION, '', ...skipped.map((repo) => style.muted(`  ${repo}`))];
   const closing =
     result.prs.length > 0
       ? [
@@ -108,7 +130,7 @@ export function renderSecretSetConfirmation(result: SecretSetResult): string {
       : result.updated.length > 0
         ? ['', SAVED_NO_PR]
         : [];
-  return [header(result), ...failedLocationLines(result.failed), ...prSection, ...closing, ...cancelledLines(result)].join('\n');
+  return [header(result), ...failedLocationLines(result.failed), ...prSection, ...skippedSection, ...closing, ...cancelledLines(result)].join('\n');
 }
 
 // ── Dry run (`capy --dry-run secrets`) ──────────────────────────────────────

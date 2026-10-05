@@ -24,6 +24,8 @@ import { normalizeQuery, textMatches } from './searchMatch';
 import { CANCELLED_NOTHING, DRY_RUN_LABEL } from '../commands/secretsSetText';
 import type { RunProgress } from '../commands/secretsSet';
 import { clipLine } from './pickerTable';
+import { BEHIND_LABEL, DEPLOYED_LABEL, NO_TARGET_LABEL, TARGET_STATUS_HEADING, formatSecretRowStatus, locationState, secretRowStatus } from '../core/deployStatus';
+import { statusBadge, statusColor } from './statusBadge';
 import {
   EditEffect,
   EditFlow,
@@ -180,9 +182,20 @@ function tokenizeFrom(chunk: string, index: number): readonly string[] {
 
 // ── Column cycling ───────────────────────────────────────────────────────────
 
-export type ColumnMode = 'connector' | 'target' | 'integrations' | 'users' | 'branch' | 'project';
-/** Tab cycles forward through this order (wrapping); Shift-Tab backward. CONNECTOR is the default/first-shown column (CAP-679 — "service" was a misnomer for what's really an inbound connector, and is gone as a column). */
-export const COLUMN_ORDER: readonly ColumnMode[] = ['connector', 'target', 'integrations', 'users', 'branch', 'project'];
+export type ColumnMode = 'project' | 'branch' | 'status' | 'connector' | 'target' | 'integrations' | 'users';
+/** Tab cycles forward through this order (wrapping); Shift-Tab backward. PROJECT is the default/first-shown column (CAP-702, Vince 2026-10-03). */
+export const COLUMN_ORDER: readonly ColumnMode[] = ['project', 'branch', 'status', 'connector', 'target', 'integrations', 'users'];
+
+/** What each column is called on screen. `status` describes Capy's own targets only; its heading is TARGET_STATUS_HEADING. */
+const COLUMN_HEADINGS: Readonly<Record<ColumnMode, string>> = {
+  project: 'PROJECT',
+  branch: 'BRANCH',
+  status: TARGET_STATUS_HEADING,
+  connector: 'CONNECTOR',
+  target: 'TARGET',
+  integrations: 'INTEGRATIONS',
+  users: 'USERS',
+};
 
 function nextColumn(column: ColumnMode, dir: 1 | -1): ColumnMode {
   const idx = COLUMN_ORDER.indexOf(column);
@@ -204,6 +217,17 @@ export interface PopupState {
   readonly revealed: boolean;
   readonly value: ValueState;
   readonly panOffset: number;
+  /** The locations table's switchable middle column (Tab / Shift-Tab while the details view is open). */
+  readonly locationColumn: LocationColumn;
+}
+
+/** The details view's locations table: Tab cycles its middle column through this order (wrapping); DEPLOY STATUS first. */
+export type LocationColumn = 'status' | 'connector' | 'target';
+export const LOCATION_COLUMN_ORDER: readonly LocationColumn[] = ['status', 'connector', 'target'];
+
+function nextLocationColumn(column: LocationColumn, dir: 1 | -1): LocationColumn {
+  const idx = LOCATION_COLUMN_ORDER.indexOf(column);
+  return LOCATION_COLUMN_ORDER[(idx + dir + LOCATION_COLUMN_ORDER.length) % LOCATION_COLUMN_ORDER.length];
 }
 
 export interface SearchState {
@@ -230,7 +254,7 @@ export interface SecretsScreenState {
 export function initialSecretsScreenState(rows: readonly SecretIndexRow[], dryRun: boolean = false): SecretsScreenState {
   return {
     rows,
-    column: 'connector',
+    column: COLUMN_ORDER[0],
     cursorIndex: 0,
     search: { query: '' },
     popup: null,
@@ -463,6 +487,12 @@ function handlePopupKey(state: SecretsScreenState, key: string): SecretsScreenSt
   if (key === KEY_END || key === KEY_END2) {
     return { ...state, popup: { ...popup, panOffset: Number.MAX_SAFE_INTEGER } };
   }
+  if (key === KEY_TAB) {
+    return { ...state, popup: { ...popup, locationColumn: nextLocationColumn(popup.locationColumn, 1) } };
+  }
+  if (key === KEY_SHIFT_TAB) {
+    return { ...state, popup: { ...popup, locationColumn: nextLocationColumn(popup.locationColumn, -1) } };
+  }
   return state;
 }
 
@@ -522,6 +552,7 @@ function handleListKey(state: SecretsScreenState, key: string): ReduceResult {
       revealed: false,
       value: { status: 'loading' },
       panOffset: 0,
+      locationColumn: LOCATION_COLUMN_ORDER[0],
     };
     return { state: { ...state, popup }, effect: { type: 'fetchValue', row } };
   }
@@ -741,7 +772,15 @@ export function formatMiddleCell(row: SecretIndexRow, column: ColumnMode, width:
   if (column === 'integrations') return formatIntegrationsCellFitted(row, width);
   if (column === 'users') return formatUsersCell(row);
   if (column === 'branch') return formatBranchCell(row);
+  if (column === 'status') return secretRowStatusBadge(row);
   return formatProjectCell(row);
+}
+
+/** The STATUS cell: the same coloured `● status` badge `capy edit` shows (CAP-702). */
+function secretRowStatusBadge(row: SecretIndexRow): string {
+  const status = secretRowStatus(row);
+  if (status.kind === 'no target') return `${DIM}${formatSecretRowStatus(status)}${RESET}`;
+  return statusBadge(status.kind, formatSecretRowStatus(status));
 }
 
 /** Most recent `changed_at` across a row's locations, or undefined if none carry one. */
@@ -853,7 +892,7 @@ function buildNameCell(left: string, tag: string, width: number): string {
 }
 
 function columnHeaderLabel(column: ColumnMode): string {
-  return `${column.toUpperCase()} ⇥`;
+  return `${COLUMN_HEADINGS[column]} ⇥`;
 }
 
 /**
@@ -872,6 +911,19 @@ function searchBarLine(state: SecretsScreenState, matchedCount: number): string 
   return `${DIM}search:${RESET} ${queryDisplay}${caret} ${DIM}${countLabel}${RESET}`;
 }
 
+/**
+ * The main list's column widths for `available` columns: NAME, the
+ * Tab-switched middle column, UPDATED. The details view's locations table
+ * uses the same widths so its columns line up with the list's (CAP-702).
+ */
+export function mainTableLayout(available: number): { readonly nameW: number; readonly middleW: number; readonly updatedW: number; readonly gap: string } {
+  const nameW = Math.max(16, Math.floor(available * 0.4));
+  const updatedW = 14;
+  const gap = '  ';
+  const middleW = Math.max(10, available - nameW - updatedW - gap.length * 2);
+  return { nameW, middleW, updatedW, gap };
+}
+
 /** Pure render — a total function of state + terminal size. Never mutates `state`; any "clamping" of a display-only quantity (e.g. panning past the end of a value) is a local `const`, never written back. */
 export function render(state: SecretsScreenState, termWidth: number, termHeight: number): string {
   if (state.edit) return renderEditScreen(state.edit, termWidth, termHeight, state.dryRun);
@@ -888,10 +940,7 @@ export function render(state: SecretsScreenState, termWidth: number, termHeight:
     '',
   ];
 
-  const nameW = Math.max(16, Math.floor(available * 0.4));
-  const updatedW = 14;
-  const gap = '  ';
-  const middleW = Math.max(10, available - nameW - updatedW - gap.length * 2);
+  const { nameW, middleW, updatedW, gap } = mainTableLayout(available);
 
   const headerLine = pad('NAME', nameW) + gap + pad(columnHeaderLabel(state.column), middleW) + gap + pad('UPDATED', updatedW);
   // Everything pushed before the body, in one array — `preBodyLines.length`
@@ -912,7 +961,8 @@ export function render(state: SecretsScreenState, termWidth: number, termHeight:
     const middleCell = pad(formatMiddleCell(row, state.column, middleW), middleW);
     const updatedCell = pad(formatUpdatedCell(row), updatedW);
     const line = nameCell + gap + middleCell + gap + updatedCell;
-    return isSelected ? INVERSE + padVis(line, available) + RESET : line;
+    // A coloured cell's own RESET would end the highlight mid-row, so the highlight is re-applied after each one.
+    return isSelected ? INVERSE + padVis(line, available).replaceAll(RESET, RESET + INVERSE) + RESET : line;
   });
 
   const withPopup: readonly string[] =
@@ -977,7 +1027,7 @@ function buildPopupLines(row: SecretIndexRow, popup: PopupState, width: number):
   const inner = '   ';
   const ruleWidth = Math.max(10, width - indent.length);
   const rule = `${indent}${DIM}╶${'─'.repeat(Math.max(0, ruleWidth - 2))}╴${RESET}`;
-  const labelW = 9;
+  const labelW = 15;
   const contentWidth = Math.max(20, ruleWidth - inner.length - 1);
   const valueWidth = Math.max(10, contentWidth - labelW);
 
@@ -990,29 +1040,12 @@ function buildPopupLines(row: SecretIndexRow, popup: PopupState, width: number):
     '',
     field('value', renderPopupValueLine(popup, valueWidth)),
     field('updated', formatUpdatedCell(row)),
+    field(TARGET_STATUS_HEADING.toLowerCase(), secretRowStatusBadge(row)),
     '',
     `${indent}${inner}${BOLD}locations${RESET}`,
   ];
 
-  // Per-location: project · branch (protected marker), the CONNECTOR that
-  // brought the value IN (renamed from "service" — CAP-679), when it
-  // changed, and — only when this location has any — every TARGET it was
-  // pushed OUT to, each spelled out with its full "(stale)" wording (the
-  // table's own TARGET column uses a compact `*` instead; there's no room
-  // pressure here to justify that shorthand).
-  const locationLines: readonly string[] = row.locations.map((loc) => {
-    const protMarker = loc.protected ? ` ${DIM}(protected)${RESET}` : '';
-    const connectorLabel = formatLocationConnectorLabel(loc);
-    const updated = loc.changed_at ? formatRelativeTime(loc.changed_at) : '—';
-    const targets = loc.targets ?? [];
-    const targetsLabel =
-      targets.length > 0
-        ? ` · targets: ${targets
-            .map((t) => `[${t.provider}] ${t.target}${t.stale ? ' (stale)' : ''}${t.pending ? ' (pending)' : ''}`)
-            .join(', ')}`
-        : '';
-    return `${indent}${inner}${truncate(`${loc.project_name} · ${loc.branch}`, contentWidth)}${protMarker} ${DIM}· ${connectorLabel} · ${updated}${targetsLabel}${RESET}`;
-  });
+  const locationLines = buildLocationTable(row.locations, popup.locationColumn, width, indent.length + inner.length).map((l) => `${indent}${inner}${l}`);
 
   const usersHeaderLines: readonly string[] = ['', `${indent}${inner}${BOLD}users${RESET}`];
   const userLines: readonly string[] =
@@ -1021,6 +1054,81 @@ function buildPopupLines(row: SecretIndexRow, popup: PopupState, width: number):
       : row.users.map((u) => `${indent}${inner}${truncate(u.email, contentWidth)}`);
 
   return [...topLines, ...locationLines, ...usersHeaderLines, ...userLines, '', rule];
+}
+
+// ── Details view: locations table (CAP-702) ─────────────────────────────────
+
+const LOCATION_COLUMN_HEADINGS: Readonly<Record<LocationColumn, string>> = {
+  status: TARGET_STATUS_HEADING,
+  connector: 'CONNECTOR',
+  target: 'TARGET',
+};
+
+/** One location's DEPLOY STATUS badge — the row's words and colours. */
+function locationStatusBadge(loc: SecretIndexLocation): string {
+  const state = locationState(loc);
+  if (state === 'none') return `${DIM}${NO_TARGET_LABEL}${RESET}`;
+  if (state === 'unknown') return statusBadge('unknown');
+  return statusBadge(state, state === 'behind' ? BEHIND_LABEL : DEPLOYED_LABEL);
+}
+
+/** Every target this location was pushed to, `[provider] target`, a lagging one marked in yellow; `—` if none. */
+function locationTargetsLabel(loc: SecretIndexLocation): string {
+  const targets = loc.targets ?? [];
+  if (targets.length === 0) return '—';
+  return targets
+    .map((t) => `[${t.provider}] ${t.target}${t.stale ? ` ${statusColor('behind')}(${BEHIND_LABEL})${RESET}` : ''}${t.pending ? ' (pending)' : ''}`)
+    .join(', ');
+}
+
+function locationMiddleCell(loc: SecretIndexLocation, column: LocationColumn): string {
+  if (column === 'status') return locationStatusBadge(loc);
+  if (column === 'connector') return formatLocationConnectorLabel(loc);
+  return locationTargetsLabel(loc);
+}
+
+/**
+ * LOCATION (always) · a Tab-switched middle column · UPDATED, on the main
+ * list's own column positions (`mainTableLayout(available)`): the middle and
+ * UPDATED columns start where the list's do, at the same widths, and
+ * LOCATION fills the NAME column's space less the details view's `indent`.
+ * When narrow, the project name shrinks first so the branch stays readable.
+ */
+export function buildLocationTable(
+  locations: readonly SecretIndexLocation[],
+  column: LocationColumn,
+  available: number,
+  indent: number,
+): readonly string[] {
+  const { nameW, middleW, updatedW, gap } = mainTableLayout(available);
+  const locationW = Math.max(1, nameW - indent);
+  const protectedMark = ` ${DIM}(protected)${RESET}`;
+  const locationTail = (loc: SecretIndexLocation) => ` · ${loc.branch}${loc.protected ? protectedMark : ''}`;
+  const middleHeading = `${LOCATION_COLUMN_HEADINGS[column]} ⇥`;
+
+  const header = `${DIM}${pad('LOCATION', locationW)}${gap}${pad(middleHeading, middleW)}${gap}${pad('UPDATED', updatedW)}${RESET}`;
+  const body = locations.map((loc) => {
+    const location = pad(fitLocation(loc.project_name, [locationTail(loc), ` · ${loc.branch}`], locationW), locationW);
+    const middle = pad(locationMiddleCell(loc, column), middleW);
+    const updated = pad(loc.changed_at ? formatRelativeTime(loc.changed_at) : '—', updatedW);
+    return `${location}${gap}${middle}${gap}${DIM}${updated}${RESET}`;
+  });
+  return [header, ...body];
+}
+
+/**
+ * `project · branch` in `width`: the project name shrinks first (with `…`) so
+ * the branch stays readable. `tails` is tried in order (with the protected
+ * marker, then without); only when none fits is the whole cell cut.
+ */
+function fitLocation(project: string, tails: readonly string[], width: number): string {
+  const [tail, ...rest] = tails;
+  if (tail === undefined) return truncate(project, width);
+  const full = `${project}${tail}`;
+  if (visLen(full) <= width) return full;
+  const room = width - visLen(tail);
+  if (room >= 4) return `${project.slice(0, room - 1)}…${tail}`;
+  return rest.length > 0 ? fitLocation(project, rest, width) : truncate(full, width);
 }
 
 function renderPopupValueLine(popup: PopupState, width: number): string {
@@ -1046,7 +1154,7 @@ function footerLine(state: SecretsScreenState): string {
   if (state.popup) {
     const revealLabel = state.popup.revealed ? 'hide' : 'reveal';
     const panHint = state.popup.revealed ? `${DIM} · ${RESET}${BOLD}←/→${RESET}${DIM} pan${RESET}` : '';
-    return `${BOLD}r${RESET}${DIM} ${revealLabel}${RESET}${panHint}${DIM} · ${RESET}${BOLD}e${RESET}${DIM} edit${RESET}${DIM} · ${RESET}${BOLD}esc${RESET}${DIM}/${RESET}${BOLD}q${RESET}${DIM} close${RESET}`; // COPY-FLAG
+    return `${BOLD}r${RESET}${DIM} ${revealLabel}${RESET}${panHint}${DIM} · ${RESET}${BOLD}tab${RESET}${DIM} column · ${RESET}${BOLD}e${RESET}${DIM} edit${RESET}${DIM} · ${RESET}${BOLD}esc${RESET}${DIM}/${RESET}${BOLD}q${RESET}${DIM} close${RESET}`; // COPY-FLAG
   }
   const editHint = state.search.query === '' ? `${BOLD}ctrl+e${RESET}${DIM} edit · ${RESET}` : '';
   return `${DIM}↑↓ navigate · ${RESET}${BOLD}tab${RESET}${DIM} column · ${RESET}${BOLD}enter${RESET}${DIM} inspect · ${RESET}${editHint}${BOLD}esc${RESET}${DIM} clear/quit${RESET}`; // COPY-FLAG

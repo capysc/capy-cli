@@ -8,7 +8,9 @@ import { fetchSecretsWithCache, readKeepCache, writeKeepCache, readSecretsLocal,
 import { isLocalOnly } from '../config/profileConfig';
 import { resolveLocalProjectKey } from '../core/localUnlock';
 import { hashValue } from './statusCommand';
-import { EditScreen, EditRow, EditState, classifyLocalRow, focusedOn } from '../ui/editScreen';
+import { EditScreen, EditRow, EditState, classifyLocalRow, focusedOn, withDeployStatus } from '../ui/editScreen';
+import { deployedHashesFor } from '../core/deployStatus';
+import { readDefaultBranchTargets } from '../deploy/configuredTargets';
 import { formatRelativeTime } from '../ui/relativeTime';
 import { Encryptor } from '../crypto/encryptor';
 import { deriveResourceId } from '../crypto/resourceId';
@@ -105,6 +107,35 @@ async function loadBaseline(args: {
   } catch {
     return BASELINE_UNAVAILABLE;
   }
+}
+
+/**
+ * CAP-702: the keep file whose deploy-target records `not deployed` is read
+ * from. The server's copy is the record (CI-mode deploys record targets
+ * there, not in the local keep.lock until their PR merges); the local
+ * keep.lock is the fallback when the server can't be read, and the only
+ * source in local mode.
+ */
+async function loadDeployKeep(args: {
+  localMode: boolean;
+  serviceClient: ServiceClient | undefined;
+  projectId: string;
+  branch: string;
+  localKeep: KeepFile;
+}): Promise<KeepFile> {
+  const { localMode, serviceClient, projectId, branch, localKeep } = args;
+  if (localMode || !serviceClient) return localKeep;
+  try {
+    const latest = await serviceClient.getLatestSecrets(projectId, branch);
+    const parsed: unknown = latest?.keep_file ? JSON.parse(latest.keep_file) : undefined;
+    return isKeepWithVariables(parsed) ? parsed : localKeep;
+  } catch {
+    return localKeep;
+  }
+}
+
+function isKeepWithVariables(value: unknown): value is KeepFile {
+  return typeof value === 'object' && value !== null && typeof (value as { variables?: unknown }).variables === 'object';
 }
 
 /** Whether probing the keep cache for this keep hash threw (the baseline is then unavailable). */
@@ -283,6 +314,9 @@ export class EditCommand {
       projectId,
     });
 
+    const deployKeep = await loadDeployKeep({ localMode, serviceClient, projectId, branch, localKeep: keep });
+    const configuredTargets = readDefaultBranchTargets(process.cwd());
+
     // Build rows for every variable known to any source
     const allKeys = new Set<string>([
       ...Object.keys(pinned),
@@ -311,15 +345,10 @@ export class EditCommand {
             status: classifyStatus(pinnedHash, localHash, remoteHash, remoteAvailable),
             updatedLabel: changedAt ? formatRelativeTime(changedAt) : '—',
           };
+      const deployedHashes = deployedHashesFor(deployKeep, key, branch, configuredTargets);
+      const base: EditRow = { key, localValue: localVal, remoteValue: remoteVal, status, updatedLabel, changedAt, deployedHashes };
 
-      return {
-        key,
-        localValue: localVal,
-        remoteValue: remoteVal,
-        status,
-        updatedLabel,
-        changedAt,
-      };
+      return { ...base, status: withDeployStatus(base, status) };
     });
 
     const baseState: EditState = {

@@ -113,10 +113,14 @@ export interface TargetDelivery {
   target: string;
   /** Adapter-specific handle for what was written, e.g. `{ composeId }` or `{ applicationId }`. */
   ref?: Record<string, string>;
-  /** sha256(value).slice(0,16) — same algorithm as `value_hash`, computed at delivery time. */
-  deployed_value_hash: string;
-  /** ISO8601 UTC — when this was delivered to the target's configuration (not "running"). */
-  deployed_at: string;
+  /**
+   * sha256(value).slice(0,16) — same algorithm as `value_hash`, computed at
+   * delivery time. Absent on a CAP-702 placeholder: the target is configured
+   * but has never received a push, so it is always behind.
+   */
+  deployed_value_hash?: string;
+  /** ISO8601 UTC — when this was delivered to the target's configuration (not "running"). Absent on a CAP-702 placeholder. */
+  deployed_at?: string;
   /** Token deploys only (Dokploy): the deploy id `capy deploy revoke` takes. */
   deploy_id?: string;
   /**
