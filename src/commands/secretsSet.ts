@@ -648,7 +648,7 @@ export function createSetEnv(orgId: string, userId: string, client: ServiceClien
     openKeys: () =>
       createRunKeyResolver(orgId, userId, {
         // The unlock is one call: a 429 on it is waited out (bounded) before every location fails with the same code.
-        coDecrypt: (oid, ct) => retryOnRateLimit(() => client.coDecrypt(oid, ct).then((r) => r.plaintext)),
+        coDecrypt: (oid, ct, transportId) => retryOnRateLimit(() => client.coDecrypt(oid, ct, undefined, transportId).then((r) => r.plaintext)),
         wrapOuterLayer: (oid, pt) => client.wrapOuterLayer(oid, pt).then((r) => r.ciphertext),
       }),
     writeCache: writeKeepCache,

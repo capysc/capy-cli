@@ -191,7 +191,7 @@ export class StatusCommand {
       if (!authResult.success) throw new Error(silentAuthFailureMessage(authResult));
 
       const keyOps = {
-        coDecrypt: (oid: string, ct: string) => this.serviceClient.coDecrypt(oid, ct).then(r => r.plaintext),
+        coDecrypt: (oid: string, ct: string, transportId?: string) => this.serviceClient.coDecrypt(oid, ct, undefined, transportId).then(r => r.plaintext),
         wrapOuterLayer: (oid: string, pt: string) => this.serviceClient.wrapOuterLayer(oid, pt).then(r => r.ciphertext),
       };
       return {

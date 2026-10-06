@@ -4,30 +4,28 @@
  * `crypto/inviteCrypto.ts`'s parse/unwrap helpers, which this command never
  * imports.
  *
- * Moves this machine's `local.key` + `key.enc` (for the project's org and
- * the current user) to another device, via Keep:
+ * Creates a revocable credential for another device without changing this
+ * machine's `local.key` or `key.enc`:
  *
- *   1. Pack this machine's `key.enc` + `local.key` into the v3 fixed-layout
- *      binary plaintext (`transportPackV3.ts`). There is no older link
- *      format to fall back to — if packing isn't lossless (foreign/corrupt
- *      `key.enc`), this refuses with a coded `TRANSPORT_KEY_FORMAT_UNSUPPORTED`
- *      BEFORE ever asking the service for a transport row, so nothing is
- *      wasted on a link that could never be produced.
- *   2. Mint a random 32-byte key S on this machine and seal the packed
- *      plaintext under it (`sealTransportBlob`, AAD `capy:transport:v4`).
- *   3. Hand the SEALED blob to the service as the `POST /transports`
- *      `ciphertext` field; it hands back `{id, expires_at}`. The service
- *      never sees S, so it can't open what it stores (zero trust).
+ *   1. Open the source credential without migrating or rewriting it.
+ *   2. Reserve a persistent transport id, mint a fresh K_transport, and wrap
+ *      the same master key under it with the id bound in service context.
+ *   3. Seal `{K_transport, key.enc, id, org, user}` under random link key S
+ *      and upload it to the reserved row. The service never sees either key.
  *   4. Print a QR code + `.../transport#4.<id>.<S>` (`transportFragmentV4`).
  *      The link carries only the id and S (~100 chars, so the QR stays
- *      small); Keep activates the row as the signed-in user (which deletes
- *      it and returns the blob) and decrypts it with S in the browser.
+ *      small); Keep activates the row as the signed-in user and decrypts
+ *      the blob with S in the browser.
  */
+import { hostname } from 'os';
 import { resolveOrgContext } from '../core/orgContext';
-import { readLocalRoot, readOrgKeyFileRaw } from '../config/globalConfig';
+import { buildTransportKeyFile } from '../config/globalConfig';
 import { resolveKeepOrigin } from '../config/keepOrigin';
-import { generateTransportKey, packTransportV3, sealTransportBlob, transportFragmentV4 } from '../crypto/transportPackV3';
-import type { PairingEntry } from '../crypto/pairingPayload';
+import { generateTransportKey, sealTransportBlob, transportFragmentV4 } from '../crypto/transportPackV3';
+import { generateTransportLocalRoot, serializePersistentTransportPayload } from '../crypto/persistentTransportPayload';
+import { unwrapMasterKey, type KeyServiceOps } from '../crypto/keyResolver';
+import { encryptMasterKey, masterKeyAAD } from '../crypto/keyManager';
+import { deriveLocalInnerKey } from '../crypto/localKeyRoot';
 import { renderTerminalQr } from '../ui/terminalQr';
 import { printMaskedLinkBlock, maskLink } from '../ui/maskedLinkPrompt';
 import { isFullScreenQrEligible, startFullScreenQrView, printMaskedLinkFooter } from '../ui/fullScreenQr';
@@ -43,12 +41,22 @@ import { refuseError } from './pairingRefusal';
  */
 const REDEMPTION_POLL_INTERVAL_MS = 5000;
 
-const TRANSPORT_REDEEMED_MESSAGE = '  Activated. Your transport key is stored in that browser.'; // COPY-FLAG
+const TRANSPORT_REDEEMED_MESSAGE = '  Activated. This protected transport is ready in that browser.'; // COPY-FLAG
 const TRANSPORT_EXPIRED_MESSAGE = 'This transport link expired. Run capy transport again.'; // COPY-FLAG
 
 /** Minimal shape `watchForRedemption` needs off `serviceClient` — easier to fake in tests than the full `ServiceClient` class. */
 interface TransportStatusSource {
   getTransportStatus(id: string): Promise<TransportStatusResult>;
+}
+
+function transportKeyServiceOps(serviceClient: {
+  coDecrypt(orgId: string, ciphertext: string, notAfter?: number, transportId?: string): Promise<{ plaintext: string }>;
+  wrapOuterLayer(orgId: string, plaintext: string, notAfter?: number, transportId?: string): Promise<{ ciphertext: string }>;
+}): KeyServiceOps {
+  return {
+    coDecrypt: (orgId, ciphertext, transportId) => serviceClient.coDecrypt(orgId, ciphertext, undefined, transportId).then(({ plaintext }) => plaintext),
+    wrapOuterLayer: (orgId, plaintext) => serviceClient.wrapOuterLayer(orgId, plaintext).then(({ ciphertext }) => ciphertext),
+  };
 }
 
 /** Either handle shape (`MaskedLinkPromptHandle` or `FullScreenQrHandle`) — both are structurally `{done, stop}`. */
@@ -101,7 +109,7 @@ export async function watchForRedemption(args: {
 }
 
 export interface TransportOptions {
-  json?: boolean;
+  readonly json?: boolean;
 }
 
 /**
@@ -137,52 +145,35 @@ function buildTransportIntro(): string {
 const LINK_LABEL = 'Open on your other device:'; // COPY-FLAG
 
 export class TransportCommand {
-  private apiUrl?: string;
-  private devMode: boolean;
-
-  constructor(apiUrl?: string, devMode: boolean = false) {
-    this.apiUrl = apiUrl;
-    this.devMode = devMode;
-  }
+  constructor(
+    private readonly apiUrl?: string,
+    private readonly devMode: boolean = false,
+  ) {}
 
   async execute(options: TransportOptions = {}): Promise<void> {
     const json = options.json === true;
     try {
       const { orgId, userId, serviceClient } = await resolveOrgContext(this.apiUrl, this.devMode);
 
-      const kLocal = readLocalRoot(orgId, userId);
-      const keyEnc = readOrgKeyFileRaw(orgId, userId);
-      if (!kLocal || !keyEnc) {
-        throw new CapyError(
-          'No local key found for this organization on this machine — nothing to transport.', // COPY-FLAG
-          ERROR_CODES.TRANSPORT_NO_LOCAL_KEY,
-        );
-      }
-
-      const entry: PairingEntry = {
+      const keyServiceOps = transportKeyServiceOps(serviceClient);
+      const sourceMasterKey = await unwrapMasterKey(orgId, userId, keyServiceOps, { migrateLegacy: false });
+      const { id, expires_at } = await serviceClient.createTransport(orgId, hostname());
+      const transportRoot = generateTransportLocalRoot();
+      const innerWrapped = encryptMasterKey(sourceMasterKey, deriveLocalInnerKey(transportRoot), masterKeyAAD(userId, orgId));
+      const outerWrapped = await serviceClient.wrapOuterLayer(orgId, innerWrapped, undefined, id);
+      const keyEnc = buildTransportKeyFile(orgId, outerWrapped.ciphertext, id);
+      const payload = serializePersistentTransportPayload({
+        v: 1,
+        k_local: transportRoot.toString('base64url'),
+        key_enc: keyEnc,
+        transport_id: id,
         org_id: orgId,
         user_id: userId,
-        k_local: kLocal.toString('base64url'),
-        key_enc: keyEnc,
-      };
-
-      // The packed layout (CAP-692) is the only format — pack BEFORE ever calling the
-      // service, so an unpackable key.enc never burns a one-time transport
-      // row for a link that was never going to exist.
-      const packed = packTransportV3(entry);
-      if (!packed) {
-        throw new CapyError(
-          "This machine's key file is in a format capy transport can't turn into a link.", // COPY-FLAG
-          ERROR_CODES.TRANSPORT_KEY_FORMAT_UNSUPPORTED,
-        );
-      }
-
-      // v4: the service stores the sealed blob; the link carries only the id
-      // and S. S never leaves this machine except inside the link.
-      const key = generateTransportKey();
-      const blob = sealTransportBlob(packed, key);
-      const { id, expires_at } = await serviceClient.createTransport(blob);
-      const fragment = transportFragmentV4(id, key);
+      });
+      const linkKey = generateTransportKey();
+      const blob = sealTransportBlob(payload, linkKey);
+      await serviceClient.uploadTransport(id, blob);
+      const fragment = transportFragmentV4(id, linkKey);
       const url = `${resolveKeepOrigin()}/transport#${fragment}`;
 
       if (json) {

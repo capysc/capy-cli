@@ -22,6 +22,8 @@ export interface PairingEntry {
   k_local: string;
   /** `key.enc` file content, verbatim. */
   key_enc: string;
+  /** Present for persistent transports; must agree with key.enc metadata when supplied. */
+  transport_id?: string;
 }
 
 export interface PairingPayload {

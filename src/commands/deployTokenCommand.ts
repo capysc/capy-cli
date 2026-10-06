@@ -68,7 +68,7 @@ async function stripRevokedTargets(
     const { Encryptor } = await import('../crypto/encryptor');
     const { deriveResourceId } = await import('../crypto/resourceId');
     const projectKey = await resolveKey(projectState.organizationId, projectState.projectId, userId, {
-      coDecrypt: (o, c) => serviceClient.coDecrypt(o, c).then((r) => r.plaintext),
+      coDecrypt: (o, c, transportId) => serviceClient.coDecrypt(o, c, undefined, transportId).then((r) => r.plaintext),
       wrapOuterLayer: (o, p) => serviceClient.wrapOuterLayer(o, p).then((r) => r.ciphertext),
     });
     const fm = new FileManager();
@@ -247,7 +247,7 @@ export async function mintDeployToken(deps: MintDeployTokenDeps): Promise<Minted
   if (Object.keys(selected).length === 0) throw new EmptyEnvError();
 
   const keyOps: KeyServiceOps = {
-    coDecrypt: (oid, ct) => serviceClient.coDecrypt(oid, ct).then(r => r.plaintext),
+    coDecrypt: (oid, ct, transportId) => serviceClient.coDecrypt(oid, ct, undefined, transportId).then(r => r.plaintext),
     wrapOuterLayer: (oid, pt) => serviceClient.wrapOuterLayer(oid, pt).then(r => r.ciphertext),
   };
   const pkHex = await resolveProjectKey(orgId, projectId, userId, keyOps);

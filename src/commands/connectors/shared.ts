@@ -175,7 +175,7 @@ async function resolveProjectKeyOrRefuse(args: {
   const { resolveProjectKey } = await import('../../crypto/keyResolver');
   try {
     return await resolveProjectKey(orgId, projectId, userId, {
-      coDecrypt: (oid, ct) => serviceClient.coDecrypt(oid, ct).then((r) => r.plaintext),
+      coDecrypt: (oid, ct, transportId) => serviceClient.coDecrypt(oid, ct, undefined, transportId).then((r) => r.plaintext),
       wrapOuterLayer: (oid, pt) => serviceClient.wrapOuterLayer(oid, pt).then((r) => r.ciphertext),
     });
   } catch (err: any) {

@@ -14,7 +14,8 @@ import {
   LOCAL_MASTER_KEY_AAD,
 } from './keyManager';
 import {
-  readMasterKey,
+  readOrgKeyFileRaw,
+  parseMasterKeyRecord,
   saveMasterKey,
   readProjectKeyCache,
   saveProjectKeyCache,
@@ -79,7 +80,7 @@ function isNetworkError(err: unknown): boolean {
  */
 export interface KeyServiceOps {
   /** Strip the KMS outer layer via POST /orgs/:orgId/co-decrypt */
-  coDecrypt(orgId: string, ciphertext: string): Promise<string>;
+  coDecrypt(orgId: string, ciphertext: string, transportId?: string): Promise<string>;
   /** Add the KMS outer layer via POST /orgs/:orgId/wrap */
   wrapOuterLayer(orgId: string, plaintext: string): Promise<string>;
 }
@@ -109,9 +110,11 @@ export async function unwrapMasterKey(
   orgId: string,
   userId: string,
   service: KeyServiceOps,
+  options: { readonly migrateLegacy?: boolean } = {},
 ): Promise<Buffer> {
-  const encryptedBlob = readMasterKey(orgId, userId);
-  if (!encryptedBlob) {
+  const keyFile = readOrgKeyFileRaw(orgId, userId);
+  const keyRecord = keyFile ? parseMasterKeyRecord(keyFile) : null;
+  if (!keyRecord) {
     throw new CapyError(
       'You do not have access to this project\'s secrets.\n\n' +
       'Ask the project owner to invite you, or run capy in a different directory to create your own project.',
@@ -125,7 +128,7 @@ export async function unwrapMasterKey(
 
   // Try double-wrapped path: co-decrypt strips KMS outer, then inner unwrap
   try {
-    const innerBlob = await service.coDecrypt(orgId, encryptedBlob);
+    const innerBlob = await service.coDecrypt(orgId, keyRecord.encryptedMasterKey, keyRecord.transportId);
 
     // K_local first — the steady state.
     const kLocal = readAnyLocalRoot(orgId, userId);
@@ -141,9 +144,11 @@ export async function unwrapMasterKey(
 
     // Legacy inner key — unwrap, then migrate the blob onto K_local.
     const masterKey = decryptMasterKey(innerBlob, legacyInnerKey, innerAAD);
-    const migrated = await wrapAndSaveMasterKey(masterKey, orgId, userId, service)
-      .then(() => true)
-      .catch(() => false); // Best-effort: next run retries the migration.
+    const migrated = options.migrateLegacy === false
+      ? false
+      : await wrapAndSaveMasterKey(masterKey, orgId, userId, service)
+        .then(() => true)
+        .catch(() => false); // Best-effort: next run retries the migration.
     if (migrated) notifyKeyStorageUpgraded();
     return masterKey;
   } catch (err) {
@@ -168,9 +173,30 @@ export async function unwrapMasterKey(
 
   // Migration: try legacy single-wrapped (no KMS outer layer). Its inner key
   // is the legacy hash by definition — single-wrap predates K_local.
-  let masterKey: Buffer;
+  const masterKey = decryptLegacyMasterKey(keyRecord.encryptedMasterKey, legacyInnerKey, innerAAD, orgId);
+
+  // Legacy blob unwrapped — re-wrap (K_local inner + KMS outer) for future runs
+  const migrated = options.migrateLegacy === false
+    ? false
+    : await wrapAndSaveMasterKey(masterKey, orgId, userId, service)
+      .then(() => true)
+      .catch(() => false);
+  // Re-wrap failure (server unavailable?) — proceed with the unwrapped M this
+  // time. Next run will retry migration. No notice: the legacy blob is still
+  // readable by every version.
+  if (migrated) notifyKeyStorageUpgraded();
+
+  return masterKey;
+}
+
+function decryptLegacyMasterKey(
+  encryptedMasterKey: string,
+  legacyInnerKey: Buffer,
+  innerAAD: Buffer,
+  orgId: string,
+): Buffer {
   try {
-    masterKey = decryptMasterKey(encryptedBlob, legacyInnerKey, innerAAD);
+    return decryptMasterKey(encryptedMasterKey, legacyInnerKey, innerAAD);
   } catch {
     throw new CapyError(
       'You do not have access to this project\'s secrets.\n\n' +
@@ -180,17 +206,6 @@ export async function unwrapMasterKey(
       { orgId },
     );
   }
-
-  // Legacy blob unwrapped — re-wrap (K_local inner + KMS outer) for future runs
-  const migrated = await wrapAndSaveMasterKey(masterKey, orgId, userId, service)
-    .then(() => true)
-    .catch(() => false);
-  // Re-wrap failure (server unavailable?) — proceed with the unwrapped M this
-  // time. Next run will retry migration. No notice: the legacy blob is still
-  // readable by every version.
-  if (migrated) notifyKeyStorageUpgraded();
-
-  return masterKey;
 }
 
 /**
@@ -296,25 +311,23 @@ export async function wrapAndSaveMasterKey(
   userId: string,
   service: KeyServiceOps,
 ): Promise<void> {
-  let kLocal = loadOrMintLocalRoot(orgId, userId);
-  let innerWrapped = encryptMasterKey(masterKey, deriveLocalInnerKey(kLocal), masterKeyAAD(userId, orgId));
+  const initialRoot = loadOrMintLocalRoot(orgId, userId);
+  const initialInnerWrapped = encryptMasterKey(masterKey, deriveLocalInnerKey(initialRoot), masterKeyAAD(userId, orgId));
   // innerWrapped is already base64 — pass directly to wrapOuterLayer
-  const outerWrapped = await service.wrapOuterLayer(orgId, innerWrapped);
+  const initialOuterWrapped = await service.wrapOuterLayer(orgId, initialInnerWrapped);
 
   // The await above yields: a concurrent process may have replaced local.key
   // (corrupt-root recovery is the one path that overwrites). Never write a
   // key.enc keyed by a root that is no longer on disk — re-check and re-wrap
   // under the current root if it moved.
   const currentRoot = readAnyLocalRoot(orgId, userId);
-  if (currentRoot && !currentRoot.equals(kLocal)) {
-    kLocal = currentRoot;
-    innerWrapped = encryptMasterKey(masterKey, deriveLocalInnerKey(kLocal), masterKeyAAD(userId, orgId));
-    const reOuter = await service.wrapOuterLayer(orgId, innerWrapped);
-    saveMasterKey(orgId, reOuter, userId);
-    return;
-  }
-
-  saveMasterKey(orgId, outerWrapped, userId);
+  const finalOuterWrapped = currentRoot && !currentRoot.equals(initialRoot)
+    ? await service.wrapOuterLayer(
+      orgId,
+      encryptMasterKey(masterKey, deriveLocalInnerKey(currentRoot), masterKeyAAD(userId, orgId)),
+    )
+    : initialOuterWrapped;
+  saveMasterKey(orgId, finalOuterWrapped, userId);
 }
 
 /**

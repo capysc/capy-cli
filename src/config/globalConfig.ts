@@ -145,10 +145,39 @@ export function saveMasterKey(orgId: string, encryptedBlob: string, userId?: str
   writeSecureFile(keyPath, JSON.stringify(data, null, 2));
 }
 
+export interface MasterKeyRecord {
+  readonly encryptedMasterKey: string;
+  readonly transportId?: string;
+}
+
+/** Parses the supported key.enc metadata without changing its on-disk representation. */
+export function parseMasterKeyRecord(content: string): MasterKeyRecord | null {
+  try {
+    const data = JSON.parse(content) as { encrypted_master_key?: unknown; transport_id?: unknown };
+    if (typeof data.encrypted_master_key !== 'string') return null;
+    return typeof data.transport_id === 'string'
+      ? { encryptedMasterKey: data.encrypted_master_key, transportId: data.transport_id }
+      : { encryptedMasterKey: data.encrypted_master_key };
+  } catch {
+    return null;
+  }
+}
+
+export function buildTransportKeyFile(orgId: string, encryptedBlob: string, transportId: string): string {
+  return JSON.stringify({
+    version: '2.0',
+    org_id: orgId,
+    encrypted_master_key: encryptedBlob,
+    wrapping_method: 'local_root',
+    created_at: new Date().toISOString(),
+    transport_id: transportId,
+  }, null, 2);
+}
+
 export function readMasterKey(orgId: string, userId?: string): string | null {
   const content = readFileOrNull(getOrgKeyPath(orgId, userId));
   if (!content) return null;
-  const data = JSON.parse(content);
+  const data = JSON.parse(content) as { readonly encrypted_master_key: string };
   return data.encrypted_master_key;
 }
 

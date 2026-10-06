@@ -1610,7 +1610,7 @@ async function bootstrapExistingProjectSafe(
 ): Promise<void> {
   const branch = 'development';
   const keyOps = {
-    coDecrypt: (oid: string, ct: string) => ctx.serviceClient.coDecrypt(oid, ct).then((r) => r.plaintext),
+    coDecrypt: (oid: string, ct: string, transportId?: string) => ctx.serviceClient.coDecrypt(oid, ct, undefined, transportId).then((r) => r.plaintext),
     wrapOuterLayer: (oid: string, pt: string) => ctx.serviceClient.wrapOuterLayer(oid, pt).then((r) => r.ciphertext),
   };
   const encryptionKey = await resolveProjectKey(project.organization_id, project.id, ctx.userId, keyOps);
@@ -1665,7 +1665,7 @@ async function checkFolderDirtySafe(
   const pm = new ProjectManager(path);
   const fm = new FileManager(path);
   const keyOps = {
-    coDecrypt: (oid: string, ct: string) => ctx.serviceClient.coDecrypt(oid, ct).then((r) => r.plaintext),
+    coDecrypt: (oid: string, ct: string, transportId?: string) => ctx.serviceClient.coDecrypt(oid, ct, undefined, transportId).then((r) => r.plaintext),
     wrapOuterLayer: (oid: string, pt: string) => ctx.serviceClient.wrapOuterLayer(oid, pt).then((r) => r.ciphertext),
   };
   const tryResolveKey = async (): Promise<{ ok: true; value: string } | { ok: false; message: string }> => {
@@ -1717,7 +1717,7 @@ async function checkoutBranchSafe(
   const fm = new FileManager(path);
   try {
     const keyOps = {
-      coDecrypt: (oid: string, ct: string) => ctx.serviceClient.coDecrypt(oid, ct).then((r) => r.plaintext),
+      coDecrypt: (oid: string, ct: string, transportId?: string) => ctx.serviceClient.coDecrypt(oid, ct, undefined, transportId).then((r) => r.plaintext),
       wrapOuterLayer: (oid: string, pt: string) => ctx.serviceClient.wrapOuterLayer(oid, pt).then((r) => r.ciphertext),
     };
     const encryptionKey = await resolveProjectKey(ctx.orgId, projectId, ctx.userId, keyOps);
@@ -1832,7 +1832,7 @@ async function importIntoBranchSafe(
   }
 
   const keyOps = {
-    coDecrypt: (oid: string, ct: string) => ctx.serviceClient.coDecrypt(oid, ct).then((r) => r.plaintext),
+    coDecrypt: (oid: string, ct: string, transportId?: string) => ctx.serviceClient.coDecrypt(oid, ct, undefined, transportId).then((r) => r.plaintext),
     wrapOuterLayer: (oid: string, pt: string) => ctx.serviceClient.wrapOuterLayer(oid, pt).then((r) => r.ciphertext),
   };
   const tryResolveProjectKey = async (): Promise<{ ok: true; value: string } | { ok: false; message: string }> => {

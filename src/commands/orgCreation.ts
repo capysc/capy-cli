@@ -20,7 +20,7 @@ type OrgNameVerdict = 'available' | 'taken' | 'unreachable';
 
 function keyServiceOpsFromClient(serviceClient: ServiceClient): KeyServiceOps {
   return {
-    coDecrypt: (orgId, ciphertext) => serviceClient.coDecrypt(orgId, ciphertext).then(r => r.plaintext),
+    coDecrypt: (orgId, ciphertext, transportId) => serviceClient.coDecrypt(orgId, ciphertext, undefined, transportId).then(r => r.plaintext),
     wrapOuterLayer: (orgId, plaintext) => serviceClient.wrapOuterLayer(orgId, plaintext).then(r => r.ciphertext),
   };
 }

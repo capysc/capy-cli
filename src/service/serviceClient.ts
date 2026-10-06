@@ -41,9 +41,8 @@ const SERVER_CODES = new Set<string>([
   ERROR_CODES.PAIRING_WRONG_USER,
   ERROR_CODES.PAIRING_NOT_READY,
   ERROR_CODES.INVALID_FORMAT,
-  // CAP-692 follow-up — `GET /transports/:id` (poll for redemption): 404
-  // once activated (the row is deleted on pickup, same lifecycle `/transports`
-  // POST already has) and 410 once expired.
+  // CAP-692 follow-up — `GET /transports/:id` (poll for activation) can
+  // report expiry through a coded 410.
   ERROR_CODES.TRANSPORT_NOT_FOUND,
   ERROR_CODES.TRANSPORT_EXPIRED,
 ]);
@@ -816,36 +815,40 @@ export class ServiceClient {
    * value in the redeem code fails the AEAD unwrap. The user's long-lived
    * master key blob is wrapped without it (no expiry on personal storage).
    */
-  async wrapOuterLayer(orgId: string, plaintext: string, notAfter?: number): Promise<{ ciphertext: string }> {
-    return this.request('POST', `/orgs/${orgId}/wrap`, { plaintext, ...(notAfter !== undefined ? { not_after: notAfter } : {}) });
+  async wrapOuterLayer(orgId: string, plaintext: string, notAfter?: number, transportId?: string): Promise<{ ciphertext: string }> {
+    return this.request('POST', `/orgs/${orgId}/wrap`, {
+      plaintext,
+      ...(notAfter !== undefined ? { not_after: notAfter } : {}),
+      ...(transportId !== undefined ? { transport_id: transportId } : {}),
+    });
   }
 
-  async coDecrypt(orgId: string, ciphertext: string, notAfter?: number): Promise<{ plaintext: string }> {
-    return this.request('POST', `/orgs/${orgId}/co-decrypt`, { ciphertext, ...(notAfter !== undefined ? { not_after: notAfter } : {}) });
+  async coDecrypt(orgId: string, ciphertext: string, notAfter?: number, transportId?: string): Promise<{ plaintext: string }> {
+    return this.request('POST', `/orgs/${orgId}/co-decrypt`, {
+      ciphertext,
+      ...(notAfter !== undefined ? { not_after: notAfter } : {}),
+      ...(transportId !== undefined ? { transport_id: transportId } : {}),
+    });
   }
 
   // --- Basic pairing (CAP-684, docs/basic-pair.md) ---
 
-  /**
-   * `capy transport` "v2": `ciphertext` here is `base64url(S)` — the
-   * one-time 32-byte transport key itself, NOT the encrypted payload (that
-   * lives only in the printed link's fragment, which this call never sees).
-   * The service is unchanged and unaware of the swap: it still just stores
-   * whatever string it's given and hands it back unmodified from
-   * `activate`. The row is deleted on first activate or after 15 minutes,
-   * whichever comes first.
-   */
-  async createTransport(ciphertext: string): Promise<{ id: string; expires_at: string }> {
-    return this.request('POST', '/transports', { ciphertext });
+  /** Reserves a pending transport row before its encrypted package is uploaded. */
+  async createTransport(orgId: string, name?: string): Promise<{ id: string; expires_at: string }> {
+    return this.request('POST', '/transports', { org_id: orgId, ...(name ? { name } : {}) });
+  }
+
+  async uploadTransport(id: string, ciphertext: string): Promise<void> {
+    await this.request('PUT', `/transports/${encodeURIComponent(id)}`, { ciphertext });
   }
 
   /**
    * `capy transport`'s redemption poll (CAP-692 follow-up): is this
-   * transport row still waiting to be activated? `GET /transports/:id`
-   * returns `{state: 'pending', expires_at}` while unused, 404
-   * `TRANSPORT_NOT_FOUND` once activated (the row is deleted on pickup —
-   * same lifecycle `POST /transports` already documents), and 410
-   * `TRANSPORT_EXPIRED` once expired. Decided only on status + the
+   * transport row's durable activation state. `GET /transports/:id` returns
+   * `{transport: {activated_at, expires_at, revoked_at}}`; activation is
+   * identified only by `activated_at`, and a pending row whose expiry has
+   * passed is expired. A 404 is unknown rather than implicit activation.
+   * A coded 410 is expired. Decided only on status + the
    * server's `code` field (never message text, per cardinal Rule 5) —
    * `classifyResponse`/`SERVER_CODES` already do that translation for
    * every other call on this client; this reads the verdict rather than
@@ -855,13 +858,23 @@ export class ServiceClient {
    */
   async getTransportStatus(id: string): Promise<TransportStatusResult> {
     try {
-      const data = await this.request<{ state: string; expires_at: string }>(
+      const data = await this.request<{
+        transport: {
+          readonly activated_at: string | null;
+          readonly expires_at: string;
+          readonly revoked_at: string | null;
+        };
+      }>(
         'GET',
         `/transports/${encodeURIComponent(id)}`,
       );
-      return data.state === 'pending' ? { kind: 'pending', expiresAt: data.expires_at } : { kind: 'unknown' };
+      const expiresAtMs = Date.parse(data.transport.expires_at);
+      if (data.transport.activated_at !== null) return { kind: 'redeemed' };
+      if (!Number.isNaN(expiresAtMs) && expiresAtMs <= Date.now()) return { kind: 'expired' };
+      return data.transport.revoked_at === null
+        ? { kind: 'pending', expiresAt: data.transport.expires_at }
+        : { kind: 'unknown' };
     } catch (error: unknown) {
-      if (error instanceof CapyError && error.code === ERROR_CODES.TRANSPORT_NOT_FOUND) return { kind: 'redeemed' };
       if (error instanceof CapyError && error.code === ERROR_CODES.TRANSPORT_EXPIRED) return { kind: 'expired' };
       return { kind: 'unknown' };
     }
@@ -869,8 +882,8 @@ export class ServiceClient {
 
   /**
    * `capy pair`'s last step: exchanges the now-authenticated device code for
-   * whatever Keep sealed to the CLI's public key. The server returns this
-   * only once — the row is deleted on pickup, same lifecycle as `/transports`.
+   * whatever Keep sealed to the CLI's public key. The pairing payload is
+   * consumed only once by the device-pairing protocol.
    *
    * `sealed` is a JSON STRING (the `JSON.stringify` of the pair envelope
    * `{v:1, epk, iv, ct}`) — the caller must `JSON.parse` and validate it

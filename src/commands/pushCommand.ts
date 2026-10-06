@@ -121,7 +121,7 @@ export class PushCommand {
       spinner.stop();
 
       const keyOps: KeyServiceOps = {
-        coDecrypt: (oid, ct) => this.serviceClient.coDecrypt(oid, ct).then(r => r.plaintext),
+        coDecrypt: (oid, ct, transportId) => this.serviceClient.coDecrypt(oid, ct, undefined, transportId).then(r => r.plaintext),
         wrapOuterLayer: (oid, pt) => this.serviceClient.wrapOuterLayer(oid, pt).then(r => r.ciphertext),
       };
       const resolvedKey = await resolveProjectKey(

@@ -269,6 +269,32 @@ describe('ServiceClient', () => {
     });
   });
 
+  describe('persistent transports', () => {
+    test('reserves, context-wraps, uploads, and context-co-decrypts a transport', async () => {
+      mockFetch
+        .mockResolvedValueOnce(mockFetchResponse({ id: 'transport_123', expires_at: '2026-10-06T00:15:00.000Z' }))
+        .mockResolvedValueOnce(mockFetchResponse({ ciphertext: 'wrapped' }))
+        .mockResolvedValueOnce(mockFetchResponse({}))
+        .mockResolvedValueOnce(mockFetchResponse({ plaintext: 'inner' }));
+
+      await serviceClient.createTransport('org_123', 'example-host');
+      await serviceClient.wrapOuterLayer('org_123', 'inner', undefined, 'transport_123');
+      await serviceClient.uploadTransport('transport_123', 'sealed-package');
+      await serviceClient.coDecrypt('org_123', 'wrapped', undefined, 'transport_123');
+
+      expect(mockFetch.mock.calls.map(([url, init]) => ({
+        url,
+        method: (init as RequestInit).method,
+        body: JSON.parse((init as RequestInit).body as string),
+      }))).toEqual([
+        { url: `${defaultServiceUrl}/transports`, method: 'POST', body: { org_id: 'org_123', name: 'example-host' } },
+        { url: `${defaultServiceUrl}/orgs/org_123/wrap`, method: 'POST', body: { plaintext: 'inner', transport_id: 'transport_123' } },
+        { url: `${defaultServiceUrl}/transports/transport_123`, method: 'PUT', body: { ciphertext: 'sealed-package' } },
+        { url: `${defaultServiceUrl}/orgs/org_123/co-decrypt`, method: 'POST', body: { ciphertext: 'wrapped', transport_id: 'transport_123' } },
+      ]);
+    });
+  });
+
   describe('403 response code threading', () => {
     // The CLI's destructive cleanup paths (cleanupOrgData, etc.) gate on
     // err.details.code === 'MEMBERSHIP_REVOKED' to avoid wiping local key
@@ -337,24 +363,28 @@ describe('ServiceClient', () => {
   // every case here asserts the resulting typed `TransportStatusResult`,
   // never a raw status/code pair leaking through.
   describe('getTransportStatus', () => {
-    test('200 {state: "pending", expires_at} -> pending', async () => {
-      mockFetch.mockResolvedValue(mockFetchResponse({ state: 'pending', expires_at: '2026-10-01T00:15:00.000Z' }));
+    test('200 pending durable transport -> pending', async () => {
+      mockFetch.mockResolvedValue(mockFetchResponse({ transport: { activated_at: null, expires_at: '2099-10-01T00:15:00.000Z', revoked_at: null } }));
       const result = await serviceClient.getTransportStatus('transport-1');
-      expect(result).toEqual({ kind: 'pending', expiresAt: '2026-10-01T00:15:00.000Z' });
+      expect(result).toEqual({ kind: 'pending', expiresAt: '2099-10-01T00:15:00.000Z' });
     });
 
-    test('404 with code TRANSPORT_NOT_FOUND -> redeemed', async () => {
-      mockFetch.mockResolvedValue(mockFetchResponse({ error: 'not found', code: 'TRANSPORT_NOT_FOUND' }, false, 404));
+    test('200 activated durable transport -> redeemed', async () => {
+      mockFetch.mockResolvedValue(mockFetchResponse({ transport: { activated_at: '2026-10-06T00:01:00.000Z', expires_at: '2099-10-01T00:15:00.000Z', revoked_at: null } }));
       const result = await serviceClient.getTransportStatus('transport-1');
       expect(result).toEqual({ kind: 'redeemed' });
     });
 
-    test('404 WITHOUT the TRANSPORT_NOT_FOUND code -> unknown, never redeemed', async () => {
-      // e.g. an older service with no /transports/:id route yet, returning
-      // a bare 404 with no body or an unrelated one.
-      mockFetch.mockResolvedValue(mockFetchResponse({}, false, 404));
+    test('404 with TRANSPORT_NOT_FOUND -> unknown, never implicit activation', async () => {
+      mockFetch.mockResolvedValue(mockFetchResponse({ error: 'not found', code: 'TRANSPORT_NOT_FOUND' }, false, 404));
       const result = await serviceClient.getTransportStatus('transport-1');
       expect(result).toEqual({ kind: 'unknown' });
+    });
+
+    test('200 pending durable transport after expiry -> expired', async () => {
+      mockFetch.mockResolvedValue(mockFetchResponse({ transport: { activated_at: null, expires_at: '2020-10-01T00:15:00.000Z', revoked_at: null } }));
+      const result = await serviceClient.getTransportStatus('transport-1');
+      expect(result).toEqual({ kind: 'expired' });
     });
 
     test('410 with code TRANSPORT_EXPIRED -> expired', async () => {

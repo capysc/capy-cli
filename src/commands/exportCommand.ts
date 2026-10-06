@@ -61,7 +61,7 @@ async function resolveEnv(devMode: boolean): Promise<ResolvedEnv> {
   const svc = new ServiceClient(undefined, devMode);
   svc.setTokenProvider(() => auth.getValidToken());
   const keyServiceOps = {
-    coDecrypt: (o: string, c: string) => svc.coDecrypt(o, c).then(r => r.plaintext),
+    coDecrypt: (o: string, c: string, transportId?: string) => svc.coDecrypt(o, c, undefined, transportId).then(r => r.plaintext),
     wrapOuterLayer: (o: string, p: string) => svc.wrapOuterLayer(o, p).then(r => r.ciphertext),
   };
 

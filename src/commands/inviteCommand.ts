@@ -346,11 +346,11 @@ export class InviteCommand {
   private async unwrapMasterKeyOrExit(
     orgId: string,
     userId: string,
-    serviceClient: { coDecrypt: (oid: string, ct: string) => Promise<{ plaintext: string }>; wrapOuterLayer: (oid: string, pt: string) => Promise<{ ciphertext: string }> },
+    serviceClient: { coDecrypt: (oid: string, ct: string, notAfter?: number, transportId?: string) => Promise<{ plaintext: string }>; wrapOuterLayer: (oid: string, pt: string) => Promise<{ ciphertext: string }> },
   ): Promise<Buffer> {
     try {
       const keyOps = {
-        coDecrypt: (oid: string, ct: string) => serviceClient.coDecrypt(oid, ct).then(r => r.plaintext),
+        coDecrypt: (oid: string, ct: string, transportId?: string) => serviceClient.coDecrypt(oid, ct, undefined, transportId).then(r => r.plaintext),
         wrapOuterLayer: (oid: string, pt: string) => serviceClient.wrapOuterLayer(oid, pt).then(r => r.ciphertext),
       };
       return await unwrapMasterKey(orgId, userId, keyOps);

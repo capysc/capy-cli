@@ -308,7 +308,7 @@ async function openSystemStoreContext(opts: OpenSystemStoreOptions): Promise<Sys
       })();
 
   const keyServiceOps = {
-    coDecrypt: (oid: string, ct: string) => serviceClient.coDecrypt(oid, ct).then((r) => r.plaintext),
+    coDecrypt: (oid: string, ct: string, transportId?: string) => serviceClient.coDecrypt(oid, ct, undefined, transportId).then((r) => r.plaintext),
     wrapOuterLayer: (oid: string, pt: string) => serviceClient.wrapOuterLayer(oid, pt).then((r) => r.ciphertext),
   };
 

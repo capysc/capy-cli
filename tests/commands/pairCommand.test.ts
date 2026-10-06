@@ -291,8 +291,8 @@ describe('pairCommand', () => {
       sealed: await sealAsBrowser(
         buildPayload({
           entries: [
-            { org_id: 'org-mine', user_id: 'user-456', k_local: Buffer.alloc(32, 1).toString('base64url'), key_enc: '{}' },
-            { org_id: 'org-other-user', user_id: 'someone-else', k_local: Buffer.alloc(32, 2).toString('base64url'), key_enc: '{}' },
+            { org_id: 'org-mine', user_id: 'user-456', k_local: Buffer.alloc(32, 1).toString('base64url'), key_enc: JSON.stringify({ encrypted_master_key: 'blob' }) },
+            { org_id: 'org-other-user', user_id: 'someone-else', k_local: Buffer.alloc(32, 2).toString('base64url'), key_enc: JSON.stringify({ encrypted_master_key: 'blob' }) },
           ],
         }),
         capturedPairPublicKey(),
@@ -303,6 +303,29 @@ describe('pairCommand', () => {
     expect(parsed.paired).toEqual([{ org_id: 'org-mine', user_id: 'user-456' }]);
     expect(mockSaveLocalRoot).toHaveBeenCalledTimes(1);
     expect(mockSaveLocalRoot.mock.calls[0][0]).toBe('org-mine');
+  });
+
+  test('refuses a persistent transport whose entry id and key.enc id disagree before writing credentials', async () => {
+    mockPickupDevicePairing.mockImplementation(async () => ({
+      sealed: await sealAsBrowser(
+        buildPayload({
+          entries: [{
+            org_id: 'org-123',
+            user_id: 'user-456',
+            k_local: Buffer.alloc(32, 4).toString('base64url'),
+            key_enc: JSON.stringify({ encrypted_master_key: 'blob', transport_id: 'transport-other' }),
+            transport_id: 'transport-expected',
+          }],
+        }),
+        capturedPairPublicKey(),
+      ),
+    }));
+    const { stdout } = await withCapturedIo(async () => {
+      await expect(pairCommand({ json: true })).rejects.toThrow();
+    });
+    expect(JSON.parse(stdout).code).toBe('INVALID_FORMAT');
+    expect(mockSaveLocalRoot).not.toHaveBeenCalled();
+    expect(mockWriteOrgKeyFileRaw).not.toHaveBeenCalled();
   });
 
   test('refuses with coded PAIR_NO_KEYS when no entry matches the logged-in user', async () => {

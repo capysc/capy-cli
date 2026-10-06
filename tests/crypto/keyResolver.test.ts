@@ -30,6 +30,7 @@ let hasLocalRoot: typeof import('../../src/config/globalConfig').hasLocalRoot;
 let getLocalRootPath: typeof import('../../src/config/globalConfig').getLocalRootPath;
 let getOrgKeyPath: typeof import('../../src/config/globalConfig').getOrgKeyPath;
 let wrapAndSaveMasterKey: typeof import('../../src/crypto/keyResolver').wrapAndSaveMasterKey;
+let unwrapMasterKey: typeof import('../../src/crypto/keyResolver').unwrapMasterKey;
 let resolveProjectKey: typeof import('../../src/crypto/keyResolver').resolveProjectKey;
 let resolveFromSeedPhrase: typeof import('../../src/crypto/keyResolver').resolveFromSeedPhrase;
 let hasOrgKey: typeof import('../../src/crypto/keyResolver').hasOrgKey;
@@ -59,6 +60,7 @@ beforeAll(async () => {
 
   const kr = await import('../../src/crypto/keyResolver');
   wrapAndSaveMasterKey = kr.wrapAndSaveMasterKey;
+  unwrapMasterKey = kr.unwrapMasterKey;
   resolveProjectKey = kr.resolveProjectKey;
   resolveFromSeedPhrase = kr.resolveFromSeedPhrase;
   hasOrgKey = kr.hasOrgKey;
@@ -103,6 +105,29 @@ describe('KeyResolver', () => {
   });
 
   describe('resolveProjectKey', () => {
+    it('forwards transport_id from key.enc to co-decrypt', async () => {
+      const org = 'org_transport_context';
+      const user = 'user_transport_context';
+      const transportId = 'transport_123';
+      const root = generateLocalRoot();
+      const inner = encryptMasterKey(masterKey, deriveLocalInnerKey(root), masterKeyAAD(user, org));
+      mkdirSync(dirname(getOrgKeyPath(org, user)), { recursive: true });
+      writeFileSync(getOrgKeyPath(org, user), JSON.stringify({ encrypted_master_key: KMS_PREFIX + inner, transport_id: transportId }));
+      saveLocalRoot(org, root, user);
+      const coDecrypt = mock(async (_org: string, ciphertext: string, receivedTransportId?: string) => {
+        expect(receivedTransportId).toBe(transportId);
+        return ciphertext.slice(KMS_PREFIX.length);
+      });
+
+      const recovered = await unwrapMasterKey(org, user, {
+        coDecrypt,
+        wrapOuterLayer: async (_org: string, plaintext: string) => plaintext,
+      });
+
+      expect(recovered.equals(masterKey)).toBe(true);
+      expect(coDecrypt).toHaveBeenCalledWith(org, KMS_PREFIX + inner, transportId);
+    });
+
     it('should throw when no org key exists', async () => {
       await expect(resolveProjectKey('org_missing', 'proj_1', userId, mockKeyServiceOps()))
         .rejects.toThrow('You do not have access');

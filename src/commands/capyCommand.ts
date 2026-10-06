@@ -112,7 +112,7 @@ export class CapyCommand {
    */
   private keyServiceOps(): KeyServiceOps {
     return {
-      coDecrypt: (orgId, ciphertext) => this.serviceClient.coDecrypt(orgId, ciphertext).then(r => r.plaintext),
+      coDecrypt: (orgId, ciphertext, transportId) => this.serviceClient.coDecrypt(orgId, ciphertext, undefined, transportId).then(r => r.plaintext),
       wrapOuterLayer: (orgId, plaintext) => this.serviceClient.wrapOuterLayer(orgId, plaintext).then(r => r.ciphertext),
     };
   }

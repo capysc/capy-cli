@@ -209,7 +209,7 @@ export class EditCommand {
       if (localMode) return await resolveLocalProjectKey(projectId);
       const { resolveProjectKey } = await import('../crypto/keyResolver');
       const keyOps = {
-        coDecrypt: (oid: string, ct: string) => serviceClient!.coDecrypt(oid, ct).then((r) => r.plaintext),
+        coDecrypt: (oid: string, ct: string, transportId?: string) => serviceClient!.coDecrypt(oid, ct, undefined, transportId).then((r) => r.plaintext),
         wrapOuterLayer: (oid: string, pt: string) => serviceClient!.wrapOuterLayer(oid, pt).then((r) => r.ciphertext),
       };
       return await resolveProjectKey(orgId, projectId, userId, keyOps);

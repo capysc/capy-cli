@@ -19,7 +19,7 @@ import { generatePairKeyPair, openPairEnvelope, parsePairEnvelope } from '../cry
 import { authorizeDevice, pollDeviceToken } from '../auth/deviceGrant';
 import { AuthService } from '../auth/authService';
 import { ServiceClient } from '../service/serviceClient';
-import { readLocalRoot, saveLocalRoot, writeOrgKeyFileRaw } from '../config/globalConfig';
+import { parseMasterKeyRecord, readLocalRoot, saveLocalRoot, writeOrgKeyFileRaw } from '../config/globalConfig';
 import { renderTerminalQr, type RenderedTerminalQr } from '../ui/terminalQr';
 import { printMaskedLinkBlock, maskLink, type MaskedLinkPromptHandle } from '../ui/maskedLinkPrompt';
 import { isFullScreenQrEligible, startFullScreenQrView, printMaskedLinkFooter } from '../ui/fullScreenQr';
@@ -60,6 +60,13 @@ interface PairedOrg {
 
 /** Writes one entry's `local.key` + `key.enc`, honoring the local.key conflict guard. Returns whether it was written or skipped (--force not needed, values matched). */
 function writeEntry(entry: PairingEntry, force: boolean): 'written' {
+  const keyRecord = parseMasterKeyRecord(entry.key_enc);
+  if (!keyRecord || (entry.transport_id !== undefined && keyRecord.transportId !== entry.transport_id)) {
+    throw new CapyError(
+      'Transport key metadata does not match its pairing entry.',
+      ERROR_CODES.INVALID_FORMAT,
+    );
+  }
   const newKLocal = Buffer.from(entry.k_local, 'base64url');
   const existing = readLocalRoot(entry.org_id, entry.user_id);
   if (existing && !existing.equals(newKLocal) && !force) {

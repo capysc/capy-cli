@@ -147,7 +147,7 @@ export class RedeemCommand {
 
     // 8. Double-wrap M (inner local key + outer KMS) and store locally
     const keyOps = {
-      coDecrypt: (oid: string, ct: string) => serviceClient.coDecrypt(oid, ct).then(r => r.plaintext),
+      coDecrypt: (oid: string, ct: string, transportId?: string) => serviceClient.coDecrypt(oid, ct, undefined, transportId).then(r => r.plaintext),
       wrapOuterLayer: (oid: string, pt: string) => serviceClient.wrapOuterLayer(oid, pt).then(r => r.ciphertext),
     };
     await wrapAndSaveMasterKey(masterKey, orgId, userId, keyOps);
