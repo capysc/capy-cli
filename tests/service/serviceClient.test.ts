@@ -375,6 +375,12 @@ describe('ServiceClient', () => {
       expect(result).toEqual({ kind: 'redeemed' });
     });
 
+    test('200 revoked activated durable transport -> unknown', async () => {
+      mockFetch.mockResolvedValue(mockFetchResponse({ transport: { activated_at: '2026-10-06T00:01:00.000Z', expires_at: '2099-10-01T00:15:00.000Z', revoked_at: '2026-10-06T00:02:00.000Z' } }));
+      const result = await serviceClient.getTransportStatus('transport-1');
+      expect(result).toEqual({ kind: 'unknown' });
+    });
+
     test('404 with TRANSPORT_NOT_FOUND -> unknown, never implicit activation', async () => {
       mockFetch.mockResolvedValue(mockFetchResponse({ error: 'not found', code: 'TRANSPORT_NOT_FOUND' }, false, 404));
       const result = await serviceClient.getTransportStatus('transport-1');

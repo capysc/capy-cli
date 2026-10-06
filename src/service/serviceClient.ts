@@ -869,11 +869,10 @@ export class ServiceClient {
         `/transports/${encodeURIComponent(id)}`,
       );
       const expiresAtMs = Date.parse(data.transport.expires_at);
+      if (data.transport.revoked_at !== null) return { kind: 'unknown' };
       if (data.transport.activated_at !== null) return { kind: 'redeemed' };
       if (!Number.isNaN(expiresAtMs) && expiresAtMs <= Date.now()) return { kind: 'expired' };
-      return data.transport.revoked_at === null
-        ? { kind: 'pending', expiresAt: data.transport.expires_at }
-        : { kind: 'unknown' };
+      return { kind: 'pending', expiresAt: data.transport.expires_at };
     } catch (error: unknown) {
       if (error instanceof CapyError && error.code === ERROR_CODES.TRANSPORT_EXPIRED) return { kind: 'expired' };
       return { kind: 'unknown' };
