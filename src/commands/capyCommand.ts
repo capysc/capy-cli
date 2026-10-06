@@ -137,7 +137,7 @@ export class CapyCommand {
 
   private async executePairCommand(expectedUserId: string): Promise<void> {
     const { pairCommand } = await import('./pairCommand');
-    await pairCommand({ apiUrl: this.apiUrl, devMode: this.devMode, expectedUserId });
+    await pairCommand({ apiUrl: this.apiUrl, devMode: this.devMode, expectedUserId, presentation: 'inline' });
   }
 
   /**

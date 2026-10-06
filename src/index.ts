@@ -694,6 +694,16 @@ program
   });
 
 program
+  .command('login', { hidden: true })
+  .description('Sign in and pair this device via Keep')
+  .option('--json', 'emit machine-readable JSON instead of the human UI')
+  .action(async (options) => {
+    assertNotLocalOnly('login');
+    const { loginCommand } = await import('./commands/loginCommand');
+    await loginCommand({ json: options.json === true });
+  });
+
+program
   .command('pair')
   .description('Pair this device via Keep; requires interactive confirmation of the returned account before installing any session or keys')
   .option('--json', 'emit machine-readable JSON instead of the human UI')

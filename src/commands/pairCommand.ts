@@ -23,9 +23,11 @@ import { readLocalRoot, saveLocalRoot, writeOrgKeyFileRaw } from '../config/glob
 import { renderTerminalQr, type RenderedTerminalQr } from '../ui/terminalQr';
 import { printMaskedLinkBlock, maskLink, type MaskedLinkPromptHandle } from '../ui/maskedLinkPrompt';
 import { isFullScreenQrEligible, startFullScreenQrView, printMaskedLinkFooter } from '../ui/fullScreenQr';
-import { CapyError, ERROR_CODES } from '../types/index';
+import { AuthResult, CapyError, ERROR_CODES } from '../types/index';
 import { refuseError } from './pairingRefusal';
 import type { PairingEntry } from '../crypto/pairingPayload';
+
+export type PairPresentation = 'centered' | 'inline';
 
 export interface PairOptions {
   readonly json?: boolean;
@@ -34,6 +36,12 @@ export interface PairOptions {
   readonly devMode?: boolean;
   /** Internal root-command guard; direct `capy pair` remains account-selectable. */
   readonly expectedUserId?: string;
+  /** Internal interactive-login hook. Reuses the caller's session instead of creating a second auth flow. */
+  readonly authService?: AuthService;
+  /** Internal UI mode: explicit `capy pair` centers the QR; onboarding keeps its flow inline. */
+  readonly presentation?: PairPresentation;
+  /** Internal org scope required by an interactive command that started pairing. */
+  readonly organizationId?: string;
 }
 
 /** Prose/QR/progress output. Always sent to stderr under `--json` so stdout stays pure JSON; stdout in human mode otherwise. */
@@ -84,10 +92,10 @@ const PAIR_LINK_LABEL = 'Approve on your other device:'; // COPY-FLAG
  * `stop()` once the poll settles whether or not the user ever pressed a
  * key — same contract `startMaskedLinkPrompt` has always had.
  */
-function printHumanPairBlock(deviceLink: string, qr: RenderedTerminalQr | null, userCode: string): MaskedLinkPromptHandle | null {
+function printHumanPairBlock(deviceLink: string, qr: RenderedTerminalQr | null, userCode: string, presentation: PairPresentation): MaskedLinkPromptHandle | null {
   const masked = maskLink(deviceLink, 'query');
 
-  if (isFullScreenQrEligible(false) && qr) {
+  if (presentation === 'centered' && isFullScreenQrEligible(false) && qr) {
     const view = startFullScreenQrView({
       fullUrl: deviceLink,
       maskedUrl: masked,
@@ -121,10 +129,11 @@ function printHumanPairBlock(deviceLink: string, qr: RenderedTerminalQr | null, 
   return prompt;
 }
 
-export async function pairCommand(options: PairOptions = {}): Promise<void> {
+export async function pairCommand(options: PairOptions = {}): Promise<AuthResult> {
   const json = options.json === true;
   const force = options.force === true;
   const devMode = options.devMode === true;
+  const presentation = options.presentation ?? 'centered';
   try {
     // Same precedence ServiceClient's constructor uses: explicit override
     // wins, otherwise the profile chain (CAPY_API_URL → profile → default).
@@ -140,7 +149,7 @@ export async function pairCommand(options: PairOptions = {}): Promise<void> {
 
     // `--json`'s progress output (stderr, unmasked) is unchanged below;
     // this is the new masked/interactive block, printed only in human mode.
-    const prompt = json ? null : printHumanPairBlock(deviceLink, qr, authorize.user_code);
+    const prompt = json ? null : printHumanPairBlock(deviceLink, qr, authorize.user_code, presentation);
     if (json) {
       announce(true, '');
       if (qr) {
@@ -182,12 +191,18 @@ export async function pairCommand(options: PairOptions = {}): Promise<void> {
       );
     }
 
-    const authService = new AuthService(options.apiUrl, devMode);
+    const authService = options.authService ?? new AuthService(options.apiUrl, devMode);
     const installed = await authService.installDeviceGrantSession(exchange.token, exchange.user, exchange.organizations);
-    if (!installed.organization_id) {
-      // Multi-org account with no org scoped by the device-grant token yet —
-      // resolve into one the same way every other org-context command does.
-      await authService.authenticateSilent();
+    const authenticated = options.organizationId
+      ? await authService.authenticateSilent(options.organizationId)
+      : installed.organization_id
+        ? installed
+        : await authService.authenticateSilent();
+    if (!authenticated.success) {
+      throw new CapyError(
+        authenticated.error || 'Device pairing could not establish an organization session.',
+        ERROR_CODES.AUTH_FAILED,
+      );
     }
 
     const serviceClient = new ServiceClient(options.apiUrl, devMode);
@@ -212,12 +227,13 @@ export async function pairCommand(options: PairOptions = {}): Promise<void> {
 
     if (json) {
       console.log(JSON.stringify({ ok: true, user_id: exchange.user.id, paired }, null, 2));
-      return;
+      return authenticated;
     }
 
     console.log('');
     console.log(`  Paired ${paired.length} organization${paired.length === 1 ? '' : 's'} to this machine.`); // COPY-FLAG
     console.log('');
+    return authenticated;
   } catch (err) {
     refuseError(err, json);
   }

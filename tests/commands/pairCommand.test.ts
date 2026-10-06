@@ -23,6 +23,11 @@ mock.module('../../src/commands/pairAccountConfirmation', () => ({
   confirmPairAccount: mockConfirmPairAccount,
 }));
 
+const mockResolveKeepOrigin = jest.fn();
+mock.module('../../src/config/keepOrigin', () => ({
+  resolveKeepOrigin: mockResolveKeepOrigin,
+}));
+
 const mockAuthorizeDevice = jest.fn();
 const mockPollDeviceToken = jest.fn();
 mock.module('../../src/auth/deviceGrant', () => ({
@@ -68,7 +73,16 @@ mock.module('../../src/config/globalConfig', () => ({
 const mockRenderTerminalQr = jest.fn();
 mock.module('../../src/ui/terminalQr', () => ({ renderTerminalQr: mockRenderTerminalQr }));
 
+const mockIsFullScreenQrEligible = jest.fn();
+const mockStartFullScreenQrView = jest.fn();
+mock.module('../../src/ui/fullScreenQr', () => ({
+  isFullScreenQrEligible: mockIsFullScreenQrEligible,
+  startFullScreenQrView: mockStartFullScreenQrView,
+  printMaskedLinkFooter: jest.fn(),
+}));
+
 import { pairCommand } from '../../src/commands/pairCommand';
+import { AuthService } from '../../src/auth/authService';
 
 /**
  * Seals `payload` to `recipientPublicKeyRaw` the way Keep's browser JS does
@@ -130,11 +144,11 @@ function captureStdio(): { stdout: () => string; stderr: () => string; restore: 
 }
 
 /** Runs `run`, capturing stdout/stderr around it — read before the spies are restored, every time. */
-async function withCapturedIo(run: () => Promise<void>): Promise<{ stdout: string; stderr: string }> {
+async function withCapturedIo<T>(run: () => Promise<T>): Promise<{ result: T; stdout: string; stderr: string }> {
   const io = captureStdio();
   try {
-    await run();
-    return { stdout: io.stdout(), stderr: io.stderr() };
+    const result = await run();
+    return { result, stdout: io.stdout(), stderr: io.stderr() };
   } finally {
     io.restore();
   }
@@ -171,9 +185,12 @@ describe('pairCommand', () => {
       organizations: [{ id: 'org-123', workos_org_id: 'wo_1', name: 'Acme' }],
     });
     mockInstallDeviceGrantSession.mockResolvedValue({ success: true, organization_id: 'org-123', user_id: EXCHANGE_USER.id });
+    mockAuthenticateSilent.mockResolvedValue({ success: true, organization_id: 'org-123', user_id: EXCHANGE_USER.id });
     mockPickupDevicePairing.mockImplementation(async () => ({ sealed: await sealAsBrowser(buildPayload(), capturedPairPublicKey()) }));
     mockReadLocalRoot.mockReturnValue(null);
     mockRenderTerminalQr.mockReturnValue(null);
+    mockResolveKeepOrigin.mockReturnValue('https://keep.capy.sc');
+    mockIsFullScreenQrEligible.mockReturnValue(false);
   });
 
   test('writes local.key + key.enc for every entry matching the logged-in user, and reports it under --json', async () => {
@@ -225,6 +242,43 @@ describe('pairCommand', () => {
     const [qrArg] = mockRenderTerminalQr.mock.calls[0] as [string];
     expect(qrArg).toBe('https://keep.capy.sc/device?code=ABCD-EFGH');
     expect(qrArg).not.toBe('https://keep.capy.sc/device?…');
+  });
+
+  test('keeps the selected API and Keep origins together for staging pairing', async () => {
+    mockResolveKeepOrigin.mockReturnValue('https://keep.staging.test');
+    await withCapturedIo(() => pairCommand({ json: true, apiUrl: 'https://api.staging.test', devMode: true }));
+
+    expect(mockAuthorizeDevice).toHaveBeenCalledWith('https://api.staging.test', expect.any(String));
+    expect(mockRenderTerminalQr).toHaveBeenCalledWith('https://keep.staging.test/device?code=ABCD-EFGH');
+  });
+
+  test('centers only explicit pair while inline pairing keeps the caller flow in place', async () => {
+    const fullScreenView = { done: Promise.resolve(), stop: jest.fn() };
+    mockRenderTerminalQr.mockReturnValue({ text: 'QR', hint: null });
+    mockIsFullScreenQrEligible.mockReturnValue(true);
+    mockStartFullScreenQrView.mockReturnValue(fullScreenView);
+
+    await withCapturedIo(() => pairCommand({}));
+    expect(mockStartFullScreenQrView).toHaveBeenCalledTimes(1);
+
+    jest.clearAllMocks();
+    mockConfirmPairAccount.mockResolvedValue(true);
+    mockAuthorizeDevice.mockResolvedValue({ device_code: 'device-1', user_code: 'ABCD-EFGH', verification_uri: 'https://x/verify', expires_in: 600, interval: 5 });
+    mockPollDeviceToken.mockResolvedValue({
+      token: { access_token: 'jwt', refresh_token: 'rt', expires_in: 600 },
+      user: EXCHANGE_USER,
+      organizations: [{ id: 'org-123', workos_org_id: 'wo_1', name: 'Acme' }],
+    });
+    mockInstallDeviceGrantSession.mockResolvedValue({ success: true, organization_id: 'org-123', user_id: EXCHANGE_USER.id });
+    mockAuthenticateSilent.mockResolvedValue({ success: true, organization_id: 'org-123', user_id: EXCHANGE_USER.id });
+    mockPickupDevicePairing.mockImplementation(async () => ({ sealed: await sealAsBrowser(buildPayload(), capturedPairPublicKey()) }));
+    mockReadLocalRoot.mockReturnValue(null);
+    mockRenderTerminalQr.mockReturnValue({ text: 'QR', hint: null });
+    mockResolveKeepOrigin.mockReturnValue('https://keep.capy.sc');
+    mockIsFullScreenQrEligible.mockReturnValue(true);
+
+    await withCapturedIo(() => pairCommand({ presentation: 'inline' }));
+    expect(mockStartFullScreenQrView).not.toHaveBeenCalled();
   });
 
   test('--json is untouched: the progress line on stderr still carries the FULL link, exactly as before', async () => {
@@ -333,10 +387,53 @@ describe('pairCommand', () => {
 
   test('falls back to authenticateSilent() when the device-grant token has no scoped org yet', async () => {
     mockInstallDeviceGrantSession.mockResolvedValue({ success: true, organization_id: '', user_id: EXCHANGE_USER.id });
-    const { stdout } = await withCapturedIo(() => pairCommand({ json: true }));
+    const { result, stdout } = await withCapturedIo(() => pairCommand({ json: true }));
     expect(mockAuthenticateSilent).toHaveBeenCalledTimes(1);
+    expect(result).toEqual({ success: true, organization_id: 'org-123', user_id: EXCHANGE_USER.id });
     const parsed = JSON.parse(stdout);
     expect(parsed.ok).toBe(true);
+  });
+
+  test('rejects before Transport when an orgless device grant cannot establish a session', async () => {
+    mockInstallDeviceGrantSession.mockResolvedValue({ success: true, organization_id: '', user_id: EXCHANGE_USER.id });
+    mockAuthenticateSilent.mockResolvedValue({ success: false, error: 'No valid session available' });
+    const { stdout } = await withCapturedIo(async () => {
+      await expect(pairCommand({ json: true })).rejects.toThrow();
+    });
+
+    expect(JSON.parse(stdout).code).toBe('AUTH_FAILED');
+    expect(mockPickupDevicePairing).not.toHaveBeenCalled();
+  });
+
+  test('rejects before Transport when the requested organization cannot be scoped after pairing', async () => {
+    mockAuthenticateSilent.mockResolvedValue({ success: false, error: 'No access to the requested organization' });
+    const { stdout } = await withCapturedIo(async () => {
+      await expect(pairCommand({ json: true, organizationId: 'org-not-authorized' })).rejects.toThrow();
+    });
+
+    expect(mockAuthenticateSilent).toHaveBeenCalledWith('org-not-authorized');
+    expect(JSON.parse(stdout).code).toBe('AUTH_FAILED');
+    expect(mockPickupDevicePairing).not.toHaveBeenCalled();
+  });
+
+  test('reuses an injected AuthService for interactive login without starting another auth flow', async () => {
+    const injectedInstall = jest.fn().mockResolvedValue({ success: true, organization_id: 'org-123', user_id: EXCHANGE_USER.id });
+    const injectedSilent = jest.fn();
+    const injectedToken = jest.fn();
+    const injectedAuthService = {
+      installDeviceGrantSession: injectedInstall,
+      authenticateSilent: injectedSilent,
+      getValidToken: injectedToken,
+    };
+
+    const { stdout } = await withCapturedIo(() => pairCommand({ json: true, authService: injectedAuthService as any }));
+
+    expect(JSON.parse(stdout).ok).toBe(true);
+    expect(injectedInstall).toHaveBeenCalledTimes(1);
+    const [tokenProvider] = mockSetTokenProvider.mock.calls[0] as [() => unknown];
+    tokenProvider();
+    expect(injectedToken).toHaveBeenCalledTimes(1);
+    expect(AuthService).not.toHaveBeenCalled();
   });
 
   test('a pickup refusal (e.g. PAIRING_NOT_READY) surfaces its own code, not a generic one', async () => {

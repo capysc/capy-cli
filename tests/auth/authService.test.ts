@@ -1,4 +1,4 @@
-import { mock, spyOn, describe, test, expect, beforeEach, afterEach, afterAll, jest } from 'bun:test';
+import { mock, spyOn, describe, test, expect, beforeEach, afterAll, jest } from 'bun:test';
 
 // Mock dependencies - must come BEFORE imports that use them
 mock.module('fs', () => ({
@@ -15,9 +15,9 @@ mock.module('proper-lockfile', () => ({
   unlockSync: mock(() => undefined),
 }));
 
-const mockOAuthServerConstructor = mock(() => ({}));
-mock.module('../../src/auth/oauthServer', () => ({
-  OAuthServer: mockOAuthServerConstructor,
+const mockPairCommand = jest.fn();
+mock.module('../../src/commands/pairCommand', () => ({
+  pairCommand: mockPairCommand,
 }));
 
 const mockReadAuthSession = mock(() => null);
@@ -42,11 +42,9 @@ afterAll(() => { mock.restore(); });
 
 import { existsSync, unlinkSync } from 'fs';
 import { AuthService } from '../../src/auth/authService';
-import { OAuthServer } from '../../src/auth/oauthServer';
 import { SessionStore } from '../../src/types/index';
 
 const mockExistsSync = existsSync as any;
-const MockOAuthServer = OAuthServer as any;
 const mockUnlinkSync = unlinkSync as any;
 
 // Mock global fetch
@@ -95,22 +93,27 @@ function makeSession(overrides: Partial<SessionStore> = {}): SessionStore {
   };
 }
 
-describe('AuthService', () => {
-  let originalEnv: NodeJS.ProcessEnv;
+function pairedAuthResult(organizationId = 'org-123') {
+  return {
+    success: true,
+    organization_id: organizationId,
+    user_id: 'user-456',
+    user_email: 'test@example.com',
+    organizations: [{ id: organizationId, workos_org_id: `workos-${organizationId}`, name: 'Test Org' }],
+  };
+}
 
+describe('AuthService', () => {
   beforeEach(() => {
-    originalEnv = { ...process.env };
     jest.clearAllMocks();
+    mockFetch.mockReset();
     delete process.env.CAPY_MOCK_AUTH;
     delete process.env.CAPY_API_URL;
 
     mockGetAuthSessionPath.mockReturnValue('/home/test/.capy/auth/session.json');
     mockReadAuthSession.mockReturnValue(null);
     mockExistsSync.mockReturnValue(false);
-  });
-
-  afterEach(() => {
-    process.env = originalEnv;
+    mockPairCommand.mockResolvedValue(pairedAuthResult());
   });
 
   describe('constructor', () => {
@@ -199,83 +202,38 @@ describe('AuthService', () => {
       expect(result._auth_method).toBe('cached');
     });
 
-    test('should perform OAuth flow when no session exists', async () => {
-      const service = new AuthService();
-
-      mockFetch
-        .mockResolvedValueOnce(mockFetchResponse({ auth_url: 'https://workos.com/auth' }))
-        .mockResolvedValueOnce(mockFetchResponse({
-          token: { access_token: fakeJwt({ org_id: 'workos-org-123' }), refresh_token: 'new-refresh', expires_in: 3600 },
-          user: { id: 'user-456', email: 'test@example.com', first_name: null, last_name: null },
-          organizations: [{ id: 'org-123', workos_org_id: 'workos-org-123', name: 'Test Org' }],
-        }));
-
-      const mockOAuthInstance = {
-        bind: mock(() => Promise.resolve(undefined)),
-        getState: mock(() => 'mock-state'),
-        getRedirectUri: mock(() => 'http://localhost:19420/callback'),
-        getCodeChallenge: mock(() => 'mock-code-challenge'),
-        getCodeVerifier: mock(() => 'mock-code-verifier'),
-        startAuthFlow: mock(() => Promise.resolve('auth-code-123')),
-      };
-      (MockOAuthServer as any).mockImplementation(() => mockOAuthInstance);
+    test('uses Keep device pairing rather than a localhost OAuth callback when no session exists', async () => {
+      const service = new AuthService('https://custom.api.test', true);
 
       const result = await service.authenticate('org-123');
 
-      expect(result.success).toBe(true);
-      expect(result.organization_id).toBe('org-123');
-
-      expect(mockSaveAuthSession).toHaveBeenCalledWith(
-        expect.objectContaining({
-          version: 2,
-          user_id: 'user-456',
-          sessions: expect.objectContaining({
-            'org-123': expect.objectContaining({ access_token: expect.any(String) }),
-          }),
-        }),
-        'user-456',
-      );
+      expect(result).toEqual(pairedAuthResult());
+      expect(mockPairCommand).toHaveBeenCalledWith({
+        apiUrl: 'https://custom.api.test',
+        devMode: true,
+        authService: service,
+        presentation: 'inline',
+        organizationId: 'org-123',
+      });
+      expect(mockFetch).not.toHaveBeenCalled();
     });
 
-    test('should handle authentication failure', async () => {
+    test('surfaces device pairing failure without continuing authentication', async () => {
       const service = new AuthService();
-
-      const mockOAuthInstance = {
-        bind: mock(() => Promise.resolve(undefined)),
-        getState: mock(() => 'mock-state'),
-        getRedirectUri: mock(() => 'http://localhost:19420/callback'),
-        getCodeChallenge: mock(() => 'mock-code-challenge'),
-        getCodeVerifier: mock(() => 'mock-code-verifier'),
-        startAuthFlow: mock(() => Promise.resolve('auth-code-123')),
-      };
-      (MockOAuthServer as any).mockImplementation(() => mockOAuthInstance);
-
-      mockFetch
-        .mockResolvedValueOnce(mockFetchResponse({ auth_url: 'https://workos.com/auth' }))
-        .mockResolvedValueOnce(mockFetchResponse({ error: 'Invalid credentials' }, false, 401));
+      mockPairCommand.mockRejectedValue(new Error('Device pairing was cancelled'));
 
       const result = await service.authenticate();
 
-      expect(result).toEqual({ success: false, error: 'Invalid credentials' });
+      expect(result).toEqual({ success: false, error: 'Device pairing was cancelled' });
     });
 
-    test('should handle network errors', async () => {
+    test('surfaces device pairing transport failure without falling back to OAuth', async () => {
       const service = new AuthService();
-
-      const mockOAuthInstance = {
-        bind: mock(() => Promise.resolve(undefined)),
-        getState: mock(() => 'mock-state'),
-        getRedirectUri: mock(() => 'http://localhost:19420/callback'),
-        getCodeChallenge: mock(() => 'mock-code-challenge'),
-        getCodeVerifier: mock(() => 'mock-code-verifier'),
-        startAuthFlow: mock(() => Promise.resolve('auth-code-123')),
-      };
-      (MockOAuthServer as any).mockImplementation(() => mockOAuthInstance);
-
-      mockFetch.mockRejectedValue(new Error('Network error'));
+      mockPairCommand.mockRejectedValue(new Error('Transport was not received'));
 
       const result = await service.authenticate();
-      expect(result).toEqual({ success: false, error: 'Network error' });
+      expect(result).toEqual({ success: false, error: 'Transport was not received' });
+      expect(mockFetch).not.toHaveBeenCalled();
     });
 
     test('should refresh expired session for requested org', async () => {
@@ -504,7 +462,7 @@ describe('AuthService', () => {
       expect(result._auth_method).toBe('refreshed');
     });
 
-    test('fresh OAuth should not carry over old session tokens', async () => {
+    test('existing account credentials still use device pairing after their selected org session cannot refresh', async () => {
       // Pre-existing session with a token for org-STALE
       const staleSession = makeSession({
         organizations: [
@@ -520,36 +478,19 @@ describe('AuthService', () => {
       });
       mockReadAuthSession.mockReturnValue(staleSession);
 
+      mockFetch.mockRejectedValueOnce(new Error('refresh failed'));
+      mockPairCommand.mockResolvedValue(pairedAuthResult());
       const service = new AuthService(undefined, false, 'user-456');
-
-      // Simulate OAuth flow returning a token for org-123
-      mockFetch
-        .mockResolvedValueOnce(mockFetchResponse({ auth_url: 'https://workos.com/auth' }))
-        .mockResolvedValueOnce(mockFetchResponse({
-          token: { access_token: fakeJwt({ org_id: 'workos-org-123' }), refresh_token: 'new-refresh', expires_in: 3600 },
-          user: { id: 'user-456', email: 'test@example.com', first_name: null, last_name: null },
-          organizations: [{ id: 'org-123', workos_org_id: 'workos-org-123', name: 'Test Org' }],
-        }));
-
-      const mockOAuthInstance = {
-        bind: mock(() => Promise.resolve(undefined)),
-        getState: mock(() => 'mock-state'),
-        getRedirectUri: mock(() => 'http://localhost:19420/callback'),
-        getCodeChallenge: mock(() => 'mock-code-challenge'),
-        getCodeVerifier: mock(() => 'mock-code-verifier'),
-        startAuthFlow: mock(() => Promise.resolve('auth-code-123')),
-      };
-      (MockOAuthServer as any).mockImplementation(() => mockOAuthInstance);
-
-      // Force OAuth by clearing session
-      (service as any).session = null;
       const result = await service.authenticate('org-123');
-      expect(result.success).toBe(true);
-
-      // The saved session should NOT contain org-STALE
-      const savedSession = mockSaveAuthSession.mock.calls[0]?.[0] as SessionStore;
-      expect(savedSession.sessions).not.toHaveProperty('org-STALE');
-      expect(savedSession.sessions).toHaveProperty('org-123');
+      expect(result).toEqual(pairedAuthResult());
+      expect(mockPairCommand).toHaveBeenCalledWith({
+        apiUrl: 'https://api.capy.sc',
+        devMode: false,
+        expectedUserId: 'user-456',
+        authService: service,
+        presentation: 'inline',
+        organizationId: 'org-123',
+      });
     });
 
     test('authenticateSilent should reject mismatched org tokens', async () => {
@@ -600,7 +541,7 @@ describe('AuthService', () => {
     test('authenticate with unknown org ID does NOT fall through to another org', async () => {
       // If keep.lock has an org ID that doesn't exist in the session,
       // authenticate must NOT silently use a different org's session.
-      // It should try refresh (fails), then fall to OAuth.
+      // It should try refresh (fails), then require device pairing.
       const session: SessionStore = {
         version: 2,
         user_id: 'user-456',
@@ -616,32 +557,23 @@ describe('AuthService', () => {
       };
       mockReadAuthSession.mockReturnValue(session);
 
-      // Refresh for 'org-OLD' fails, OAuth mock returns success
-      mockFetch
-        .mockRejectedValueOnce(new Error('refresh failed'))
-        .mockResolvedValueOnce(mockFetchResponse({ auth_url: 'https://workos.com/auth' }))
-        .mockResolvedValueOnce(mockFetchResponse({
-          token: { access_token: fakeJwt({ org_id: 'workos-org-OLD' }), refresh_token: 'new-refresh', expires_in: 3600 },
-          user: { id: 'user-456', email: 'test@example.com', first_name: null, last_name: null },
-          organizations: [{ id: 'org-OLD', workos_org_id: 'workos-org-OLD', name: 'Old Org' }],
-        }));
-
-      const mockOAuthInstance = {
-        bind: mock(() => Promise.resolve(undefined)),
-        getState: mock(() => 'mock-state'),
-        getRedirectUri: mock(() => 'http://localhost:19420/callback'),
-        getCodeChallenge: mock(() => 'mock-challenge'),
-        getCodeVerifier: mock(() => 'mock-verifier'),
-        startAuthFlow: mock(() => Promise.resolve('code-123')),
-      };
-      (MockOAuthServer as any).mockImplementation(() => mockOAuthInstance);
+      mockFetch.mockRejectedValueOnce(new Error('refresh failed'));
+      mockPairCommand.mockResolvedValue(pairedAuthResult('org-OLD'));
 
       const service = new AuthService(undefined, false, 'user-456');
       const result = await service.authenticate('org-OLD');
 
-      // Should have gone to OAuth, not used org-NEW's session
+      // Should have paired, not used org-NEW's session
       expect(result.success).toBe(true);
       expect(result.organization_id).toBe('org-OLD');
+      expect(mockPairCommand).toHaveBeenCalledWith({
+        apiUrl: 'https://api.capy.sc',
+        devMode: false,
+        expectedUserId: 'user-456',
+        authService: service,
+        presentation: 'inline',
+        organizationId: 'org-OLD',
+      });
     });
 
     test('refreshForOrg merges new session, preserves others', async () => {

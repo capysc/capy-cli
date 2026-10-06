@@ -2,8 +2,7 @@ import { unlinkSync, existsSync, readdirSync } from 'fs';
 import { join } from 'path';
 import { lockSync, unlockSync } from 'proper-lockfile';
 import { AuthResult, Organization, ServiceToken, SessionStore, CapyError, ERROR_CODES, SilentAuthFailureCode } from '../types/index';
-import { OAuthServer } from './oauthServer';
-import { saveAuthSession, readAuthSession, getAuthSessionPath, getGlobalCapyDir, consumeForceLoginMarker } from '../config/globalConfig';
+import { saveAuthSession, readAuthSession, getAuthSessionPath, getGlobalCapyDir } from '../config/globalConfig';
 import { resolveActiveUrl } from '../config/profileConfig';
 import { debug } from '../ui/debug';
 
@@ -207,8 +206,7 @@ export class AuthService {
       const pwResult = await this.tryPasswordAuth(organizationId);
       if (pwResult) return pwResult;
 
-      // Full OAuth flow
-      return await this.startOAuthFlow(organizationId);
+      return await this.startDevicePairing(organizationId);
     } catch (error: any) {
       return {
         success: false,
@@ -284,42 +282,16 @@ export class AuthService {
     }
   }
 
-  private async startOAuthFlow(organizationId?: string): Promise<AuthResult> {
-    const oauthServer = new OAuthServer();
-    await oauthServer.bind();
-    const redirectUri = oauthServer.getRedirectUri();
-    const state = oauthServer.getState();
-
-    // If `capy logout` left a marker, ask the service to add prompt=login to
-    // the WorkOS auth URL so AuthKit re-prompts instead of silently reusing
-    // its SSO cookie. Consume the marker now — even if the OAuth round-trip
-    // fails later, "force_login" was the user's intent for this attempt and
-    // we don't want it sticking forever.
-    const forceLogin = consumeForceLoginMarker();
-
-    const { auth_url } = await postJson<{ auth_url: string }>(
-      `${this.serviceApiUrl}/auth/initiate`,
-      {
-        state,
-        redirect_uri: redirectUri,
-        organization_id: organizationId,
-        code_challenge: oauthServer.getCodeChallenge(),
-        ...(forceLogin ? { force_login: true } : {}),
-      },
-    );
-
-    const code = await oauthServer.startAuthFlow(auth_url);
-
-    const response = await postJson<{
-      token: { access_token: string | null; refresh_token: string; expires_in: number };
-      user: { id: string; email: string; first_name: string | null; last_name: string | null };
-      organizations: Organization[];
-    }>(`${this.serviceApiUrl}/auth/exchange`, {
-      code,
-      code_verifier: oauthServer.getCodeVerifier(),
+  private async startDevicePairing(organizationId?: string): Promise<AuthResult> {
+    const { pairCommand } = await import('../commands/pairCommand');
+    return pairCommand({
+      apiUrl: this.serviceApiUrl,
+      devMode: this.devMode,
+      ...(this.sessionUserId ? { expectedUserId: this.sessionUserId } : {}),
+      authService: this,
+      presentation: 'inline',
+      ...(organizationId ? { organizationId } : {}),
     });
-
-    return this.processExchangeResponse(response.token, response.user, response.organizations, organizationId);
   }
 
   /**
@@ -347,7 +319,7 @@ export class AuthService {
   }
 
   /**
-   * Shared session-storage logic used by both OAuth and password auth flows.
+   * Shared session-storage logic used by device-grant and password auth flows.
    */
   private async processExchangeResponse(
     token: { access_token: string | null; refresh_token: string; expires_in: number },
@@ -423,7 +395,7 @@ export class AuthService {
 
   /**
    * Installs a token/user/org triple as the current session, the same way a
-   * successful `capy` OAuth or password login does — this just exposes
+   * successful `capy` device-grant or password login does — this just exposes
    * {@link processExchangeResponse} publicly rather than duplicating its
    * session-storage logic.
    *
