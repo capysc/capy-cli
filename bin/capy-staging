@@ -19,6 +19,9 @@ if (!process.env.CAPY_GLOBAL_DIR_NAME) {
 if (!process.env.CAPY_API_URL) {
   process.env.CAPY_API_URL = 'https://staging-api.capy.sc';
 }
+if (!process.env.CAPY_KEEP_ORIGIN) {
+  process.env.CAPY_KEEP_ORIGIN = 'https://staging-keep.capy.sc';
+}
 if (!process.env.CAPY_BIN_NAME) {
   process.env.CAPY_BIN_NAME = 'capy-staging';
 }
