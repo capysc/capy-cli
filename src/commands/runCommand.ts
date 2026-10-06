@@ -7,6 +7,7 @@ import { getShellPinnedEnv } from '../config/prodPins';
 import { resolveActiveUrl } from '../config/profileConfig';
 import type { ParsedSecretsBlob } from '../crypto/deployRuntime';
 import { ERROR_CODES } from '../types/index';
+import { planComposeForward, OVERRIDE_FD } from './composeForward';
 
 /**
  * Writes `.capy/next-env.js`, a CommonJS module mapping each decrypted env var
@@ -46,15 +47,25 @@ interface ChildExit {
  * is started; `spawnChild` is its exit-code-only face for the callers that
  * have nothing to settle afterwards.
  */
-function spawnChildDetailed(args: string[], env: Record<string, string | undefined>): Promise<ChildExit> {
+function spawnChildDetailed(
+  args: string[],
+  env: Record<string, string | undefined>,
+  pipe?: string,
+): Promise<ChildExit> {
   // On Windows, node_modules/.bin entries are .cmd shims that Node's spawn
   // won't execute without a shell — bare `cross-env`/`nodemon` fail with
   // ENOENT. shell:true delegates to cmd.exe so PATHEXT resolution kicks in.
+  // `pipe` is written to the child's fd OVERRIDE_FD (composeForward.ts).
   const child: ChildProcess = spawn(args[0], args.slice(1), {
     env: env as Record<string, string>,
-    stdio: 'inherit',
+    stdio: pipe === undefined ? 'inherit' : ['inherit', 'inherit', 'inherit', 'pipe'],
     shell: process.platform === 'win32',
   });
+  if (pipe !== undefined) {
+    const fd = child.stdio[OVERRIDE_FD] as NodeJS.WritableStream | null;
+    fd?.on('error', () => undefined); // child exited without reading it
+    fd?.end(pipe);
+  }
 
   // Resolves (once) the first time a signal is forwarded. Never rejects.
   const forwarded = new Promise<boolean>((resolve) => {
@@ -101,8 +112,9 @@ export async function runChildThenSettle(
   args: string[],
   env: Record<string, string | undefined>,
   reported: Promise<unknown> | undefined,
+  pipe?: string,
 ): Promise<number> {
-  const exit = await spawnChildDetailed(args, env);
+  const exit = await spawnChildDetailed(args, env, pipe);
   if (reported !== undefined && !exit.interrupted) await reported.catch(() => undefined);
   return exit.code;
 }
@@ -487,5 +499,19 @@ export async function runCommand(args: string[], devMode: boolean = false): Prom
   }
 
   const decryptedEnv = Object.fromEntries(decryptedResult.value);
-  return runChildThenSettle(args, { ...env, ...decryptedEnv }, projectKeyResult.reported);
+
+  // `docker compose` doesn't pass its environment into containers, so
+  // `env_file: .env` would hand them ciphertext. Forward the decrypted names
+  // to the services that read this .env — see composeForward.ts.
+  const compose = planComposeForward(args, join(process.cwd(), '.env'), Object.keys(decryptedEnv), {
+    cwd: process.cwd(),
+    env: process.env,
+    platform: process.platform,
+  });
+  if (compose) debug(`capy run: compose override → ${compose.args.join(' ')}`);
+  try {
+    return await runChildThenSettle(compose?.args ?? args, { ...env, ...decryptedEnv }, projectKeyResult.reported, compose?.pipe);
+  } finally {
+    compose?.cleanup();
+  }
 }
