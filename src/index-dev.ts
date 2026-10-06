@@ -468,7 +468,7 @@ program
   });
 
 program
-  .command('login', { hidden: true })
+  .command('login')
   .description('Sign in and pair this device via Keep')
   .option('--json', 'emit machine-readable JSON instead of the human UI')
   .action(async (options) => {

@@ -362,6 +362,20 @@ capy transport [options]
 
 JSON support: yes (`--json`)
 
+## `capy login`
+
+Sign in and pair this device via Keep
+
+```
+capy login [options]
+```
+
+| Option | Description | Default |
+|---|---|---|
+| `--json` | emit machine-readable JSON instead of the human UI |  |
+
+JSON support: yes (`--json`)
+
 ## `capy pair`
 
 Pair this device via Keep; requires interactive confirmation of the returned account before installing any session or keys
