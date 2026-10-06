@@ -536,7 +536,8 @@ export function optionsProblem(config: TargetConfig): PreflightResult | null {
  */
 export function dokployCiPreflightProblem(
   config: TargetConfig,
-  cwd: string,
+  /** keep.lock's path relative to the repo root (`keep.lock`, or `<folder>/keep.lock`): what the service's watch paths must cover. */
+  relKeep: string,
   entity: { autoDeploy?: boolean | null; branch?: string; customGitBranch?: string | null; watchPaths?: readonly string[] | null },
 ): PreflightResult | null {
   if (config.mode !== 'ci') return null;
@@ -563,7 +564,6 @@ export function dokployCiPreflightProblem(
       hint,
     };
   }
-  const relKeep = repoRelPath(cwd, 'keep.lock');
   if (watchPathsExcludeKeep(entity.watchPaths, relKeep)) {
     return {
       ok: false,
@@ -574,6 +574,14 @@ export function dokployCiPreflightProblem(
     };
   }
   return null;
+}
+
+/**
+ * keep.lock's repo-relative path for a preflight: the caller's own (`keepLockPath`, a caller with no
+ * checkout such as the batch deploy), else worked out from `cwd` with git, as `capy deploy` always did.
+ */
+function keepLockPathFor(ctx: { cwd: string; keepLockPath?: string }): string {
+  return ctx.keepLockPath ?? repoRelPath(ctx.cwd, 'keep.lock');
 }
 
 /** A failed Dokploy call as a reason (and fix-it hint) a person can act on. */
@@ -1107,7 +1115,7 @@ export function createDokployAdapter(deps: DokployAdapterDeps = {}): DeployAdapt
       return {};
     },
 
-    async preflight(config: TargetConfig, ctx: { cwd: string } & AdapterCallContext): Promise<PreflightResult> {
+    async preflight(config: TargetConfig, ctx: { cwd: string; keepLockPath?: string } & AdapterCallContext): Promise<PreflightResult> {
       const shape = optionsProblem(config);
       if (shape) return shape;
       const opts = config.options as unknown as DokployOptions;
@@ -1129,7 +1137,7 @@ export function createDokployAdapter(deps: DokployAdapterDeps = {}): DeployAdapt
         // active line for a delivered var gets COMMENTED OUT at deploy time
         // (see `mergeManagedValuesBlock`), not silently shadowed, so warning
         // about it here would be actively misleading.
-        const ciProblem = dokployCiPreflightProblem(config, ctx.cwd, compose.value);
+        const ciProblem = dokployCiPreflightProblem(config, keepLockPathFor(ctx), compose.value);
         if (ciProblem) return ciProblem;
         const stackWarning = await composeStackVersionWarning(client, compose.value);
         return { ok: true, ...(stackWarning ? { warnings: [stackWarning] } : {}) };
@@ -1138,7 +1146,7 @@ export function createDokployAdapter(deps: DokployAdapterDeps = {}): DeployAdapt
       if (!app.ok) return { ok: false, ...explainApiError(app.error, 'application.one', opts) };
       const problem = envProblems(app.value.env);
       if (problem) return { ok: false, ...describeEnvProblem(problem) };
-      const ciProblem = dokployCiPreflightProblem(config, ctx.cwd, app.value);
+      const ciProblem = dokployCiPreflightProblem(config, keepLockPathFor(ctx), app.value);
       if (ciProblem) return ciProblem;
       return { ok: true };
     },

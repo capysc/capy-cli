@@ -86,7 +86,7 @@ async function walk(w: ReturnType<typeof world>, locs: readonly Loc[] = LOCATION
   const done = applyRunDone(running.state, await w.actions.run(request));
   return {
     frames: { list, value: frame(typed), locations: frame(locations), loading: loadingFrame, repos: reposFrame, running: runningFrame, done: frame(done) },
-    left: press(done, 'x'),
+    left: press(done, ESC),
     request,
   };
 }
@@ -239,8 +239,8 @@ describe('through the real driver', () => {
     const wait = (ms = 15) => new Promise((r) => setTimeout(r, ms));
     const done = runSecretsScreen(indexRows(), async () => ({ ok: false, code: 'NO' }), w.actions, true);
     await wait();
-    // Ctrl+E, the value as a bracketed paste, Enter, Enter (all locations), wait for repos, Enter (plan), wait, any key.
-    await [`\x05`, `${ESC}[200~${SENTINEL}${ESC}[201~`, '\r', '\r', 40, '\r', 60, 'x'].reduce<Promise<void>>(async (prev, k) => {
+    // Ctrl+E, the value as a bracketed paste, Enter, Enter (all locations), wait for repos, Enter (plan), wait, Esc.
+    await [`\x05`, `${ESC}[200~${SENTINEL}${ESC}[201~`, '\r', '\r', 40, '\r', 60, ESC].reduce<Promise<void>>(async (prev, k) => {
       await prev;
       if (typeof k === 'number') return wait(k);
       process.stdin.emit('data', Buffer.from(k));

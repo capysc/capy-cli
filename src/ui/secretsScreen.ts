@@ -17,7 +17,7 @@
 
 import type { SecretIndexLocation, SecretIndexRow, SecretIndexTarget } from '../service/serviceClient';
 import { formatRelativeTime } from './relativeTime';
-import { renderInlineValue } from './editScreen';
+import { ValueState, maskSecretValue, renderValueLine } from './valueDisplay';
 import { hashValue } from '../commands/statusCommand';
 import { ACCENT } from './colors';
 import { normalizeQuery, textMatches } from './searchMatch';
@@ -42,6 +42,22 @@ import {
   startEdit,
   stepEdit,
 } from './secretsEditFlow';
+import {
+  DeployEffect,
+  DeployFinished,
+  DeployFlow,
+  DeployPlanLoaded,
+  applyDeployFinished,
+  applyDeployPlanLoaded,
+  applyDeployProgress,
+  applyDeployValue,
+  isDeployRunning,
+  renderDeploy,
+  startDeploy,
+  stepDeploy,
+  wantsValue,
+} from './secretsDeployFlow';
+import type { BatchProgress } from '../deploy/batchDeploy';
 
 // ── ANSI (mirrors EditScreen's palette/look-and-feel) ───────────────────────
 
@@ -95,6 +111,8 @@ const KEY_ESC_ESC = `${ESC}${ESC}`;
 const KEY_CTRL_C = '\x03';
 /** Ctrl+E: edit the selected row's value, from the list while no filter is typed. The plain `e` is only a hotkey in the details view, where nothing types. */
 const KEY_CTRL_E = '\x05';
+/** Ctrl+D: deploy the selected row's Dokploy targets, from the list while no filter is typed. The plain `d` is only a hotkey in the details view. */
+const KEY_CTRL_D = '\x04';
 const KEY_BACKSPACE = '\x7f';
 const KEY_BACKSPACE2 = '\b';
 
@@ -205,10 +223,8 @@ function nextColumn(column: ColumnMode, dir: 1 | -1): ColumnMode {
 
 // ── State ────────────────────────────────────────────────────────────────────
 
-export type ValueState =
-  | { readonly status: 'loading' }
-  | { readonly status: 'ok'; readonly value: string }
-  | { readonly status: 'unavailable'; readonly code: string };
+export type { ValueState };
+export { maskSecretValue };
 
 export interface PopupState {
   /** Identifies which (name, value_hash) row this popup belongs to, so a value that resolves after the popup moved on (or closed) is dropped instead of applied to the wrong row. */
@@ -242,6 +258,8 @@ export interface SecretsScreenState {
   readonly popup: PopupState | null;
   /** The edit flow (CAP-698), open while a value is being changed; `null` otherwise. */
   readonly edit: EditFlow | null;
+  /** The deploy flow (CAP-704), open while a batch deploy is planned or running; `null` otherwise. */
+  readonly deploy: DeployFlow | null;
   /** `capy --dry-run secrets`: the edit flow only plans, and every screen says so. */
   readonly dryRun: boolean;
   readonly quit: boolean;
@@ -259,6 +277,7 @@ export function initialSecretsScreenState(rows: readonly SecretIndexRow[], dryRu
     search: { query: '' },
     popup: null,
     edit: null,
+    deploy: null,
     dryRun,
     quit: false,
     exitText: null,
@@ -375,7 +394,7 @@ function clampIndex(index: number, length: number): number {
 // ── Effects (data describing a side effect the driver must perform — the
 // reducer itself performs none) ─────────────────────────────────────────────
 
-export type SecretsScreenEffect = { readonly type: 'fetchValue'; readonly row: SecretIndexRow } | EditEffect | null;
+export type SecretsScreenEffect = { readonly type: 'fetchValue'; readonly row: SecretIndexRow } | EditEffect | DeployEffect | null;
 
 export interface ReduceResult {
   readonly state: SecretsScreenState;
@@ -391,11 +410,13 @@ export function handleKey(state: SecretsScreenState, rawKey: string): ReduceResu
   if (state.note !== null) return handleKey({ ...state, note: null }, rawKey);
 
   // While an edit runs, Ctrl-C and Esc STOP it (never leave the screen hanging, never cut a push in half).
-  if (key === KEY_CTRL_C && !isRunning(state.edit)) return noEffect({ ...state, quit: true });
+  if (key === KEY_CTRL_C && !isRunning(state.edit) && !isDeployRunning(state.deploy)) return noEffect({ ...state, quit: true });
 
   if (state.edit) return handleEditFlowKey(state, state.edit, key);
+  if (state.deploy) return handleDeployFlowKey(state, state.deploy, key);
 
   if (state.popup) {
+    if (key === 'd' || key === 'D' || key === KEY_CTRL_D) return openDeployOnCursor(state);
     return key === 'e' || key === 'E' || key === KEY_CTRL_E ? openEditOnCursor(state) : noEffect(handlePopupKey(state, key));
   }
 
@@ -411,6 +432,45 @@ function openEditOnCursor(state: SecretsScreenState): ReduceResult {
   const rows = filteredRows(state);
   const row = rows[clampIndex(state.cursorIndex, rows.length)];
   return row ? { state: { ...state, popup: null, edit: startEdit(row) }, effect: { type: 'fetchValue', row } } : noEffect(state);
+}
+
+/** The row under the cursor, as the deploy flow's starting point: its Dokploy targets are read from GitHub next (reads only). */
+function openDeployOnCursor(state: SecretsScreenState): ReduceResult {
+  const rows = filteredRows(state);
+  const row = rows[clampIndex(state.cursorIndex, rows.length)];
+  if (!row) return noEffect(state);
+  const started = startDeploy(row);
+  return { state: { ...state, popup: null, deploy: started.flow }, effect: started.effect };
+}
+
+function handleDeployFlowKey(state: SecretsScreenState, flow: DeployFlow, key: string): ReduceResult {
+  const step = stepDeploy(flow, key, state.dryRun);
+  if (step.exitText !== undefined) return noEffect({ ...state, deploy: null, quit: true, exitText: step.exitText });
+  return { state: { ...state, deploy: step.flow, note: step.note ?? null }, effect: step.effect };
+}
+
+/** The deploy plan the `loadDeployPlan` effect asked for. */
+export function applyDeployPlan(state: SecretsScreenState, loaded: DeployPlanLoaded): SecretsScreenState {
+  return { ...state, deploy: applyDeployPlanLoaded(state.deploy, loaded) };
+}
+
+/**
+ * After the plan arrived: the effect that fetches the row's value for the plan's `value` line, the
+ * same `fetchValue` (and so the same decrypt path) the details view uses. `null` unless the flow
+ * is on a plan step that has targets.
+ */
+export function pendingDeployValueEffect(state: SecretsScreenState): SecretsScreenEffect {
+  return wantsValue(state.deploy) ? { type: 'fetchValue', row: state.deploy.row } : null;
+}
+
+/** The deploy run reported progress (a single re-render). */
+export function applyDeployRunProgress(state: SecretsScreenState, progress: BatchProgress): SecretsScreenState {
+  return { ...state, deploy: applyDeployProgress(state.deploy, progress) };
+}
+
+/** The run the `runDeploy` effect started. */
+export function applyDeployRunDone(state: SecretsScreenState, finished: DeployFinished): SecretsScreenState {
+  return { ...state, deploy: applyDeployFinished(state.deploy, finished) };
 }
 
 function handleEditFlowKey(state: SecretsScreenState, flow: EditFlow, key: string): ReduceResult {
@@ -515,6 +575,7 @@ function handleListKey(state: SecretsScreenState, key: string): ReduceResult {
 
   // Never while a filter is typed: the search owns the keyboard then. Enter (details), then `e`, edits a filtered row.
   if (key === KEY_CTRL_E && state.search.query === '') return openEditOnCursor(state);
+  if (key === KEY_CTRL_D && state.search.query === '') return openDeployOnCursor(state);
 
   if (key === KEY_TAB) {
     return noEffect({ ...state, column: nextColumn(state.column, 1) });
@@ -585,8 +646,8 @@ export function applyValueResult(
     state.popup !== null && state.popup.rowName === forRow.name && state.popup.rowHash === forRow.value_hash
       ? { ...state.popup, value: result }
       : state.popup;
-  // The edit dialog's Old value row is fed by the same fetch (and dropped by the same row guard).
-  return { ...state, popup, edit: applyOldValue(state.edit, forRow, result) };
+  // The edit dialog's Old value row and the deploy plan's value line are fed by the same fetch (and dropped by the same row guard).
+  return { ...state, popup, edit: applyOldValue(state.edit, forRow, result), deploy: applyDeployValue(state.deploy, forRow, result) };
 }
 
 // ── Value resolution (pure given an injected decryptor — see module doc) ────
@@ -795,29 +856,6 @@ export function formatUpdatedCell(row: SecretIndexRow, now?: Date): string {
   return ts ? formatRelativeTime(ts, now) : '—';
 }
 
-// ── Masking (security-critical — see module doc and CAP-675's spec) ─────────
-
-const FULL_MASK = '••••••••';
-
-/**
- * Never reveals a value ≤8 chars (always the same fixed-width mask, so
- * length itself isn't leaked either). For longer values, shows at most 4
- * characters total, split as a prefix and a suffix, and never more than a
- * third of the value's length — deliberately weaker than
- * `formatSnippet`, which shows values ≤6 chars verbatim; that behavior is
- * not reused here on purpose.
- */
-export function maskSecretValue(value: string): string {
-  if (value.length === 0) return '(empty)';
-  if (value.length <= 8) return FULL_MASK;
-  const maxShown = Math.min(4, Math.floor(value.length / 3));
-  const prefixLen = Math.ceil(maxShown / 2);
-  const suffixLen = maxShown - prefixLen;
-  const prefix = value.slice(0, prefixLen);
-  const suffix = suffixLen > 0 ? value.slice(value.length - suffixLen) : '';
-  return `${prefix}...${suffix}`;
-}
-
 // ── Rendering (pure) ─────────────────────────────────────────────────────────
 
 const MARGIN = 2;
@@ -927,6 +965,7 @@ export function mainTableLayout(available: number): { readonly nameW: number; re
 /** Pure render — a total function of state + terminal size. Never mutates `state`; any "clamping" of a display-only quantity (e.g. panning past the end of a value) is a local `const`, never written back. */
 export function render(state: SecretsScreenState, termWidth: number, termHeight: number): string {
   if (state.edit) return renderEditScreen(state.edit, termWidth, termHeight, state.dryRun);
+  if (state.deploy) return renderDeployScreen(state.deploy, termWidth, termHeight, state.dryRun);
   const m = ' '.repeat(MARGIN);
   const available = Math.max(40, termWidth - MARGIN * 2);
   const matched = filteredRowsWithReasons(state);
@@ -1006,6 +1045,21 @@ function renderEditScreen(flow: EditFlow, termWidth: number, termHeight: number,
   return out.map((l) => clipLine(l, termWidth) + CLEAR_EOL).join('\n');
 }
 
+/** The deploy flow's screen: a header, the step's body, and its key hints. */
+function renderDeployScreen(flow: DeployFlow, termWidth: number, termHeight: number, dryRun: boolean): string {
+  const m = ' '.repeat(MARGIN);
+  const { lines, footer } = renderDeploy(flow, termWidth, termHeight);
+  const out: readonly string[] = [
+    `${m}${BOLD}capy secrets${RESET}${dryRunTag(dryRun)}`,
+    '',
+    ...lines.map((l) => m + l),
+    '',
+    m + footer,
+  ];
+  // No line is ever wider than the terminal (a wrapped line would break the layout).
+  return out.map((l) => clipLine(l, termWidth) + CLEAR_EOL).join('\n');
+}
+
 function spliceIn(bodyLines: readonly string[], afterIndex: number, insert: readonly string[]): string[] {
   return [...bodyLines.slice(0, afterIndex + 1), ...insert, ...bodyLines.slice(afterIndex + 1)];
 }
@@ -1038,7 +1092,7 @@ function buildPopupLines(row: SecretIndexRow, popup: PopupState, width: number):
     '',
     `${indent}${inner}${BOLD}${truncate(row.name, contentWidth)}${RESET}`,
     '',
-    field('value', renderPopupValueLine(popup, valueWidth)),
+    field('value', renderValueLine(popup.value, popup.revealed, popup.panOffset, valueWidth)),
     field('updated', formatUpdatedCell(row)),
     field(TARGET_STATUS_HEADING.toLowerCase(), secretRowStatusBadge(row)),
     '',
@@ -1131,31 +1185,12 @@ function fitLocation(project: string, tails: readonly string[], width: number): 
   return rest.length > 0 ? fitLocation(project, rest, width) : truncate(full, width);
 }
 
-function renderPopupValueLine(popup: PopupState, width: number): string {
-  if (popup.value.status === 'loading') return `${DIM}loading…${RESET}`;
-  if (popup.value.status === 'unavailable') return `${RED}unavailable ${DIM}(${popup.value.code})${RESET}`;
-
-  const raw = popup.value.value;
-  if (!popup.revealed) return maskSecretValue(raw);
-  if (raw === '') return `${DIM}(empty)${RESET}`;
-
-  const value = renderInlineValue(raw);
-  if (value.length <= width) return value;
-
-  const visibleWidth = Math.max(1, width - 4);
-  const maxOffset = Math.max(0, value.length - visibleWidth);
-  const offset = Math.min(Math.max(0, popup.panOffset), maxOffset);
-  const leftIndicator = offset > 0 ? `${DIM}◂${RESET} ` : '  ';
-  const rightIndicator = offset < maxOffset ? ` ${DIM}▸${RESET}` : '  ';
-  return leftIndicator + value.slice(offset, offset + visibleWidth) + rightIndicator;
-}
-
 function footerLine(state: SecretsScreenState): string {
   if (state.popup) {
     const revealLabel = state.popup.revealed ? 'hide' : 'reveal';
     const panHint = state.popup.revealed ? `${DIM} · ${RESET}${BOLD}←/→${RESET}${DIM} pan${RESET}` : '';
-    return `${BOLD}r${RESET}${DIM} ${revealLabel}${RESET}${panHint}${DIM} · ${RESET}${BOLD}tab${RESET}${DIM} column · ${RESET}${BOLD}e${RESET}${DIM} edit${RESET}${DIM} · ${RESET}${BOLD}esc${RESET}${DIM}/${RESET}${BOLD}q${RESET}${DIM} close${RESET}`; // COPY-FLAG
+    return `${BOLD}r${RESET}${DIM} ${revealLabel}${RESET}${panHint}${DIM} · ${RESET}${BOLD}tab${RESET}${DIM} column · ${RESET}${BOLD}e${RESET}${DIM} edit${RESET}${DIM} · ${RESET}${BOLD}d${RESET}${DIM} deploy${RESET}${DIM} · ${RESET}${BOLD}esc${RESET}${DIM}/${RESET}${BOLD}q${RESET}${DIM} close${RESET}`; // COPY-FLAG
   }
-  const editHint = state.search.query === '' ? `${BOLD}ctrl+e${RESET}${DIM} edit · ${RESET}` : '';
+  const editHint = state.search.query === '' ? `${BOLD}ctrl+e${RESET}${DIM} edit · ${RESET}${BOLD}ctrl+d${RESET}${DIM} deploy · ${RESET}` : ''; // COPY-FLAG
   return `${DIM}↑↓ navigate · ${RESET}${BOLD}tab${RESET}${DIM} column · ${RESET}${BOLD}enter${RESET}${DIM} inspect · ${RESET}${editHint}${BOLD}esc${RESET}${DIM} clear/quit${RESET}`; // COPY-FLAG
 }

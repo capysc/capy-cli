@@ -827,6 +827,45 @@ secretsCmd
     process.exit(code);
   });
 
+secretsCmd
+  .command('deploy <names...>')
+  // COPY-FLAG: minimal-neutral. Agent mode: never prompts; takes no value.
+  .description('Deploy the Dokploy targets of one or more secrets with no project folder, and open one keep.lock PR per target. Never prompts.')
+  .option('--json', 'emit machine-readable JSON instead of the human UI')
+  // COPY-FLAG: the option descriptions of `secrets deploy` are minimal and neutral.
+  .option('--row <row_id>', 'deploy this row of a name (repeatable; ids from `capy secrets --name NAME --json`)', collectRepeatable, [])
+  .option('--all-rows', 'deploy every row of those names')
+  .option('--exclude <project:branch>', 'leave this location out (repeatable)', collectRepeatable, [])
+  .option('--confirm <plan_id>', 'run the plan that --dry-run printed (required for a real run)')
+  .addHelpText(
+    'after',
+    // COPY-FLAG
+    '\n' +
+      'Agents: look the rows up, show the human a table, let the human pick the row(s), dry run, get approval, then run with --confirm. Never pick a row yourself.\n' +
+      '  capy secrets --name NAME --json\n' +
+      '  capy secrets deploy NAME --row <row_id> --dry-run --json\n' +
+      '  capy secrets deploy NAME --row <row_id> --confirm <plan_id> --json\n',
+  )
+  .action(async (names: string[], options: any, command: any) => {
+    // `--json` is also a `capy secrets` option, which Commander lets the parent claim;
+    // `--dry-run` is the program-level flag. Read both from the merged options.
+    const merged = command.optsWithGlobals();
+    const { secretsDeployCommand } = await import('./commands/secretsDeployCommand');
+    const code = await secretsDeployCommand(
+      names,
+      {
+        json: merged.json === true,
+        dryRun: merged.dryRun === true,
+        confirm: options.confirm,
+        row: options.row,
+        allRows: options.allRows === true,
+        exclude: options.exclude,
+      },
+      true,
+    );
+    process.exit(code);
+  });
+
 program
   .command('grant-branch <email> <project> <branch>')
   .description('Grant a member wildcard access to a protected branch')

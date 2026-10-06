@@ -127,13 +127,13 @@ const CODE_EXIT: Readonly<Record<string, number>> = {
 };
 
 /** Refuses and exits: pure JSON on stdout under `--json`, the sentence on stderr otherwise. Never carries a value. */
-function refuse(json: boolean, code: string, error: string, extra: object = {}): never {
+export function refuse(json: boolean, code: string, error: string, extra: object = {}): never {
   if (json) console.log(JSON.stringify({ ok: false, code, error, ...extra }, null, 2));
   else console.error(error);
   return process.exit(CODE_EXIT[code] ?? exitCodeForRefusal(code));
 }
 
-function describe(err: unknown): { readonly code: string; readonly message: string } {
+export function describe(err: unknown): { readonly code: string; readonly message: string } {
   return err instanceof CapyError
     ? { code: err.code, message: err.message }
     : { code: ERROR_CODES.SERVICE_ERROR, message: 'The service request failed.' }; // COPY-FLAG
@@ -156,7 +156,7 @@ const withRowId = (row: SecretIndexRow): readonly Located[] => {
   }));
 };
 
-function candidatesOf(rows: readonly SecretIndexRow[]) {
+export function candidatesOf(rows: readonly SecretIndexRow[]) {
   return rows.map((r) => ({
     row_id: rowIdOf(r.name, r.value_hash),
     locations: r.locations.map((l) => ({ project: l.project_name, branch: l.branch, protected: l.protected })),
@@ -196,16 +196,16 @@ const ambiguousStop = (named: readonly SecretIndexRow[]) => [
   { id: 'row', flag: '--row', alternative: '--all-rows', candidates: candidatesOf(named) },
 ];
 
-function excludeLocations(
-  located: readonly Located[],
+export function excludeLocations<L extends { readonly project_name: string; readonly branch: string }>(
+  located: readonly L[],
   exclude: readonly string[],
   json: boolean,
-): readonly Located[] {
+): readonly L[] {
   const parsed = exclude.map((token) => {
     const at = token.indexOf(':');
     return { token, project: at === -1 ? token : token.slice(0, at), branch: at === -1 ? '' : token.slice(at + 1) };
   });
-  const matches = (l: Located, e: { project: string; branch: string }) => l.project_name === e.project && l.branch === e.branch;
+  const matches = (l: L, e: { project: string; branch: string }) => l.project_name === e.project && l.branch === e.branch;
   const unmatched = parsed.filter((e) => !located.some((l) => matches(l, e)));
   if (unmatched.length > 0) {
     refuse(json, ERROR_CODES.INVALID_FORMAT, `--exclude names no selected location: ${unmatched.map((e) => e.token).join(', ')}`); // COPY-FLAG
@@ -233,7 +233,7 @@ function narrowRepos(
 
 const PLAN_DOMAIN = 'capy:secrets:plan:v1';
 
-const byText = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
+export const byText = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
 
 /**
  * A hash over the exact (row_id, project, branch) set and the per-repo PR set
@@ -342,13 +342,13 @@ export function renderPlanText(plan: SetPlan): string {
 
 // ── The command ─────────────────────────────────────────────────────────────
 
-interface LoadedLinks {
+export interface LoadedLinks {
   readonly links: readonly OrgRepoLink[];
   /** Set when the service has no repo links to give (it predates them): a reason, not a failure. */
   readonly unavailable?: string;
 }
 
-async function loadLinks(io: SecretsSetIo, json: boolean): Promise<LoadedLinks> {
+export async function loadLinks(io: Pick<SecretsSetIo, 'orgId' | 'client'>, json: boolean): Promise<LoadedLinks> {
   try {
     return { links: (await io.client.getOrgRepos(io.orgId)).repos };
   } catch (err) {
@@ -357,7 +357,7 @@ async function loadLinks(io: SecretsSetIo, json: boolean): Promise<LoadedLinks> 
   }
 }
 
-async function readSecretIndex(io: SecretsSetIo, json: boolean): Promise<readonly SecretIndexRow[]> {
+export async function readSecretIndex(io: Pick<SecretsSetIo, 'orgId' | 'client'>, json: boolean): Promise<readonly SecretIndexRow[]> {
   try {
     return (await io.client.getSecretIndex(io.orgId)).rows;
   } catch (err) {
@@ -512,7 +512,7 @@ export async function resolveSilentContext(devMode: boolean): Promise<SilentCont
   return { ok: true, context: { orgId, userId: auth.user_id as string, client } };
 }
 
-async function silentContext(devMode: boolean, json: boolean): Promise<SilentContext> {
+export async function silentContext(devMode: boolean, json: boolean): Promise<SilentContext> {
   const resolved = await resolveSilentContext(devMode);
   return resolved.ok ? resolved.context : refuse(json, resolved.code, resolved.message);
 }

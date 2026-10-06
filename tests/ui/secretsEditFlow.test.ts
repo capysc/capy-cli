@@ -370,7 +370,7 @@ until its PR is merged and pulled.`);
     expect(text).toContain(`web · production  ✗ ${ERROR_CODES.PERMISSION_DENIED}`);
   });
 
-  test('through the screen: the run finishing shows the confirmation, any key leaves and hands it to stdout', () => {
+  test('through the screen: the run finishing shows the confirmation, only Esc leaves and hands it to stdout', () => {
     const running = handleKey(
       applyRepos(handleKey(atLocations(), ENTER).state, { ok: true, links: LINKS, bases: {} }),
       ENTER,
@@ -379,7 +379,14 @@ until its PR is merged and pulled.`);
     expect(flowOf(done).step).toBe('done');
     expect(frame(done)).toContain('✓ ANTHROPIC_API_KEY updated in 4 locations.');
     expect(frame(done)).not.toContain(VALUE);
-    const left = press(done, 'x');
+    expect(frame(done)).toContain('esc exit');
+    // Any other key leaves the result on screen, so the links can be selected and copied.
+    for (const key of ['x', ENTER, ' ']) {
+      const stays = press(done, key);
+      expect(stays.quit).toBe(false);
+      expect(flowOf(stays).step).toBe('done');
+    }
+    const left = press(done, ESC);
     expect(left.quit).toBe(true);
     expect(left.exitText).toContain('https://github.com/SlideSpeak/slidespeak-monorepo/pull/1');
     expect(left.exitText).not.toContain(VALUE);

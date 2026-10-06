@@ -65,7 +65,7 @@ const ERROR_MESSAGES: Readonly<Record<string, string>> = {
 // Public types
 // ---------------------------------------------------------------------------
 
-export type KeepLockCommandName = 'add' | 'edit' | 'remove' | 'secrets';
+export type KeepLockCommandName = 'add' | 'edit' | 'remove' | 'secrets' | 'deploy';
 
 export interface PrFlags {
   /** `--pr` */
@@ -376,6 +376,11 @@ export interface KeepLockFileSpec {
   readonly path: string;
   readonly records: readonly EditSaveRecord[];
   readonly localKeep: KeepFile;
+  /**
+   * Replaces folding `records`: the caller works out the new keep.lock from the base's own
+   * (the batch deploy writes a delivery record, which `records` cannot say). Absent: `records` are folded.
+   */
+  readonly fold?: (base: KeepFile) => KeepFile;
 }
 
 /** What a base branch holds at one keep.lock path. */
@@ -427,7 +432,7 @@ async function planCommit(target: Target, base: string, specs: readonly KeepLock
 
   const changed = specs.flatMap((spec, i) => {
     const before = bases.value[i];
-    const folded = spec.records.reduce(foldEditSaveIntoKeep, before.keep);
+    const folded = spec.fold === undefined ? spec.records.reduce(foldEditSaveIntoKeep, before.keep) : spec.fold(before.keep);
     const content = serializeKeep(folded);
     const noDiff = before.existed ? content === serializeKeep(before.keep) : Object.keys(folded.variables).length === 0;
     return noDiff ? [] : [{ path: spec.path, content }];
@@ -439,7 +444,7 @@ async function planCommit(target: Target, base: string, specs: readonly KeepLock
 }
 
 /** What a pull request that writes files says about itself. Names only: never a value. */
-interface PullWording {
+export interface PullWording {
   readonly commitMessage: string;
   readonly title: string;
   readonly body: string;
@@ -529,6 +534,8 @@ export interface KeepLockPullRequest {
   readonly files: readonly KeepLockFileSpec[];
   /** The PR base. Absent: the repo's default branch. */
   readonly base?: string;
+  /** The commit message, title and body to use instead of the keep.lock wording (names only, never a value). */
+  readonly wording?: PullWording;
 }
 
 export type KeepLockPullRequestResult =
@@ -593,7 +600,10 @@ export async function openKeepLockPullRequest(
     const branch = deps.branchName();
     if (!isValidBranchName(branch)) return { ok: false, code: ERROR_CODES.KEEP_PR_BRANCH_FAILED };
     const records = req.files.flatMap((f) => f.records);
-    const report = await publish(target, base.base, plan.value, branch, { command: req.command, records });
+    const report =
+      req.wording === undefined
+        ? await publish(target, base.base, plan.value, branch, { command: req.command, records })
+        : await publishFiles(target, base.base, plan.value, branch, req.wording);
     if (report.changed && report.committed) {
       return { ok: true, pr_url: report.pr_url, base: base.base, paths: plan.value.files.map((f) => f.path), bases: plan.value.bases };
     }

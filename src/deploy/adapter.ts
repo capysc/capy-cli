@@ -263,8 +263,12 @@ export interface DeployAdapter {
   };
   /** Sniff the user's cwd for config files; pre-fill picker defaults. */
   detect(cwd: string): Promise<DetectedDefaults>;
-  /** Validate config + binaries + auth without performing the deploy. */
-  preflight(config: TargetConfig, ctx: { cwd: string } & AdapterCallContext): Promise<PreflightResult>;
+  /**
+   * Validate config + binaries + auth without performing the deploy.
+   * `keepLockPath`: keep.lock's path relative to the repo root, for a caller with no
+   * checkout (the batch deploy). Absent: worked out from `cwd`, as `capy deploy` does.
+   */
+  preflight(config: TargetConfig, ctx: { cwd: string; keepLockPath?: string } & AdapterCallContext): Promise<PreflightResult>;
   /** Push secrets + deploy code. Adapter prints its own progress. */
   deploy(config: TargetConfig, ctx: DeployContext): Promise<DeployResult>;
   /**

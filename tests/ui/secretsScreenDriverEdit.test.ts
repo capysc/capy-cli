@@ -80,8 +80,8 @@ describe('runSecretsScreen with the edit flow', () => {
       };
     });
 
-    // Ctrl+E, the value as one bracketed paste, Enter, Enter (all locations), wait for repos, Enter (run), wait, any key.
-    const { screen, logged } = await drive({ loadRepos, loadBases, run }, ['\x05', `${ESC}[200~${VALUE}${ESC}[201~`, '\r', '\r', 40, '\r', 40, 'x']);
+    // Ctrl+E, the value as one bracketed paste, Enter, Enter (all locations), wait for repos, Enter (run), wait, Esc.
+    const { screen, logged } = await drive({ loadRepos, loadBases, run }, ['\x05', `${ESC}[200~${VALUE}${ESC}[201~`, '\r', '\r', 40, '\r', 40, ESC]);
 
     const requests = run.mock.calls.map((c) => c[0]);
     expect(requests).toHaveLength(1);
@@ -103,7 +103,7 @@ describe('runSecretsScreen with the edit flow', () => {
     const cancelled = await drive(undefined, ['\x05', 'ab', ESC, 20, '\x03']);
     expect(cancelled.logged).toEqual([]);
 
-    const unwired = await drive(undefined, ['\x05', 'v', '\r', '\r', 30, '\r', 30, 'x']);
+    const unwired = await drive(undefined, ['\x05', 'v', '\r', '\r', 30, '\r', 30, ESC]);
     expect(unwired.logged.join('\n')).toContain('(UNAVAILABLE)');
   });
 });
@@ -122,8 +122,8 @@ describe('Ctrl+R in the dialog, through the real driver', () => {
         result: { name: request.name, updated: [], unchanged: [], prs: [], no_pr: [], failed: [] },
       }),
     };
-    // Ctrl+E, wait for the value to be read, Ctrl+R, type, Enter, Enter, wait, Enter (run), wait, any key.
-    const { screen, logged } = await drive(actions, ['\x05', 40, '\x12', VALUE, '\r', '\r', 40, '\r', 40, 'x'], oldRows, decrypt);
+    // Ctrl+E, wait for the value to be read, Ctrl+R, type, Enter, Enter, wait, Enter (run), wait, Esc.
+    const { screen, logged } = await drive(actions, ['\x05', 40, '\x12', VALUE, '\r', '\r', 40, '\r', 40, ESC], oldRows, decrypt);
     expect(screen).toContain(OLD); // visible while the dialog is open
     expect(screen).toContain(VALUE); // revealed by the same Ctrl+R, typed after it
     const exitAt = screen.lastIndexOf(`${ESC}[?1049l`);

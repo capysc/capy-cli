@@ -17,7 +17,7 @@
 //              space, a (toggle all), i (invert), / (filter), enter, and Esc back.
 //   repos      the repos to open a PR in, with the approved prompt, all selected.
 //   running    keys are ignored: a push in flight is never abandoned halfway.
-//   done       the confirmation; any key leaves the screen.
+//   done       the confirmation; only Esc leaves it, so the PR links can be selected and copied first.
 
 import { CheckboxKey, CheckboxState, initialCheckboxState, stepCheckboxKey } from './searchableCheckbox';
 import { isRevealKey, stepEditBuffer } from './editBuffer';
@@ -363,7 +363,8 @@ export function stepEdit(flow: EditFlow, key: string): EditStep {
   if (flow.step === 'loading') return stepLoading(flow, key);
   if (flow.step === 'repos') return stepRepos(flow, key);
   if (flow.step === 'running') return stepRunning(flow, key);
-  return { flow: null, effect: null, exitText: flow.text };
+  // The result screen stays until Esc, so its PR links can be selected and copied.
+  return isEsc(key) ? { flow: null, effect: null, exitText: flow.text } : { flow, effect: null };
 }
 
 // ── Results coming back ─────────────────────────────────────────────────────
@@ -519,7 +520,7 @@ export function renderEdit(
   }
   return {
     lines: flow.text.split('\n').map((l) => (l.startsWith('✗') ? `${RED}${l}${RESET}` : l)),
-    footer: hint(['any key', 'exit']), // COPY-FLAG
+    footer: hint(['esc', 'exit']), // COPY-FLAG
   };
 }
 

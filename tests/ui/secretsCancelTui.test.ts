@@ -192,8 +192,8 @@ describe('through the real driver: a run stopped part way', () => {
     const logSpy = spyOn(console, 'log').mockImplementation(() => {});
     const done = runSecretsScreen(rows, async () => ({ ok: false, code: 'NO' }), actions);
     await wait();
-    // Ctrl+E, value, Enter, Enter (all locations), wait for the table and its bases, Enter (run), 60ms into the 1st push: Ctrl+C, wait, any key.
-    const keys: ReadonlyArray<string | number> = ['\x05', SENTINEL, '\r', '\r', 200, '\r', 60, CTRL_C, 900, 'x'];
+    // Ctrl+E, value, Enter, Enter (all locations), wait for the table and its bases, Enter (run), 60ms into the 1st push: Ctrl+C, wait, Esc.
+    const keys: ReadonlyArray<string | number> = ['\x05', SENTINEL, '\r', '\r', 200, '\r', 60, CTRL_C, 900, ESC];
     await keys.reduce<Promise<void>>(async (prev, k) => {
       await prev;
       if (typeof k === 'number') return wait(k);

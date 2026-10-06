@@ -748,6 +748,17 @@ export const ERROR_CODES = {
   DISCOVER_UNSUPPORTED_TARGET: 'DISCOVER_UNSUPPORTED_TARGET',
   /** `--confirm` wrote some repos' deploy.json PRs and at least one repo failed; the refusal lists `failed: [{ repo, code }]`. Exit 1. */
   DISCOVER_PARTIAL: 'DISCOVER_PARTIAL',
+  // --- `capy secrets deploy` and the `capy secrets` deploy key (CAP-704) ---
+  /** `capy secrets deploy`: the run finished but at least one target failed, or a stop left some undone. Exit 1. */
+  DEPLOY_BATCH_PARTIAL: 'DEPLOY_BATCH_PARTIAL',
+  /** `capy secrets deploy`: the selection has no Dokploy CI-mode target on the default branch to deploy. */
+  DEPLOY_NOTHING_TO_DEPLOY: 'DEPLOY_NOTHING_TO_DEPLOY',
+  /** A batch deploy target ships a variable that is not in its Capy branch. Nothing was pushed to the platform. */
+  DEPLOY_VARS_MISSING: 'DEPLOY_VARS_MISSING',
+  /** A batch deploy target's preflight refused and gave no code of its own. Nothing was pushed to the platform. */
+  DEPLOY_PREFLIGHT_FAILED: 'DEPLOY_PREFLIGHT_FAILED',
+  /** A batch deploy target's delivery to the platform failed and gave no code of its own. */
+  DEPLOY_PUSH_FAILED: 'DEPLOY_PUSH_FAILED',
 } as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES];

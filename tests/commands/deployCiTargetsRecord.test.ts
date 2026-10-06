@@ -493,6 +493,38 @@ describe('capy deploy — server-side target recording (CAP-687)', () => {
     });
   }, 30_000);
 
+  test('a second CI deploy no longer erases another target\'s record: the pushed keep is built from the SERVER\'s keep, not the local keep.lock (CAP-704)', async () => {
+    setUpRepo();
+    process.chdir(REPO);
+    // Another target's CI record is already on the SERVER (its own deploy recorded it), but this
+    // checkout's keep.lock has never seen it: the local copy lags the server.
+    const otherRecord = {
+      provider: 'dokploy',
+      target: 'someone-elses-target',
+      deployed_value_hash: hashValue(STRIPE_KEY_VALUE),
+      deployed_at: '2026-01-02T03:04:05.000Z',
+    };
+    const serverKeep = baseKeep();
+    writeServerSnapshot('main', {
+      keep: {
+        ...serverKeep,
+        variables: { STRIPE_KEY: [{ ...serverKeep.variables.STRIPE_KEY[0], targets: [otherRecord] }] },
+      } as unknown as KeepFile,
+    });
+    expect(readFileSync(join(REPO, 'keep.lock'), 'utf-8')).not.toContain('someone-elses-target');
+
+    const code = await runScriptedDeploy('dokploy-ci', dokployFetchMock(), { yes: true });
+
+    expect(code).toBe(0);
+    expect(pushSecretsMock).toHaveBeenCalledTimes(1);
+    const [, keepFileJson, envBlob] = pushSecretsMock.mock.calls[0];
+    const targets = JSON.parse(keepFileJson).variables.STRIPE_KEY[0].targets as Array<{ target: string }>;
+    // Both records: the one already on the server survives, and this deploy's is added.
+    expect(targets.map((t) => t.target).sort()).toEqual(['dokploy-ci', 'someone-elses-target']);
+    expect(targets.find((t) => t.target === 'someone-elses-target')).toEqual(otherRecord);
+    expect(envBlob).toBe(SERVER_ENV_FILE);
+  }, 30_000);
+
   test('a dry run never pushes to the server', async () => {
     setUpRepo();
     process.chdir(REPO);
