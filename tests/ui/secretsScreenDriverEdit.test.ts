@@ -4,7 +4,7 @@
  * `runSet`) performed by injected actions. Nothing real: no TTY, no service, no gh.
  */
 import { describe, test, expect, mock, spyOn } from 'bun:test';
-import { runSecretsScreen, type SecretsEditActions } from '../../src/ui/secretsScreenDriver';
+import { runSecretsScreen, type CopyText, type SecretsEditActions } from '../../src/ui/secretsScreenDriver';
 import type { SecretIndexRow } from '../../src/service/serviceClient';
 import { hashValue } from '../../src/commands/statusCommand';
 import type { LocationDecryptor } from '../../src/ui/secretsScreen';
@@ -30,10 +30,11 @@ async function drive(
   keys: ReadonlyArray<string | number>,
   inRows: readonly SecretIndexRow[] = rows,
   decrypt: LocationDecryptor = async () => ({ ok: false, code: 'NO' }),
+  copy?: CopyText,
 ) {
   const outSpy = spyOn(process.stdout, 'write').mockImplementation((() => true) as never);
   const logSpy = spyOn(console, 'log').mockImplementation(() => {});
-  const done = runSecretsScreen(inRows, decrypt, actions);
+  const done = runSecretsScreen(inRows, decrypt, actions, false, undefined, copy);
   await wait();
   for (const k of keys) {
     if (typeof k === 'number') await wait(k);
@@ -105,6 +106,48 @@ describe('runSecretsScreen with the edit flow', () => {
 
     const unwired = await drive(undefined, ['\x05', 'v', '\r', '\r', 30, '\r', 30, ESC]);
     expect(unwired.logged.join('\n')).toContain('(UNAVAILABLE)');
+  });
+});
+
+describe('`c` on the result screen, through the real driver', () => {
+  const URL = 'https://github.com/Acme/repo-p1/pull/3';
+  const actions: SecretsEditActions = {
+    loadRepos: async (ids) => ({
+      ok: true as const,
+      links: ids.map((id) => ({ project_id: id, project_name: id, host: 'github.com', owner: 'Acme', name: `repo-${id}`, path: '.', github_repo_id: 1, last_seen_at: '' })),
+    }),
+    loadBases: async () => ({ 'github.com/acme/repo-p1': 'main', 'github.com/acme/repo-p2': 'main' }),
+    run: async (request) => ({
+      ok: true,
+      result: {
+        name: request.name,
+        updated: request.locations.map((l) => ({ project: l.project_name, branch: l.branch, protected: l.protected })),
+        unchanged: [],
+        prs: [{ repo: 'Acme/repo-p1', url: URL, base: 'main', keep_lock_paths: ['keep.lock'], keep_lock_diverged: false, locations: [] }],
+        no_pr: [],
+        failed: [],
+      },
+    }),
+  };
+  // Ctrl+E, the value, Enter, Enter (all locations), wait for repos, Enter (run), wait, `c`, wait, Esc.
+  const keys = ['\x05', 'v', '\r', '\r', 40, '\r', 40, 'c', 30, ESC] as const;
+
+  test('the effect calls the injected clipboard function with the PR urls; the screen stays open and draws the outcome', async () => {
+    const copy = mock(async (_text: string) => true);
+    const { screen } = await drive(actions, keys, rows, undefined, copy);
+    expect(copy.mock.calls.map((c) => c[0])).toEqual([URL]);
+    expect(screen.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '')).toContain('Copied 1 PR link');
+  });
+
+  test('a clipboard that fails (or throws) is shown as could-not-copy, never a crash', async () => {
+    const failing = mock(async (_text: string) => false);
+    const failed = await drive(actions, keys, rows, undefined, failing);
+    expect(failing.mock.calls).toHaveLength(1);
+    expect(failed.screen).toContain('Could not copy to clipboard');
+    const throwing = mock(async (_text: string): Promise<boolean> => {
+      throw new Error('boom');
+    });
+    expect((await drive(actions, keys, rows, undefined, throwing)).screen).toContain('Could not copy to clipboard');
   });
 });
 

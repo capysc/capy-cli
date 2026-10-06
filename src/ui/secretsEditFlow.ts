@@ -17,7 +17,8 @@
 //              space, a (toggle all), i (invert), / (filter), enter, and Esc back.
 //   repos      the repos to open a PR in, with the approved prompt, all selected.
 //   running    keys are ignored: a push in flight is never abandoned halfway.
-//   done       the confirmation; only Esc leaves it, so the PR links can be selected and copied first.
+//   done       the confirmation; only Esc leaves it. `c` copies the PR links to the clipboard (and the
+//              screen stays), so they can also be selected and copied by hand first.
 
 import { CheckboxKey, CheckboxState, initialCheckboxState, stepCheckboxKey } from './searchableCheckbox';
 import { isRevealKey, stepEditBuffer } from './editBuffer';
@@ -28,6 +29,7 @@ import { CONFIRM_MESSAGE } from '../commands/keepLockPr';
 import { CANCELLED_NOTHING, STOPPING_AGAIN, STOPPING_NOW, stoppingAfter, DryRunView, renderDryRunPlan, renderSecretSetConfirmation, TERMINAL_STYLE } from '../commands/secretsSetText';
 import { RepoTarget, RunProgress, SecretSetResult, SetLocation, planRepos, repoKey, repoLabel } from '../commands/secretsSet';
 import { TableColumn, clipLine, pickerTableLines } from './pickerTable';
+import { COPY_HINT_PAIR, CopyEffect, CopyOutcome, copiedLine, copyEffectFor, isCopyKey, uniqueUrls } from './copyPrLinks';
 import type { OrgRepoLink, SecretIndexRow } from '../service/serviceClient';
 
 const ESC = '\x1b';
@@ -105,7 +107,14 @@ export type EditFlow =
       /** A stop was asked for in this phase, this many times (Ctrl+C / Esc). */
       readonly stop?: { readonly phase: RunProgress['phase']; readonly count: number };
     } & Carried)
-  | { readonly step: 'done'; readonly text: string };
+  | {
+      readonly step: 'done';
+      readonly text: string;
+      /** The PR links of the result, from its own url fields (never read back from `text`). Empty: `c` does nothing. */
+      readonly prUrls: readonly string[];
+      /** What the last `c` did; absent until it was pressed. */
+      readonly copied?: CopyOutcome;
+    };
 
 export interface RunRequest {
   readonly name: string;
@@ -119,6 +128,8 @@ export interface RunRequest {
 }
 
 export type EditEffect =
+  /** Copy the PR links (newline-joined) to the clipboard; the driver reports back with `applyEditCopied`. */
+  | CopyEffect
   | { readonly type: 'loadRepos'; readonly projectIds: readonly string[] }
   /** Read the default branches of these repos (one batched call): the BASE column. */
   | { readonly type: 'loadBases'; readonly targets: readonly RepoTarget[] }
@@ -363,8 +374,14 @@ export function stepEdit(flow: EditFlow, key: string): EditStep {
   if (flow.step === 'loading') return stepLoading(flow, key);
   if (flow.step === 'repos') return stepRepos(flow, key);
   if (flow.step === 'running') return stepRunning(flow, key);
-  // The result screen stays until Esc, so its PR links can be selected and copied.
-  return isEsc(key) ? { flow: null, effect: null, exitText: flow.text } : { flow, effect: null };
+  return stepDone(flow, key);
+}
+
+/** The result screen: Esc leaves it; `c` copies the PR links and stays (no links: nothing to copy); every other key does nothing. */
+function stepDone(flow: Extract<EditFlow, { step: 'done' }>, key: string): EditStep {
+  if (isEsc(key)) return { flow: null, effect: null, exitText: flow.text };
+  if (isCopyKey(key) && flow.prUrls.length > 0) return { flow, effect: copyEffectFor(flow.prUrls) };
+  return stay(flow);
 }
 
 // ── Results coming back ─────────────────────────────────────────────────────
@@ -401,6 +418,10 @@ export type RunFinished =
   | { readonly ok: true; readonly plan: DryRunView }
   | { readonly ok: false; readonly code: string };
 
+/** The PR links of a finished run: each PR's own `url` (a dry run, a failure and a repo that needed no PR have none), once each. */
+export const prUrlsOf = (finished: RunFinished): readonly string[] =>
+  finished.ok && 'result' in finished ? uniqueUrls(finished.result.prs.map((p) => p.url)) : [];
+
 function finishedText(name: string, finished: RunFinished): string {
   if (!finished.ok) return `✗ ${name} was not updated. (${finished.code})`; // COPY-FLAG
   return 'plan' in finished ? renderDryRunPlan(finished.plan) : renderSecretSetConfirmation(finished.result, TERMINAL_STYLE);
@@ -409,7 +430,13 @@ function finishedText(name: string, finished: RunFinished): string {
 /** The run finished. Dropped unless the flow is still running. */
 export function applyRunFinished(flow: EditFlow | null, finished: RunFinished): EditFlow | null {
   if (flow === null || flow.step !== 'running') return flow;
-  return { step: 'done', text: finishedText(flow.name, finished) };
+  return { step: 'done', text: finishedText(flow.name, finished), prUrls: prUrlsOf(finished) };
+}
+
+/** The copy the `copyToClipboard` effect started finished. Dropped unless the flow is still on the result. */
+export function applyEditCopied(flow: EditFlow | null, ok: boolean): EditFlow | null {
+  if (flow === null || flow.step !== 'done') return flow;
+  return { ...flow, copied: { ok, count: flow.prUrls.length } };
 }
 
 // ── Rendering ────────────────────────────────────────────────────────────────
@@ -519,8 +546,11 @@ export function renderEdit(
     return { lines: [`${DIM}${runningLine(flow, dryRun)}${RESET}`], footer: flow.stop === undefined ? hint(['ctrl+c', 'stop']) : '' }; // COPY-FLAG
   }
   return {
-    lines: flow.text.split('\n').map((l) => (l.startsWith('✗') ? `${RED}${l}${RESET}` : l)),
-    footer: hint(['esc', 'exit']), // COPY-FLAG
+    lines: [
+      ...flow.text.split('\n').map((l) => (l.startsWith('✗') ? `${RED}${l}${RESET}` : l)),
+      ...(flow.copied === undefined ? [] : ['', `${flow.copied.ok ? DIM : RED}${copiedLine(flow.copied)}${RESET}`]),
+    ],
+    footer: hint(...(flow.prUrls.length > 0 ? [COPY_HINT_PAIR] : []), ['esc', 'exit']), // COPY-FLAG
   };
 }
 

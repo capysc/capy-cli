@@ -5,6 +5,7 @@
  */
 import { describe, test, expect, mock, spyOn } from 'bun:test';
 import {
+  applyDeployCopied,
   applyDeployFinished,
   applyDeployPlanLoaded,
   applyDeployProgress,
@@ -19,6 +20,7 @@ import {
   type DeployFlow,
 } from '../../src/ui/secretsDeployFlow';
 import {
+  applyCopied,
   applyDeployPlan,
   applyDeployRunDone,
   applyDeployRunProgress,
@@ -640,5 +642,138 @@ describe('the plan step through the screen and the driver', () => {
     expect(screen).toContain('NO_KEY');
     expect(run.mock.calls).toHaveLength(1);
     expect(run.mock.calls[0][0].targets).toHaveLength(3);
+  });
+});
+
+describe('the result screen: `c` copies the PR links', () => {
+  const target = (name: string) => ({ project: 'mono-backend', branch: 'production', target: name, provider: 'dokploy', repo: 'Acme/mono', path: 'backend', vars: 2 });
+  const delivered = (name: string, prUrl: string | null) => ({ kind: 'delivered' as const, target: target(name), pr_url: prUrl, base: 'main', recorded: true });
+  const URL_A = 'https://github.com/Acme/mono/pull/12';
+  const URL_B = 'https://github.com/Acme/web/pull/7';
+  // Two PRs, one target that needed none, one that failed (no link), and a repeat of the first PR.
+  const WITH_PRS: BatchResult = {
+    targets: [
+      delivered('api', URL_A),
+      delivered('worker', null),
+      { kind: 'failed', target: target('cron'), code: 'UNAVAILABLE', stage: 'push', values_pushed: false },
+      delivered('web', URL_B),
+      delivered('api-2', URL_A),
+    ],
+    skipped: [],
+    read_failed: [],
+  };
+  const NO_PRS: BatchResult = { targets: [delivered('worker', null)], skipped: [], read_failed: [] };
+
+  const runningFlow = async (): Promise<DeployFlow> => {
+    const plan = await realPlan();
+    return stepDeploy(applyDeployPlanLoaded(startDeploy(row).flow, { ok: true, plan }) as DeployFlow, '\r').flow as DeployFlow;
+  };
+  async function doneWith(result: BatchResult): Promise<Extract<DeployFlow, { step: 'done' }>> {
+    return applyDeployFinished(await runningFlow(), { ok: true, result }) as Extract<DeployFlow, { step: 'done' }>;
+  }
+
+  test('`c` asks for a copy of exactly the PR urls (newline-joined, once each) and keeps the screen; the footer offers it', async () => {
+    const done = await doneWith(WITH_PRS);
+    expect(done.prUrls).toEqual([URL_A, URL_B]);
+    for (const key of ['c', 'C']) {
+      const step = stepDeploy(done, key);
+      expect(step.effect).toEqual({ type: 'copyToClipboard', text: `${URL_A}\n${URL_B}` });
+      expect(step.flow).toBe(done);
+      expect(step.exitText).toBeUndefined();
+    }
+    expect(strip(renderDeploy(done, 120).footer)).toBe('c copy PRs · esc exit');
+  });
+
+  test('Esc is still the only way out, and any other key still does nothing', async () => {
+    const done = await doneWith(WITH_PRS);
+    const left = stepDeploy(done, ESC);
+    expect(left.flow).toBeNull();
+    expect(left.exitText).toBe(done.text);
+    for (const key of ['x', '\r', ' ', '\x03', 'q']) {
+      const stays = stepDeploy(done, key);
+      expect(stays.flow).toBe(done);
+      expect(stays.effect).toBeNull();
+    }
+  });
+
+  test('with no PR: `c` does nothing and the footer does not offer it', async () => {
+    const done = await doneWith(NO_PRS);
+    expect(done.prUrls).toEqual([]);
+    const step = stepDeploy(done, 'c');
+    expect(step.flow).toBe(done);
+    expect(step.effect).toBeNull();
+    expect(strip(renderDeploy(done, 120).footer)).not.toContain('copy PRs');
+    expect(strip(renderDeploy(done, 120).footer)).toContain('esc exit');
+    // A failed run and a dry run have no links either.
+    const failed = applyDeployFinished(await runningFlow(), { ok: false, code: 'UNAVAILABLE' }) as DeployFlow;
+    expect(stepDeploy(failed, 'c').effect).toBeNull();
+    expect(strip(renderDeploy(failed, 120).footer)).not.toContain('copy PRs');
+    const plan = await realPlan();
+    const dry = stepDeploy(applyDeployPlanLoaded(startDeploy(row).flow, { ok: true, plan }) as DeployFlow, '\r', true).flow as DeployFlow;
+    expect(stepDeploy(dry, 'c').effect).toBeNull();
+  });
+
+  test('the outcome is shown on the screen: copied (with the count) or could not copy; the screen stays open', async () => {
+    const done = await doneWith(WITH_PRS);
+    const ok = applyDeployCopied(done, true) as Extract<DeployFlow, { step: 'done' }>;
+    expect(strip(renderDeploy(ok, 120).lines.join('\n'))).toContain('Copied 2 PR links');
+    const bad = applyDeployCopied(done, false) as Extract<DeployFlow, { step: 'done' }>;
+    expect(strip(renderDeploy(bad, 120).lines.join('\n'))).toContain('Could not copy to clipboard');
+    expect(bad.step).toBe('done');
+    const one = applyDeployCopied(await doneWith(RESULT), true) as DeployFlow;
+    expect(strip(renderDeploy(one, 120).lines.join('\n'))).toContain('Copied 1 PR link');
+    expect(strip(renderDeploy(one, 120).lines.join('\n'))).not.toContain('Copied 1 PR links');
+    // The exit text is the result alone: the copy line is not part of what is printed after the screen.
+    expect(stepDeploy(ok, ESC).exitText).toBe(done.text);
+    // A late answer is dropped once the flow has moved on.
+    expect(applyDeployCopied(null, true)).toBeNull();
+  });
+
+  test('through the screen reducer: `c` on the result gives the effect and the screen stays; the answer lands on the result', async () => {
+    const plan = await realPlan();
+    const planned = applyDeployPlan(handleKey(initialSecretsScreenState([row], false), CTRL_D).state, { ok: true, plan });
+    const finished = applyDeployRunDone(handleKey(planned, '\r').state, { ok: true, result: WITH_PRS });
+    const pressed = handleKey(finished, 'c');
+    expect(pressed.effect).toEqual({ type: 'copyToClipboard', text: `${URL_A}\n${URL_B}` });
+    expect(pressed.state.quit).toBe(false);
+    expect(pressed.state.deploy?.step).toBe('done');
+    expect(strip(render(applyCopied(pressed.state, true), 120, 30))).toContain('Copied 2 PR links');
+  });
+
+  async function driveCopy(copy: (text: string) => Promise<boolean>) {
+    const plan = await realPlan();
+    const actions: SecretsDeployActions = { loadPlan: async () => ({ ok: true, plan }), run: async () => ({ ok: true, result: WITH_PRS }), cancel: () => undefined };
+    const outSpy = spyOn(process.stdout, 'write').mockImplementation((() => true) as never);
+    const logSpy = spyOn(console, 'log').mockImplementation(() => {});
+    const finished = runSecretsScreen([row], async () => ({ ok: false, code: 'NO' }), undefined, false, actions, copy);
+    await wait();
+    for (const k of [CTRL_D, 40, '\r', 40, 'c', 30, ESC]) {
+      if (typeof k === 'number') await wait(k);
+      else {
+        process.stdin.emit('data', Buffer.from(k));
+        await wait();
+      }
+    }
+    await finished;
+    const screen = outSpy.mock.calls.map((c) => String(c[0])).join('');
+    outSpy.mockRestore();
+    logSpy.mockRestore();
+    return { screen };
+  }
+
+  test('the driver performs the effect with the injected clipboard function (never the real one) and draws the outcome', async () => {
+    const copy = mock(async (_text: string) => true);
+    const ok = await driveCopy(copy);
+    expect(copy.mock.calls.map((c) => c[0])).toEqual([`${URL_A}\n${URL_B}`]);
+    expect(strip(ok.screen)).toContain('Copied 2 PR links');
+
+    const failing = mock(async (_text: string) => false);
+    expect(strip((await driveCopy(failing)).screen)).toContain('Could not copy to clipboard');
+    expect(failing.mock.calls).toHaveLength(1);
+
+    const throwing = mock(async (_text: string): Promise<boolean> => {
+      throw new Error('boom');
+    });
+    expect(strip((await driveCopy(throwing)).screen)).toContain('Could not copy to clipboard');
   });
 });

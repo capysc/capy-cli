@@ -19,7 +19,8 @@
 //             Under `--dry-run` Enter shows what would happen for the ticked targets and
 //             changes nothing: no effect is ever started.
 //   running   Ctrl+C / Esc stop: no further target is started, every one in flight finishes.
-//   done      the result; only Esc leaves it, so the PR links can be selected and copied first.
+//   done      the result; only Esc leaves it. `c` copies the PR links to the clipboard (and the screen
+//             stays), so they can also be selected and copied by hand first.
 
 import type { SecretIndexRow } from '../service/serviceClient';
 import { BatchPhase, BatchPlan, BatchProgress, BatchResult, restrictPlan, targetKeyOf } from '../deploy/batchDeploy';
@@ -38,6 +39,7 @@ import { TableColumn, clipLine, pickerTableLines } from './pickerTable';
 import { CheckboxState, initialCheckboxState, stepCheckboxKey } from './searchableCheckbox';
 import { toCheckboxKey } from './secretsEditFlow';
 import { ValueState, renderValueLine } from './valueDisplay';
+import { COPY_HINT_PAIR, CopyEffect, CopyOutcome, copiedLine, copyEffectFor, isCopyKey, uniqueUrls } from './copyPrLinks';
 
 const ESC = '\x1b';
 const RESET = `${ESC}[0m`;
@@ -73,9 +75,18 @@ export type DeployFlow =
       /** A stop was asked for in this phase, this many times (Ctrl+C / Esc). */
       readonly stop?: { readonly phase: BatchPhase; readonly count: number };
     }
-  | { readonly step: 'done'; readonly text: string };
+  | {
+      readonly step: 'done';
+      readonly text: string;
+      /** The PR links of the result, from its own url fields (never read back from `text`). Empty: `c` does nothing. */
+      readonly prUrls: readonly string[];
+      /** What the last `c` did; absent until it was pressed. */
+      readonly copied?: CopyOutcome;
+    };
 
 export type DeployEffect =
+  /** Copy the PR links (newline-joined) to the clipboard; the driver reports back with `applyDeployCopied`. */
+  | CopyEffect
   | { readonly type: 'loadDeployPlan'; readonly row: SecretIndexRow }
   /** Stop: `planning` kills the GitHub reads; `pushing` / `prs` start nothing new and wait for every item in flight. */
   | { readonly type: 'cancelDeploy'; readonly phase: 'planning' | BatchPhase }
@@ -133,7 +144,7 @@ function stepPlan(flow: Extract<DeployFlow, { step: 'plan' }>, key: string, dryR
   if (flow.box.checked.length === 0) return stay(flow);
   const plan = selectedPlan(flow);
   // A dry run never starts the run: it shows what would happen.
-  if (dryRun) return stay({ step: 'done', text: dryRunDeployText(plan) });
+  if (dryRun) return stay({ step: 'done', text: dryRunDeployText(plan), prUrls: [] });
   return { flow: { step: 'running', row: flow.row, plan }, effect: { type: 'runDeploy', plan } };
 }
 
@@ -157,8 +168,14 @@ export function stepDeploy(flow: DeployFlow, key: string, dryRun: boolean = fals
   }
   if (flow.step === 'plan') return stepPlan(flow, key, dryRun);
   if (flow.step === 'running') return stepRunning(flow, key);
-  // The result screen stays until Esc, so its PR links can be selected and copied.
-  return isEsc(key) ? { flow: null, effect: null, exitText: flow.text } : { flow, effect: null };
+  return stepDone(flow, key);
+}
+
+/** The result screen: Esc leaves it; `c` copies the PR links and stays (no links: nothing to copy); every other key does nothing. */
+function stepDone(flow: Extract<DeployFlow, { step: 'done' }>, key: string): DeployStep {
+  if (isEsc(key)) return { flow: null, effect: null, exitText: flow.text };
+  if (isCopyKey(key) && flow.prUrls.length > 0) return { flow, effect: copyEffectFor(flow.prUrls) };
+  return stay(flow);
 }
 
 // ── Results coming back ─────────────────────────────────────────────────────
@@ -179,7 +196,7 @@ export function applyDeployPlanLoaded(flow: DeployFlow | null, loaded: DeployPla
         value: { status: 'loading' },
         revealed: false,
       }
-    : { step: 'done', text: `✗ Could not read the deploy targets. (${loaded.code})` }; // COPY-FLAG
+    : { step: 'done', text: `✗ Could not read the deploy targets. (${loaded.code})`, prUrls: [] }; // COPY-FLAG
 }
 
 /** The plan step has targets: the row's value is worth fetching, to show it on this screen. */
@@ -208,6 +225,10 @@ export function applyDeployProgress(flow: DeployFlow | null, progress: BatchProg
   return { ...flow, progress, stop };
 }
 
+/** The PR links of a finished batch: every delivered target's own `pr_url` (a target that needed no PR has none), once each. */
+export const prUrlsOf = (result: BatchResult): readonly string[] =>
+  uniqueUrls(result.targets.flatMap((t) => (t.kind === 'delivered' && t.pr_url !== null ? [t.pr_url] : [])));
+
 export type DeployFinished =
   | { readonly ok: true; readonly result: BatchResult }
   | { readonly ok: false; readonly code: string };
@@ -218,7 +239,14 @@ export function applyDeployFinished(flow: DeployFlow | null, finished: DeployFin
   return {
     step: 'done',
     text: finished.ok ? renderBatchResult(finished.result, TERMINAL_STYLE) : `✗ ${flow.row.name} was not deployed. (${finished.code})`, // COPY-FLAG
+    prUrls: finished.ok ? prUrlsOf(finished.result) : [],
   };
+}
+
+/** The copy the `copyToClipboard` effect started finished. Dropped unless the flow is still on the result. */
+export function applyDeployCopied(flow: DeployFlow | null, ok: boolean): DeployFlow | null {
+  if (flow === null || flow.step !== 'done') return flow;
+  return { ...flow, copied: { ok, count: flow.prUrls.length } };
 }
 
 // ── Rendering ────────────────────────────────────────────────────────────────
@@ -301,7 +329,10 @@ export function renderDeploy(
     return { lines: [`${DIM}${deployRunningLine(flow)}${RESET}`], footer: flow.stop === undefined ? hint(['ctrl+c', 'stop']) : '' }; // COPY-FLAG
   }
   return {
-    lines: flow.text.split('\n').map((l) => (l.startsWith('✗') ? `${RED}${l}${RESET}` : l)),
-    footer: hint(['esc', 'exit']), // COPY-FLAG
+    lines: [
+      ...flow.text.split('\n').map((l) => (l.startsWith('✗') ? `${RED}${l}${RESET}` : l)),
+      ...(flow.copied === undefined ? [] : ['', `${flow.copied.ok ? DIM : RED}${copiedLine(flow.copied)}${RESET}`]),
+    ],
+    footer: hint(...(flow.prUrls.length > 0 ? [COPY_HINT_PAIR] : []), ['esc', 'exit']), // COPY-FLAG
   };
 }

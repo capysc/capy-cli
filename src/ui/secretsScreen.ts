@@ -36,6 +36,7 @@ import {
   applyReposLoaded,
   basesEffectFor,
   applyOldValue,
+  applyEditCopied,
   applyRunFinished,
   isRunning,
   renderEdit,
@@ -47,6 +48,7 @@ import {
   DeployFinished,
   DeployFlow,
   DeployPlanLoaded,
+  applyDeployCopied,
   applyDeployFinished,
   applyDeployPlanLoaded,
   applyDeployProgress,
@@ -466,6 +468,11 @@ export function pendingDeployValueEffect(state: SecretsScreenState): SecretsScre
 /** The deploy run reported progress (a single re-render). */
 export function applyDeployRunProgress(state: SecretsScreenState, progress: BatchProgress): SecretsScreenState {
   return { ...state, deploy: applyDeployProgress(state.deploy, progress) };
+}
+
+/** The clipboard copy the `copyToClipboard` effect started finished (on whichever result screen is open). */
+export function applyCopied(state: SecretsScreenState, ok: boolean): SecretsScreenState {
+  return { ...state, edit: applyEditCopied(state.edit, ok), deploy: applyDeployCopied(state.deploy, ok) };
 }
 
 /** The run the `runDeploy` effect started. */

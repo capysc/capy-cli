@@ -33,6 +33,7 @@ import {
   pendingBasesEffect,
   pendingDeployValueEffect,
   applyRunDone,
+  applyCopied,
   resolveSecretValue,
   render,
   tokenizeKeys,
@@ -43,6 +44,7 @@ import type { SecretIndexRow } from '../service/serviceClient';
 import { isRunning, type EditEffect, type ReposLoaded, type RunFinished } from './secretsEditFlow';
 import type { RunProgress } from '../commands/secretsSet';
 import { isDeployRunning, type DeployEffect, type DeployFinished, type DeployPlanLoaded } from './secretsDeployFlow';
+import { copyToClipboard } from './clipboard';
 import type { BatchPlan, BatchProgress } from '../deploy/batchDeploy';
 
 const {
@@ -98,7 +100,11 @@ type DriverAction =
   | { readonly kind: 'progress'; readonly progress: RunProgress }
   | { readonly kind: 'deployPlan'; readonly loaded: DeployPlanLoaded }
   | { readonly kind: 'deployProgress'; readonly progress: BatchProgress }
-  | { readonly kind: 'deployRan'; readonly finished: DeployFinished };
+  | { readonly kind: 'deployRan'; readonly finished: DeployFinished }
+  | { readonly kind: 'copied'; readonly ok: boolean };
+
+/** Puts text on the clipboard; true when it got there. Injected so tests never touch the real one. */
+export type CopyText = (text: string) => Promise<boolean>;
 
 function draw(state: SecretsScreenState): void {
   const width = process.stdout.columns || 80;
@@ -118,32 +124,34 @@ async function loop(
   decryptAt: LocationDecryptor,
   edit: SecretsEditActions | undefined,
   bus: EventEmitter,
-  deploy?: SecretsDeployActions,
+  deploy: SecretsDeployActions | undefined,
+  copy: CopyText,
 ): Promise<string | null> {
   if (state.quit) return state.exitText;
   draw(state);
 
   const { value } = await actions.next();
   const [action] = value;
-  const next = (s: SecretsScreenState) => loop(s, actions, decryptAt, edit, bus, deploy);
+  const next = (s: SecretsScreenState) => loop(s, actions, decryptAt, edit, bus, deploy, copy);
 
   // A push in flight is never abandoned halfway: a quit signal waits for it.
   if (action.kind === 'quit') {
     // A quit signal while an edit runs is a stop request, like Ctrl-C: it never cuts a push in half.
     if (!isRunning(state.edit) && !isDeployRunning(state.deploy)) return next({ ...state, quit: true });
     const stopped = handleKey(state, '\x03');
-    if (stopped.effect) perform(stopped.effect, decryptAt, edit, bus, deploy);
+    if (stopped.effect) perform(stopped.effect, decryptAt, edit, bus, deploy, copy);
     return next(stopped.state);
   }
   if (action.kind === 'deployPlan') {
     // The plan is up; the row's value is fetched next (the details view's own fetch) for its `value` line.
     const planned = applyDeployPlan(state, action.loaded);
     const valueEffect = pendingDeployValueEffect(planned);
-    if (valueEffect) perform(valueEffect, decryptAt, edit, bus, deploy);
+    if (valueEffect) perform(valueEffect, decryptAt, edit, bus, deploy, copy);
     return next(planned);
   }
   if (action.kind === 'deployProgress') return next(applyDeployRunProgress(state, action.progress));
   if (action.kind === 'deployRan') return next(applyDeployRunDone(state, action.finished));
+  if (action.kind === 'copied') return next(applyCopied(state, action.ok));
   if (action.kind === 'progress') return next(applyRunProgress(state, action.progress));
   if (action.kind === 'resize') return next(state);
   if (action.kind === 'value') return next(applyValueResult(state, action.row, action.result));
@@ -151,18 +159,18 @@ async function loop(
     // The table is up now; BASE is read next, and the keys already work.
     const shown = applyRepos(state, action.result);
     const basesEffect = pendingBasesEffect(shown);
-    if (basesEffect) perform(basesEffect, decryptAt, edit, bus, deploy);
+    if (basesEffect) perform(basesEffect, decryptAt, edit, bus, deploy, copy);
     return next(shown);
   }
   if (action.kind === 'bases') {
     const filled = applyBases(state, action.bases);
-    if (filled.effect) perform(filled.effect, decryptAt, edit, bus, deploy);
+    if (filled.effect) perform(filled.effect, decryptAt, edit, bus, deploy, copy);
     return next(filled.state);
   }
   if (action.kind === 'ran') return next(applyRunDone(state, action.finished));
 
   const { state: nextState, effect } = handleKey(state, action.key);
-  if (effect) perform(effect, decryptAt, edit, bus, deploy);
+  if (effect) perform(effect, decryptAt, edit, bus, deploy, copy);
   return next(nextState);
 }
 
@@ -176,8 +184,17 @@ function perform(
   decryptAt: LocationDecryptor,
   edit: SecretsEditActions | undefined,
   bus: EventEmitter,
-  deploy?: SecretsDeployActions,
+  deploy: SecretsDeployActions | undefined,
+  copy: CopyText,
 ): void {
+  if (effect.type === 'copyToClipboard') {
+    // A rejected copy is a failed copy: the screen shows it, it never crashes the loop.
+    void copy(effect.text).then(
+      (ok) => bus.emit('action', { kind: 'copied', ok }),
+      () => bus.emit('action', { kind: 'copied', ok: false }),
+    );
+    return;
+  }
   if (effect.type === 'loadDeployPlan') {
     const loaded = deploy ? deploy.loadPlan(effect.row) : Promise.resolve<DeployPlanLoaded>({ ok: false, code: 'UNAVAILABLE' });
     void loaded.then((result) => bus.emit('action', { kind: 'deployPlan', loaded: result }));
@@ -233,6 +250,8 @@ export async function runSecretsScreen(
   dryRun: boolean = false,
   /** The deploy flow's side effects (CAP-704); absent: the deploy keys do nothing useful. */
   deploy?: SecretsDeployActions,
+  /** Puts text on the clipboard (the `c` key of the result screens); the real clipboard by default. */
+  copy: CopyText = copyToClipboard,
 ): Promise<void> {
   const bus = new EventEmitter();
   // A single `data` chunk can carry more than one keypress (a paste, fast
@@ -257,7 +276,7 @@ export async function runSecretsScreen(
 
   const exitText = await (async () => {
     try {
-      return await loop(initialSecretsScreenState(rows, dryRun), actions, decryptAt, edit, bus, deploy);
+      return await loop(initialSecretsScreenState(rows, dryRun), actions, decryptAt, edit, bus, deploy, copy);
     } finally {
       process.stdout.write(DISABLE_BRACKETED_PASTE + SHOW_CURSOR + EXIT_ALT_SCREEN);
       if (process.stdin.isTTY) process.stdin.setRawMode(false);
