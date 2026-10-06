@@ -237,7 +237,6 @@ export type ImportOutcome =
       unchanged: readonly string[];
       skipped: readonly ImportSkip[];
       warnings: readonly ImportWarning[];
-      deployTargetSaved: boolean;
       /**
        * Dokploy import only: names with a different local value that a real
        * (non-dry-run) run would have prompted about. Only populated under
@@ -279,6 +278,8 @@ export type ImportOutcome =
       /** Stable refusal code — branch on this, never on `message`. */
       code: string;
       message: string;
+      /** CAP-703: what a caller must still supply, as flags (`DOKPLOY_SETTINGS_MISSING`). */
+      unanswered?: ReadonlyArray<{ readonly id: string; readonly flag: string; readonly hint: string; readonly alternative?: string }>;
     };
 
 export interface ConnectorModule {

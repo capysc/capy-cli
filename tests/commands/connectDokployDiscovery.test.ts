@@ -28,7 +28,7 @@
  * Every network-touching test injects its own `fetch` — no `mock.module()`,
  * so this file runs in `run-tests.sh`'s normal batch, not its isolated list.
  */
-import { describe, test, expect, spyOn } from 'bun:test';
+import { describe, test, expect, spyOn, mock } from 'bun:test';
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
@@ -64,6 +64,7 @@ import type { ImportOutcome } from '../../src/commands/connectors/registry';
 import type { FetchLike } from '../../src/deploy/dokployApi';
 import type { ConnectOpts } from '../../src/commands/connectors/registry';
 import type { KeepFile } from '../../src/types/index';
+import { withEnv, withTty } from '../helpers/processState';
 
 function git(cwd: string, args: string[]): string {
   return execFileSync('git', args, { cwd, stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf-8' });
@@ -758,7 +759,6 @@ const okImport = (names: readonly string[]): Extract<ImportOutcome, { ok: true }
   unchanged: [],
   skipped: [],
   warnings: [],
-  deployTargetSaved: false,
 });
 
 describe('runDiscoverySequence', () => {
@@ -3954,3 +3954,91 @@ function tryGitRevParse(repoRoot: string, ref: string): boolean {
     return false;
   }
 }
+
+// ── CAP-703: connect --discover never creates, offers or writes a deploy target ──
+
+describe('connector.discover — never creates, offers or writes a deploy target (CAP-703)', () => {
+  test('an APPLICATION service, a real TTY, --yes: the import runs, nothing asks about a target, no .capy/deploy.json appears', async () => {
+    const ROOT = realpathSync(mkdtempSync(join(tmpdir(), 'capy-discover-notarget-')));
+    const globalDirName = `.capy-test-notarget-${process.pid}-${Date.now()}`;
+    try {
+      initRepo(ROOT, 'git@github.com:acme/widgets.git');
+      const orgId = 'org_notarget_test';
+      const userId = 'user_notarget_test';
+      await withEnv({ CAPY_GLOBAL_DIR_NAME: globalDirName }, async () => {
+        await wrapAndSaveMasterKey(randomBytes(32), orgId, userId, {
+          coDecrypt: async (_oid: string, ct: string) => ct,
+          wrapOuterLayer: async (_oid: string, pt: string) => pt,
+        });
+        const projectId = 'proj_notarget';
+        writeFileSync(
+          join(ROOT, 'keep.lock'),
+          JSON.stringify({ version: '3.0', org_id: orgId, project_id: projectId, project_name: 'widgets', variables: {} }),
+        );
+        const ctx: DiscoveryContext = {
+          orgId,
+          userId,
+          authService: {} as unknown as DiscoveryContext['authService'],
+          serviceClient: {
+            coDecrypt: async (_oid: string, ct: string) => ({ plaintext: ct }),
+            wrapOuterLayer: async (_oid: string, pt: string) => ({ ciphertext: pt }),
+            listBranches: async () => [],
+            createBranch: async () => ({ id: 'b1', name: 'production', project_id: projectId, is_protected: false }),
+            getDecryptData: async () => ({ env_content: '', keep_file: '', decrypt_key: '', expires_at: new Date().toISOString() }),
+            pushSecrets: async () => {
+              throw new Error('must not be called — --no-push');
+            },
+          } as unknown as DiscoveryContext['serviceClient'],
+        };
+        const fetchImpl: FetchLike = (async (url: string) => {
+          if (url.includes('project.all')) {
+            return {
+              status: 200,
+              ok: true,
+              text: async () =>
+                JSON.stringify([
+                  {
+                    projectId: 'proj_1',
+                    name: 'acme',
+                    environments: [{ environmentId: 'env_1', name: 'production', applications: [{ applicationId: 'app_1', name: 'widgets' }] }],
+                  },
+                ]),
+            };
+          }
+          return {
+            status: 200,
+            ok: true,
+            text: async () =>
+              JSON.stringify({ applicationId: 'app_1', env: 'A=1', createEnvFile: true, owner: 'acme', repository: 'widgets', sourceType: 'github', branch: 'main' }),
+          };
+        }) as FetchLike;
+
+        // Would say yes to ANY question, including a deploy-target offer if one still existed.
+        const confirm = mock(async (_message: string, _defaultValue: boolean) => true);
+        const connector = createDokployConnector({
+          fetch: fetchImpl,
+          env: { T: 'x' },
+          cwd: ROOT,
+          confirm,
+          selectVars: async (c: readonly string[]) => c,
+        });
+        const outcome = await withTty({ stdin: true }, () =>
+          connector.discover!(ctx, { nonTty: false, json: true, baseUrl: 'https://d', tokenEnv: 'T', yes: true, noPush: true } as ConnectOpts),
+        );
+
+        expect(outcome.ok).toBe(true);
+        if (!outcome.ok) return;
+        const folder = outcome.applied?.[0];
+        expect(folder?.ok).toBe(true);
+        if (!folder?.ok) return;
+        expect(folder.environments[0].outcome.imported.map((e) => e.varName)).toEqual(['A']);
+        expect(folder.environments[0].outcome).not.toHaveProperty('deployTargetSaved');
+        expect(confirm.mock.calls.filter(([message]) => message.toLowerCase().includes('deploy target'))).toEqual([]);
+        expect(existsSync(join(ROOT, '.capy', 'deploy.json'))).toBe(false);
+      });
+    } finally {
+      rmSync(join(homedir(), globalDirName), { recursive: true, force: true });
+      rmSync(ROOT, { recursive: true, force: true });
+    }
+  });
+});

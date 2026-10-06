@@ -207,6 +207,8 @@ describe('resolveDokploySettings', () => {
       baseUrl: 'https://asked.example.com',
       applicationId: 'app_asked',
       tokenEnv: 'DOKPLOY_API_KEY',
+      // CAP-703: a URL typed at a prompt is marked, so the caller can offer it to the org.
+      baseUrlAsked: true,
     });
   });
 });
@@ -568,61 +570,49 @@ describe('dokploy import — keep.lock metadata + warnings', () => {
   });
 });
 
-describe('dokploy import — deploy-target offer', () => {
+// CAP-703 (Vince, 2026-10-03): "connect is for retrieval, target is for deploy". A connector
+// import never creates, offers or writes a deploy target. This block used to cover the offer
+// (`maybeOfferDeployTarget`); it now pins that the offer is gone: no question asked, nothing
+// saved, in a terminal or not, and an existing deploy.json is left exactly as it was.
+describe('dokploy import — never offers or saves a deploy target', () => {
   const ROOT = mkdtempSync(join(tmpdir(), 'capy-dokploy-import-'));
 
   afterEach(() => {
     if (existsSync(join(ROOT, '.capy'))) rmSync(join(ROOT, '.capy'), { recursive: true, force: true });
   });
 
-  test('non-interactive: never asks, never saves', async () => {
+  test('non-interactive: nothing saved, and the outcome carries no deploy-target field', async () => {
     const calls: FakeCall[] = [];
     const connector = createDokployConnector({ fetch: fakeFetch({ env: 'A=1', calls }), env: { T: 'x' }, cwd: ROOT });
     const outcome = await connector.import!(ctxWith(), { nonTty: true, baseUrl: 'https://d', application: 'app_new', tokenEnv: 'T' });
     expect(outcome.ok).toBe(true);
     if (!outcome.ok) return;
-    expect(outcome.deployTargetSaved).toBe(false);
+    expect(outcome).not.toHaveProperty('deployTargetSaved');
     expect(listTargets(ROOT)).toEqual([]);
   });
 
-  test('interactive + yes: saves a target with the imported names', async () => {
+  test('interactive, with a confirm that would say yes to anything: no target question, nothing saved', async () => {
     const calls: FakeCall[] = [];
+    const asked = mock(async (_message: string, _defaultValue: boolean) => true);
     const connector = createDokployConnector({
       fetch: fakeFetch({ env: 'A=1', calls }),
       env: { T: 'x' },
       cwd: ROOT,
-      confirm: async () => true,
+      confirm: asked,
       selectVars: async (c: readonly string[]) => c,
     });
     const outcome = await withTTY(() => connector.import!(ctxWith(), { nonTty: false, baseUrl: 'https://d', application: 'app_yes', tokenEnv: 'T' }));
     expect(outcome.ok).toBe(true);
     if (!outcome.ok) return;
-    expect(outcome.deployTargetSaved).toBe(true);
-    const targets = listTargets(ROOT);
-    expect(targets.length).toBe(1);
-    expect(targets[0].kind).toBe('dokploy');
-    expect(targets[0].vars).toEqual(['A']);
-    expect((targets[0].options as { applicationId: string }).applicationId).toBe('app_yes');
-  });
-
-  test('interactive + no: nothing saved', async () => {
-    const calls: FakeCall[] = [];
-    const connector = createDokployConnector({
-      fetch: fakeFetch({ env: 'A=1', calls }),
-      env: { T: 'x' },
-      cwd: ROOT,
-      confirm: async () => false,
-      selectVars: async (c: readonly string[]) => c,
-    });
-    const outcome = await withTTY(() => connector.import!(ctxWith(), { nonTty: false, baseUrl: 'https://d', application: 'app_no', tokenEnv: 'T' }));
-    expect(outcome.ok).toBe(true);
-    if (!outcome.ok) return;
-    expect(outcome.deployTargetSaved).toBe(false);
+    expect(outcome.imported.map((i) => i.varName)).toEqual(['A']);
+    expect(asked).not.toHaveBeenCalled();
     expect(listTargets(ROOT)).toEqual([]);
+    expect(existsSync(join(ROOT, '.capy', 'deploy.json'))).toBe(false);
   });
 
-  test('already has a target for this application: not offered again', async () => {
+  test('an existing target for this application is left exactly as it was', async () => {
     upsertTarget(ROOT, DOKPLOY_TARGET({ options: { baseUrl: 'https://d', applicationId: 'app_existing', tokenEnv: 'T' } }));
+    const before = readFileSync(join(ROOT, '.capy', 'deploy.json'), 'utf-8');
     let confirmCalled = false;
     const calls: FakeCall[] = [];
     const connector = createDokployConnector({
@@ -638,11 +628,11 @@ describe('dokploy import — deploy-target offer', () => {
     const outcome = await withTTY(() => connector.import!(ctxWith(), { nonTty: false, baseUrl: 'https://d', application: 'app_existing', tokenEnv: 'T' }));
     expect(outcome.ok).toBe(true);
     if (!outcome.ok) return;
-    expect(outcome.deployTargetSaved).toBe(false);
     expect(confirmCalled).toBe(false);
+    expect(readFileSync(join(ROOT, '.capy', 'deploy.json'), 'utf-8')).toBe(before);
   });
 
-  test('nothing imported: never offered', async () => {
+  test('nothing imported: nothing asked, nothing saved', async () => {
     const calls: FakeCall[] = [];
     let confirmCalled = false;
     const connector = createDokployConnector({
@@ -657,8 +647,8 @@ describe('dokploy import — deploy-target offer', () => {
     const outcome = await withTTY(() => connector.import!(ctxWith(), { nonTty: false, baseUrl: 'https://d', application: 'app_empty', tokenEnv: 'T' }));
     expect(outcome.ok).toBe(true);
     if (!outcome.ok) return;
-    expect(outcome.deployTargetSaved).toBe(false);
     expect(confirmCalled).toBe(false);
+    expect(listTargets(ROOT)).toEqual([]);
   });
 });
 
@@ -770,7 +760,6 @@ describe('writeImportOutcome — unchanged-value connector backfill', () => {
       unchangedEntries: [{ varName: 'PORT', value: '3000', entry: backfillEntry }],
       skipped: [],
       warnings: [],
-      deployTargetSaved: false,
     };
 
     const { wrote } = await writeImportOutcome(ctx, outcome, { push: true, dryRun: false });
@@ -808,7 +797,6 @@ describe('writeImportOutcome — unchanged-value connector backfill', () => {
       unchanged: [],
       skipped: [],
       warnings: [],
-      deployTargetSaved: false,
     };
     const { wrote } = await writeImportOutcome(ctx, outcome, { push: true, dryRun: false });
     expect(wrote).toBe(false);
@@ -829,7 +817,6 @@ describe('writeImportOutcome — unchanged-value connector backfill', () => {
       unchangedEntries: [{ varName: 'PORT', value: '3000', entry: { provider: 'dokploy', source: 'import', created_at: 1, fingerprint: 'x' } }],
       skipped: [],
       warnings: [],
-      deployTargetSaved: false,
     };
     const { wrote } = await writeImportOutcome(ctx, outcome, { push: true, dryRun: true });
     expect(wrote).toBe(false);
@@ -903,7 +890,6 @@ describe('connectCommand import output — no secret value on any output surface
     unchanged: [],
     skipped: [],
     warnings: [{ code: 'DOKPLOY_PLAINTEXT_REMAINS', names: ['API_KEY'] }],
-    deployTargetSaved: false,
   });
 
   /**
@@ -1446,6 +1432,8 @@ describe('resolveDokployImportSource', () => {
       baseUrl: 'https://asked.example.com',
       source: { kind: 'compose', id: 'compose_asked' },
       tokenEnv: 'DOKPLOY_API_KEY',
+      // CAP-703: a URL typed at a prompt is marked, so the caller can offer it to the org.
+      baseUrlAsked: true,
     });
   });
 
@@ -1491,6 +1479,8 @@ describe('resolveDokployImportSource', () => {
       baseUrl: 'https://asked.example.com',
       source: { kind: 'compose', id: 'compose_asked' },
       tokenEnv: 'DOKPLOY_API_KEY',
+      // CAP-703: a URL typed at a prompt is marked, so the caller can offer it to the org.
+      baseUrlAsked: true,
     });
   });
 
@@ -1505,6 +1495,8 @@ describe('resolveDokployImportSource', () => {
       baseUrl: 'https://asked.example.com',
       source: { kind: 'application', id: 'app_asked' },
       tokenEnv: 'DOKPLOY_API_KEY',
+      // CAP-703: a URL typed at a prompt is marked, so the caller can offer it to the org.
+      baseUrlAsked: true,
     });
   });
 });
@@ -1630,7 +1622,7 @@ describe('dokploy import — compose source, end to end', () => {
       );
       expect(outcome.ok).toBe(true);
       if (!outcome.ok) return;
-      expect(outcome.deployTargetSaved).toBe(false);
+      expect(outcome).not.toHaveProperty('deployTargetSaved');
       expect(confirmCalls.length).toBe(0);
       expect(listTargets(ROOT)).toEqual([]);
     } finally {
@@ -1681,7 +1673,6 @@ describe('dokploy import — compose source, end to end', () => {
         unchanged: [],
         skipped: [],
         warnings: [{ code: 'DOKPLOY_PLAINTEXT_REMAINS', names: ['SECRET_TOKEN'] }],
-        deployTargetSaved: false,
       };
 
       const fakeMod: ConnectorModule = {
@@ -1902,7 +1893,7 @@ describe('dokploy import — dry run', () => {
       );
       expect(outcome.ok).toBe(true);
       if (!outcome.ok) return;
-      expect(outcome.deployTargetSaved).toBe(false);
+      expect(outcome).not.toHaveProperty('deployTargetSaved');
       expect(confirmCalls.length).toBe(0);
       expect(listTargets(ROOT)).toEqual([]);
     } finally {
@@ -1959,7 +1950,6 @@ describe('dokploy import — dry run', () => {
         unchanged: ['UNCHANGED_VAR'],
         skipped: [{ name: 'SKIPPED_VAR', code: 'IMPORT_CONFLICT_SKIPPED' }],
         warnings: [],
-        deployTargetSaved: false,
         wouldAsk: ['CONFLICT_VAR'],
       };
     }
@@ -2011,7 +2001,7 @@ describe('dokploy import — dry run', () => {
       expect(parsed.wouldAsk).toEqual(['CONFLICT_VAR']);
       expect(parsed.skipped).toEqual([{ name: 'SKIPPED_VAR', code: 'IMPORT_CONFLICT_SKIPPED' }]);
       expect(parsed.pushed).toBe(false);
-      expect(parsed.deployTargetSaved).toBe(false);
+      expect(parsed).not.toHaveProperty('deployTargetSaved');
     });
 
     test('terminal: no write/push, prints names only (never the sentinel value)', async () => {
@@ -2285,7 +2275,7 @@ describe('dokploy import — --overwrite', () => {
           localPlaintext: { GONE: 'old-value', KEPT: 'still-here' },
         } as unknown as ResolvedContext;
 
-        const outcome: ImportOutcome = { ok: true, source: { kind: 'compose', id: 'c1' }, imported: [], cleared: ['GONE'], replacedNames: [], unchanged: ['KEPT'], skipped: [], warnings: [], deployTargetSaved: false };
+        const outcome: ImportOutcome = { ok: true, source: { kind: 'compose', id: 'c1' }, imported: [], cleared: ['GONE'], replacedNames: [], unchanged: ['KEPT'], skipped: [], warnings: [] };
         const fakeModule: ConnectorModule = {
           name: 'dokploy',
           description: 'test double',

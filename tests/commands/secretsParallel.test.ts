@@ -188,6 +188,37 @@ describe('PRs: bounded concurrency, steps within a repo in order', () => {
     expect(maxReposOpen(github.events(), repos.targets.map((t) => t.name))).toBe(PR_CONCURRENCY);
   });
 
+  test('a repo whose locations all already had the value gets no PR and is reported as skipped', async () => {
+    const repos = manyRepos(2);
+    const github = gaugedGithub(repos);
+    const result = await runSecretSet(
+      requestFor([], { locations: onePush, repos: repos.targets, bases: repos.bases }),
+      makeEnv(fakeService({ locs: [{ project: 'pC', branch: 'br0', value: SENTINEL }] }), github.api),
+    );
+    expect(result.prs).toEqual([]);
+    expect(result.unchanged).toHaveLength(1);
+    expect(result.skipped).toEqual([
+      { repo: 'Acme/repo1', reason: 'NOTHING_CHANGED' },
+      { repo: 'Acme/repo2', reason: 'NOTHING_CHANGED' },
+    ]);
+    expect(github.events().some((e) => e.includes('createPull'))).toBe(false);
+  });
+
+  test('a repo is not called skipped when its location failed or was pushed', async () => {
+    const repos = manyRepos(1);
+    const failed = await runSecretSet(
+      requestFor([], { locations: onePush, repos: repos.targets, bases: repos.bases }),
+      makeEnv(fakeService({ locs: [{ project: 'pC', branch: 'br0' }], failPush: { 'pC/br0': ERROR_CODES.PERMISSION_DENIED } }), gaugedGithub(repos).api),
+    );
+    expect(failed.skipped).toBeUndefined();
+    const pushed = await runSecretSet(
+      requestFor([], { locations: onePush, repos: repos.targets, bases: repos.bases }),
+      makeEnv(fakeService({ locs: [{ project: 'pC', branch: 'br0' }] }), gaugedGithub(repos).api),
+    );
+    expect(pushed.prs).toHaveLength(1);
+    expect(pushed.skipped).toBeUndefined();
+  });
+
   test('inside each repo the calls are strictly one after the other, in the same order for every repo', async () => {
     const repos = manyRepos(6);
     const github = gaugedGithub(repos, (repo) => 2 + (repo.length % 3));

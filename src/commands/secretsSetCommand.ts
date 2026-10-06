@@ -55,7 +55,7 @@ import {
   resolveBases,
   runSecretSet,
 } from './secretsSet';
-import { renderSecretSetConfirmation, stoppingAfter } from './secretsSetText';
+import { renderSecretSetConfirmation, stoppingAfter, TERMINAL_STYLE } from './secretsSetText';
 import { PoolItem, runPool } from '../utils/pool';
 
 export interface SecretsSetOpts {
@@ -453,6 +453,7 @@ export async function runSecretsSet(name: string, opts: SecretsSetOpts, io: Secr
           unchanged: result.unchanged,
           prs: result.prs,
           no_pr: result.no_pr,
+          ...(result.skipped !== undefined ? { skipped: result.skipped } : {}),
           failed: result.failed,
           ...(cancelled.length > 0 ? { cancelled } : {}),
           not_linked: planning.notLinked,
@@ -463,7 +464,7 @@ export async function runSecretsSet(name: string, opts: SecretsSetOpts, io: Secr
       ),
     );
   } else {
-    console.log(renderSecretSetConfirmation(result));
+    console.log(renderSecretSetConfirmation(result, process.stdout.isTTY ? TERMINAL_STYLE : undefined));
   }
   return failed ? 1 : 0;
 }
@@ -473,21 +474,47 @@ export async function runSecretsSet(name: string, opts: SecretsSetOpts, io: Secr
 /** How long `--dry-run` waits for a piped value it does not need. */
 const DRY_RUN_PEEK_MS = 1000;
 
-/** Silent auth only: never a prompt, never a browser. The org is the cwd keep.lock's, else the session's. */
-async function silentContext(devMode: boolean, json: boolean) {
+/** The silent session a non-interactive command runs under: the org, the user and a client. */
+export interface SilentContext {
+  readonly orgId: string;
+  readonly userId: string;
+  readonly client: ServiceClient;
+}
+
+export type SilentContextResult =
+  | { readonly ok: true; readonly context: SilentContext }
+  | { readonly ok: false; readonly code: string; readonly message: string };
+
+/**
+ * Silent auth only: never a prompt, never a browser. The org is the cwd keep.lock's, else the session's.
+ * Returns the refusal instead of exiting, so a caller that owns its own output (`capy deploy dokploy --discover`)
+ * can reuse it.
+ */
+export async function resolveSilentContext(devMode: boolean): Promise<SilentContextResult> {
   const state = await new ProjectManager().detectProjectState().catch(() => undefined);
   const authService = new AuthService(undefined, devMode, state?.userId);
   const client = new ServiceClient(undefined, devMode);
   client.setTokenProvider(() => authService.getValidToken());
   const forOrg = await authService.authenticateSilent(state?.organizationId);
   const auth = forOrg.success ? forOrg : await authService.authenticateSilent();
-  if (!auth.success || !auth.user_id) refuse(json, ERROR_CODES.AUTH_FAILED, silentAuthFailureMessage(auth));
+  if (!auth.success || !auth.user_id) {
+    return { ok: false, code: ERROR_CODES.AUTH_FAILED, message: silentAuthFailureMessage(auth) };
+  }
   const orgs = auth.organizations ?? [];
   const orgId = state?.organizationId ?? auth.organization_id ?? (orgs.length === 1 ? orgs[0].id : undefined);
   if (orgId === undefined) {
-    refuse(json, ERROR_CODES.ORG_NOT_FOUND, 'No organization could be chosen without a prompt. Run from a project folder.'); // COPY-FLAG
+    return {
+      ok: false,
+      code: ERROR_CODES.ORG_NOT_FOUND,
+      message: 'No organization could be chosen without a prompt. Run from a project folder.', // COPY-FLAG
+    };
   }
-  return { orgId, userId: auth.user_id as string, client };
+  return { ok: true, context: { orgId, userId: auth.user_id as string, client } };
+}
+
+async function silentContext(devMode: boolean, json: boolean): Promise<SilentContext> {
+  const resolved = await resolveSilentContext(devMode);
+  return resolved.ok ? resolved.context : refuse(json, resolved.code, resolved.message);
 }
 
 /**

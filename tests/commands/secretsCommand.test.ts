@@ -188,8 +188,8 @@ describe('SecretsCommand', () => {
     expect(payload).toEqual({
       ok: true,
       org_id: 'org_9',
-      // `row_id` is the one field this command adds to each server row (CAP-698).
-      rows: [{ ...row({ name: 'X' }), row_id: rowIdOf('X', row({ name: 'X' }).value_hash) }],
+      // The fields this command adds to each server row: `row_id` (CAP-698) and `status` (CAP-702; `unknown` because this fixture's server sent no targets).
+      rows: [{ ...row({ name: 'X' }), row_id: rowIdOf('X', row({ name: 'X' }).value_hash), status: 'unknown' }],
       skipped: [],
     });
   });
@@ -349,7 +349,39 @@ describe('SecretsCommand', () => {
     // the fake row's own known-safe fields made it into the payload.
     const payload = JSON.parse(stdout);
     expect(payload.rows[0].value_hash).toBe('deadbeefdeadbeef');
-    expect(Object.keys(payload.rows[0])).toEqual(['name', 'value_hash', 'locations', 'users', 'row_id']);
+    expect(Object.keys(payload.rows[0])).toEqual(['name', 'value_hash', 'locations', 'users', 'row_id', 'status']);
+  });
+
+  it('CAP-702: --json gives each row a STATUS and each target `up_to_date`', async () => {
+    getSecretIndexImpl.mockImplementation(async () => ({
+      org_id: 'org_1',
+      rows: [
+        row({
+          name: 'BEHIND',
+          locations: [
+            loc({ targets: [{ provider: 'dokploy', target: 'prod', stale: true }, { provider: 'vercel', target: 'main', stale: false }] }),
+            loc({ branch: 'staging', targets: [{ provider: 'dokploy', target: 'staging', stale: false }] }),
+          ],
+        }),
+        row({ name: 'CURRENT', locations: [loc({ targets: [{ provider: 'dokploy', target: 'prod', stale: false }] })] }),
+        row({ name: 'NO_TARGETS', locations: [loc({ targets: [] })] }),
+      ],
+      skipped: [],
+    }));
+
+    const { stdout } = await capture(() => new SecretsCommand().execute({ json: true }));
+    const payload = JSON.parse(stdout);
+    const [behind, current, noTargets] = payload.rows;
+    expect(behind.status).toBe('needs deploy');
+    expect(behind.status_locations).toBe(1);
+    expect(behind.locations_total).toBe(2);
+    expect(behind.locations[0].targets.map((t: { up_to_date: boolean }) => t.up_to_date)).toEqual([false, true]);
+    expect(current.status).toBe('deployed');
+    expect(current.status_locations).toBe(1);
+    expect(current.locations_total).toBe(1);
+    expect(current.locations[0].targets[0].up_to_date).toBe(true);
+    expect(noTargets.status).toBe('no target');
+    expect(noTargets.status_locations).toBeUndefined();
   });
 });
 

@@ -1,7 +1,9 @@
 // Single-column TUI for `capy edit`: variables list with an inline popup
 // detail view. Built on raw stdin + ANSI codes so we don't add a TUI dependency.
 
-import { formatSnippet } from '../commands/statusCommand';
+import { formatSnippet, hashValue } from '../commands/statusCommand';
+import { anyTargetBehind } from '../core/deployStatus';
+import { statusBadge } from './statusBadge';
 import { formatRelativeTime } from './relativeTime';
 import { isRevealKey, stepEditBuffer } from './editBuffer';
 import { OldValueView, canReveal, renderInlineValue as inlineValue, valueDialogRows } from './valueDialog';
@@ -29,7 +31,6 @@ const BOLD = `${ESC}[1m`;
 const GREEN = `${ESC}[32m`;
 const YELLOW = `${ESC}[33m`;
 const RED = `${ESC}[31m`;
-const CYAN = `${ESC}[36m`;
 
 const MARGIN = 2;
 const NO_VALUE = '—';
@@ -38,8 +39,15 @@ export interface EditRow {
   key: string;
   localValue: string | undefined;
   remoteValue: string | undefined;
-  status: 'in sync' | 'local' | 'remote' | 'conflict' | 'unknown';
+  status: 'in sync' | 'local' | 'remote' | 'conflict' | 'behind' | 'unknown';
   updatedLabel: string;
+  /**
+   * CAP-702: `deployed_value_hash` of every deploy target this variable was
+   * pushed to on the active branch (`null`: never pushed). A row that is
+   * otherwise in sync reads `behind` while any of these differs from its
+   * value's hash.
+   */
+  deployedHashes?: readonly (string | null)[];
   /**
    * keep.lock changed_at for this variable on the active branch (ISO8601,
    * server-assigned) — when the value last changed server-side. Drives the
@@ -135,6 +143,21 @@ export function reclassifyRow(
   row: EditRow,
   mode: { localMode?: boolean; remoteAvailable: boolean },
 ): EditRow['status'] {
+  return withDeployStatus(row, syncStatus(row, mode));
+}
+
+/**
+ * CAP-702: one status per variable, the one that needs action first —
+ * `conflict` → `local`/`remote` → `not deployed` → `in sync`. So only a row
+ * that is otherwise in sync can read `not deployed`.
+ */
+export function withDeployStatus(row: EditRow, status: EditRow['status']): EditRow['status'] {
+  if (status !== 'in sync') return status;
+  const value = row.localValue ?? row.remoteValue;
+  return anyTargetBehind(row.deployedHashes, value === undefined ? undefined : hashValue(value)) ? 'behind' : status;
+}
+
+function syncStatus(row: EditRow, mode: { localMode?: boolean; remoteAvailable: boolean }): EditRow['status'] {
   // Local mode: committed-vs-working. remoteValue holds the committed value.
   if (mode.localMode) return classifyLocalRow(row.localValue, row.remoteValue).status;
   if (!mode.remoteAvailable) return 'unknown';
@@ -154,7 +177,7 @@ export function reclassifyRow(
  * wording; otherwise the label says when the value last changed server-side.
  */
 export function updatedLabelForRow(row: EditRow, mode: { localMode?: boolean }): string {
-  if (mode.localMode) return row.status === 'in sync' ? 'committed' : 'uncommitted';
+  if (mode.localMode) return row.status === 'in sync' || row.status === 'behind' ? 'committed' : 'uncommitted';
   return row.changedAt ? formatRelativeTime(row.changedAt) : NO_VALUE;
 }
 
@@ -815,19 +838,7 @@ export class EditScreen {
   }
 
   private statusBadge(status: EditRow['status']): string {
-    switch (status) {
-      case 'in sync':
-        return `${GREEN}● in sync${RESET}`;
-      case 'local':
-        return `${YELLOW}● local${RESET}`;
-      case 'remote':
-        return `${CYAN}● remote${RESET}`;
-      case 'conflict':
-        return `${RED}● conflict${RESET}`;
-      case 'unknown':
-      default:
-        return `${DIM}● unknown${RESET}`;
-    }
+    return statusBadge(status);
   }
 
   // --- helpers ---

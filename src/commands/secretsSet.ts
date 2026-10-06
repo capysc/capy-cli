@@ -115,6 +115,11 @@ export interface SecretSetResult {
   readonly no_pr: ReadonlyArray<{ readonly repo: string; readonly reason: 'NO_DIFF_VS_BASE' }>;
   readonly failed: readonly FailedItem[];
   /**
+   * Repos that were asked for but needed no PR because none of their locations
+   * changed (every one already had this value). Left out when there are none.
+   */
+  readonly skipped?: ReadonlyArray<{ readonly repo: string; readonly reason: 'NOTHING_CHANGED' }>;
+  /**
    * What a cancel left undone: locations never pushed and repos whose PR was never opened.
    * Empty (and left out of JSON) unless the run was stopped.
    */
@@ -589,6 +594,21 @@ export async function runSecretSet(req: SetRequest, env: SetEnv, hooks: RunHooks
   });
   const present = opened.results.flatMap((o) => (o === undefined ? [] : [o]));
 
+  // A repo with no pushed location gets no PR. Name it as skipped only when every one of its
+  // locations ended unchanged: a failed or cancelled location is already reported as such.
+  const inTarget = (t: RepoTarget) => (o: LocationOutcome) => t.files.some((f) => f.project_id === o.location.project_id);
+  const cancelledLocations = new Set(pushed.cancelled.map((l) => `${l.project_id}\u0000${l.branch}`));
+  const skipped = req.repos
+    .filter((t) => !planned.includes(t))
+    .filter((t) => {
+      const mine = outcomes.filter(inTarget(t));
+      const anyCancelled = req.locations.some(
+        (l) => t.files.some((f) => f.project_id === l.project_id) && cancelledLocations.has(`${l.project_id}\u0000${l.branch}`),
+      );
+      return mine.length > 0 && !anyCancelled && mine.every((o) => o.kind === 'unchanged');
+    })
+    .map((t) => ({ repo: repoLabel(t), reason: 'NOTHING_CHANGED' as const }));
+
   const cancelled: readonly CancelledItem[] = [
     ...pushed.cancelled.map((l): CancelledItem => ({ kind: 'location', ...locationRef(l) })),
     ...opened.cancelled.map((t): CancelledItem => ({ kind: 'repo', repo: repoLabel(t) })),
@@ -604,6 +624,7 @@ export async function runSecretSet(req: SetRequest, env: SetEnv, hooks: RunHooks
       ...failedLocations,
       ...present.flatMap((o): FailedItem[] => (o.kind === 'failed' ? [{ kind: 'repo', repo: o.repo, code: o.code }] : [])),
     ],
+    ...(skipped.length > 0 ? { skipped } : {}),
     ...(cancelled.length > 0 ? { cancelled } : {}),
   };
 }
@@ -612,7 +633,8 @@ export async function runSecretSet(req: SetRequest, env: SetEnv, hooks: RunHooks
 // Real environment
 // ---------------------------------------------------------------------------
 
-function realGithub(): GithubApi | undefined {
+/** The real GitHub API through the user's own `gh` login, or `undefined` when `gh` is not installed. */
+export function realGithub(): GithubApi | undefined {
   const gh = resolveGh();
   // Asynchronous: the screen keeps drawing (and reading keys) while `gh` runs, and calls can overlap.
   return gh === null ? undefined : createGhApi(spawnGhRunnerAsync(gh));

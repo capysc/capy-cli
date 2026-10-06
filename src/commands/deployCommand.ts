@@ -978,6 +978,25 @@ async function resolveDokployApiKeyForPicker(
   });
 }
 
+/**
+ * The org system variable for the Dokploy URL, read through the shared resolver (CAP-703); `undefined` when it is
+ * unset, cannot be read (not an admin) or there is no org. Never prompts.
+ */
+async function storedDokployBaseUrl(orgId: string | undefined): Promise<string | undefined> {
+  if (orgId === undefined) return undefined;
+  try {
+    const { resolveDokployBaseUrl, realBaseUrlStoreOpener } = await import('../deploy/dokployBaseUrl');
+    const resolved = await resolveDokployBaseUrl({
+      dryRun: true,
+      openStore: realBaseUrlStoreOpener(orgId, false),
+      savedTargetUrl: () => undefined,
+    });
+    return resolved.ok ? resolved.baseUrl : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** `new URL(raw).host`, or `undefined` for anything that doesn't parse — never throws. */
 function hostOf(raw: string | undefined): string | undefined {
   if (!raw) return undefined;
@@ -1004,6 +1023,8 @@ async function askDokployKindAndBaseUrl(
   id: string,
   existingOpts: Record<string, string>,
   existingKind: DokployServiceKind,
+  /** The org system variable `_CONNECTOR_DOKPLOY_BASE_URL`, offered as the default when the target has no URL of its own (CAP-703). */
+  storedBaseUrl?: string,
 ): Promise<DokployServiceUrlOk> {
   const ans = (await inquirer.prompt([
     {
@@ -1021,7 +1042,7 @@ async function askDokployKindAndBaseUrl(
       type: 'input',
       name: 'baseUrl',
       message: 'Dokploy URL:',
-      default: existingOpts.baseUrl,
+      default: existingOpts.baseUrl ?? storedBaseUrl,
       validate: (v: string) => baseUrlProblem(v) ?? true,
       filter: (v: string) => v.trim(),
     },
@@ -1091,7 +1112,7 @@ export async function resolveDokployServiceOptions(
     const answer = await askUrlOrId();
 
     if (isBareDokployId(answer)) {
-      return askDokployKindAndBaseUrl(answer, existingOpts, existingKind);
+      return askDokployKindAndBaseUrl(answer, existingOpts, existingKind, await storedDokployBaseUrl(orgId));
     }
 
     const parsed = parseDokployServiceUrl(answer);
@@ -1163,7 +1184,25 @@ export async function resolveDokployServiceOptions(
     return confirmed ? parsed : resolve();
   };
 
-  return resolve();
+  const resolved = await resolve();
+  await offerSaveEnteredDokployUrl(orgId, resolved.baseUrl, existingOpts.baseUrl);
+  return resolved;
+}
+
+/**
+ * CAP-703: the URL the person typed at the setup prompt is offered to the org (the system variable
+ * `_CONNECTOR_DOKPLOY_BASE_URL`) through the shared resolver's save path: only when the variable is unset and the
+ * caller is an org admin, never overwriting. A URL the target already had is not "entered", so it is left alone.
+ * Never fails the setup.
+ */
+async function offerSaveEnteredDokployUrl(orgId: string | undefined, baseUrl: string, existingBaseUrl: string | undefined): Promise<void> {
+  if (orgId === undefined || baseUrl === existingBaseUrl) return;
+  try {
+    const { offerSaveAskedBaseUrl, realBaseUrlStoreOpener } = await import('../deploy/dokployBaseUrl');
+    await offerSaveAskedBaseUrl({ baseUrl, openStore: realBaseUrlStoreOpener(orgId, false) });
+  } catch {
+    // Best effort: a failed offer never fails the target setup.
+  }
 }
 
 /**
@@ -1600,6 +1639,15 @@ function renderPlan(target: TargetConfig, adapter: DeployAdapter): void {
   }
   console.log(`  ${B('Vars:')}    ${target.vars.join(', ')}`);
   console.log('');
+}
+
+/**
+ * CAP-702: what a successful push means, and nothing more — capy put the
+ * values in the target's store; it does not track whether a release ran.
+ * Wording approved by Vince (2026-10-04).
+ */
+export function pushedLine(target: TargetConfig, noDeploy: boolean): string {
+  return noDeploy ? 'pushed, release not triggered' : `pushed to ${target.name}`;
 }
 
 function renderResult(result: DeployResult): void {
@@ -2725,6 +2773,7 @@ export async function deployCommand(
     return 1;
   }
   if (mode === 'direct') await unwindGitState(cwd, null, directStashed);
+  if (!options.dryRun) console.log(`  ${GREEN('✓')} ${pushedLine(target, !!options.noDeploy)}`);
 
   // ── Record targets (CAP-679, CI mode CAP-687) ────────────────────────────
   // Direct mode: record against the user's own branch, same as always.
@@ -2806,14 +2855,14 @@ async function unwindGitState(
   }
 }
 
-function buildDeployPrBody(target: TargetConfig): string {
+export function buildDeployPrBody(target: TargetConfig): string {
   const adapter = getAdapter(target.kind);
   const adapterLabel = adapter ? adapter.label : target.kind;
   const optionsTable = Object.entries(target.options)
     .map(([k, v]) => `- \`${k}\`: \`${String(v)}\``)
     .join('\n');
   const baseLine = target.gitBaseBranch
-    ? `- **Git base:** \`${target.gitBaseBranch}\` — merging this PR is the deploy signal for that branch.`
+    ? `- **Git base:** \`${target.gitBaseBranch}\``
     : '';
 
   // Secret-delivery wording depends on the adapter. Blob adapters (Vercel) push
@@ -2837,40 +2886,14 @@ function buildDeployPrBody(target: TargetConfig): string {
         target.vars.map((v) => `- \`${v}\``).join('\n'),
       ].join('\n');
 
-  // Dokploy CI mode (CAP-682): not `needsDeployToken` (plain values now) and
-  // not `ciOnly` (direct mode still exists) — but for THIS section it reads
-  // exactly like a `ciOnly` adapter: Dokploy's OWN auto-deploy is what merging
-  // triggers, capy never calls `compose.redeploy`/`application.deploy` in CI
-  // mode. Checked before the generic `ciOnly` branch so it wins.
-  const mergeSection = adapter?.needsDeployToken
-    ? [
-        `Merging this PR is the deploy signal. ${adapterLabel}'s git CI builds on`,
-        `merge, and \`capy run\` injects your secrets from \`SECRETS_BLOB\` at build`,
-        `time. capy does **not** ship code from the local machine — only the`,
-        `keep.lock pin lands here.`,
-      ].join('\n')
-    : adapter?.id === 'dokploy'
-      ? // COPY-FLAG: new user-facing string, minimal/neutral wording.
-        [
-          `Merging this PR is the deploy signal. Dokploy's own auto-deploy builds`,
-          `and deploys on merge, reading the env vars written above directly from`,
-          `its store — no decrypt step at build. capy does **not** call`,
-          `\`compose.redeploy\`/\`application.deploy\` in CI mode — only the`,
-          `keep.lock pin lands here.`,
-        ].join('\n')
-      : adapter?.ciOnly
-        ? [
-            `Merging this PR is the deploy signal. ${adapterLabel}'s git integration`,
-            `builds and deploys on merge, reading the env vars pushed above directly`,
-            `from its store — no decrypt step at build. capy does **not** ship code`,
-            `from the local machine — only the keep.lock pin lands here.`,
-          ].join('\n')
-        : [
-            `Merging this PR is the deploy signal. Your CI pipeline runs the actual`,
-            `code deploy (e.g. \`capy run -- wrangler deploy\` for cf-worker) using`,
-            `the secrets that were pushed above. capy itself does **not** ship code`,
-            `from the local machine in CI mode — only the keep.lock pin lands here.`,
-          ].join('\n');
+  // CAP-702: capy does not track releases. The values are already in the
+  // vendor's store; merging records them in keep.lock and starts a release
+  // only where the vendor builds on merge. Wording approved by Vince
+  // (2026-10-04), verbatim from the ticket.
+  const mergeSection = [
+    `The new values are already in ${adapterLabel}. The next release of this branch will use them.`,
+    `Merging this PR records them in keep.lock, and it starts a release if ${adapterLabel} builds on merge.`,
+  ].join(' ');
 
   return [
     `Automated deploy PR opened by \`capy deploy\`.`,

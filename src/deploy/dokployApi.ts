@@ -42,6 +42,13 @@ export interface DokployApplication {
   repository?: string;
   owner?: string;
   branch?: string;
+  /**
+   * The build directory within the repo (e.g. `/` or `backend`). Read by
+   * `capy deploy dokploy --discover` (CAP-703) to match an Application to a
+   * Capy project folder. UNVERIFIED live: assumed to be `application.one`'s
+   * `buildPath`, a string where `/` (or empty) means the repo root.
+   */
+  buildPath?: string;
   /** Which Dokploy environment this Application belongs to, within its project. */
   environmentId?: string;
   /**
@@ -466,6 +473,7 @@ export function createDokployClient(
         repository: typeof body.repository === 'string' ? body.repository : undefined,
         owner: typeof body.owner === 'string' ? body.owner : undefined,
         branch: typeof body.branch === 'string' ? body.branch : undefined,
+        buildPath: typeof body.buildPath === 'string' ? body.buildPath : undefined,
         environmentId: typeof body.environmentId === 'string' ? body.environmentId : undefined,
         autoDeploy: typeof body.autoDeploy === 'boolean' ? body.autoDeploy : null,
         customGitBranch: typeof body.customGitBranch === 'string' ? body.customGitBranch : null,
@@ -618,6 +626,14 @@ export function resolveDokployToken(
  * `_CONNECTOR_<PROVIDER>_<NAME>`.
  */
 export const DOKPLOY_CONNECTOR_SECRET_NAME = '_CONNECTOR_DOKPLOY_API_KEY';
+
+/**
+ * Name of the org system variable that holds the Dokploy dashboard URL (CAP-703): the same store and the
+ * same `_CONNECTOR_<PROVIDER>_<NAME>` convention as the API key, with `BASE_URL` as the name. The URL is
+ * not a secret, but it travels the same encrypted path anyway. See `dokployBaseUrl.ts` for the one
+ * resolver every Dokploy path uses to read it.
+ */
+export const DOKPLOY_BASE_URL_VAR_NAME = '_CONNECTOR_DOKPLOY_BASE_URL';
 
 /**
  * Name of the org system store entry that holds the Dokploy API key for
