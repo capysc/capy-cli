@@ -34,8 +34,6 @@ describe('AGENTS_BLOCK', () => {
         '- Always pass `--json` and branch on the `code` field, never on message text.',
         '- Run `capy pair --json` in an interactive terminal/PTY. After browser approval, it asks "Enable this location as [email]?" before installing the session or keys. Show the returned email to the human and obtain explicit Yes/No approval before answering. Never automatically confirm or pipe `yes`; Enter defaults to No. No upfront email is required.',
         '- Never print, log, or commit secret values.',
-        '- `capy run` injects project secrets; it is not a general-purpose secure command launcher. Never wrap unrelated AWS, Terraform, SSH, Tailscale, curl, or other administration commands unless this task explicitly needs this project’s variables.',
-        '- Before local automation, confirm the authorized organization, project, branch, and required variable names. Use `capy run --org <id> --project <id> --branch <name> --only NAME,OTHER -- <command>`. Do not select all variables mechanically or use a PTY to bypass scope checks. If no project secrets are needed, use the tool’s native authentication and run it directly.',
         '- To set a value, pipe it from the command that produces it: `<cmd> | capy edit NAME --json`. Never put a value in a command argument, an `echo`, or a heredoc — it would land in your context and the shell history.',
         '<!-- capy:agents:end -->',
       ].join('\n'),
