@@ -6,7 +6,8 @@ import { debug } from '../ui/debug';
 import { getShellPinnedEnv } from '../config/prodPins';
 import { resolveActiveUrl } from '../config/profileConfig';
 import type { ParsedSecretsBlob } from '../crypto/deployRuntime';
-import { ERROR_CODES } from '../types/index';
+import { CapyError, ERROR_CODES } from '../types/index';
+import { hasRunScope, requiresExplicitRunScope, validateRunScope, selectRunVariables, scopedShellEnvironment, type RunScopeOptions } from '../core/runScope';
 
 /**
  * Writes `.capy/next-env.js`, a CommonJS module mapping each decrypted env var
@@ -313,7 +314,7 @@ function resolveNewRuntimePair(rawBlob: string, rawKey: string): NewRuntimePairR
   return { ok: true, secretsBlob: blob.value, projectKey: key.value };
 }
 
-export async function runCommand(args: string[], devMode: boolean = false): Promise<number> {
+export async function runCommand(args: string[], devMode: boolean = false, options: RunScopeOptions = {}): Promise<number> {
   if (args.length === 0) {
     console.error('Usage: capy run -- <command> [args...]');
     return 1;
@@ -359,6 +360,10 @@ export async function runCommand(args: string[], devMode: boolean = false): Prom
 
   // Deployed mode: CI, serverless, Vercel builds, Dokploy applications, etc.
   if (useNewPair || useOldPair) {
+    if (hasRunScope(options)) {
+      console.error(`capy run: [${ERROR_CODES.RUN_SCOPE_INVALID}] Local project scope flags cannot be used with deployed runtime credentials.`);
+      return 1;
+    }
     // Strip + validate ONLY the new pair (see the "Quoted runtime-pair
     // values" section above) — the old pair is untouched, exactly as today.
     const newPairResolved = useNewPair
@@ -422,12 +427,36 @@ export async function runCommand(args: string[], devMode: boolean = false): Prom
   // local key caching, no CAPY_KEY escape hatch — server must be reachable.
   const fm = new FileManager();
   const envFromFile = fm.readEnvFile();
+  const scoped = hasRunScope(options) || (Object.keys(envFromFile).length > 0
+    && requiresExplicitRunScope(process.stdin.isTTY, process.env, options.nonTty));
+  const scope = await (async () => {
+    if (!scoped) return { ok: true as const, values: envFromFile, shell: { ...process.env, ...getShellPinnedEnv() } };
+    try {
+      const names = validateRunScope(options);
+      const keepPath = join(process.cwd(), 'keep.lock');
+      if (!existsSync(keepPath)) {
+        throw new CapyError('Explicit project scope requires keep.lock in the current directory.', ERROR_CODES.RUN_CONTEXT_MISMATCH);
+      }
+      const ids = resolveKeepIds(keepPath);
+      if (!ids.ok) throw new CapyError(ids.message, ERROR_CODES.RUN_CONTEXT_MISMATCH);
+      const { ProjectManager } = await import('../core/projectManager');
+      const branch = new ProjectManager().deriveActiveBranch();
+      const values = selectRunVariables(envFromFile, names, options, { ...ids.value, branch }, fm.readEnvMeta());
+      console.error(`capy run: org=${ids.value.orgId} project=${ids.value.projectId} branch=${branch}; variables=${names.join(',')}`);
+      return { ok: true as const, values, shell: scopedShellEnvironment({ ...process.env, ...getShellPinnedEnv() }, Object.keys(envFromFile), names) };
+    } catch (error) {
+      const code = error instanceof CapyError ? error.code : ERROR_CODES.RUN_SCOPE_INVALID;
+      console.error(`capy run: [${code}] ${error instanceof Error ? error.message : 'Could not verify local project scope.'}`);
+      return { ok: false as const };
+    }
+  })();
+  if (!scope.ok) return 1;
 
   // Collect encrypted entries from .env *before* the shell merge. An
   // encrypted value represents a deliberate project secret, so it must not be
   // silently overridden by a stale value of the same name in process.env
   // (common when the user has an unrelated DATABASE_URL etc. in their shell).
-  const toDecrypt: Array<[string, string]> = Object.entries(envFromFile).filter(
+  const toDecrypt: Array<[string, string]> = Object.entries(scope.values).filter(
     (entry): entry is [string, string] => typeof entry[1] === 'string' && fm.isEncrypted(entry[1]),
   );
 
@@ -435,9 +464,8 @@ export async function runCommand(args: string[], devMode: boolean = false): Prom
   // are re-applied after decryption below, so they always win regardless of
   // what process.env contains.
   const env: Record<string, string | undefined> = {
-    ...envFromFile,
-    ...process.env,
-    ...getShellPinnedEnv(),
+    ...scope.values,
+    ...scope.shell,
   };
 
   if (toDecrypt.length === 0) {

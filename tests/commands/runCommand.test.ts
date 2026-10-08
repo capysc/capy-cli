@@ -4,6 +4,7 @@ import { join } from 'path';
 import { tmpdir } from 'os';
 import { createCipheriv, createHash, randomBytes, hkdfSync } from 'crypto';
 import { createServer, Server } from 'http';
+import { text } from 'node:stream/consumers';
 import {
   generateDeployId,
   generateDerivationToken,
@@ -23,9 +24,7 @@ const ALPHABET = 'abcdefghjkmnpqrstuvwxyz23456789';
 
 function deriveResourceId(key: string, varName: string): string {
   const hash = createHash('sha256').update(`${key}:${varName}`).digest();
-  let id = '';
-  for (let i = 0; i < 5; i++) id += ALPHABET[hash[i] % ALPHABET.length];
-  return id;
+  return Array.from({ length: 5 }, (_, i) => ALPHABET[hash[i] % ALPHABET.length]).join('');
 }
 
 function encrypt(value: string, key: string, varName: string = 'SECRET'): string {
@@ -68,29 +67,29 @@ function capy(
     );
   }
 
-  return new Promise((resolve) => {
-    const child = spawn('node', [cliPath, 'run', ...args], {
-      cwd: opts.cwd ?? TEST_DIR,
-      // HOME redirect also keeps these runs off the developer's real ~/.capy.
-      env: { ...process.env, HOME: fakeHome, USERPROFILE: fakeHome, ...restEnv },
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-
-    let stdout = '';
-    let stderr = '';
-    child.stdout.on('data', (d: Buffer) => (stdout += d.toString()));
-    child.stderr.on('data', (d: Buffer) => (stderr += d.toString()));
-
-    const killer = setTimeout(() => child.kill('SIGKILL'), 15000);
-    child.on('close', (code: number | null) => {
-      clearTimeout(killer);
-      resolve({ stdout, stderr, exitCode: code ?? 1 });
-    });
-    child.on('error', () => {
-      clearTimeout(killer);
-      resolve({ stdout, stderr, exitCode: 1 });
-    });
+  const child = spawn('node', [cliPath, 'run', ...args], {
+    cwd: opts.cwd ?? TEST_DIR,
+    env: { ...process.env, HOME: fakeHome, USERPROFILE: fakeHome, ...restEnv },
+    stdio: ['pipe', 'pipe', 'pipe'],
   });
+  const killer = setTimeout(() => child.kill('SIGKILL'), 15000);
+  const exitCode = new Promise<number>(resolve => {
+    child.on('close', (code: number | null) => resolve(code ?? 1));
+    child.on('error', () => resolve(1));
+  });
+  return Promise.all([text(child.stdout), text(child.stderr), exitCode])
+    .then(([stdout, stderr, code]) => ({ stdout, stderr, exitCode: code }))
+    .finally(() => {
+      clearTimeout(killer);
+      rmSync(fakeHome, { recursive: true, force: true });
+    });
+}
+
+const localScope = (only: string): string[] => ['--org', 'test-org', '--project', 'test-project', '--branch', 'local', '--only', only];
+function writeLocalContext(): void {
+  writeFileSync(join(TEST_DIR, 'keep.lock'), JSON.stringify({ version: '3.0', org_id: 'test-org', project_id: 'test-project', variables: {} }));
+  mkdirSync(join(TEST_DIR, '.capy'), { recursive: true });
+  writeFileSync(join(TEST_DIR, '.capy', 'branch'), 'local');
 }
 
 // ---------------------------------------------------------------------------
@@ -113,7 +112,8 @@ describe('capy run', () => {
   test('passes plaintext env vars through unchanged', async () => {
     writeFileSync(join(TEST_DIR, '.env'), 'PLAIN_VAR=hello-world\n');
 
-    const result = await capy(['--', 'node', '-e', 'console.log(process.env.PLAIN_VAR)']);
+    writeLocalContext();
+    const result = await capy([...localScope('PLAIN_VAR'), '--', 'node', '-e', 'console.log(process.env.PLAIN_VAR)']);
 
     expect(result.exitCode).toBe(0);
     expect(result.stdout.trim()).toBe('hello-world');
@@ -146,7 +146,7 @@ describe('capy run', () => {
     writeFileSync(join(TEST_DIR, '.env'), `SECRET=${encValue}\n`);
 
     // No keep.lock → can't resolve project key via server.
-    const result = await capy(['--', 'echo', 'should-not-reach']);
+    const result = await capy([...localScope('SECRET'), '--', 'echo', 'should-not-reach']);
 
     expect(result.exitCode).toBe(1);
     expect(result.stderr).toMatch(/keep\.lock/);
@@ -155,8 +155,9 @@ describe('capy run', () => {
   test('.env with zero encrypted values needs no key', async () => {
     writeFileSync(join(TEST_DIR, '.env'), 'DB_HOST=localhost\nDB_PORT=5432\n');
 
+    writeLocalContext();
     const result = await capy([
-      '--', 'node', '-e',
+      ...localScope('DB_HOST,DB_PORT'), '--', 'node', '-e',
       'console.log(process.env.DB_HOST + ":" + process.env.DB_PORT)',
     ]);
 

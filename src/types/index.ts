@@ -540,6 +540,10 @@ export const ERROR_CODES = {
   RUN_SECRETS_BLOB_INVALID: 'RUN_SECRETS_BLOB_INVALID',
   /** `_PROJECT_KEY` (the new runtime pair) is not 64 hex characters after stripping one layer of surrounding quotes. */
   RUN_PROJECT_KEY_INVALID: 'RUN_PROJECT_KEY_INVALID',
+  /** Local automation must select its credential scope before injection. */
+  RUN_SCOPE_REQUIRED: 'RUN_SCOPE_REQUIRED',
+  RUN_SCOPE_INVALID: 'RUN_SCOPE_INVALID',
+  RUN_CONTEXT_MISMATCH: 'RUN_CONTEXT_MISMATCH',
   // --- Dokploy plaintext delivery (CAP-682) ---
   /**
    * A value Capy needs to deliver plaintext to Dokploy cannot be rendered as

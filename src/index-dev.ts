@@ -968,14 +968,19 @@ program
 
 program
   .command('run')
-  .description('Run a command with decrypted secrets')
+  .description('Run a command with decrypted secrets; local automation requires explicit scope')
+  .option('--org <id>', 'expected organization ID (verified against keep.lock)')
+  .option('--project <id>', 'expected project ID (verified against keep.lock)')
+  .option('--branch <name>', 'expected active Capy branch')
+  .option('--only <names>', 'inject only these comma-separated project variables; no wildcards')
+  .option('--non-tty', 'require explicit local scope even in a terminal')
   .allowUnknownOption()
   .helpOption(false)
   .action(async (_opts: any, cmd: any) => {
     const { runCommand } = await import('./commands/runCommand');
     const dashIdx = process.argv.indexOf('--');
     const childArgs = dashIdx >= 0 ? process.argv.slice(dashIdx + 1) : cmd.args;
-    const code = await runCommand(childArgs, true);
+    const code = await runCommand(childArgs, true, _opts);
     process.exit(code);
   });
 
