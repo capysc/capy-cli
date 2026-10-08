@@ -7,7 +7,8 @@
  * Moves this machine's `local.key` + `key.enc` (for the project's org and
  * the current user) to another device, via Keep:
  *
- *   1. Pack this machine's `key.enc` + `local.key` into the v3 fixed-layout
+ *   1. Upgrade known legacy credentials through the existing resolver, then
+ *      pack this machine's `key.enc` + `local.key` into the v3 fixed-layout
  *      binary plaintext (`transportPackV3.ts`). There is no older link
  *      format to fall back to — if packing isn't lossless (foreign/corrupt
  *      `key.enc`), this refuses with a coded `TRANSPORT_KEY_FORMAT_UNSUPPORTED`
@@ -27,6 +28,7 @@ import { resolveOrgContext } from '../core/orgContext';
 import { readLocalRoot, readOrgKeyFileRaw } from '../config/globalConfig';
 import { resolveKeepOrigin } from '../config/keepOrigin';
 import { generateTransportKey, packTransportV3, sealTransportBlob, transportFragmentV4 } from '../crypto/transportPackV3';
+import { unwrapMasterKey, wrapAndSaveMasterKey, type KeyServiceOps } from '../crypto/keyResolver';
 import type { PairingEntry } from '../crypto/pairingPayload';
 import { renderTerminalQr } from '../ui/terminalQr';
 import { printMaskedLinkBlock, maskLink } from '../ui/maskedLinkPrompt';
@@ -136,9 +138,40 @@ function buildTransportIntro(): string {
 
 const LINK_LABEL = 'Open on your other device:'; // COPY-FLAG
 
+/** Only migrate the known legacy format; unknown formats still fail closed. */
+function isLegacyCredential(raw: string | null, orgId: string): boolean {
+  if (!raw) return false;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') return false;
+    const record = parsed as Readonly<Record<string, unknown>>;
+    return record.version === '1.0'
+      && record.wrapping_method === 'auth_token'
+      && record.org_id === orgId;
+  } catch {
+    return false;
+  }
+}
+
+async function prepareTransportCredential(
+  orgId: string,
+  userId: string,
+  service: KeyServiceOps,
+): Promise<void> {
+  if (!isLegacyCredential(readOrgKeyFileRaw(orgId, userId), orgId)) return;
+
+  const credential = await unwrapMasterKey(orgId, userId, service);
+  // Normal resolution migrates legacy storage best-effort. Transport needs
+  // the upgrade persisted before it can pack the files, so surface any
+  // remaining write/service failure instead of issuing an unusable link.
+  if (isLegacyCredential(readOrgKeyFileRaw(orgId, userId), orgId)) {
+    await wrapAndSaveMasterKey(credential, orgId, userId, service);
+  }
+}
+
 export class TransportCommand {
-  private apiUrl?: string;
-  private devMode: boolean;
+  private readonly apiUrl?: string;
+  private readonly devMode: boolean;
 
   constructor(apiUrl?: string, devMode: boolean = false) {
     this.apiUrl = apiUrl;
@@ -149,6 +182,11 @@ export class TransportCommand {
     const json = options.json === true;
     try {
       const { orgId, userId, serviceClient } = await resolveOrgContext(this.apiUrl, this.devMode);
+
+      await prepareTransportCredential(orgId, userId, {
+        coDecrypt: (id, ciphertext) => serviceClient.coDecrypt(id, ciphertext).then(result => result.plaintext),
+        wrapOuterLayer: (id, plaintext) => serviceClient.wrapOuterLayer(id, plaintext).then(result => result.ciphertext),
+      });
 
       const kLocal = readLocalRoot(orgId, userId);
       const keyEnc = readOrgKeyFileRaw(orgId, userId);
@@ -166,8 +204,8 @@ export class TransportCommand {
         key_enc: keyEnc,
       };
 
-      // The packed layout (CAP-692) is the only format — pack BEFORE ever calling the
-      // service, so an unpackable key.enc never burns a one-time transport
+      // The packed layout (CAP-692) is the only format — pack before creating a
+      // transport, so an unpackable key.enc never burns a one-time transport
       // row for a link that was never going to exist.
       const packed = packTransportV3(entry);
       if (!packed) {

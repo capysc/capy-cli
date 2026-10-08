@@ -71,6 +71,7 @@ ISOLATED_FILES=(
   tests/commands/connectDiscoveryRouting.test.ts
   tests/commands/agentsCommand.test.ts
   tests/commands/transportCommand.test.ts
+  tests/commands/transportLegacyCredential.test.ts
   tests/commands/pairCommand.test.ts
   # Reads process.stdout.isTTY/columns/rows directly; on CI's Linux runner an
   # earlier batch file left isTTY unassignable ("readonly property").
