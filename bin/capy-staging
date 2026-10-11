@@ -22,4 +22,7 @@ if (!process.env.CAPY_API_URL) {
 if (!process.env.CAPY_BIN_NAME) {
   process.env.CAPY_BIN_NAME = 'capy-staging';
 }
+if (!process.env.CAPY_KEEP_ORIGIN) {
+  process.env.CAPY_KEEP_ORIGIN = 'https://staging-keep.capy.sc';
+}
 require('../dist/index-dev.js');

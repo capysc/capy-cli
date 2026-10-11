@@ -25,6 +25,7 @@ import { printMaskedLinkBlock, maskLink, type MaskedLinkPromptHandle } from '../
 import { isFullScreenQrEligible, startFullScreenQrView, printMaskedLinkFooter } from '../ui/fullScreenQr';
 import { CapyError, ERROR_CODES } from '../types/index';
 import { refuseError } from './pairingRefusal';
+import { createPairingPresentation } from '../ui/pairingPresentation';
 import type { PairingEntry } from '../crypto/pairingPayload';
 
 export interface PairOptions {
@@ -140,6 +141,16 @@ export async function pairCommand(options: PairOptions = {}): Promise<void> {
     // this is the new masked/interactive block, printed only in human mode.
     const prompt = json ? null : printHumanPairBlock(deviceLink, qr, authorize.user_code);
     if (json) {
+      console.log(JSON.stringify({
+        status: 'approval_pending',
+        url: deviceLink,
+        userCode: authorize.user_code,
+        ...createPairingPresentation(deviceLink, authorize.user_code, {
+          purpose: 'Sign in or sign up in Keep, prepare Transport, and pair this CLI.',
+          expiresInSeconds: authorize.expires_in,
+          ...(authorize.expires_at ? { expiresAt: authorize.expires_at } : {}),
+        }),
+      }));
       announce(true, '');
       if (qr) {
         announce(true, qr.text);
