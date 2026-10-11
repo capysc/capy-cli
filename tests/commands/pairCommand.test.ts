@@ -65,10 +65,16 @@ mock.module('../../src/config/globalConfig', () => ({
 // tests can assert on exactly what url it was called with (the QR must
 // always encode the FULL url — with the real `?code=...` — never the
 // masked text, Vince's explicit addendum) without depending on a real TTY.
+const realTerminalQr = await import('../../src/ui/terminalQr');
 const mockRenderTerminalQr = jest.fn();
-mock.module('../../src/ui/terminalQr', () => ({ renderTerminalQr: mockRenderTerminalQr }));
+mock.module('../../src/ui/terminalQr', () => ({ ...realTerminalQr, renderTerminalQr: mockRenderTerminalQr }));
 
 import { pairCommand } from '../../src/commands/pairCommand';
+
+function finalResult(stdout: string): any {
+  const pending = stdout.startsWith('{"status":"approval_pending",');
+  return JSON.parse(pending ? stdout.slice(stdout.indexOf('\n') + 1) : stdout);
+}
 
 /**
  * Seals `payload` to `recipientPublicKeyRaw` the way Keep's browser JS does
@@ -179,7 +185,7 @@ describe('pairCommand', () => {
   test('writes local.key + key.enc for every entry matching the logged-in user, and reports it under --json', async () => {
     const { stdout } = await withCapturedIo(() => pairCommand({ json: true }));
     expect(stdout.trim().startsWith('{')).toBe(true);
-    const parsed = JSON.parse(stdout);
+    const parsed = finalResult(stdout);
     expect(parsed.ok).toBe(true);
     expect(parsed.paired).toEqual([{ org_id: 'org-123', user_id: 'user-456' }]);
 
@@ -195,10 +201,32 @@ describe('pairCommand', () => {
     expect(mockWriteOrgKeyFileRaw.mock.calls[0][2]).toBe('user-456');
   });
 
-  test('under --json, the QR/link/progress lines go to stderr and stdout stays pure JSON', async () => {
+  test('under --json, the QR/link/progress lines go to stderr and stdout emits JSON records', async () => {
     const { stdout, stderr } = await withCapturedIo(() => pairCommand({ json: true }));
-    expect(() => JSON.parse(stdout)).not.toThrow();
+    expect(() => finalResult(stdout)).not.toThrow();
     expect(stderr).toContain('ABCD-EFGH');
+  });
+
+  test('returns the current device handoff and exact service expiry before polling', async () => {
+    const expiry = '2026-10-11T01:45:53.670Z';
+    mockAuthorizeDevice.mockResolvedValue({ device_code: 'device-1', user_code: 'ABCD-EFGH', expires_in: 600, expires_at: expiry, interval: 5 });
+    const capture = captureStdio();
+    try {
+      mockPollDeviceToken.mockImplementation(async () => {
+        const pending = JSON.parse(capture.stdout().trim());
+        expect(pending.status).toBe('approval_pending');
+        expect(pending.url).toBe('https://keep.capy.sc/device?code=ABCD-EFGH');
+        expect(pending.accessThrough).toBe(`Access through: [Open in Keep](${pending.url})`);
+        expect(pending.expiresAt).toBe(expiry);
+        expect(pending.purpose).toContain('pair this CLI');
+        expect(pending.qrCode.mimeType).toBe('image/png');
+        expect(mockInstallDeviceGrantSession).not.toHaveBeenCalled();
+        throw new CapyError('fixture denial', ERROR_CODES.AUTH_FAILED);
+      });
+      await expect(pairCommand({ json: true })).rejects.toThrow();
+    } finally {
+      capture.restore();
+    }
   });
 
   // CAP-684 follow-up: `bun test`'s stdin is never a real TTY, so this
@@ -245,7 +273,7 @@ describe('pairCommand', () => {
       ),
     }));
     const { stdout } = await withCapturedIo(() => pairCommand({ json: true }));
-    const parsed = JSON.parse(stdout);
+    const parsed = finalResult(stdout);
     expect(parsed.paired).toEqual([{ org_id: 'org-mine', user_id: 'user-456' }]);
     expect(mockSaveLocalRoot).toHaveBeenCalledTimes(1);
     expect(mockSaveLocalRoot.mock.calls[0][0]).toBe('org-mine');
@@ -261,7 +289,7 @@ describe('pairCommand', () => {
     // Under --json, progress (QR/link/code) goes to stderr — only the final
     // refusal is on stdout, and it must be pure JSON.
     expect(stderr).toContain('ABCD-EFGH');
-    const parsed = JSON.parse(stdout);
+    const parsed = finalResult(stdout);
     expect(parsed.code).toBe('PAIR_NO_KEYS');
     expect(mockSaveLocalRoot).not.toHaveBeenCalled();
   });
@@ -271,7 +299,7 @@ describe('pairCommand', () => {
     const { stdout } = await withCapturedIo(async () => {
       await expect(pairCommand({ json: true })).rejects.toThrow();
     });
-    const parsed = JSON.parse(stdout);
+    const parsed = finalResult(stdout);
     expect(parsed.code).toBe('PAIR_LOCAL_KEY_CONFLICT');
     expect(mockSaveLocalRoot).not.toHaveBeenCalled();
   });
@@ -279,7 +307,7 @@ describe('pairCommand', () => {
   test('--force overwrites a conflicting local.key', async () => {
     mockReadLocalRoot.mockReturnValue(Buffer.alloc(32, 9));
     const { stdout } = await withCapturedIo(() => pairCommand({ json: true, force: true }));
-    const parsed = JSON.parse(stdout);
+    const parsed = finalResult(stdout);
     expect(parsed.ok).toBe(true);
     expect(mockSaveLocalRoot).toHaveBeenCalledTimes(1);
   });
@@ -287,7 +315,7 @@ describe('pairCommand', () => {
   test('an identical existing local.key is not a conflict, --force or not', async () => {
     mockReadLocalRoot.mockReturnValue(Buffer.alloc(32, 5)); // matches the sealed entry's k_local
     const { stdout } = await withCapturedIo(() => pairCommand({ json: true }));
-    const parsed = JSON.parse(stdout);
+    const parsed = finalResult(stdout);
     expect(parsed.ok).toBe(true);
     expect(mockSaveLocalRoot).toHaveBeenCalledTimes(1);
   });
@@ -297,7 +325,7 @@ describe('pairCommand', () => {
     const { stdout } = await withCapturedIo(async () => {
       await expect(pairCommand({ json: true })).rejects.toThrow();
     });
-    const parsed = JSON.parse(stdout);
+    const parsed = finalResult(stdout);
     expect(parsed.code).toBe('AUTH_FAILED');
     expect(mockPickupDevicePairing).not.toHaveBeenCalled();
   });
@@ -306,7 +334,7 @@ describe('pairCommand', () => {
     mockInstallDeviceGrantSession.mockResolvedValue({ success: true, organization_id: '', user_id: EXCHANGE_USER.id });
     const { stdout } = await withCapturedIo(() => pairCommand({ json: true }));
     expect(mockAuthenticateSilent).toHaveBeenCalledTimes(1);
-    const parsed = JSON.parse(stdout);
+    const parsed = finalResult(stdout);
     expect(parsed.ok).toBe(true);
   });
 
@@ -315,7 +343,7 @@ describe('pairCommand', () => {
     const { stdout } = await withCapturedIo(async () => {
       await expect(pairCommand({ json: true })).rejects.toThrow();
     });
-    const parsed = JSON.parse(stdout);
+    const parsed = finalResult(stdout);
     expect(parsed.code).toBe('PAIRING_NOT_READY');
   });
 
@@ -327,7 +355,7 @@ describe('pairCommand', () => {
     // what the mock handed back to prove it really was a string and not an
     // object a future regression quietly reverted to.
     const { stdout } = await withCapturedIo(() => pairCommand({ json: true }));
-    const parsed = JSON.parse(stdout);
+    const parsed = finalResult(stdout);
     expect(parsed.ok).toBe(true);
 
     expect(mockPickupDevicePairing).toHaveBeenCalledTimes(1);
@@ -345,7 +373,7 @@ describe('pairCommand', () => {
     const { stdout } = await withCapturedIo(async () => {
       await expect(pairCommand({ json: true })).rejects.toThrow();
     });
-    const parsed = JSON.parse(stdout);
+    const parsed = finalResult(stdout);
     expect(parsed.code).toBe('INVALID_FORMAT');
     expect(mockSaveLocalRoot).not.toHaveBeenCalled();
   });
@@ -355,7 +383,7 @@ describe('pairCommand', () => {
     const { stdout } = await withCapturedIo(async () => {
       await expect(pairCommand({ json: true })).rejects.toThrow();
     });
-    const parsed = JSON.parse(stdout);
+    const parsed = finalResult(stdout);
     expect(parsed.code).toBe('INVALID_FORMAT');
   });
 });

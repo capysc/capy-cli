@@ -37,6 +37,7 @@ export interface DeviceAuthorizeResult {
   verification_uri: string;
   verification_uri_complete?: string;
   expires_in: number;
+  readonly expires_at?: string;
   interval: number;
 }
 
