@@ -72,6 +72,8 @@ function codeOrFallback(data: { code?: unknown }, fallback: string): string {
 export interface PairingIntent {
   readonly title?: string;
   readonly description?: string;
+  /** This pairing starts a signup/onboarding. */
+  readonly signup?: boolean;
 }
 
 export async function authorizeDevice(apiUrl: string, publicKey: string, intent: PairingIntent = {}): Promise<DeviceAuthorizeResult> {
@@ -79,6 +81,7 @@ export async function authorizeDevice(apiUrl: string, publicKey: string, intent:
     public_key: publicKey,
     ...(intent.title ? { intent_title: intent.title } : {}),
     ...(intent.description ? { intent_description: intent.description } : {}),
+    ...(intent.signup ? { is_signup: true } : {}),
   });
   if (!ok) {
     throw new CapyError(

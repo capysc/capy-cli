@@ -474,10 +474,11 @@ program
   .option('--force', 'overwrite a different local key already on this machine')
   .option('--title <text>', 'short summary of why you are pairing, shown as the Keep pairing heading (max 120 chars)')
   .option('--description <text>', 'what you will do once paired, shown under it on the Keep pairing page (max 600 chars)')
+  .option('--signup', 'this pairing starts a signup/onboarding; Keep shows its signup prompts')
   .addHelpText('after', '\nAfter browser approval: Enable this location as [email]? (y/N)\nAgents: use an interactive terminal/PTY, show the email to the human, and obtain explicit approval before answering Yes. Never auto-confirm. No upfront email is required.\n')
   .action(async (options) => {
     const { pairCommand } = await import('./commands/pairCommand');
-    await pairCommand({ json: options.json === true, force: options.force === true, title: options.title, description: options.description, apiUrl: process.env.CAPY_API_URL, devMode: true });
+    await pairCommand({ json: options.json === true, force: options.force === true, title: options.title, description: options.description, signup: options.signup === true, apiUrl: process.env.CAPY_API_URL, devMode: true });
   });
 
 program
