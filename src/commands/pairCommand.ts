@@ -37,6 +37,8 @@ export interface PairOptions {
   readonly title?: string;
   /** What the agent will do once paired; shown under the heading. Display only. */
   readonly description?: string;
+  /** This pairing starts a signup/onboarding (Keep shows its signup prompts). */
+  readonly signup?: boolean;
 }
 
 /** Prose/QR/progress output. Always sent to stderr under `--json` so stdout stays pure JSON; stdout in human mode otherwise. */
@@ -137,6 +139,7 @@ export async function pairCommand(options: PairOptions = {}): Promise<void> {
     const intent = {
       ...(options.title?.trim() ? { title: options.title.trim() } : {}),
       ...(options.description?.trim() ? { description: options.description.trim() } : {}),
+      ...(options.signup ? { signup: true } : {}),
     };
     const authorize = await authorizeDevice(apiUrl, keyPair.publicKey, intent);
 
