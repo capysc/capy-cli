@@ -33,6 +33,10 @@ export interface PairOptions {
   readonly force?: boolean;
   readonly apiUrl?: string;
   readonly devMode?: boolean;
+  /** The agent's short reason for pairing; Keep's /device heading. Display only. */
+  readonly title?: string;
+  /** What the agent will do once paired; shown under the heading. Display only. */
+  readonly description?: string;
 }
 
 /** Prose/QR/progress output. Always sent to stderr under `--json` so stdout stays pure JSON; stdout in human mode otherwise. */
@@ -130,7 +134,11 @@ export async function pairCommand(options: PairOptions = {}): Promise<void> {
     const apiUrl = options.apiUrl || resolveActiveUrl(devMode);
 
     const keyPair = generatePairKeyPair();
-    const authorize = await authorizeDevice(apiUrl, keyPair.publicKey);
+    const intent = {
+      ...(options.title?.trim() ? { title: options.title.trim() } : {}),
+      ...(options.description?.trim() ? { description: options.description.trim() } : {}),
+    };
+    const authorize = await authorizeDevice(apiUrl, keyPair.publicKey, intent);
 
     // The QR always encodes the FULL deviceLink (fragment/query and all) —
     // only the TEXT link below is ever masked.
@@ -146,7 +154,7 @@ export async function pairCommand(options: PairOptions = {}): Promise<void> {
         url: deviceLink,
         userCode: authorize.user_code,
         ...createPairingPresentation(deviceLink, authorize.user_code, {
-          purpose: 'Sign in or sign up in Keep, prepare Transport, and pair this CLI.',
+          purpose: intent.description ?? intent.title ?? 'Sign in or sign up in Keep, prepare Transport, and pair this CLI.',
           expiresInSeconds: authorize.expires_in,
           ...(authorize.expires_at ? { expiresAt: authorize.expires_at } : {}),
         }),

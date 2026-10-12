@@ -68,8 +68,18 @@ function codeOrFallback(data: { code?: unknown }, fallback: string): string {
 }
 
 /** `POST /auth/device/authorize {public_key}` — step 1 of `capy pair`. */
-export async function authorizeDevice(apiUrl: string, publicKey: string): Promise<DeviceAuthorizeResult> {
-  const { ok, status, data } = await postJson<DeviceAuthorizeResult>(`${apiUrl}/auth/device/authorize`, { public_key: publicKey });
+/** The agent's display-only reason for pairing, shown on Keep's /device page. */
+export interface PairingIntent {
+  readonly title?: string;
+  readonly description?: string;
+}
+
+export async function authorizeDevice(apiUrl: string, publicKey: string, intent: PairingIntent = {}): Promise<DeviceAuthorizeResult> {
+  const { ok, status, data } = await postJson<DeviceAuthorizeResult>(`${apiUrl}/auth/device/authorize`, {
+    public_key: publicKey,
+    ...(intent.title ? { intent_title: intent.title } : {}),
+    ...(intent.description ? { intent_description: intent.description } : {}),
+  });
   if (!ok) {
     throw new CapyError(
       typeof data.error === 'string' ? data.error : 'Failed to start device pairing',
