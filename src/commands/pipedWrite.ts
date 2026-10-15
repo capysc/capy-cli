@@ -16,6 +16,8 @@
 import { CapyError, ERROR_CODES } from '../types/index';
 import { hashValue } from './statusCommand';
 import { resolveContext, writeAndSync, type ResolvedContext } from './connectors/shared';
+import { checkFolder } from '../sync/commit';
+import { NO_CONFLICT_FLAGS, exitOnConflictRefusal, previewDecider, type ConflictFlags } from '../sync/conflicts';
 import { refusePiped, reportPipedDryRun, reportPipedSuccess, type PipedAction } from './pipedValue';
 import { repoLinkWarningsField } from '../core/repoLinkReporter';
 import {
@@ -74,6 +76,8 @@ export interface PipedWriteOpts {
    * existing name); `undefined` to go on.
    */
   readonly gate?: (ctx: ResolvedContext) => { readonly code: string; readonly error: string } | undefined;
+  /** `--resolve` / `--conflict` (CAP-717): a piped write is never at a terminal, so a conflict stops it unless these decide it. */
+  readonly conflicts?: ConflictFlags;
 }
 
 /** Turns anything thrown into a code and a sentence that cannot contain the value. */
@@ -92,7 +96,19 @@ async function writeOrFail(
     await writeAndSync(ctx, name, value, { push });
     return undefined;
   } catch (err) {
+    // A conflict is not a failure: it is the protocol's answer (exit 3, the payload on stdout).
+    exitOnConflictRefusal(err);
     return describeFailure(err);
+  }
+}
+
+/** `--dry-run`: would this write meet a value someone else changed? Exits with the payload if so; writes nothing either way. */
+async function previewOrExit(ctx: ResolvedContext, name: string, value: string): Promise<void> {
+  try {
+    await checkFolder(ctx, { set: { [name]: value }, remove: [] }, { decide: previewDecider });
+  } catch (err) {
+    exitOnConflictRefusal(err);
+    throw err;
   }
 }
 
@@ -109,6 +125,8 @@ export async function runPipedWrite(name: string, value: string, opts: PipedWrit
     interactive: false,
     json: opts.json,
     dryRun: opts.dryRun === true,
+    // A piped write is never at a terminal: a conflict stops it unless --resolve + --conflict decide it.
+    conflicts: opts.conflicts ?? NO_CONFLICT_FLAGS,
     refuse: (code, message) => refusePiped(opts.json, code, message),
   });
 
@@ -120,6 +138,7 @@ export async function runPipedWrite(name: string, value: string, opts: PipedWrit
     // Everything above only read. Nothing below this line runs: no write, no push, no PR.
     const pinned = ctx.keep.variables[name]?.find((e) => e.branch === ctx.branch)?.value_hash;
     const wouldChange = action !== 'unchanged' && opts.push && pinned !== hashValue(value);
+    if (wouldChange) await previewOrExit(ctx, name, value);
     const preview = await previewKeepLockPrStep({ changed: wouldChange, cwd: process.cwd(), flags: opts.pr ?? {} });
     return reportPipedDryRun(opts.json, { name, branch: ctx.branch, action }, preview);
   }

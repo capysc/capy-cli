@@ -3,6 +3,7 @@ import type { Blocked } from '../../ui/screens/contract';
 import type { DokployImportSource } from '../../deploy/dokployApi';
 import type { DiscoveryContext, DiscoveryOutcome } from './dokployDiscovery';
 import { ResolvedContext } from './shared';
+import type { RawConflictFlags } from '../../sync/conflicts';
 
 export interface ConnectOpts {
   live?: boolean;
@@ -26,6 +27,11 @@ export interface ConnectOpts {
   subStep?: boolean;
   /** Disable interactive prompts: resolve every choice from flags or fail fast. */
   nonTty?: boolean;
+  /**
+   * `--resolve` / `--conflict` as typed (CAP-717): they decide a conflict between what this
+   * run writes and what someone else saved to Capy since this folder last synced.
+   */
+  conflictFlags?: RawConflictFlags;
   /**
    * Pair with the provider again even when a usable session already exists.
    *
@@ -159,6 +165,11 @@ export interface RotateOpts {
   noPush?: boolean;
   /** Disable interactive prompts: resolve every choice from flags or fail fast. */
   nonTty?: boolean;
+  /**
+   * `--resolve` / `--conflict` as typed (CAP-717). A rotation replaces a value with a key the provider
+   * only issues once, so a conflict on the variable is settled BEFORE the new key is issued.
+   */
+  conflictFlags?: RawConflictFlags;
 }
 
 /** Result of provider.connect(): the provider hands us a value + the connector metadata to record on the keep.lock entry. */

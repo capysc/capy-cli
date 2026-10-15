@@ -13,6 +13,7 @@ import { readDefaultBranchTargets } from '../deploy/configuredTargets';
 import { formatRelativeTime } from '../ui/relativeTime';
 import { KeepFile } from '../types/index';
 import { commitFolder, pinnedHashes, readLocalPlaintext, type FolderContext } from '../sync/commit';
+import { conflictFlagsOrExit, type RawConflictFlags } from '../sync/conflicts';
 import { reportKeepLockHuman, refuseBadPrFlags, runKeepLockPrStep, type PrFlags } from './keepLockPr';
 import { startSaveLog } from './sessionSaveLog';
 import { decideEditMode, editPipedCommand, refuseEditNeedsTty } from './editPiped';
@@ -185,6 +186,8 @@ export interface EditOpts {
   pr?: PrFlags;
   /** The global `--dry-run`: piped mode previews; the TUI refuses (`DRY_RUN_UNSUPPORTED`). */
   dryRun?: boolean;
+  /** `--resolve` / `--conflict` as typed (CAP-717): they decide a conflict of a piped value. The TUI shows conflicts on its own screen (CAP-714). */
+  conflictFlags?: RawConflictFlags;
 }
 
 export class EditCommand {
@@ -267,6 +270,8 @@ export class EditCommand {
         devMode: this.devMode,
         pr: opts.pr,
         dryRun: opts.dryRun === true,
+        // A bad flag is refused here, before stdin is read or anything is authenticated.
+        conflicts: conflictFlagsOrExit(opts.conflictFlags ?? {}, opts.json === true),
       });
     }
 

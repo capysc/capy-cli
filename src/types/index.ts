@@ -385,6 +385,8 @@ export interface CliOptions {
   verbose?: boolean;
   force?: boolean;
   dryRun?: boolean;
+  /** `--resolve` / `--conflict` as typed (CAP-717): off a terminal they decide the names both sides changed. */
+  conflictFlags?: { readonly resolve?: readonly string[]; readonly conflict?: string };
 }
 
 export interface ProjectInitResult {
@@ -639,6 +641,23 @@ export const ERROR_CODES = {
    * variables (names only, never values); never auto-resolved.
    */
   SECRETS_CONFLICT: 'SECRETS_CONFLICT',
+  // --- Conflicts everywhere: the non-TTY protocol (CAP-717, docs/conflict-resolution.md) ---
+  /**
+   * A rerun with `--conflict <id>` whose state moved since the id was issued: the old decision
+   * no longer applies. Nothing was written; the fresh conflicts (with a new id) come back
+   * with it. Exit 3.
+   */
+  SECRETS_CONFLICT_STALE: 'SECRETS_CONFLICT_STALE',
+  /** `--resolve` is not `NAME=mine|theirs` (or `NAME@TARGET=mine|theirs`), or `--conflict` is not a conflict id. Exit 1. */
+  SECRETS_RESOLVE_INVALID: 'SECRETS_RESOLVE_INVALID',
+  /** `--resolve` was given without `--conflict <id>`: a decision is only valid for the conflicts it was made against. Exit 1. */
+  SECRETS_RESOLVE_NEEDS_CONFLICT: 'SECRETS_RESOLVE_NEEDS_CONFLICT',
+  /**
+   * `capy remove` used to refuse when other variables had unpushed local edits.
+   * @deprecated Retired by CAP-712: `capy remove` only checks the names it removes. Kept defined
+   * so existing callers keep compiling; nothing raises it.
+   */
+  REMOVE_LOCAL_DRIFT: 'REMOVE_LOCAL_DRIFT',
   // --- keep.lock PR step (capy add / edit / remove, CAP-699) ---
   // Reported as `keep_lock.error.code`: the secret change itself still succeeded.
   /** keep.lock PR step: the working directory is not inside a git repository. */

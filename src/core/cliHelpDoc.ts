@@ -72,6 +72,8 @@ export interface CliHelpDoc {
   conventions: {
     json: string;
     codes: string;
+    /** What a write does when someone else changed the value it would replace (CAP-717). */
+    conflicts?: string;
   };
 }
 
@@ -173,6 +175,9 @@ export function buildCliHelpDoc(program: Command): CliHelpDoc {
     conventions: {
       json: 'Pass --json on any command whose supportsJson is true and parse stdout as JSON; prose (progress, prompts, errors) goes to stderr so stdout stays pure JSON.',
       codes: 'Branch only on the machine-readable `code` field (from --json output or a CapyError), never on human-readable message text — messages may be reworded without notice.',
+      // COPY-FLAG: minimal and neutral; the contract is docs/conflict-resolution.md.
+      conflicts:
+        'A write that would replace a value someone else changed stops: nothing is written, the exit code is 3, and stdout is {ok:false, code:"SECRETS_CONFLICT", conflict_id, conflicts:[...]} (fingerprints only, never values). Ask the person, then rerun the same command with --resolve NAME=mine|theirs for every conflicting name (NAME@TARGET=... for a deploy target) and --conflict <conflict_id>. A state that moved since is SECRETS_CONFLICT_STALE with the fresh conflicts. There is no resolve-all.',
     },
   };
 }

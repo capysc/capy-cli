@@ -43,14 +43,17 @@ import {
   createBatchEnv,
   deployLocationsOf,
   planBatchDeploy,
+  previewBatchConflicts,
   runBatchDeploy,
 } from '../deploy/batchDeploy';
+import { ConflictRefusal, conflictFlagsOrExit, conflictRefusalFor, gateConflicts, type RawConflictFlags } from '../sync/conflicts';
 import { targetRefFor } from '../deploy/deliveryRecord';
 import type { SecretsSetIo } from './secretsSetCommand';
 import {
   byText,
   candidatesOf,
   excludeLocations,
+  exitWithConflicts,
   loadLinks,
   readSecretIndex,
   refuse,
@@ -72,6 +75,8 @@ export interface SecretsDeployOpts {
   readonly allRows?: boolean;
   /** `--exclude <project>:<branch>` (repeatable) */
   readonly exclude?: readonly string[];
+  /** `--resolve` / `--conflict` as typed (CAP-717): they decide a Dokploy value changed outside Capy since Capy last delivered it. */
+  readonly conflictFlags?: RawConflictFlags;
 }
 
 /** Injectable seam: tests pass fakes for the service, GitHub and Dokploy. */
@@ -190,6 +195,7 @@ async function readPlan(sel: Selection, io: SecretsDeployIo, links: readonly Org
 export async function runSecretsDeploy(names: readonly string[], opts: SecretsDeployOpts, io: SecretsDeployIo): Promise<number> {
   const json = opts.json === true;
   if (names.length === 0 || !names.every(isValidVarName)) return refuseInvalidName(json);
+  const flags = conflictFlagsOrExit(opts.conflictFlags ?? {}, json);
 
   const rows = selectRows(await readSecretIndex(io, json), names, opts, json);
   const located = excludeLocations(rows.flatMap(locatedOf), opts.exclude ?? [], json);
@@ -203,6 +209,12 @@ export async function runSecretsDeploy(names: readonly string[], opts: SecretsDe
   const planBody = { names, ...planJsonOf(plan), ...(loaded.unavailable === undefined ? {} : { repos_unavailable: loaded.unavailable }) };
 
   if (opts.dryRun === true) {
+    // Reading only: a Dokploy value changed outside Capy since Capy last delivered it is reported with the conflict_id (exit 3).
+    // A preview that could not look says nothing about conflicts.
+    const scopes = await previewBatchConflicts(plan, io.env).catch(() => []);
+    if (scopes.length > 0) {
+      return exitWithConflicts(conflictRefusalFor(ERROR_CODES.SECRETS_CONFLICT, scopes, undefined, { dryRun: true }), { plan_id: planId, plan: planBody });
+    }
     if (json) console.log(JSON.stringify({ ok: true, dry_run: true, plan_id: planId, ...planBody }, null, 2));
     else console.log(renderDeployPlanText(plan, names, planId));
     return 0;
@@ -229,11 +241,13 @@ export async function runSecretsDeploy(names: readonly string[], opts: SecretsDe
   }
 
   const result: BatchResult = await runBatchDeploy(plan, io.env, {
+    // Every Dokploy value changed outside Capy since Capy last delivered it needs an answer before anything is written.
+    decide: (scopes) => gateConflicts(flags, scopes),
     stopPushes: io.control?.pushes,
     stopPrs: io.control?.prs,
     // Said once per phase when a stop is noticed with items still running; silent when nothing is in progress.
     onStopping: ({ inFlight }) => (json || inFlight === 0 ? undefined : console.error(stoppingAfter(inFlight))),
-  });
+  }).catch((err: unknown) => (err instanceof ConflictRefusal ? exitWithConflicts(err, { plan_id: planId }) : Promise.reject(err)));
   const ok = batchSucceeded(result);
 
   if (json) {

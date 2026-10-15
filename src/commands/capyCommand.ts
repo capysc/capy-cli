@@ -45,7 +45,9 @@ import { isMembershipRevokedError } from '../errors/membershipRevoked';
 import { cleanupOrgData } from '../cleanup/orgCleanup';
 import { formatSnippet } from './statusCommand';
 import { compareSecrets, hashValue } from '../sync/compareSecrets';
-import { commitLocalValues, envBlobOf, keepForEnv, pinnedHashes, snapshotFrom, type Snapshot } from '../sync/commit';
+import { commitLocalValues, envBlobOf, findConflicts, keepForEnv, localChanges, pinnedHashes, snapshotFrom, type Snapshot } from '../sync/commit';
+import { conflictFlagsOrExit, conflictRefusalFor, exitOnConflictRefusal, protocolDecider, type ConflictView } from '../sync/conflicts';
+import { isInteractive } from '../ui/interactive';
 import { ACCENT } from '../ui/colors';
 import { installSyncHooks } from '../git/syncHooks';
 import { initProjectQuestion } from '../ui/projectQuestions';
@@ -146,6 +148,8 @@ export class CapyCommand {
   }
 
   async execute(): Promise<void> {
+    // A bad --resolve / --conflict is refused before anything is read.
+    conflictFlagsOrExit(this.options.conflictFlags ?? {}, false);
     try {
       // Detect project state
       const projectState = await this.projectManager.detectProjectState();
@@ -185,6 +189,8 @@ export class CapyCommand {
       printExpiryWarnings();
     } catch (error: any) {
       this.debugError('execute caught error', error);
+      // A conflict off a terminal is the protocol's answer, not a failure: exit 3 with the payload on stdout.
+      exitOnConflictRefusal(error);
       const { displayErrorAndExit } = await import('../ui/errorScreen');
       await displayErrorAndExit(error);
     }
@@ -1151,12 +1157,15 @@ export class CapyCommand {
     const { authResult, branch } = await (async (): Promise<{ authResult: AuthResult; branch: string }> => {
       if (localMode) {
         const localBranch = await this.resolveActiveBranch(projectState, true);
-        this.displayHeader(
-          projectState.projectName || 'local project',
-          'local (this machine only)',
-          'local',
-          localBranch,
-        );
+        // The banner is for a person: off a terminal stdout stays free for the conflict payload (CAP-717).
+        if (isInteractive()) {
+          this.displayHeader(
+            projectState.projectName || 'local project',
+            'local (this machine only)',
+            'local',
+            localBranch,
+          );
+        }
         return { authResult: { success: true, user_id: LOCAL_USER_ID }, branch: localBranch };
       }
 
@@ -1226,12 +1235,14 @@ export class CapyCommand {
         || (result.organizations?.length === 0 ? 'not yet created' : result.organization_id)
         || 'not yet created';
 
-      this.displayHeader(
-        projectState.projectName || 'not yet created',
-        orgName,
-        result.user_first_name || result.user_email || '',
-        resolvedBranch,
-      );
+      if (isInteractive()) {
+        this.displayHeader(
+          projectState.projectName || 'not yet created',
+          orgName,
+          result.user_first_name || result.user_email || '',
+          resolvedBranch,
+        );
+      }
 
       const token = this.authService.getToken();
       if (!token) {
@@ -1520,6 +1531,43 @@ export class CapyCommand {
           })()
         : localMatches;
 
+    // The keep a commit starts from: the folder's, or (no keep.lock yet) a fresh one for this project.
+    const keep: KeepFile = currentKeep || {
+      version: '3.0',
+      org_id: projectState.organizationId!,
+      project_id: projectState.projectId!,
+      project_name: projectState.projectName!,
+      variables: {},
+    };
+
+    // Off a terminal nobody can answer the menu (CAP-717). When both sides changed a name the protocol decides it:
+    // the local changes are committed on top of the server's latest, and each conflicting name needs --resolve
+    // (exit 3 with the payload otherwise). Without a conflict nothing changes: the menu below is what it was.
+    const protocolCommit = !isInteractive() && !localMode && networkAvailable && !isOnboarding && seenSnapshot !== undefined &&
+      findConflicts({ pinned, latest: seenSnapshot.entries, changes: localChanges(localPlaintext, pinned, { removals: true }) }).length > 0;
+    if (protocolCommit) {
+      const flags = conflictFlagsOrExit(this.options.conflictFlags ?? {}, false);
+      const { changed } = await commitLocalValues(
+        {
+          pm: this.projectManager,
+          fileManager: this.fileManager,
+          serviceClient: this.serviceClient,
+          orgId: projectState.organizationId!,
+          projectId: projectState.projectId!,
+          branch,
+          userId: authResult.user_id!,
+          projectKey: encryptionKey,
+          keep,
+          localPlaintext,
+        },
+        { pinned, remoteHashes, seen: seenSnapshot },
+        protocolDecider(flags),
+      );
+      console.error(`Pushed ${changed} change(s) to Keep.`); // COPY-FLAG
+      this.installGitHooks();
+      return;
+    }
+
     const DIM = '\x1b[90m';
     const RST = '\x1b[0m';
 
@@ -1675,21 +1723,26 @@ export class CapyCommand {
         return { kind: 'abort' };
       }
       // Individual resolution.
-      const resolved = await this.resolveIndividually(diffs, showLocal, showRemote, pinned, localPlaintext, remotePlaintext, pinnedPlaintext);
+      const resolved = await this.resolveIndividually(
+        diffs,
+        showLocal,
+        showRemote,
+        pinned,
+        localPlaintext,
+        remotePlaintext,
+        pinnedPlaintext,
+        {
+          project: keep.project_name,
+          branch,
+          serverKeepHash: seenSnapshot?.keep === undefined ? '' : SyncEngine.computeKeepHash(seenSnapshot.keep, branch),
+        },
+      );
       if (!resolved) return { kind: 'abort' }; // Cancelled
       return { kind: 'proceed', finalEnv: resolved };
     })();
 
     if (finalEnvDecision.kind === 'abort') return;
     const { finalEnv } = finalEnvDecision;
-
-    const keep = currentKeep || {
-      version: '3.0',
-      org_id: projectState.organizationId!,
-      project_id: projectState.projectId!,
-      project_name: projectState.projectName!,
-      variables: {},
-    };
 
     // Commit + push are coupled: choosing "commit local" pushes too — except
     // in local-only mode, where there is no remote and the local writes ARE the commit.
@@ -1857,6 +1910,7 @@ export class CapyCommand {
     localPlaintext: Record<string, string>,
     remotePlaintext: Record<string, string>,
     pinnedPlaintext: Record<string, string> = {},
+    view: ConflictView = { project: '', branch: '', serverKeepHash: '' },
   ): Promise<Record<string, string> | null> {
     const { ResolveTable } = await import('../ui/resolveTable');
     type Row = import('../ui/resolveTable').ResolveRow;
@@ -1909,12 +1963,25 @@ export class CapyCommand {
       // both sides changed, and which one survives is a fact only the person
       // who made the changes holds. Off a TTY this used to apply the defaults
       // and carry on — a resolution written and reported as consent with
-      // nobody in the room. Exit 3 so a caller can tell "I need a human or a
-      // browser" apart from "this failed, retry".
-      const { refuseNonInteractive } = await import('../ui/interactive');
-      refuseNonInteractive(
-        `${diffs.length} ${diffs.length === 1 ? 'variable has' : 'variables have'} changed on both sides and need a decision`,
-        'Run `capy` in a terminal.', // COPY-FLAG
+      // nobody in the room. It is the protocol's answer now (CAP-717): exit 3,
+      // every row's fingerprints in the payload, so a caller can tell "I need a
+      // human or a decision" apart from "this failed, retry".
+      throw conflictRefusalFor(
+        ERROR_CODES.SECRETS_CONFLICT,
+        [
+          {
+            ...view,
+            conflicts: diffs.map((d) => ({
+              kind: 'source' as const,
+              name: d.variable,
+              project: view.project,
+              branch: view.branch,
+              pinned: d.pinned ?? null,
+              yours: d.local ?? null,
+              theirs: d.remote ?? null,
+            })),
+          },
+        ],
       );
     }
 

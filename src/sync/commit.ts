@@ -30,6 +30,7 @@ import type { ProjectManager } from '../core/projectManager';
 import type { ServiceClient } from '../service/serviceClient';
 import { CapyError, ERROR_CODES, KeepFile, setSyncKeepHash } from '../types/index';
 import { hashValue } from './compareSecrets';
+import type { ConflictDecider, ConflictView, Resolution, Resolutions, SourceConflict } from './conflicts';
 import { SyncEngine } from './syncEngine';
 
 // ── Vocabulary ──────────────────────────────────────────────────────────────
@@ -40,9 +41,7 @@ export interface Changes {
   readonly remove: readonly string[];
 }
 
-/** The caller's answer for a name the server changed under it: keep theirs, or overwrite with mine. */
-export type Resolution = 'mine' | 'theirs';
-export type Resolutions = Readonly<Record<string, Resolution>>;
+export type { Resolution, Resolutions };
 
 /** One variable as the server holds it for the branch. */
 export interface LatestEntry {
@@ -90,6 +89,41 @@ export function pinnedHashes(keep: KeepFile | null | undefined, branch: string):
 
 const has = (record: object, name: string): boolean => Object.hasOwn(record, name);
 
+/** A change that meets a value the server moved since the caller's pin. Fingerprints only. */
+export interface Contest {
+  readonly name: string;
+  /** What the caller last agreed with the server (`undefined`: the caller never had it). */
+  readonly pinned: string | undefined;
+  /** The intended value's fingerprint (`undefined`: a deletion). */
+  readonly yours: string | undefined;
+  /** The server's fingerprint now (`undefined`: the server no longer has it). */
+  readonly theirs: string | undefined;
+}
+
+/**
+ * Every change in `changes` that meets a value the server moved since `pinned` (different hash,
+ * including added or removed on the server since) and that would actually change it: a name in
+ * `set` whose intended value is not already the server's, a name in `remove` the server still has.
+ * Independent of any resolution, so a decision can be bound to exactly this set. In name order.
+ */
+export function findConflicts(input: {
+  readonly pinned: Readonly<Record<string, string>>;
+  readonly latest: Readonly<Record<string, LatestEntry>>;
+  readonly changes: Changes;
+}): readonly Contest[] {
+  const { pinned, latest, changes } = input;
+  const writes = Object.entries(changes.set)
+    .filter(([name, value]) => latest[name]?.plaintext !== value)
+    .map(([name, value]) => ({ name, yours: hashValue(value) as string | undefined }));
+  const removals = changes.remove
+    .filter((name) => !has(changes.set, name) && has(latest, name))
+    .map((name) => ({ name, yours: undefined as string | undefined }));
+  return [...writes, ...removals]
+    .filter(({ name }) => latest[name]?.hash !== pinned[name])
+    .map(({ name, yours }) => ({ name, pinned: pinned[name], yours, theirs: latest[name]?.hash }))
+    .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+}
+
 /**
  * `changes` applied to `latest`.
  *
@@ -110,15 +144,12 @@ export function planCommit(input: {
 }): Plan {
   const { pinned, latest, changes, encryptLine } = input;
   const resolutions = input.resolutions ?? {};
-  const moved = (name: string): boolean => latest[name]?.hash !== pinned[name];
-  const contested = (name: string): boolean => moved(name) && resolutions[name] !== 'mine';
 
-  const setEntries = Object.entries(changes.set);
-  const toWrite = setEntries.filter(([name, value]) => resolutions[name] !== 'theirs' && latest[name]?.plaintext !== value);
+  const open = findConflicts({ pinned, latest, changes }).filter((c) => resolutions[c.name] === undefined);
+  if (open.length > 0) return { kind: 'conflict', names: open.map((c) => c.name) };
+
+  const toWrite = Object.entries(changes.set).filter(([name, value]) => resolutions[name] !== 'theirs' && latest[name]?.plaintext !== value);
   const toRemove = changes.remove.filter((name) => !has(changes.set, name) && has(latest, name) && resolutions[name] !== 'theirs');
-
-  const conflicts = [...toWrite.map(([name]) => name), ...toRemove].filter(contested);
-  if (conflicts.length > 0) return { kind: 'conflict', names: [...new Set(conflicts)].sort() };
 
   const written = Object.fromEntries(toWrite);
   const encrypted = Object.fromEntries(toWrite.map(([name, value]) => [name, encryptLine(name, value)]));
@@ -279,6 +310,14 @@ export interface ServerCommitInput {
   readonly transformKeep?: (keep: KeepFile) => KeepFile;
   /** A read the caller already made and showed its user: used for the first attempt instead of reading again. */
   readonly seen?: Snapshot;
+  /**
+   * Asked for the decision on every conflict the changes meet that `resolutions` does not already settle
+   * (CAP-717). It returns the decisions or throws (a `ConflictRefusal`: nothing is uploaded). Absent: an
+   * unsettled conflict is `SECRETS_CONFLICT`.
+   */
+  readonly decide?: ConflictDecider;
+  /** Read, plan and decide, but upload nothing: for a caller that wants to know whether the write would go through. */
+  readonly check?: boolean;
 }
 
 export interface ServerCommit {
@@ -290,6 +329,8 @@ export interface ServerCommit {
   readonly env: Readonly<Record<string, string>>;
   readonly written: readonly string[];
   readonly removed: readonly string[];
+  /** Every decision this commit was planned with: the caller's, and what `decide` added. */
+  readonly resolutions: Resolutions;
   /** The push response; `undefined` when nothing needed uploading. */
   readonly result: { readonly keep_hash: string; readonly keep_file?: string } | undefined;
 }
@@ -301,25 +342,57 @@ function stillValid(resolutions: Resolutions | undefined, before: Snapshot, afte
   );
 }
 
+/** The conflicts `decide` is asked about, as the protocol reports them (fingerprints only). */
+export function sourceConflictsOf(contests: readonly Contest[], snapshot: Snapshot, view: ConflictView): readonly SourceConflict[] {
+  return contests.map((c) => {
+    const changedAt = snapshot.keep?.variables[c.name]?.find((e) => e.branch === view.branch)?.changed_at;
+    return {
+      kind: 'source',
+      name: c.name,
+      project: view.project,
+      branch: view.branch,
+      pinned: c.pinned ?? null,
+      yours: c.yours ?? null,
+      theirs: c.theirs ?? null,
+      ...(changedAt === undefined ? {} : { theirs_changed_at: changedAt }),
+    };
+  });
+}
+
+/** The resolutions `input.decide` gives for the conflicts that `resolutions` leaves open (none when nothing is open or nobody decides). */
+async function decidedFor(input: ServerCommitInput, snapshot: Snapshot, resolutions: Resolutions | undefined, latestKeep: KeepFile): Promise<Resolutions> {
+  const { branch, startKeep, changes } = input;
+  const open = findConflicts({ pinned: pinnedHashes(startKeep, branch), latest: snapshot.entries, changes }).filter((c) => resolutions?.[c.name] === undefined);
+  if (open.length === 0 || input.decide === undefined) return {};
+  const view: ConflictView = {
+    project: latestKeep.project_name,
+    branch,
+    serverKeepHash: snapshot.keep === undefined ? '' : SyncEngine.computeKeepHash(snapshot.keep, branch),
+  };
+  return input.decide(sourceConflictsOf(open, snapshot, view), view);
+}
+
 async function attempt(input: ServerCommitInput, snapshot: Snapshot, resolutions: Resolutions | undefined, mayRetry: boolean): Promise<ServerCommit> {
   const { client, projectId, branch, projectKey, startKeep, changes, transformKeep } = input;
   const latestKeep: KeepFile = snapshot.keep ?? { ...startKeep, variables: {} };
   const resourceIdOf = (name: string): string =>
     latestKeep.variables[name]?.find((e) => e.branch === branch)?.resource_id || deriveResourceId(branch, name);
 
+  const decided = await decidedFor(input, snapshot, resolutions, latestKeep);
+  const settled: Resolutions = { ...resolutions, ...decided };
   const plan = planCommit({
     pinned: pinnedHashes(startKeep, branch),
     latest: snapshot.entries,
     changes,
-    resolutions,
+    resolutions: settled,
     encryptLine: (name, value) => `capy:${resourceIdOf(name)}:${Encryptor.encrypt(value, projectKey)}`,
   });
   if (plan.kind === 'conflict') throw conflictError(plan.names);
 
   const changed = keepWithChanges(latestKeep, branch, plan.written, plan.removed, resourceIdOf);
   const keep = transformKeep ? transformKeep(changed) : changed;
-  const base = { snapshot, keep, lines: plan.lines, env: plan.env, written: Object.keys(plan.written), removed: plan.removed };
-  if (keep === latestKeep) return { ...base, result: undefined };
+  const base = { snapshot, keep, lines: plan.lines, env: plan.env, written: Object.keys(plan.written), removed: plan.removed, resolutions: settled };
+  if (keep === latestKeep || input.check === true) return { ...base, result: undefined };
 
   try {
     const result = await client.pushSecrets(
@@ -378,12 +451,16 @@ export interface FolderContext {
   readonly keep: KeepFile;
   /** The folder's decrypted `.env` when the command started. */
   readonly localPlaintext: Readonly<Record<string, string>>;
+  /** How the command settles a conflict (the non-TTY protocol sets this); absent: a conflict is `SECRETS_CONFLICT`. */
+  readonly decide?: ConflictDecider;
 }
 
 export interface FolderCommitOptions {
   readonly resolutions?: Resolutions;
   readonly transformKeep?: (keep: KeepFile) => KeepFile;
   readonly seen?: Snapshot;
+  /** Overrides the context's `decide` for this one commit. */
+  readonly decide?: ConflictDecider;
 }
 
 export interface FolderCommit {
@@ -413,15 +490,23 @@ export function localChanges(local: Readonly<Record<string, string>>, pinned: Re
  * to it, so for each one the server also moved, the answer is `mine`. `seen` is the read the
  * table was drawn from; the commit is planned against it, so a save in between is caught by
  * the server (`SECRETS_STALE_BASE`) rather than overwritten.
+ *
+ * Off a terminal there is no table to answer for (CAP-717): the caller passes `decide` and the same
+ * commit grants nothing up front, so a name the server also changed is a conflict that `decide` settles.
  */
 export async function commitLocalValues(
   ctx: FolderContext,
   shown: { readonly pinned: Readonly<Record<string, string>>; readonly remoteHashes: Readonly<Record<string, string>>; readonly seen: Snapshot | undefined },
+  decide?: ConflictDecider,
 ): Promise<{ readonly changed: number }> {
   const changes = localChanges(ctx.localPlaintext, shown.pinned, { removals: true });
   const names = [...Object.keys(changes.set), ...changes.remove];
-  const resolutions = Object.fromEntries(names.filter((name) => shown.remoteHashes[name] !== shown.pinned[name]).map((name) => [name, 'mine' as const]));
-  await commitFolder(ctx, changes, { resolutions, seen: shown.seen });
+  // Choosing "commit local" in the menu grants `mine` to removals too, exactly as it does to edits: the table showed both.
+  const resolutions =
+    decide === undefined
+      ? Object.fromEntries(names.filter((name) => shown.remoteHashes[name] !== shown.pinned[name]).map((name) => [name, 'mine' as const]))
+      : {};
+  await commitFolder(ctx, changes, { resolutions, seen: shown.seen, decide });
   return { changed: names.length };
 }
 
@@ -478,9 +563,9 @@ function commitLocalCopy(ctx: FolderContext, changes: Changes, transformKeep: Fo
   };
 }
 
-/** The server commit, and what the folder should adopt from it. */
-async function commitToServerFor(ctx: FolderContext, changes: Changes, opts: FolderCommitOptions) {
-  const committed = await commitToServer({
+/** What a folder commit asks the server commit to do. */
+function serverInputFor(ctx: FolderContext, changes: Changes, opts: FolderCommitOptions): ServerCommitInput {
+  return {
     client: ctx.serviceClient!,
     projectId: ctx.projectId,
     branch: ctx.branch,
@@ -490,7 +575,13 @@ async function commitToServerFor(ctx: FolderContext, changes: Changes, opts: Fol
     resolutions: opts.resolutions,
     transformKeep: opts.transformKeep,
     seen: opts.seen,
-  });
+    decide: opts.decide ?? ctx.decide,
+  };
+}
+
+/** The server commit, and what the folder should adopt from it. */
+async function commitToServerFor(ctx: FolderContext, changes: Changes, opts: FolderCommitOptions) {
+  const committed = await commitToServer(serverInputFor(ctx, changes, opts));
   const pinned = pinnedHashes(ctx.keep, ctx.branch);
   // A local edit nobody committed stays an edit: its value stays in `.env` and its pin stays
   // where it was, so the next bare `capy` still sees what the server changed under it.
@@ -512,6 +603,19 @@ async function commitToServerFor(ctx: FolderContext, changes: Changes, opts: Fol
     written: committed.written,
     removed: committed.removed,
   };
+}
+
+/**
+ * Reads, plans and decides exactly as `commitFolder(ctx, changes, opts)` would, and writes nothing, on the
+ * server or in the folder: a `--dry-run` that can say "this would conflict", or a command that must settle
+ * its conflicts BEFORE it does something it cannot take back (`capy rotate` issues a new key first). Throws what
+ * the commit would throw; returns the decisions it was planned with. A folder with no server has nothing to
+ * conflict with.
+ */
+export async function checkFolder(ctx: FolderContext, changes: Changes, opts: FolderCommitOptions = {}): Promise<{ readonly resolutions: Resolutions }> {
+  if (ctx.serviceClient === undefined) return { resolutions: opts.resolutions ?? {} };
+  const checked = await commitToServer({ ...serverInputFor(ctx, changes, opts), check: true });
+  return { resolutions: checked.resolutions };
 }
 
 /**

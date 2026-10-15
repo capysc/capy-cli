@@ -48,6 +48,8 @@ capy edit [name] [options]
 | `--pr` | create a PR with the keep.lock change (answers the prompt) |  |
 | `--no-pr` | do not create a PR with the keep.lock change |  |
 | `--pr-base <branch>` | base branch for the PR (answers the prompt) |  |
+| `--resolve <NAME=mine|theirs>` | decide a conflict: keep your value (mine) or theirs; NAME@TARGET=... for a deploy target (repeatable, needs --conflict) | `[]` |
+| `--conflict <conflict_id>` | the conflict_id a conflict returned: binds --resolve to what was seen |  |
 
 JSON support: yes (`--json`)
 
@@ -87,13 +89,17 @@ JSON support: yes (`--json`)
 
 ## `capy push`
 
-Push encrypted values to Keep
+Push your changes to Keep: edited, new and deleted variables
 
 ```
-capy push
+capy push [options]
 ```
 
-_No options._
+| Option | Description | Default |
+|---|---|---|
+| `--non-tty` | treat stdin as not a terminal; a conflict stops the push with the conflict_id (agents/CI) |  |
+| `--resolve <NAME=mine|theirs>` | decide a conflict: keep your value (mine) or theirs; NAME@TARGET=... for a deploy target (repeatable, needs --conflict) | `[]` |
+| `--conflict <conflict_id>` | the conflict_id a conflict returned: binds --resolve to what was seen |  |
 
 JSON support: no
 
@@ -123,6 +129,8 @@ capy deploy [target] [options]
 | `--plan <file>` | dokploy --discover: the plan file to check (see schemas.deploy_dokploy_plan in `capy help --json`) |  |
 | `--confirm <plan_id>` | dokploy --discover: write the plan that --dry-run printed (one PR per repo) |  |
 | `--base-url <url>` | dokploy --discover: the Dokploy dashboard URL (else the org system variable _CONNECTOR_DOKPLOY_BASE_URL) |  |
+| `--resolve <NAME=mine|theirs>` | decide a conflict: keep your value (mine) or theirs; NAME@TARGET=... for a deploy target (repeatable, needs --conflict) | `[]` |
+| `--conflict <conflict_id>` | the conflict_id a conflict returned: binds --resolve to what was seen |  |
 
 JSON support: yes (`--json`)
 
@@ -551,6 +559,8 @@ capy secrets set <name> [options]
 | `--no-pr-for <owner/name>` | do not open a PR in this repo (repeatable) | `[]` |
 | `--no-pr` | do not open any PR |  |
 | `--confirm <plan_id>` | run the plan that --dry-run printed (required for a real run) |  |
+| `--resolve <NAME=mine|theirs>` | decide a conflict: keep your value (mine) or theirs; NAME@TARGET=... for a deploy target (repeatable, needs --conflict) | `[]` |
+| `--conflict <conflict_id>` | the conflict_id a conflict returned: binds --resolve to what was seen |  |
 
 JSON support: yes (`--json`)
 
@@ -571,6 +581,8 @@ capy secrets deploy <names...> [options]
 | `--all-rows` | deploy every row of those names |  |
 | `--exclude <project:branch>` | leave this location out (repeatable) | `[]` |
 | `--confirm <plan_id>` | run the plan that --dry-run printed (required for a real run) |  |
+| `--resolve <NAME=mine|theirs>` | decide a conflict: keep your value (mine) or theirs; NAME@TARGET=... for a deploy target (repeatable, needs --conflict) | `[]` |
+| `--conflict <conflict_id>` | the conflict_id a conflict returned: binds --resolve to what was seen |  |
 
 JSON support: yes (`--json`)
 
@@ -653,6 +665,8 @@ capy add <vars...> [options]
 | `--pr` | create a PR with the keep.lock change (answers the prompt) |  |
 | `--no-pr` | do not create a PR with the keep.lock change |  |
 | `--pr-base <branch>` | base branch for the PR (answers the prompt) |  |
+| `--resolve <NAME=mine|theirs>` | decide a conflict: keep your value (mine) or theirs; NAME@TARGET=... for a deploy target (repeatable, needs --conflict) | `[]` |
+| `--conflict <conflict_id>` | the conflict_id a conflict returned: binds --resolve to what was seen |  |
 
 JSON support: yes (`--json`)
 
@@ -674,6 +688,8 @@ capy remove <vars...> [options]
 | `--pr` | create a PR with the keep.lock change (answers the prompt) |  |
 | `--no-pr` | do not create a PR with the keep.lock change |  |
 | `--pr-base <branch>` | base branch for the PR (answers the prompt) |  |
+| `--resolve <NAME=mine|theirs>` | decide a conflict: keep your value (mine) or theirs; NAME@TARGET=... for a deploy target (repeatable, needs --conflict) | `[]` |
+| `--conflict <conflict_id>` | the conflict_id a conflict returned: binds --resolve to what was seen |  |
 
 JSON support: yes (`--json`)
 
@@ -705,6 +721,8 @@ capy connect [provider] [options]
 | `-y, --yes` | dokploy import/discover: skip the confirmation prompt (import: --overwrite's clear/replace/import ask) — discover never prompts and needs --yes to write |  |
 | `--overwrite` | dokploy import: set the branch's vars to EXACTLY Dokploy's set — clear names not in Dokploy, replace differing values, import new ones |  |
 | `--environment <names>` | dokploy discover: restrict the plan to these Dokploy environment names, comma-separated (e.g. staging,preview) |  |
+| `--resolve <NAME=mine|theirs>` | decide a conflict: keep your value (mine) or theirs; NAME@TARGET=... for a deploy target (repeatable, needs --conflict) | `[]` |
+| `--conflict <conflict_id>` | the conflict_id a conflict returned: binds --resolve to what was seen |  |
 
 JSON support: yes (`--json`)
 
@@ -726,6 +744,8 @@ capy rotate [var] [options]
 | `--skip-prompts` | alias for --yes |  |
 | `--non-tty` | never prompt; resolve choices from flags or fail fast (agents/CI) |  |
 | `--provider <name>` | integration to promote an unmanaged var through (non-interactive) |  |
+| `--resolve <NAME=mine|theirs>` | decide a conflict: keep your value (mine) or theirs; NAME@TARGET=... for a deploy target (repeatable, needs --conflict) | `[]` |
+| `--conflict <conflict_id>` | the conflict_id a conflict returned: binds --resolve to what was seen |  |
 
 JSON support: no
 
@@ -881,6 +901,10 @@ Every refusal carries a stable `code` — branch on it, never on message text.
 - `REMOVE_NEEDS_TTY`
 - `SECRETS_STALE_BASE`
 - `SECRETS_CONFLICT`
+- `SECRETS_CONFLICT_STALE`
+- `SECRETS_RESOLVE_INVALID`
+- `SECRETS_RESOLVE_NEEDS_CONFLICT`
+- `REMOVE_LOCAL_DRIFT`
 - `KEEP_PR_NOT_GIT_REPO`
 - `KEEP_PR_NO_GITHUB_REMOTE`
 - `KEEP_PR_GH_UNAVAILABLE`
@@ -932,3 +956,4 @@ Every refusal carries a stable `code` — branch on it, never on message text.
 
 - **JSON**: Pass --json on any command whose supportsJson is true and parse stdout as JSON; prose (progress, prompts, errors) goes to stderr so stdout stays pure JSON.
 - **Codes**: Branch only on the machine-readable `code` field (from --json output or a CapyError), never on human-readable message text — messages may be reworded without notice.
+- **Conflicts**: A write that would replace a value someone else changed stops: nothing is written, the exit code is 3, and stdout is {ok:false, code:"SECRETS_CONFLICT", conflict_id, conflicts:[...]} (fingerprints only, never values). Ask the person, then rerun the same command with --resolve NAME=mine|theirs for every conflicting name (NAME@TARGET=... for a deploy target) and --conflict <conflict_id>. A state that moved since is SECRETS_CONFLICT_STALE with the fresh conflicts. There is no resolve-all.

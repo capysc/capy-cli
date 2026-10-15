@@ -45,12 +45,13 @@
  *     reports the deploy as succeeded (the delivery already happened) — and
  *     the PR still opens (CI mode).
  *
- * No crypto mocking needed: `pushKeepTransform` no longer touches
- * `resolveProjectKey`/`Encryptor`/`deriveResourceId` at all (it never
- * decrypts or re-encrypts anything — see its own doc), and this fixture's
- * `.env` is plain (unencrypted), so `decryptCurrentBranch` (the ADAPTER's
- * own read, delivering to Dokploy — unrelated to the bug fixed here) never
- * needs them either.
+ * Crypto: the record now goes through the one commit path (CAP-717/712), which
+ * needs the project key to read the server's lines, so `resolveProjectKey` is
+ * mocked to a fixed key. It still never encrypts or decrypts a value of its own:
+ * the server's blob in this fixture is an opaque line nobody holds the key for,
+ * kept verbatim, and this fixture's `.env` is plain (unencrypted), so
+ * `decryptCurrentBranch` (the ADAPTER's own read, delivering to Dokploy) never
+ * needs the key either.
  *
  * The mocked `ServiceClient#getLatestSecrets` fakes "the server's current
  * snapshot" by reading a small JSON file this test writes per branch
@@ -68,6 +69,7 @@ import { mkdirSync, writeFileSync, rmSync, readFileSync, existsSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { SyncEngine } from '../../src/sync/syncEngine';
+import { agreeingDecryptData, fixedKeyResolver } from '../helpers/deployServer';
 
 // Declared before the mocks below (which close over them) — every binding
 // here is fully initialized before any test() callback runs, so the mocked
@@ -103,6 +105,14 @@ mock.module('../../src/service/serviceClient', () => ({
     // per-branch fixture `writeServerSnapshot` (below) wrote, NEVER the
     // repo's own `.env`. Returns null (→ pushKeepTransform's coded "no
     // snapshot yet" warning) when nothing was written for this branch.
+    // The same snapshot as `getDecryptData`, for the commit path (which reads the server's latest before it writes).
+    async getDecryptData(_projectId: string, branch: string) {
+      const snap = existsSync(SERVER_SNAPSHOTS_PATH)
+        ? (JSON.parse(readFileSync(SERVER_SNAPSHOTS_PATH, 'utf-8')) as Record<string, { keepFile: string; envFile: string }>)[branch]
+        : undefined;
+      if (!snap) throw new Error('no server snapshot written for this branch');
+      return agreeingDecryptData(JSON.parse(snap.keepFile), branch, snap.envFile);
+    }
     async getLatestSecrets(_projectId: string, branch: string) {
       if (!existsSync(SERVER_SNAPSHOTS_PATH)) return null;
       const snapshots = JSON.parse(readFileSync(SERVER_SNAPSHOTS_PATH, 'utf-8')) as Record<
@@ -119,6 +129,7 @@ mock.module('../../src/service/serviceClient', () => ({
     }
   },
 }));
+mock.module('../../src/crypto/keyResolver', () => fixedKeyResolver());
 // `gh` unavailable → `createPr` takes its manual-instructions path (ok:
 // true, no real GitHub call needed) — deterministic on any machine.
 mock.module('../../src/utils/gh', () => ({
@@ -282,7 +293,8 @@ function dokployFetchMock(opts: { failWrite?: boolean; stripeKeyValue?: string }
   const value = opts.stripeKeyValue ?? STRIPE_KEY_VALUE;
   const merged = mergeManagedValuesBlock(RAW_APP_ENV, [{ name: 'STRIPE_KEY', value }]);
   if (!merged.ok) throw new Error('unexpected merge problem in test fixture');
-  const reads = [RAW_APP_ENV, RAW_APP_ENV, merged.env][Symbol.iterator]();
+  // preflight, the conflict check before anything is written (CAP-717), deploy's fresh read, the post-write verify.
+  const reads = [RAW_APP_ENV, RAW_APP_ENV, RAW_APP_ENV, merged.env][Symbol.iterator]();
   return mock(async (url: string, init: { method: string; body?: string }) => {
     const u = new URL(url);
     if (u.pathname.endsWith('application.one')) {

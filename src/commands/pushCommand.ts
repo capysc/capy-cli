@@ -11,8 +11,17 @@ import { LOCAL_USER_ID } from '../config/globalConfig';
 import { isLocalOnly } from '../config/profileConfig';
 import { resolveLocalProjectKey } from '../core/localUnlock';
 import { reportRepoLinkForCommand } from '../core/repoLinkReporter';
+import { isInteractive } from '../ui/interactive';
+import { conflictFlagsOrExit, exitOnConflictRefusal, hasConflictFlags, protocolDecider, type RawConflictFlags } from '../sync/conflicts';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
+
+export interface PushOpts {
+  /** Treat stdin as not a terminal even when it is one: a conflict then follows the protocol. */
+  nonTty?: boolean;
+  /** `--resolve` / `--conflict` as typed (CAP-717). */
+  conflictFlags?: RawConflictFlags;
+}
 
 export class PushCommand {
   private projectManager: ProjectManager;
@@ -50,17 +59,23 @@ export class PushCommand {
     }
   }
 
-  async execute(): Promise<void> {
+  async execute(opts: PushOpts = {}): Promise<void> {
     try {
-      await this._execute();
+      await this._execute(opts);
     } catch (error: any) {
       this.debugError('push execute caught', error);
+      // A conflict is not a failure: it is the protocol's answer (exit 3, the payload on stdout).
+      exitOnConflictRefusal(error);
       const { displayErrorAndExit } = await import('../ui/errorScreen');
       await displayErrorAndExit(error);
     }
   }
 
-  private async _execute(): Promise<void> {
+  private async _execute(opts: PushOpts): Promise<void> {
+    // A bad --resolve / --conflict is refused before anything is read or authenticated.
+    const flags = conflictFlagsOrExit(opts.conflictFlags ?? {}, false);
+    // Off a terminal (or given --resolve) a conflict stops the push with the payload; at a terminal it is the plain error.
+    const protocol = !isInteractive(opts.nonTty) || hasConflictFlags(flags);
     this.debug('starting push command');
     this.debug('cwd', process.cwd());
 
@@ -170,13 +185,15 @@ export class PushCommand {
     }
 
     // What this folder has to commit is what it CHANGED: a value that differs from the one
-    // keep.lock pins (an edit, or a new name). Values it merely still holds from an older
-    // sync are not pushed, so a stale folder cannot revert what someone else saved since.
+    // keep.lock pins (an edit, or a new name) and a pinned name it no longer has (a deletion; kept
+    // out, `.env` would get it back from the server). Values it merely still holds from an older
+    // sync are not pushed, so a stale folder cannot revert what someone else saved since. Every
+    // change, deletions included, is conflict-checked against what the server holds now.
     const localPlaintext = Object.fromEntries(
       Object.entries(rawLocal).map(([key, value]) => [key, value.startsWith('capy:') ? this.fileManager.decryptValue(value, encryptionKey) : value]),
     );
-    const changes = localChanges(localPlaintext, pinnedHashes(keep, branch), { removals: false });
-    this.debug('local edits', Object.keys(changes.set));
+    const changes = localChanges(localPlaintext, pinnedHashes(keep, branch), { removals: true });
+    this.debug('local edits', { set: Object.keys(changes.set), removed: changes.remove });
 
     const committed = await commitFolder(
       {
@@ -190,12 +207,13 @@ export class PushCommand {
         projectKey: encryptionKey,
         keep,
         localPlaintext,
+        ...(protocol ? { decide: protocolDecider(flags) } : {}),
       },
       changes,
     );
     this.debug('push complete', { localMode, uploaded: committed.uploaded, written: committed.written });
 
-    const count = Object.keys(changes.set).length;
+    const count = Object.keys(changes.set).length + changes.remove.length;
     pushSpinner.succeed(
       localMode
         ? `Stored ${count} secret(s) locally (local-only mode)`

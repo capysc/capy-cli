@@ -37,11 +37,17 @@ mock.module('../../src/auth/authService', () => ({
   },
   silentAuthFailureMessage: () => 'auth failed',
 }));
+// CAP-717: a deploy compares the values it delivers with Capy's latest before it writes, so the server answers
+// (in agreement with the folder: nothing here is about conflicts).
 mock.module('../../src/service/serviceClient', () => ({
   ServiceClient: class {
     setTokenProvider() {}
+    async getDecryptData() {
+      return agreeingDecryptData(JSON.parse(readFileSync(join(ROOT, 'keep.lock'), 'utf-8')), 'production');
+    }
   },
 }));
+mock.module('../../src/crypto/keyResolver', () => fixedKeyResolver());
 const mintDeployTokenMock = mock(async () => ({
   secretsBlob: 'BLOB_VALUE',
   projectKey: 'KEY_VALUE',
@@ -53,9 +59,10 @@ mock.module('../../src/commands/deployTokenCommand', () => ({
 }));
 afterAll(() => mock.restore());
 
-import { mkdirSync, writeFileSync, rmSync } from 'fs';
+import { mkdirSync, writeFileSync, rmSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
+import { agreeingDecryptData, fixedKeyResolver } from '../helpers/deployServer';
 import { deployCommand } from '../../src/commands/deployCommand';
 import { mergeManagedValuesBlock } from '../../src/deploy/dokployApi';
 
@@ -114,9 +121,10 @@ function tearDown(): void {
 }
 
 /**
- * `compose.one` is read exactly 3 times in CI mode (preflight, deploy's
- * fresh read, deploy's post-write verify) — RAW_ENV for the first two,
- * EXPECTED_MERGED_ENV once the write has landed. `settings.getDokployVersion`
+ * `compose.one` is read exactly 4 times in CI mode (preflight, the conflict
+ * check before anything is written (CAP-717), deploy's fresh read, deploy's
+ * post-write verify) — RAW_ENV for the first three, EXPECTED_MERGED_ENV once
+ * the write has landed. `settings.getDokployVersion`
  * is read once, in preflight, to decide the `DOKPLOY_STACK_QUOTES` warning.
  * A fixed-sequence iterator (the same idea `tests/deploy/dokploy.test.ts`'s
  * own `scripted()` helper uses) hands back each read in order with no
@@ -124,7 +132,7 @@ function tearDown(): void {
  * advances.
  */
 function scriptedDokployFetch(): typeof fetch {
-  const reads = [RAW_ENV, RAW_ENV, EXPECTED_MERGED_ENV][Symbol.iterator]();
+  const reads = [RAW_ENV, RAW_ENV, RAW_ENV, EXPECTED_MERGED_ENV][Symbol.iterator]();
   const impl = (async (url: string, init: { method: string; body?: string }) => {
     const u = new URL(url);
     if (u.pathname.endsWith('compose.saveEnvironment')) {

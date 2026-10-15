@@ -43,6 +43,8 @@ ISOLATED_FILES=(
   tests/commands/deployDokploySystemStoreToken.test.ts
   tests/commands/deployCiChangeGate.test.ts
   tests/commands/deployCiTargetsRecord.test.ts
+  tests/commands/deployConflicts.test.ts
+  tests/commands/deployTargetConflict.test.ts
   tests/commands/deployRevokeWiring.test.ts
   tests/commands/deployDirectModeTiming.test.ts
   tests/commands/deployDokployPickerTokenEnv.test.ts

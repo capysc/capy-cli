@@ -2,6 +2,7 @@ import { CapyError, ERROR_CODES } from '../types';
 import { resolveContext, writeAndSync, type ResolvedContext } from './connectors/shared';
 import { DRY_RUN_UNSUPPORTED_MESSAGES, MAX_PIPED_BYTES, readPipedValue, refuseDryRunUnsupported, refuseInvalidName, refusePiped } from './pipedValue';
 import { runPipedWrite, variableExists } from './pipedWrite';
+import { conflictFlagsOrExit, type RawConflictFlags } from '../sync/conflicts';
 import {
   recordsForWrite,
   refuseBadPrFlags,
@@ -26,6 +27,8 @@ export interface AddOpts {
   pr?: PrFlags;
   /** The global `--dry-run`: a piped add previews; an interactive add refuses (`DRY_RUN_UNSUPPORTED`). */
   dryRun?: boolean;
+  /** `--resolve` / `--conflict` as typed (CAP-717): they decide a conflict of a piped value. */
+  conflictFlags?: RawConflictFlags;
 }
 
 const VAR_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -137,6 +140,8 @@ export class AddCommand {
     const [name] = names;
     // The argument is not echoed: a `NAME=value` typed by mistake must not be printed back.
     if (!VAR_RE.test(name)) return refuseInvalidName(json);
+    // A bad flag is refused before stdin is read or anything is authenticated.
+    const conflicts = conflictFlagsOrExit(opts.conflictFlags ?? {}, json);
 
     const piped = await readPipedValue(process.stdin, MAX_PIPED_BYTES);
     if (!piped.ok) return refusePiped(json, piped.code, piped.error);
@@ -148,6 +153,7 @@ export class AddCommand {
       command: 'add',
       pr: opts.pr,
       dryRun: opts.dryRun === true,
+      conflicts,
       gate: (ctx) =>
         variableExists(ctx, name) && opts.force !== true
           ? {

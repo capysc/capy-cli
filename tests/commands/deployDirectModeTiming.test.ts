@@ -34,6 +34,8 @@ import { SyncEngine } from '../../src/sync/syncEngine';
 
 const REPO_FOR_MOCK = join(tmpdir(), `capy-deploy-timing-${process.pid}`, 'repo');
 
+mock.module('../../src/crypto/keyResolver', () => fixedKeyResolver());
+
 mock.module('../../src/auth/authService', () => ({
   AuthService: class {
     async authenticateSilent() {
@@ -51,6 +53,12 @@ mock.module('../../src/service/serviceClient', () => ({
     // Always "in sync" — reads local keep.lock the same working-copy-first
     // way the real code under test does, so this pre-check never refuses.
     // Staleness itself is covered separately (deployRevokeWiring.test.ts).
+    // The same server, for the compare-before-delivering step (CAP-717) and the commit path.
+    async getDecryptData(_projectId: string, branch: string) {
+      const keep = new ProjectManager(REPO_FOR_MOCK).readKeepFile();
+      if (!keep) throw new Error('test fixture has no keep.lock to read');
+      return agreeingDecryptData(keep, branch);
+    }
     async getLatestSecrets(_projectId: string, branch: string) {
       const keep = new ProjectManager(REPO_FOR_MOCK).readKeepFile();
       if (!keep) return null;
@@ -59,6 +67,7 @@ mock.module('../../src/service/serviceClient', () => ({
   },
 }));
 
+import { agreeingDecryptData, fixedKeyResolver } from '../helpers/deployServer';
 import { deployCommand } from '../../src/commands/deployCommand';
 
 const HAS_WRANGLER = spawnSync('which', ['wrangler']).status === 0;

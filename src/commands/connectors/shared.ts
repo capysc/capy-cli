@@ -2,7 +2,8 @@ import { ProjectManager } from '../../core/projectManager';
 import { FileManager } from '../../files/fileManager';
 import { AuthService, silentAuthFailureMessage } from '../../auth/authService';
 import { ServiceClient } from '../../service/serviceClient';
-import { commitFolder, readLocalPlaintext } from '../../sync/commit';
+import { commitFolder, readLocalPlaintext, type Resolutions } from '../../sync/commit';
+import { protocolDecider, type ConflictDecider, type ConflictFlags } from '../../sync/conflicts';
 import { KeepFile, ConnectorMetadata, CapyError, ERROR_CODES, AuthResult } from '../../types/index';
 import type { ImportOutcome } from './registry';
 import { reportRepoLinkForCommand, type RepoLinkWarning } from '../../core/repoLinkReporter';
@@ -23,6 +24,12 @@ export interface ResolvedContext {
   localPlaintext: Record<string, string>;
   /** CAP-697: warnings from reporting this project's repo link (empty unless the keep.lock looks copied). */
   repoLinkWarnings?: readonly RepoLinkWarning[];
+  /**
+   * How a write settles a conflict (CAP-717): set by a command that follows the non-TTY protocol, so
+   * every save through this context refuses with the payload (or applies `--resolve`). Absent:
+   * a conflict is a plain `SECRETS_CONFLICT`.
+   */
+  decide?: ConflictDecider;
 }
 
 /**
@@ -67,6 +74,8 @@ export async function resolveContext(
     json?: boolean;
     /** The caller is a dry run: the repo link is not reported. */
     dryRun?: boolean;
+    /** The caller follows the conflict protocol (off a terminal, or given `--resolve`): its flags decide every conflict. */
+    conflicts?: ConflictFlags;
   } = {},
 ): Promise<ResolvedContext> {
   const refuse = opts.refuse ?? exitWithMessage;
@@ -136,6 +145,7 @@ export async function resolveContext(
     keep,
     localPlaintext: readLocalPlaintext(fileManager, projectKey),
     repoLinkWarnings: repoLink.warnings,
+    ...(opts.conflicts === undefined ? {} : { decide: protocolDecider(opts.conflicts) }),
   };
 }
 
@@ -205,6 +215,8 @@ export async function writeAndSync(
     connector?: ConnectorMetadata;
     /** Additional (varName, connector) pairs to mark managed in the same write. */
     alsoConnect?: ReadonlyArray<{ varName: string; entry: ConnectorMetadata }>;
+    /** Decisions already made for names the server changed (e.g. settled before a rotation issued its key). */
+    resolutions?: Resolutions;
   },
 ): Promise<void> {
   const { fileManager, branch, projectKey, keep, localPlaintext } = ctx;
@@ -221,7 +233,7 @@ export async function writeAndSync(
     return;
   }
 
-  await commitFolder(ctx, { set: value === undefined ? {} : { [varName]: value }, remove: [] }, { transformKeep: attach });
+  await commitFolder(ctx, { set: value === undefined ? {} : { [varName]: value }, remove: [] }, { transformKeep: attach, resolutions: opts.resolutions });
 }
 
 /**

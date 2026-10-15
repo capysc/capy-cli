@@ -59,6 +59,7 @@ import {
   VarDelivery,
 } from '../deploy/targetsGate';
 import { KeepFile, ERROR_CODES, AuthResult, ErrorCode } from '../types/index';
+import { adoptedKeepFor, commitToServer } from '../sync/commit';
 import type { AuthService } from '../auth/authService';
 import type { ServiceClient } from '../service/serviceClient';
 import { ProjectManager } from '../core/projectManager';
@@ -87,6 +88,15 @@ import { buildDeployPrBody } from '../deploy/deployPrBody';
 import { resolveDokployApiKeyOnce } from '../deploy/dokployApiKeyOnce';
 import { deliveryFor, recordDeliveriesOnServer, targetRefFor } from '../deploy/deliveryRecord';
 import { deployPlan, unansweredDeployStops, type DeployStopId } from '../core/deployPlan';
+import {
+  conflictFlagsOrExit,
+  conflictRefusalFor,
+  isConflictRefusal,
+  printConflictRefusal,
+  type RawConflictFlags,
+} from '../sync/conflicts';
+import { reconcileDeployConflicts } from './deployConflicts';
+import { EXIT_NEEDS_INPUT } from '../ui/interactive';
 import type { DeployPlanConfirmStop } from '../ui/screens/contract';
 import { CHECKBOX_INSTRUCTIONS, CHECKBOX_THEME, LIST_THEME } from '../ui/promptStyle';
 import { keypressConfirm } from '../ui/keypressConfirm';
@@ -139,6 +149,11 @@ export interface DeployCliOptions {
    * ships it later. `targets` are still recorded — the write happened.
    */
   noDeploy?: boolean;
+  /**
+   * `--resolve` / `--conflict` as typed (CAP-717): they decide the conflicts between the folder, Capy and the
+   * platform off a terminal. Without them such a conflict stops the deploy (exit 3, the payload on stdout).
+   */
+  conflictFlags?: RawConflictFlags;
 }
 
 /**
@@ -398,70 +413,40 @@ async function loadDeploySecrets(
 // ── Targets recording (CAP-679) ─────────────────────────────────────────────
 
 /**
- * Read → transform → push keep.lock through the existing sync path, for a
- * pure `KeepFile → KeepFile` change that isn't a value edit (targets
- * recording/stripping). Mirrors `capy connect`'s import write
- * (`connectors/shared.ts#writeImportedAndSync`) — same push — but
- * generalized over the transform instead of "add these new vars".
+ * Transform keep.lock on the Capy SERVER and push it, for a pure `KeepFile → KeepFile` change that isn't a
+ * value edit (targets recording/stripping). Mirrors `deployTokenCommand`'s keep-only writes.
  *
- * Writes only the untracked working copy (`writeKeepFile`); it never
- * auto-commits the tracked keep.lock onto whatever branch the caller
- * happens to be on. Only `capy deploy`'s own explicit, isolated commit
- * steps (direct mode's own-branch commit, CI mode's worktree PR) ever touch
- * the tracked file.
+ * The write is the one commit path (sync/commit.ts): `commitToServer` reads the server's latest for `branch`,
+ * applies `transform` to THAT keep, and uploads it with the branch's blob exactly as the server holds it
+ * (every ciphertext line verbatim) and the keep it was built from (`base_keep_hash`), re-reading and rebuilding
+ * once if someone saved in between. Nothing in this folder's `.env` or its keep.lock beyond `transform` reaches
+ * the server, so recording a target can never revert, add or drop a value (CAP-687: a keep-only write must not
+ * move a secret's value under an unchanged hash).
  *
- * `transform` returning the SAME object (`===`) is treated as "nothing to
- * do" and skips the network entirely. Best-effort: errors are logged, never
- * thrown — the caller's own operation (a deploy, a remove, a revoke) already
- * succeeded or is already committed to happening by the time this runs.
+ * Writes only the untracked working copy (`writeKeepFile`), and only the branch's slice of the server's keep
+ * (`adoptedKeepFor`): it never auto-commits the tracked keep.lock onto whatever branch the caller happens to be
+ * on. Only `capy deploy`'s own explicit, isolated commit steps (direct mode's own-branch commit, CI mode's
+ * worktree PR) ever touch the tracked file.
  *
- * CAP-687 (validator fix-first): this used to build the pushed env blob by
- * decrypting the LOCAL `.env` and re-encrypting it fresh. That's wrong for
- * EVERY caller here, not just CI mode — none of them are value edits, so
- * NOTHING about the branch's secret values should ever be able to change as
- * a side effect of "record a target" or "revoke a token". But a local `.env`
- * can hold unpushed edits, or a variable that was never synced at all, and
- * the server's `keep_hash` only covers `name:resource_id:value_hash` — not
- * blob content — so a keep-only write that rebuilds the blob from local
- * `.env` can silently overwrite the team's stored blob under an UNCHANGED
- * hash: the next `capy` pull anyone runs decrypts the same pin to a
- * different value, with no signal anything drifted.
+ * `transform` returning the SAME object (`===`) is treated as "nothing to do" and skips the network entirely.
+ * Best-effort: errors are logged, never thrown — the caller's own operation (a deploy, a remove, a revoke)
+ * already succeeded or is already committed to happening by the time this runs.
  *
- * Fixed by never touching local `.env` here at all. Instead: fetch the
- * server's OWN current snapshot for `branch` (`getLatestSecrets` — one read,
- * so the returned `env_file` and `keep_hash` can never disagree with each
- * other) and verify that hash against the LOCAL keep's branch entries
- * (`SyncEngine.computeKeepHash`) — `transform` only ever touches `targets`/
- * `connector` metadata, never `resource_id`/`value_hash`, so the hash is the
- * same whether computed before or after it runs. A match proves the local
- * keep's pins for this branch are exactly what's already live, so it's safe
- * to (a) push the fetched `env_file` straight through, byte-for-byte, as
- * the SAME blob already stored, and (b) build `nextKeep` off the LOCAL keep
- * (preserving every other branch's entries exactly as the local file has
- * them, same as before). A mismatch means the local keep.lock is stale for
- * this branch — skip the write with a warning rather than risk a
- * keep/blob pair the server never actually produced together.
+ * Before anything is uploaded, `resolveFreshSnapshot` verifies the LOCAL keep's pins for this branch are what
+ * the server holds (a mismatch means the local keep.lock is stale: skip the write with a warning rather than
+ * record against a keep the caller never saw).
  *
- * `opts.writeLocal` (default `true`) gates the LOCAL side effect below —
- * writing the untracked working copy. CI mode passes `false` (CAP-687): it
- * must NEVER write keep.lock to disk — CI mode must NEVER touch the user's
- * working tree (see `openCiDeployPr`'s own doc for why). Every other
- * caller keeps the default.
+ * `opts.writeLocal` (default `true`) gates the LOCAL side effect — writing the untracked working copy. CI mode
+ * passes `false` (CAP-687): it must NEVER write keep.lock to disk — CI mode must NEVER touch the user's working
+ * tree (see `openCiDeployPr`'s own doc for why). Every other caller keeps the default.
  *
- * `opts.warnCode` prefixes every warning this function prints with a
- * machine-readable code (Rule 4: never branch on prose, but a human reading
- * the warning still gets a stable label for it). Omitted by callers that
- * predate CAP-687, whose warning text for the branch-mismatch/auth-failure/
- * exception cases is therefore unchanged; the two NEW warning cases this fix
- * introduces (no server snapshot yet, local keep out of sync with it) are
- * new regardless, so there's no "unchanged text" to preserve for them.
+ * `opts.warnCode` prefixes every warning this function prints with a machine-readable code (Rule 4: never
+ * branch on prose, but a human reading the warning still gets a stable label for it).
  *
- * Returns `{ ok: true }` on an actual push OR a genuine no-op (`transform`
- * found nothing to change); `{ ok: false }` on ANY refusal or failure —
- * callers that minted a deploy token before calling this (CAP-687 follow-up,
- * "no untracked tokens") check `.ok` to decide whether the mint is now
- * untracked, and `capy deploy targets-remove` checks it to decide whether
- * revoking is still safe. Never throws.
+ * Returns `{ ok: true }` on an actual push OR a genuine no-op (`transform` found nothing to change); `{ ok:
+ * false }` on ANY refusal or failure — callers that minted a deploy token before calling this (CAP-687
+ * follow-up, "no untracked tokens") check `.ok` to decide whether the mint is now untracked, and `capy deploy
+ * targets-remove` checks it to decide whether revoking is still safe. Never throws.
  */
 async function pushKeepTransform(
   cwd: string,
@@ -477,19 +462,27 @@ async function pushKeepTransform(
     const pm = new ProjectManager(cwd);
     const keep = pm.readKeepFile();
     if (!keep) return { ok: false };
-    const nextKeep = transform(keep);
-    if (nextKeep === keep) return { ok: true };
+    if (transform(keep) === keep) return { ok: true };
 
     const fresh = await resolveFreshSnapshot(cwd, branch, devMode, `${label} in keep.lock`, opts.warnCode);
     if (!fresh) return { ok: false };
 
-    const pushed = await fresh.serviceClient.pushSecrets(fresh.projectId, JSON.stringify(nextKeep), fresh.latest.env_file, branch, undefined, fresh.latest.keep_hash);
+    const { resolveProjectKey } = await import('../crypto/keyResolver');
+    const projectKey = await resolveProjectKey(fresh.orgId, fresh.projectId, fresh.userId, {
+      coDecrypt: (o, c) => fresh.serviceClient.coDecrypt(o, c).then((r) => r.plaintext),
+      wrapOuterLayer: (o, p) => fresh.serviceClient.wrapOuterLayer(o, p).then((r) => r.ciphertext),
+    });
+    const committed = await commitToServer({
+      client: fresh.serviceClient,
+      projectId: fresh.projectId,
+      branch,
+      projectKey,
+      startKeep: keep,
+      changes: { set: {}, remove: [] },
+      transformKeep: transform,
+    });
 
-    if (writeLocal) {
-      const { SyncEngine } = await import('../sync/syncEngine');
-      const fm = new FileManager(cwd);
-      fm.writeKeepFile(SyncEngine.adoptServerKeep(pushed.keep_file, nextKeep, branch));
-    }
+    if (writeLocal) new FileManager(cwd).writeKeepFile(adoptedKeepFor(keep, committed, branch));
     return { ok: true };
   } catch (err: any) {
     console.error(`  ${YELLOW('!')} could not ${label} in keep.lock: ${codePrefix}${err?.message ?? err}`);
@@ -526,7 +519,9 @@ async function resolveFreshSnapshot(
 ): Promise<{
   keep: KeepFile;
   latest: { env_file: string; keep_hash: string; keep_file?: string };
+  orgId: string;
   projectId: string;
+  userId: string;
   serviceClient: ServiceClient;
 } | null> {
   const codePrefix = warnCode ? `${warnCode}: ` : '';
@@ -570,7 +565,7 @@ async function resolveFreshSnapshot(
       );
       return null;
     }
-    return { keep, latest, projectId: projectState.projectId, serviceClient };
+    return { keep, latest, orgId: projectState.organizationId, projectId: projectState.projectId, userId: authResult.user_id, serviceClient };
   } catch (err: any) {
     console.error(`  ${YELLOW('!')} could not ${label}: ${codePrefix}${err?.message ?? err}`);
     return null;
@@ -1567,18 +1562,18 @@ async function runPicker(
 
 // ── Plan rendering ─────────────────────────────────────────────────────────
 
-function renderPlan(target: TargetConfig, adapter: DeployAdapter): void {
-  console.log('');
-  console.log(`  ${B('Target:')}  ${target.name}  ${DIM(`(${adapter.label})`)}`);
-  console.log(`  ${B('Branch:')}  ${target.branch}`);
+function renderPlan(target: TargetConfig, adapter: DeployAdapter, out: (line: string) => void = console.log): void {
+  out('');
+  out(`  ${B('Target:')}  ${target.name}  ${DIM(`(${adapter.label})`)}`);
+  out(`  ${B('Branch:')}  ${target.branch}`);
   if (target.mode === 'ci' && target.gitBaseBranch) {
-    console.log(`  ${B('PR base:')} ${target.gitBaseBranch}`);
+    out(`  ${B('PR base:')} ${target.gitBaseBranch}`);
   }
   for (const [k, v] of Object.entries(target.options)) {
-    console.log(`  ${DIM(k.padEnd(7))}: ${String(v)}`);
+    out(`  ${DIM(k.padEnd(7))}: ${String(v)}`);
   }
-  console.log(`  ${B('Vars:')}    ${target.vars.join(', ')}`);
-  console.log('');
+  out(`  ${B('Vars:')}    ${target.vars.join(', ')}`);
+  out('');
 }
 
 /**
@@ -2477,6 +2472,9 @@ export async function deployCommand(
     return 0;
   }
 
+  // A bad --resolve / --conflict is refused before anything is read.
+  const conflictFlags = conflictFlagsOrExit(options.conflictFlags ?? {}, false);
+
   const keep = readKeep(cwd);
   if (!keep) {
     console.error(
@@ -2527,7 +2525,11 @@ export async function deployCommand(
   const reconciled = await reconcileTargetVars(cwd, keep, healed.value, options);
   if (!reconciled.ok) return reconciled.code;
 
-  renderPlan(reconciled.value, adapter);
+  // `--yes` / `--dry-run` runs (CI, an agent) are asked nothing, and a conflict ends them with its payload ALONE on
+  // stdout (CAP-717): the plan and the preflight heads-up are printed once the conflicts are settled, not before.
+  // A run that may ask a person shows them first, as it always did.
+  const deferPlan = options.yes === true || options.dryRun === true;
+  if (!deferPlan) renderPlan(reconciled.value, adapter);
 
   // CI-only adapters (Vercel) always take the CI/PR path, even if a legacy or
   // ad-hoc target carries a stale 'direct' mode — capy never runs their CLI.
@@ -2577,9 +2579,12 @@ export async function deployCommand(
   const preflightOutcome = await preflightOrEdit(reconciled.value);
   if (!preflightOutcome.ok) return 1;
   const preflight = preflightOutcome.preflight;
-  for (const w of preflight.warnings ?? []) {
-    console.log(`  ${YELLOW('!')} ${w.message}`);
-  }
+  const showPreflightWarnings = (): void => {
+    for (const w of preflight.warnings ?? []) {
+      console.log(`  ${YELLOW('!')} ${w.message}`);
+    }
+  };
+  if (!deferPlan) showPreflightWarnings();
 
   // capy never blocks on uncommitted source changes. It only ever stages and
   // commits keep.lock — your work-in-progress is left exactly as it was.
@@ -2598,6 +2603,47 @@ export async function deployCommand(
   const msg = `chore(deploy): ${target.name} → ${target.branch} (${target.kind})`;
   const baseBranch = target.gitBaseBranch ?? 'main';
 
+  // ── Conflicts (CAP-717) — before the gate, a mint, a decrypt or any write. The values about to be delivered
+  //    are compared with Capy's latest (source) and, on Dokploy, with the service's live env (target); every
+  //    conflict is answered (a question per variable in a terminal, --resolve off one) and the folder takes the
+  //    values that will be delivered. Nothing is written until then.
+  const settled = await (async (): Promise<Awaited<ReturnType<typeof reconcileDeployConflicts>>> => {
+    try {
+      return await reconcileDeployConflicts({
+        cwd,
+        target,
+        adapter,
+        devMode: options.devMode,
+        dryRun: !!options.dryRun,
+        interactive: process.stdin.isTTY === true && !options.yes,
+        flags: conflictFlags,
+        adapterCtx: adapterCallCtx,
+        showFailure: renderResult,
+      });
+    } catch (err: any) {
+      if (isConflictRefusal(err)) {
+        printConflictRefusal(err);
+        return { ok: false, code: EXIT_NEEDS_INPUT };
+      }
+      // A preview that could not compare says nothing; a real deploy that could not compare does not deliver.
+      if (options.dryRun) return { ok: true, skipped: [] };
+      console.error(`${RED('✗')} could not compare with Capy: ${err?.message ?? err}`); // COPY-FLAG
+      return { ok: false, code: 1 };
+    }
+  })();
+  if (!settled.ok) return settled.code;
+  if (deferPlan) {
+    renderPlan(target, adapter);
+    showPreflightWarnings();
+  }
+  // What this delivery records: the target without the variables whose platform value was kept (`theirs`).
+  const recorded: TargetConfig =
+    settled.skipped.length === 0 ? target : { ...target, vars: target.vars.filter((v) => !settled.skipped.includes(v)) };
+  if (recorded.vars.length === 0) {
+    console.log(`  ${DIM('·')} nothing to deliver — every value on the platform was kept.`); // COPY-FLAG
+    return 0;
+  }
+
   // ── CI change-gate — BEFORE any mint (see resolveCiGateOutcome's own doc:
   //    deciding "did anything change" must never itself require a token, or
   //    every CI run of a token adapter mints and writes one regardless of
@@ -2605,7 +2651,7 @@ export async function deployCommand(
   //    — `gateOutcome` stays `null` and the fallback below covers them.
   const ciGated = gitOk && mode === 'ci' && !options.dryRun;
   const gateOutcome: CiGateOutcome | null = ciGated
-    ? await resolveCiGateOutcome(cwd, baseBranch, target, adapter, options)
+    ? await resolveCiGateOutcome(cwd, baseBranch, recorded, adapter, options)
     : null;
   if (gateOutcome?.kind === 'error') return 1;
   if (gateOutcome?.kind === 'unchanged') return 0;
@@ -2633,7 +2679,7 @@ export async function deployCommand(
   // ── Decrypt the secrets we're about to push (and, for a token adapter,
   //    mint) — only reached when direct mode, or CI mode just decided
   //    something is actually worth shipping.
-  const secrets = await loadDeploySecrets(cwd, adapter, target, options);
+  const secrets = await loadDeploySecrets(cwd, adapter, recorded, options);
   if (!secrets) return 1;
   const { env, deployToken, valueHashes } = secrets;
 
@@ -2641,7 +2687,7 @@ export async function deployCommand(
   // — see `buildFinalCiKeep`'s own doc.
   const changeGate: CiChangeGate =
     gateOutcome?.kind === 'proceed'
-      ? buildFinalCiKeep(gateOutcome.baseKeep, env, target, adapter, deployToken?.deployId, options)
+      ? buildFinalCiKeep(gateOutcome.baseKeep, env, recorded, adapter, deployToken?.deployId, options)
       : { ok: true, keepLockChanged: false, deployKeepContent: '' };
   if (!changeGate.ok) return 1;
   const { keepLockChanged, deployKeepContent } = changeGate;
@@ -2706,7 +2752,15 @@ export async function deployCommand(
     noDeploy: !!options.noDeploy,
     cwd,
     ...adapterCallCtx,
+    // A dry run's delivery stays a plain dry run (it reads nothing): the preview of conflicts was the step before.
+    ...(settled.targetCheck === undefined || options.dryRun ? {} : { targetCheck: settled.targetCheck }),
   });
+  // The platform changed between the comparison and the write: the delivery was refused, nothing was written.
+  if (!result.ok && result.conflicts !== undefined && result.conflicts.length > 0 && settled.view !== undefined) {
+    await unwindGitState(cwd, null, directStashed);
+    printConflictRefusal(conflictRefusalFor(ERROR_CODES.SECRETS_CONFLICT, [{ ...settled.view, conflicts: result.conflicts }]));
+    return EXIT_NEEDS_INPUT;
+  }
   renderResult(result);
   if (!result.ok) {
     await unwindGitState(cwd, null, directStashed);
@@ -2728,17 +2782,17 @@ export async function deployCommand(
   // same as the PR-open below it: only when the CI gate actually decided to
   // proceed is there a real delivery worth recording server-side.
   if (mode === 'direct' && !options.dryRun) {
-    await recordDeployTargets(cwd, target, adapter, valueHashes, deployToken?.deployId, options.devMode, !!options.noDeploy);
+    await recordDeployTargets(cwd, recorded, adapter, valueHashes, deployToken?.deployId, options.devMode, !!options.noDeploy);
     // "No untracked tokens" (CAP-679 follow-up): only once THIS deploy is a
     // REAL one (never `--no-deploy` — that config is pending, and its
     // predecessor may still be the one actually running) does it become safe
     // to revoke whatever `recordDeployTargets` just moved to
     // `superseded_deploy_ids` — see `revokeSupersededDeployTokens`'s own doc.
     if (!options.noDeploy) {
-      await revokeSupersededDeployTokens(cwd, target, adapter, options.devMode);
+      await revokeSupersededDeployTokens(cwd, recorded, adapter, options.devMode);
     }
   } else if (mode === 'ci' && !options.dryRun && keepLockChanged) {
-    await recordDeployTargetsCi(cwd, target, adapter, valueHashes, deployToken?.deployId, options.devMode, !!options.noDeploy);
+    await recordDeployTargetsCi(cwd, recorded, adapter, valueHashes, deployToken?.deployId, options.devMode, !!options.noDeploy);
   }
 
   // CI mode: open the keep.lock PR in an ISOLATED git worktree (see

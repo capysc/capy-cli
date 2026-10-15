@@ -11,7 +11,8 @@
  */
 
 import type { Classification } from './classify';
-import type { ResolveDokployApiKeyResult } from './dokployApi';
+import type { ResolveDokployApiKeyResult, TargetCheck } from './dokployApi';
+import type { TargetConflict } from '../sync/conflicts';
 import type { ErrorCode } from '../types/index';
 
 export type DeployMode = 'direct' | 'ci';
@@ -132,6 +133,14 @@ export interface DeployResult {
   epilogue?: string;
   /** Non-blocking heads-up(s) about the deploy that just ran. */
   warnings?: readonly DeployWarning[];
+  /**
+   * Target conflicts (CAP-717; only an adapter with `readsLiveValues`): delivered names whose live value on
+   * the platform was changed outside Capy. On a failed result they are unanswered and NOTHING was written; on a
+   * dry run with a `targetCheck` they are the preview. Fingerprints only.
+   */
+  conflicts?: readonly TargetConflict[];
+  /** Names the delivery left alone because the platform's value was kept (`theirs`): not written, not to be recorded as delivered. */
+  skipped?: readonly string[];
 }
 
 export interface DeployContext extends AdapterCallContext {
@@ -164,6 +173,17 @@ export interface DeployContext extends AdapterCallContext {
   noDeploy?: boolean;
   /** cwd of the user's invocation. */
   cwd: string;
+  /**
+   * CAP-717, an adapter with `readsLiveValues` only: compare each delivered name with the platform's live value
+   * before writing. Absent: no comparison (the delivery is as it always was). With `dryRun` it reads and reports
+   * `conflicts` and writes nothing.
+   */
+  targetCheck?: TargetCheck;
+  /**
+   * Deliver only the names in `config.vars`, leaving every other line Capy already manages on the platform exactly
+   * as it is (the batch deploy of picked variables, CAP-715). Absent: the managed block holds the target's vars.
+   */
+  keepOtherManaged?: boolean;
 }
 
 export type AdapterVarKind = 'runtime' | 'build-time';
@@ -252,6 +272,11 @@ export interface DeployAdapter {
    * than setting each secret as a plaintext vendor env var.
    */
   needsDeployToken?: boolean;
+  /**
+   * When true the adapter can read the platform's live values before it writes, and honours
+   * `DeployContext.targetCheck` (CAP-717: Dokploy). Other platforms cannot be read back.
+   */
+  readsLiveValues?: boolean;
   /**
    * Hard requirements: binaries that must be on PATH, env vars that must be
    * set (typically only in CI), and an adapter-specific auth check. Any

@@ -14,6 +14,8 @@ import { CapyError, ConnectorMetadata, ERROR_CODES, KeepFile } from '../types/in
 import { TargetConfig } from '../deploy/adapter';
 import { staleTargets } from '../deploy/targetsGate';
 import { isInteractive, refuseNonInteractive } from '../ui/interactive';
+import { checkFolder, type Resolutions } from '../sync/commit';
+import { conflictFlagsOrExit, exitOnConflictRefusal, hasConflictFlags } from '../sync/conflicts';
 import type { RotatePlanStop } from '../ui/screens/contract';
 import { writeSync } from 'fs';
 
@@ -154,6 +156,8 @@ export class RotateCommand {
     varName: string | undefined,
     opts: RotateOpts & { all?: boolean; skipPrompts?: boolean; provider?: string },
   ): Promise<void> {
+    // A bad --resolve / --conflict is refused before anything is read or asked.
+    conflictFlagsOrExit(opts.conflictFlags ?? {}, false);
     const pm = new ProjectManager();
     const keep = pm.readKeepFile();
     const branch = pm.deriveActiveBranch();
@@ -464,9 +468,15 @@ export class RotateCommand {
       return [];
     }
 
-    const ctx = await resolveContext({ devMode: this.devMode });
+    // Off a terminal (or given --resolve), a conflict follows the protocol. It is settled for every variable
+    // BEFORE the first new key is issued: a key the provider hands out once must not be lost to a refused write.
+    const flags = conflictFlagsOrExit(opts.conflictFlags ?? {}, false);
+    const protocol = !isInteractive(opts.nonTty) || hasConflictFlags(flags);
+    const ctx = await resolveContext({ devMode: this.devMode, ...(protocol ? { conflicts: flags } : {}) });
+    const settled = await this.settleConflicts(ctx, toRotate, opts);
+    if (settled.rotate.length === 0) return [];
 
-    const result = await this.rotateSequentially(toRotate, ctx, opts, { succeeded: [], failed: [] });
+    const result = await this.rotateSequentially(settled.rotate, ctx, opts, { succeeded: [], failed: [] }, settled.resolutions);
 
     if (opts.all && (result.succeeded.length > 0 || result.failed.length > 0)) {
       console.log('');
@@ -480,6 +490,25 @@ export class RotateCommand {
     }
 
     return [...result.succeeded];
+  }
+
+  /**
+   * With a deciding context (the conflict protocol) and a push: the variables whose server value moved since
+   * this folder's pin are decided now (exit 3 with the payload when the flags do not decide them). `theirs` drops
+   * the variable from the run: nothing is rotated that would not be written. Without one, nothing changes.
+   */
+  private async settleConflicts(
+    ctx: ResolvedContext,
+    toRotate: readonly { varName: string; connector: ConnectorMetadata }[],
+    opts: RotateOpts,
+  ): Promise<{ rotate: readonly { varName: string; connector: ConnectorMetadata }[]; resolutions: Resolutions }> {
+    if (ctx.decide === undefined || opts.noPush) return { rotate: toRotate, resolutions: {} };
+    // A rotation replaces the value whatever it was: for the check it is a change to the name, its new value not yet known.
+    const checked = await checkFolder(ctx, { set: {}, remove: toRotate.map((t) => t.varName) }).catch((err: unknown) => {
+      exitOnConflictRefusal(err);
+      return Promise.reject(err);
+    });
+    return { rotate: toRotate.filter((t) => checked.resolutions[t.varName] !== 'theirs'), resolutions: checked.resolutions };
   }
 
   /**
@@ -536,6 +565,7 @@ export class RotateCommand {
     ctx: ResolvedContext,
     opts: RotateOpts & { all?: boolean },
     state: RotateLoopState,
+    resolutions: Resolutions = {},
   ): Promise<RotateLoopState> {
     if (items.length === 0) return state;
     const [{ varName: name, connector }, ...rest] = items;
@@ -559,7 +589,7 @@ export class RotateCommand {
             ...state,
             failed: [...state.failed, { name, err: new Error('confirmation declined') }],
           };
-          if (opts.all) return this.rotateSequentially(rest, ctx, opts, declinedState);
+          if (opts.all) return this.rotateSequentially(rest, ctx, opts, declinedState, resolutions);
           process.exit(1);
         }
       }
@@ -570,7 +600,7 @@ export class RotateCommand {
       });
 
       const freshCtx = await resolveContext({ devMode: this.devMode });
-      await writeAndSync(freshCtx, name, value, { push: !opts.noPush, connector: updated });
+      await writeAndSync(freshCtx, name, value, { push: !opts.noPush, connector: updated, resolutions });
 
       const succeededState: RotateLoopState = {
         ...state,
@@ -584,8 +614,9 @@ export class RotateCommand {
         );
       }
       console.log('');
-      return this.rotateSequentially(rest, ctx, opts, succeededState);
+      return this.rotateSequentially(rest, ctx, opts, succeededState, resolutions);
     } catch (err) {
+      exitOnConflictRefusal(err);
       const failState: RotateLoopState = {
         ...state,
         failed: [...state.failed, { name, err }],
@@ -593,7 +624,7 @@ export class RotateCommand {
       console.error('');
       console.error(`  ✗ Failed to rotate ${B(name)}: ${(err as Error).message}`);
       console.error('');
-      if (opts.all) return this.rotateSequentially(rest, ctx, opts, failState);
+      if (opts.all) return this.rotateSequentially(rest, ctx, opts, failState, resolutions);
       process.exit(1);
     }
   }

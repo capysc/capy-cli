@@ -33,12 +33,24 @@ import { ProjectManager } from '../core/projectManager';
 import { ServiceClient } from '../service/serviceClient';
 import type { OrgRepoLink, SecretIndexRow } from '../service/serviceClient';
 import { CapyError, ERROR_CODES } from '../types/index';
+import { hashValue } from '../deploy/keepGate';
+import {
+  ConflictRefusal,
+  conflictFlagsOrExit,
+  conflictRefusalFor,
+  gateConflicts,
+  type ConflictFlags,
+  type ConflictScope,
+  type RawConflictFlags,
+  type Resolutions,
+} from '../sync/conflicts';
 import { EXIT_NEEDS_INPUT } from '../ui/interactive';
 import { mostRecentChangedAt } from '../ui/secretsScreen';
 import { MAX_PIPED_BYTES, PipedValueResult, readPipedValue, refuseInvalidName, exitCodeForRefusal } from './pipedValue';
 import { isValidVarName } from './pipedWrite';
 import { rowIdOf } from './secretsRowId';
 import {
+  LocationPreview,
   LocationRef,
   RepoTarget,
   SetEnv,
@@ -74,6 +86,8 @@ export interface SecretsSetOpts {
   readonly noPrFor?: readonly string[];
   /** `--no-pr` */
   readonly noPr?: boolean;
+  /** `--resolve` / `--conflict` as typed (CAP-717): they decide a location someone else changed since its row was listed. */
+  readonly conflictFlags?: RawConflictFlags;
 }
 
 /** Injectable seam: tests pass fakes for the service, GitHub and stdin. */
@@ -133,6 +147,24 @@ export function refuse(json: boolean, code: string, error: string, extra: object
   return process.exit(CODE_EXIT[code] ?? exitCodeForRefusal(code));
 }
 
+/** A conflict ends the command: the payload (with `extra`, e.g. the plan) on stdout, the sentence on stderr, exit 3. */
+export function exitWithConflicts(refusal: ConflictRefusal, extra: object = {}): never {
+  console.log(JSON.stringify({ ...refusal.payload, ...extra }, null, 2));
+  console.error(refusal.message);
+  console.error('Rerun with --resolve NAME=mine|theirs for each name and --conflict <conflict_id>.'); // COPY-FLAG
+  return process.exit(EXIT_NEEDS_INPUT);
+}
+
+/** The decisions for `scopes` (the flags', when they cover them), or the command ends with the payload. */
+export function decideOrExit(scopes: readonly ConflictScope[], flags: ConflictFlags): Resolutions {
+  try {
+    return gateConflicts(flags, scopes);
+  } catch (err) {
+    if (err instanceof ConflictRefusal) return exitWithConflicts(err);
+    throw err;
+  }
+}
+
 export function describe(err: unknown): { readonly code: string; readonly message: string } {
   return err instanceof CapyError
     ? { code: err.code, message: err.message }
@@ -143,6 +175,8 @@ export function describe(err: unknown): { readonly code: string; readonly messag
 
 interface Located extends SetLocation {
   readonly row_id: string;
+  /** The fingerprint the row listed for this location: what the caller saw (the pin of the conflict check). */
+  readonly seen: string;
 }
 
 const withRowId = (row: SecretIndexRow): readonly Located[] => {
@@ -153,8 +187,47 @@ const withRowId = (row: SecretIndexRow): readonly Located[] => {
     branch: l.branch,
     protected: l.protected,
     row_id,
+    seen: row.value_hash,
   }));
 };
+
+// ── Conflicts (CAP-717) ─────────────────────────────────────────────────────
+
+/**
+ * The locations where the value is no longer the one the row listed AND is not the value being set: someone
+ * else changed it since the caller looked. One scope per location (each is its own project and branch).
+ */
+export function secretConflictScopes(
+  name: string,
+  value: string,
+  located: readonly Located[],
+  previews: readonly LocationPreview[],
+): readonly ConflictScope[] {
+  const yours = hashValue(value);
+  return located.flatMap((l, i): ConflictScope[] => {
+    const current = previews[i]?.current;
+    if (current === undefined || current.hash === yours || current.hash === l.seen) return [];
+    return [
+      {
+        project: l.project_name,
+        branch: l.branch,
+        serverKeepHash: current.serverKeepHash,
+        conflicts: [
+          {
+            kind: 'source',
+            name,
+            project: l.project_name,
+            branch: l.branch,
+            pinned: l.seen,
+            yours,
+            theirs: current.hash,
+            ...(current.changedAt === undefined ? {} : { theirs_changed_at: current.changedAt }),
+          },
+        ],
+      },
+    ];
+  });
+}
 
 export function candidatesOf(rows: readonly SecretIndexRow[]) {
   return rows.map((r) => ({
@@ -284,9 +357,15 @@ const planIdFor = (sel: Selection): string =>
  * (needs a value to know `unchanged`) and GitHub's keep.lock for divergence.
  * The one planner: `capy secrets set --dry-run` and the `capy --dry-run secrets` screen both use it.
  */
-export async function describePlanBody(sel: PlanInput, env: SetEnv, value: string | undefined): Promise<SetPlanBody> {
+export async function describePlanBody(
+  sel: PlanInput,
+  env: SetEnv,
+  value: string | undefined,
+  /** Reads the caller already made (`previewLocations` for these locations and this value): not read again. */
+  read?: readonly LocationPreview[],
+): Promise<SetPlanBody> {
   // ONE unlock, then the reads `LOCATION_CONCURRENCY` at a time (and the repos `PR_CONCURRENCY` at a time).
-  const previews = await previewLocations(env, sel.located, sel.name, value);
+  const previews = read ?? (await previewLocations(env, sel.located, sel.name, value));
   const github = env.github();
   const prs = (
     await runPool({
@@ -318,8 +397,8 @@ export async function describePlanBody(sel: PlanInput, env: SetEnv, value: strin
 }
 
 /** The plan with its `plan_id`. */
-async function describePlan(sel: Selection, io: SecretsSetIo, value: string | undefined): Promise<SetPlan> {
-  return { plan_id: planIdFor(sel), ...(await describePlanBody(sel, io.env, value)) };
+async function describePlan(sel: Selection, io: SecretsSetIo, value: string | undefined, read?: readonly LocationPreview[]): Promise<SetPlan> {
+  return { plan_id: planIdFor(sel), ...(await describePlanBody(sel, io.env, value, read)) };
 }
 
 /** Human text for a plan. */
@@ -389,6 +468,7 @@ async function optionalValue(io: SecretsSetIo): Promise<string | undefined> {
 export async function runSecretsSet(name: string, opts: SecretsSetOpts, io: SecretsSetIo): Promise<number> {
   const json = opts.json === true;
   if (!isValidVarName(name)) return refuseInvalidName(json);
+  const flags = conflictFlagsOrExit(opts.conflictFlags ?? {}, json);
 
   const rows = selectRows(await readSecretIndex(io, json), name, opts, json);
   const located = excludeLocations(rows.flatMap(withRowId), opts.exclude ?? [], json);
@@ -404,7 +484,15 @@ export async function runSecretsSet(name: string, opts: SecretsSetOpts, io: Secr
   const sel: Selection = { name, located, targets, notLinked: planning.notLinked, bases, reposUnavailable: loaded.unavailable };
 
   if (opts.dryRun === true) {
-    const plan = await describePlan(sel, io, await optionalValue(io));
+    const previewValue = await optionalValue(io);
+    // With a value to compare, a location someone else changed since its row was listed is reported with the
+    // conflict_id (exit 3), the plan alongside; without one there is nothing to conflict with yet.
+    const read = previewValue === undefined || located.length === 0 ? undefined : await previewLocations(io.env, located, name, previewValue);
+    const plan = await describePlan(sel, io, previewValue, read);
+    const scopes = previewValue === undefined || read === undefined ? [] : secretConflictScopes(name, previewValue, located, read);
+    if (scopes.length > 0) {
+      return exitWithConflicts(conflictRefusalFor(ERROR_CODES.SECRETS_CONFLICT, scopes, undefined, { dryRun: true }), { plan_id: plan.plan_id, plan });
+    }
     if (json) console.log(JSON.stringify({ ok: true, dry_run: true, ...plan }, null, 2));
     else console.log(renderPlanText(plan));
     return 0;
@@ -431,7 +519,18 @@ export async function runSecretsSet(name: string, opts: SecretsSetOpts, io: Secr
   }
 
   const value = await requireValue(io, json);
-  const result = await runSecretSet({ name, value, locations: located, repos: targets, bases }, io.env, {
+  // Before anything is pushed: a location someone else changed since its row was listed needs a decision.
+  const keys = io.env.openKeys();
+  const reads = await previewLocations(io.env, located, name, value, keys);
+  const scopes = secretConflictScopes(name, value, located, reads);
+  const decided = await decideOrExit(scopes, flags);
+  const yours = hashValue(value);
+  const pushTo = located.filter((l) => decided[name] !== 'theirs' || !scopes.some((sc) => sc.project === l.project_name && sc.branch === l.branch));
+  const allowed = (loc: SetLocation): readonly string[] => {
+    const at = located.findIndex((l) => l.project_id === loc.project_id && l.branch === loc.branch);
+    return [yours, located[at]?.seen ?? '', reads[at]?.current?.hash ?? ''];
+  };
+  const result = await runSecretSet({ name, value, locations: pushTo, repos: targets, bases, allowed, keys }, io.env, {
     stopPushes: io.control?.pushes,
     stopPrs: io.control?.prs,
     // Said once per phase when a stop is noticed with items still running; silent when nothing is in progress.

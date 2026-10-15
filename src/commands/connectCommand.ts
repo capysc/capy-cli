@@ -3,6 +3,7 @@ import { listProviders, loadProvider, ConnectOpts, ConnectorModule } from './con
 import { EXIT_NEEDS_INPUT, isInteractive } from '../ui/interactive';
 import { resolveOrgContext } from '../core/orgContext';
 import { isSecretsConflict } from '../sync/commit';
+import { conflictFlagsOrExit, exitOnConflictRefusal, hasConflictFlags } from '../sync/conflicts';
 import type { DiscoveryContext } from './connectors/dokployDiscovery';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
@@ -99,7 +100,10 @@ export class ConnectCommand {
       return await this.executeDiscovery(mod, provider, discoveryCtx, discoveryOpts);
     }
 
-    const ctx = await resolveContext({ devMode: this.devMode, dryRun: effective.dryRun === true });
+    // Off a terminal (or given --resolve), a conflict follows the protocol: nothing is written, exit 3, the payload on stdout.
+    const flags = conflictFlagsOrExit(effective.conflictFlags ?? {}, effective.json === true);
+    const protocol = effective.json === true || !isInteractive(effective.nonTty) || hasConflictFlags(flags);
+    const ctx = await resolveContext({ devMode: this.devMode, dryRun: effective.dryRun === true, ...(protocol ? { conflicts: flags } : {}) });
 
     // Import-kind connectors (CAP-662: `dokploy`) pull MANY variables in one
     // run rather than linking one existing one, so they skip the var-picking
@@ -219,7 +223,10 @@ export class ConnectCommand {
     // A name someone else changed on the server since this folder's pin is a refusal naming it (nothing was uploaded).
     const written = await writeImportOutcome(ctx, outcome, { push: !opts.noPush, dryRun }).then(
       (result) => ({ conflict: undefined, wrote: result.wrote }),
-      (err: unknown) => (isSecretsConflict(err) ? { conflict: err, wrote: false } : Promise.reject(err)),
+      (err: unknown) => {
+        exitOnConflictRefusal(err);
+        return isSecretsConflict(err) ? { conflict: err, wrote: false } : Promise.reject(err);
+      },
     );
     if (written.conflict) {
       if (opts.json) {

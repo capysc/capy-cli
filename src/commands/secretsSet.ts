@@ -92,6 +92,14 @@ export interface SetRequest {
   readonly repos: readonly RepoTarget[];
   /** Each repo's PR base, by `repoKey`. Absent: the repo's default branch. */
   readonly bases?: Readonly<Record<string, string>>;
+  /**
+   * The fingerprints a location's current value may have for this push to go on (CAP-717): what the caller
+   * saw and decided against. A location holding anything else was changed by someone else since, and is
+   * `failed` with `SECRETS_CONFLICT` (nothing pushed to it). Absent: the location is not checked.
+   */
+  readonly allowed?: (location: SetLocation) => readonly string[];
+  /** The run's key resolver, when the caller already unlocked (the unlock is once per run). Absent: opened here. */
+  readonly keys?: KeyResolver;
 }
 
 export interface PrResult {
@@ -338,7 +346,15 @@ const failedItem = (location: SetLocation, err: unknown, rate?: RateInfo): PoolI
  * reading it saw. The push names the keep it was built from (`base_keep_hash`); if the server says someone saved
  * since the read (`SECRETS_STALE_BASE`), the location is read and replaced once more from the new latest.
  */
-async function pushLocation(env: SetEnv, keys: KeyResolver, loc: SetLocation, name: string, value: string, retried: boolean = false): Promise<PoolItem<LocationOutcome>> {
+async function pushLocation(
+  env: SetEnv,
+  keys: KeyResolver,
+  loc: SetLocation,
+  name: string,
+  value: string,
+  allowed?: (location: SetLocation) => readonly string[],
+  retried: boolean = false,
+): Promise<PoolItem<LocationOutcome>> {
   const key = await settled(keys(loc.project_id));
   if (!key.ok) return failedItem(loc, key.error);
   const read = await callWithBackoff((onRate) => env.client.getDecryptData(loc.project_id, loc.branch, undefined, true, onRate), env.sleep);
@@ -346,6 +362,10 @@ async function pushLocation(env: SetEnv, keys: KeyResolver, loc: SetLocation, na
   const current = attempt(() => currentFrom(read.value, name, key.value));
   if (!current.ok) return failedItem(loc, current.error, read.rate);
   if (current.value.plaintext === value) return withRate<LocationOutcome>({ kind: 'unchanged', location: loc }, read.rate);
+  // Someone else changed it since the caller looked (or again, since it decided): not overwritten.
+  if (allowed !== undefined && !allowed(loc).includes(hashValue(current.value.plaintext))) {
+    return failedItem(loc, new CapyError('changed since it was read', ERROR_CODES.SECRETS_CONFLICT), read.rate);
+  }
 
   const write = attempt(() => {
     const existing = current.value.serverKeep.variables[name]?.find((e) => e.branch === loc.branch);
@@ -374,7 +394,7 @@ async function pushLocation(env: SetEnv, keys: KeyResolver, loc: SetLocation, na
       ),
     env.sleep,
   );
-  if (!pushed.ok && !retried && isStaleBase(pushed.error)) return pushLocation(env, keys, loc, name, value, true);
+  if (!pushed.ok && !retried && isStaleBase(pushed.error)) return pushLocation(env, keys, loc, name, value, allowed, true);
   const rate = mergeRates(read.rate, pushed.rate, (env.now ?? Date.now)());
   if (!pushed.ok) return failedItem(loc, pushed.error, rate);
 
@@ -395,6 +415,8 @@ async function pushLocation(env: SetEnv, keys: KeyResolver, loc: SetLocation, na
 export interface LocationPreview {
   readonly action: 'update' | 'unchanged';
   readonly serverKeep: KeepFile | undefined;
+  /** What the location holds now, as fingerprints (never the value); absent when it could not be read. */
+  readonly current?: { readonly hash: string; readonly serverKeepHash: string; readonly changedAt?: string };
 }
 
 const UNKNOWN_PREVIEW: LocationPreview = { action: 'update', serverKeep: undefined };
@@ -414,7 +436,17 @@ async function previewItem(
   if (key === undefined || !key.ok) return withRate({ action: 'update', serverKeep: parseKeepJson(read.value.keep_file) }, read.rate);
   const current = attempt(() => currentFrom(read.value, name, key.value));
   return withRate<LocationPreview>(
-    current.ok ? { action: current.value.plaintext === value ? 'unchanged' : 'update', serverKeep: current.value.serverKeep } : UNKNOWN_PREVIEW,
+    current.ok
+      ? {
+          action: current.value.plaintext === value ? 'unchanged' : 'update',
+          serverKeep: current.value.serverKeep,
+          current: {
+            hash: hashValue(current.value.plaintext),
+            serverKeepHash: SyncEngine.computeKeepHash(current.value.serverKeep, loc.branch),
+            changedAt: current.value.serverKeep.variables[name]?.find((e) => e.branch === loc.branch)?.changed_at,
+          },
+        }
+      : UNKNOWN_PREVIEW,
     read.rate,
   );
 }
@@ -435,8 +467,10 @@ export async function previewLocations(
   locations: readonly SetLocation[],
   name: string,
   value: string | undefined,
+  /** The run's key resolver, when the caller already unlocked. */
+  opened?: KeyResolver,
 ): Promise<readonly LocationPreview[]> {
-  const keys = value === undefined || locations.length === 0 ? undefined : env.openKeys();
+  const keys = value === undefined || locations.length === 0 ? undefined : (opened ?? env.openKeys());
   const pooled = await runPool({
     items: locations,
     limit: LOCATION_CONCURRENCY,
@@ -573,11 +607,11 @@ const NO_KEYS: KeyResolver = async () => {
  * what it left unstarted is in `cancelled`. Everything in the result is in input order.
  */
 export async function runSecretSet(req: SetRequest, env: SetEnv, hooks: RunHooks = {}): Promise<SecretSetResult> {
-  const keys = req.locations.length === 0 || hooks.stopPushes?.aborted === true ? NO_KEYS : env.openKeys();
+  const keys = req.locations.length === 0 || hooks.stopPushes?.aborted === true ? NO_KEYS : (req.keys ?? env.openKeys());
   const pushed = await runPool({
     items: req.locations,
     limit: LOCATION_CONCURRENCY,
-    run: (loc) => pushLocation(env, keys, loc, req.name, req.value),
+    run: (loc) => pushLocation(env, keys, loc, req.name, req.value, req.allowed),
     stop: hooks.stopPushes,
     reserve: PACING_RESERVE,
     now: env.now,

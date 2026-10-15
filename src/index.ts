@@ -9,6 +9,7 @@ import { assertNotLocalOnly } from './core/localGate';
 import { version as CLI_VERSION } from '../package.json';
 import { refuseWebMode } from './core/webModeRemoved';
 import { ACCENT } from './ui/colors';
+import { conflictOption, rawConflictFlagsOf, resolveOption } from './sync/conflicts';
 
 // Prod talks to api.capy.sc and ~/.capy, full stop. Strip the environment's
 // attempts to move it before anything can read them — see config/prodPins.ts
@@ -71,6 +72,8 @@ program
   .option('-v, --verbose', 'enable detailed logging')
   .option('-f, --force', 're-encrypt existing variables')
   .option('-d, --dry-run', 'preview changes without applying')
+  .addOption(resolveOption())
+  .addOption(conflictOption())
   // Hidden: `--web` was removed. It still parses so the hook below can refuse it (WEB_MODE_REMOVED).
   .addOption(new Option('--web').hideHelp())
   // Root help only (Commander scopes addHelpText to the command it's called
@@ -117,7 +120,8 @@ program
       envPath: options.envPath,
       verbose: options.verbose,
       force: options.force,
-      dryRun: options.dryRun
+      dryRun: options.dryRun,
+      conflictFlags: rawConflictFlagsOf(cmd),
     };
 
     const command = new CapyCommand(cliOptions);
@@ -164,6 +168,8 @@ program
       'With a name and a piped value, sets that one variable. The value is read from stdin only:\n' +
       '  <cmd> | capy edit NAME --json\n',
   )
+  .addOption(resolveOption())
+  .addOption(conflictOption())
   .action(async (name, options, command) => {
     const { EditCommand } = await import('./commands/editCommand');
     const { prFlagsFromCommand } = await import('./commands/keepLockPr');
@@ -176,6 +182,7 @@ program
       pr: prFlagsFromCommand(command, options.prBase),
       // The program-level `--dry-run`, wherever it was typed.
       dryRun: command.optsWithGlobals().dryRun === true,
+      conflictFlags: rawConflictFlagsOf(command),
     });
   });
 
@@ -349,11 +356,15 @@ program
 
 program
   .command('push')
-  .description('Push encrypted values to Keep')
-  .action(async () => {
+  // COPY-FLAG: names what a push covers, deletions included.
+  .description('Push your changes to Keep: edited, new and deleted variables')
+  .option('--non-tty', 'treat stdin as not a terminal; a conflict stops the push with the conflict_id (agents/CI)')
+  .addOption(resolveOption())
+  .addOption(conflictOption())
+  .action(async (options, command) => {
     const { PushCommand } = await import('./commands/pushCommand');
     const cmd = new PushCommand();
-    await cmd.execute();
+    await cmd.execute({ nonTty: options.nonTty, conflictFlags: rawConflictFlagsOf(command) });
   });
 
 // `capy deploy` is a single picker that surfaces both:
@@ -390,6 +401,8 @@ const deploy = program
   .option('--plan <file>', 'dokploy --discover: the plan file to check (see schemas.deploy_dokploy_plan in `capy help --json`)')
   .option('--confirm <plan_id>', 'dokploy --discover: write the plan that --dry-run printed (one PR per repo)')
   .option('--base-url <url>', 'dokploy --discover: the Dokploy dashboard URL (else the org system variable _CONNECTOR_DOKPLOY_BASE_URL)')
+  .addOption(resolveOption())
+  .addOption(conflictOption())
   .action(async (target: string | undefined, options: any, cmd: any) => {
     assertNotLocalOnly('deploy');
     // Top-level program also defines --dry-run; merge globals so either
@@ -415,6 +428,7 @@ const deploy = program
         // commander negates `--no-deploy` onto the positive `deploy` property.
         noDeploy: options.deploy === false,
         json: !!options.json,
+        conflictFlags: rawConflictFlagsOf(cmd),
       });
       process.exit(code);
     }
@@ -851,6 +865,8 @@ secretsCmd
       '  <cmd> | capy secrets set NAME --row <row_id> --dry-run --json\n' +
       '  <cmd> | capy secrets set NAME --row <row_id> --confirm <plan_id> --json\n',
   )
+  .addOption(resolveOption())
+  .addOption(conflictOption())
   .action(async (name: string, options: any, command: any) => {
     assertNotLocalOnly('secrets set');
     // `--json` is also a `capy secrets` option, which Commander lets the parent claim;
@@ -868,6 +884,7 @@ secretsCmd
         exclude: options.exclude,
         noPrFor: options.prFor,
         noPr: options.pr === false,
+        conflictFlags: rawConflictFlagsOf(command),
       },
       false,
     );
@@ -893,6 +910,8 @@ secretsCmd
       '  capy secrets deploy NAME --row <row_id> --dry-run --json\n' +
       '  capy secrets deploy NAME --row <row_id> --confirm <plan_id> --json\n',
   )
+  .addOption(resolveOption())
+  .addOption(conflictOption())
   .action(async (names: string[], options: any, command: any) => {
     assertNotLocalOnly('secrets deploy');
     // `--json` is also a `capy secrets` option, which Commander lets the parent claim;
@@ -908,6 +927,7 @@ secretsCmd
         row: options.row,
         allRows: options.allRows === true,
         exclude: options.exclude,
+        conflictFlags: rawConflictFlagsOf(command),
       },
       false,
     );
@@ -979,6 +999,8 @@ program
       'With a value piped in and one name, adds that variable (an existing one needs --force):\n' +
       '  <cmd> | capy add NAME --json\n',
   )
+  .addOption(resolveOption())
+  .addOption(conflictOption())
   .action(async (varNames, options, command) => {
     assertNotLocalOnly('add');
     const { AddCommand } = await import('./commands/addCommand');
@@ -992,6 +1014,7 @@ program
       json: options.json,
       pr: prFlagsFromCommand(command, options.prBase),
       dryRun: merged.dryRun === true,
+      conflictFlags: rawConflictFlagsOf(command),
     });
   });
 
@@ -1004,6 +1027,8 @@ program
   .option('--pr', 'create a PR with the keep.lock change (answers the prompt)') // COPY-FLAG
   .option('--no-pr', 'do not create a PR with the keep.lock change') // COPY-FLAG
   .option('--pr-base <branch>', 'base branch for the PR (answers the prompt)') // COPY-FLAG
+  .addOption(resolveOption())
+  .addOption(conflictOption())
   .action(async (varNames, options, command) => {
     assertNotLocalOnly('remove');
     const { RemoveCommand } = await import('./commands/removeCommand');
@@ -1015,6 +1040,7 @@ program
       nonTty: options.nonTty,
       pr: prFlagsFromCommand(command, options.prBase),
       dryRun: command.optsWithGlobals().dryRun === true,
+      conflictFlags: rawConflictFlagsOf(command),
     });
   });
 
@@ -1053,6 +1079,8 @@ program
     '--environment <names>',
     'dokploy discover: restrict the plan to these Dokploy environment names, comma-separated (e.g. staging,preview)',
   )
+  .addOption(resolveOption())
+  .addOption(conflictOption())
   .action(async (provider, options, command) => {
     assertNotLocalOnly('connect');
     const { ConnectCommand } = await import('./commands/connectCommand');
@@ -1082,6 +1110,7 @@ program
       yes: options.yes === true,
       overwrite: options.overwrite === true,
       environment: options.environment,
+      conflictFlags: rawConflictFlagsOf(command),
     });
   });
 
@@ -1094,6 +1123,8 @@ program
   .option('--skip-prompts', 'alias for --yes')
   .option('--non-tty', 'never prompt; resolve choices from flags or fail fast (agents/CI)')
   .option('--provider <name>', 'integration to promote an unmanaged var through (non-interactive)')
+  .addOption(resolveOption())
+  .addOption(conflictOption())
   .action(async (varName, options, command) => {
     assertNotLocalOnly('rotate');
     const { RotateCommand } = await import('./commands/rotateCommand');
@@ -1104,6 +1135,7 @@ program
       skipPrompts: !!(options.yes || options.skipPrompts),
       nonTty: options.nonTty,
       provider: options.provider,
+      conflictFlags: rawConflictFlagsOf(command),
     });
   });
 

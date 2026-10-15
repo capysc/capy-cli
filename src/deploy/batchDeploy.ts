@@ -42,7 +42,9 @@ import { RecordClient, RecordResult, deliveryFor, recordDeliveriesOnServer } fro
 import { buildDeployPrBody } from './deployPrBody';
 import { foldDeployKeep, hashValue } from './keepGate';
 import { parseTargets } from './configuredTargets';
-import { TargetDeliveryDescriptor, VarDelivery, deliveryWorthGating } from './targetsGate';
+import { TargetDeliveryDescriptor, VarDelivery, deployedHashesFor, deliveryWorthGating } from './targetsGate';
+import { SyncEngine } from '../sync/syncEngine';
+import { targetResolutions, type ConflictScope, type Resolutions } from '../sync/conflicts';
 import { callWithBackoff, retryOnRateLimit } from '../service/capyCalls';
 import { PACING_RESERVE, PoolItem, RateInfo, runPool } from '../utils/pool';
 import type { Sleep } from '../utils/backoff';
@@ -72,6 +74,8 @@ export const SKIP_CODES = {
   NOT_CI_MODE: 'NOT_CI_MODE',
   /** Capy's keep.lock on the PR base already records exactly these values for this target. */
   NOTHING_TO_DEPLOY: 'NOTHING_TO_DEPLOY',
+  /** Every picked value on the service was changed outside Capy and the caller chose to keep the service's (CAP-717). */
+  KEPT_ON_PLATFORM: 'KEPT_ON_PLATFORM',
 } as const;
 export type SkipCode = (typeof SKIP_CODES)[keyof typeof SKIP_CODES];
 
@@ -118,6 +122,12 @@ export interface BatchTarget {
   /** The PR base: the target's `gitBaseBranch`, else the repo's default branch. */
   readonly base: string;
   readonly config: TargetConfig;
+  /**
+   * The selected names this target ships: the only variables the deploy delivers and records (CAP-715).
+   * Every other variable of the target, and every other line Capy manages in its Dokploy block, is left as it is.
+   * Absent: all of the target's variables.
+   */
+  readonly picked?: readonly string[];
 }
 
 export interface PlanSkipped {
@@ -205,6 +215,7 @@ function classifyLocation(
       path: link.path,
       base: config.gitBaseBranch ?? base,
       config,
+      picked: config.vars.filter((v) => names.includes(v)),
     }));
   const skipped = [...notOnDefault, ...foundSkips];
   return {
@@ -353,7 +364,7 @@ export interface BatchEnv {
   readonly now?: () => number;
 }
 
-export type BatchPhase = 'pushing' | 'recording' | 'prs';
+export type BatchPhase = 'checking' | 'pushing' | 'recording' | 'prs';
 
 export interface BatchProgress {
   readonly phase: BatchPhase;
@@ -372,6 +383,12 @@ export interface BatchHooks {
   readonly onStopping?: (stopping: { readonly phase: BatchPhase; readonly inFlight: number }) => void;
   readonly stopPushes?: AbortSignal;
   readonly stopPrs?: AbortSignal;
+  /**
+   * CAP-717: given, every Dokploy target is first compared with the service's live env (reading only), and the
+   * conflicts found are handed over BEFORE anything is written. It returns the decisions (by `NAME@TARGET`) or
+   * throws a `ConflictRefusal` (nothing has been written). Absent: no comparison, as before.
+   */
+  readonly decide?: (scopes: readonly ConflictScope[]) => Resolutions;
 }
 
 // ---------------------------------------------------------------------------
@@ -476,14 +493,23 @@ export interface Pushed {
   readonly missing: readonly string[];
 }
 
-/** The target with only the names that have a value; unchanged when nothing is missing. */
-const effectiveTarget = (item: BatchTarget, missing: readonly string[]): BatchTarget =>
-  missing.length === 0 ? item : { ...item, config: { ...item.config, vars: item.config.vars.filter((v) => !missing.includes(v)) } };
+/** The target restricted to `names`: only these are delivered and recorded. */
+const withVars = (item: BatchTarget, names: readonly string[]): BatchTarget => ({ ...item, config: { ...item.config, vars: [...names] } });
+
+/** The names the deploy is about: the picked ones the branch has a value for (all of the target's when none were picked). */
+const wantedOf = (item: BatchTarget): readonly string[] => item.picked ?? item.config.vars;
 
 export type PushOutcome =
   | Pushed
   | { readonly kind: 'skipped'; readonly item: BatchTarget; readonly code: SkipCode }
   | { readonly kind: 'failed'; readonly item: BatchTarget; readonly code: string; readonly stage: FailStage };
+
+/** The comparison pass (reading only): where this target's conflicts, if any, were found. */
+export interface Checked {
+  readonly kind: 'checked';
+  readonly item: BatchTarget;
+  readonly scope: ConflictScope | undefined;
+}
 
 const failedPush = (item: BatchTarget, code: string, stage: FailStage, rate?: RateInfo): PoolItem<PushOutcome> =>
   withRate<PushOutcome>({ kind: 'failed', item, code, stage }, rate);
@@ -498,12 +524,43 @@ function specFor(p: Pushed): KeepLockFileSpec {
   };
 }
 
+/** What one pass over a target does: look for conflicts (reading only), or deliver with the decisions made. */
+type TargetPass = { readonly kind: 'check' } | { readonly kind: 'deliver'; readonly resolutions: Resolutions };
+
 /**
- * One target, up to and including the delivery to Dokploy: preflight, read and decrypt its
+ * One target, up to and including the delivery to Dokploy: preflight, read and decrypt its picked
  * variables, check against the PR base's keep.lock that something would change, push.
  * Never throws; reports the rate-limit reading it saw.
+ *
+ * Only the picked variables are delivered and recorded; every other managed line in the service's Capy block
+ * stays exactly as it is (CAP-715). On Dokploy the live value of each is first compared with what Capy last
+ * delivered (CAP-717): the `check` pass reads and reports, the `deliver` pass writes with the decisions made
+ * (`NAME@TARGET`): `theirs` leaves that variable on the service as it is and records nothing for it.
  */
-export async function pushTarget(env: BatchEnv, keys: KeyResolver, apiKeys: ApiKeys, item: BatchTarget): Promise<PoolItem<PushOutcome>> {
+export async function pushTarget(
+  env: BatchEnv,
+  keys: KeyResolver,
+  apiKeys: ApiKeys,
+  item: BatchTarget,
+  resolutions: Resolutions = {},
+): Promise<PoolItem<PushOutcome>> {
+  const done = await passOverTarget(env, keys, apiKeys, item, { kind: 'deliver', resolutions });
+  // A delivery pass never answers `checked`; if it ever did, nothing was written and the target says so.
+  return done.result.kind === 'checked' ? failedPush(item, ERROR_CODES.SERVICE_ERROR, 'push', done.rate) : (done as PoolItem<PushOutcome>);
+}
+
+/** The comparison pass over one target: reads, decrypts and compares; writes nothing. */
+export async function checkTarget(env: BatchEnv, keys: KeyResolver, apiKeys: ApiKeys, item: BatchTarget): Promise<PoolItem<PushOutcome | Checked>> {
+  return passOverTarget(env, keys, apiKeys, item, { kind: 'check' });
+}
+
+async function passOverTarget(
+  env: BatchEnv,
+  keys: KeyResolver,
+  apiKeys: ApiKeys,
+  item: BatchTarget,
+  pass: TargetPass,
+): Promise<PoolItem<PushOutcome | Checked>> {
   const config = item.config;
   const github = env.github();
   if (github === undefined) return failedPush(item, ERROR_CODES.KEEP_PR_GH_UNAVAILABLE, 'github');
@@ -522,11 +579,12 @@ export async function pushTarget(env: BatchEnv, keys: KeyResolver, apiKeys: ApiK
   if (!read.ok) return failedPush(item, codeOf(read.error), 'values', read.rate);
   const serverKeep = parseKeep(read.value.keep_file);
   if (serverKeep === undefined) return failedPush(item, ERROR_CODES.NO_KEEP_FILE, 'values', read.rate);
-  const decrypted = decryptVars(read.value.env_content ?? '', config.vars, key.value);
+  const decrypted = decryptVars(read.value.env_content ?? '', wantedOf(item), key.value);
   if (!decrypted.ok) return failedPush(item, decrypted.code, 'values', read.rate);
-  // From here on the target carries only the names that have a value (`capy deploy` does the same).
-  const effective = effectiveTarget(item, decrypted.missing);
-  const hashes = Object.fromEntries(effective.config.vars.map((v) => [v, hashValue(decrypted.values[v])]));
+  // From here on the target carries only the picked names that have a value (`capy deploy` drops a missing one the same way).
+  const present = wantedOf(item).filter((v) => !decrypted.missing.includes(v));
+  const effective = withVars(item, present);
+  const hashes = Object.fromEntries(present.map((v) => [v, hashValue(decrypted.values[v])]));
   const { delivery, values } = deliveryFor(effective.config, env.adapter, undefined, false, hashes);
 
   // Nothing is pushed unless the PR can be opened afterwards: the base exists, and its keep.lock would change.
@@ -547,17 +605,61 @@ export async function pushTarget(env: BatchEnv, keys: KeyResolver, apiKeys: ApiK
     return withRate<PushOutcome>({ kind: 'skipped', item, code: SKIP_CODES.NOTHING_TO_DEPLOY }, read.rate);
   }
 
+  // Dokploy: the service's live value of each picked name against what Capy last delivered (CAP-717).
+  const targetCheck = env.adapter.readsLiveValues
+    ? {
+        pinned: deployedHashesFor(serverKeep, item.branch, delivery.provider, config.name),
+        resolutions: pass.kind === 'deliver' ? targetResolutions(pass.resolutions, config.name) : {},
+      }
+    : undefined;
+  const ctx = {
+    env: decrypted.values,
+    secretsOnly: true,
+    noDeploy: false,
+    keepOtherManaged: true,
+    cwd: process.cwd(),
+    ...callCtx,
+    ...(targetCheck === undefined ? {} : { targetCheck }),
+  };
+
+  if (pass.kind === 'check') {
+    if (targetCheck === undefined) return withRate<Checked>({ kind: 'checked', item, scope: undefined }, read.rate);
+    const looked = await settled(env.adapter.deploy(effective.config, { ...ctx, dryRun: true }));
+    if (!looked.ok) return failedPush(item, codeOf(looked.error), 'push', read.rate);
+    if (!looked.value.ok) return failedPush(item, looked.value.steps.find((st) => st.status === 'fail' && st.code !== undefined)?.code ?? ERROR_CODES.DEPLOY_PUSH_FAILED, 'push', read.rate);
+    const conflicts = looked.value.conflicts ?? [];
+    const scope: ConflictScope | undefined =
+      conflicts.length === 0
+        ? undefined
+        : { project: serverKeep.project_name, branch: item.branch, serverKeepHash: SyncEngine.computeKeepHash(serverKeep, item.branch), conflicts };
+    return withRate<Checked>({ kind: 'checked', item, scope }, read.rate);
+  }
+
   // CI mode: secrets only. Merging the PR is what triggers Dokploy's own auto-deploy.
-  const delivered = await settled(
-    env.adapter.deploy(effective.config, { env: decrypted.values, dryRun: false, secretsOnly: true, noDeploy: false, cwd: process.cwd(), ...callCtx }),
-  );
+  const delivered = await settled(env.adapter.deploy(effective.config, { ...ctx, dryRun: false }));
   if (!delivered.ok) return failedPush(item, codeOf(delivered.error), 'push', read.rate);
   if (!delivered.value.ok) {
+    // The service changed between the comparison and the write: refused, nothing written.
+    if ((delivered.value.conflicts ?? []).length > 0) return failedPush(item, ERROR_CODES.SECRETS_CONFLICT, 'push', read.rate);
     const stepCode = delivered.value.steps.find((s) => s.status === 'fail' && s.code !== undefined)?.code;
     return failedPush(item, stepCode ?? ERROR_CODES.DEPLOY_PUSH_FAILED, 'push', read.rate);
   }
+  // A name whose service value was kept (`theirs`) was not written: it is not recorded as delivered either.
+  const kept = delivered.value.skipped ?? [];
+  const landed = present.filter((v) => !kept.includes(v));
+  if (landed.length === 0) return withRate<PushOutcome>({ kind: 'skipped', item, code: SKIP_CODES.KEPT_ON_PLATFORM }, read.rate);
+  const recorded = deliveryFor(withVars(item, landed).config, env.adapter, undefined, false, hashes);
   return withRate<PushOutcome>(
-    { kind: 'pushed', item: effective, delivery, values, hashes, deliveredAt: new Date((env.now ?? Date.now)()).toISOString(), scaffold, missing: decrypted.missing },
+    {
+      kind: 'pushed',
+      item: withVars(item, landed),
+      delivery: recorded.delivery,
+      values: recorded.values,
+      hashes: Object.fromEntries(landed.map((v) => [v, hashes[v]])),
+      deliveredAt: new Date((env.now ?? Date.now)()).toISOString(),
+      scaffold,
+      missing: decrypted.missing,
+    },
     read.rate,
   );
 }
@@ -676,6 +778,37 @@ export async function deployTarget(env: BatchEnv, keys: KeyResolver, apiKeys: Ap
 // ---------------------------------------------------------------------------
 
 /**
+ * The comparison pass of a run (CAP-717): each target read, decrypted and compared with its service, nothing
+ * written. Returns where conflicts were found (none for a target on a platform that cannot be read back).
+ */
+async function findBatchConflicts(
+  plan: BatchPlan,
+  env: BatchEnv,
+  keys: KeyResolver,
+  apiKeys: ApiKeys,
+  hooks: BatchHooks,
+): Promise<readonly ConflictScope[]> {
+  const looked = await runPool({
+    items: plan.targets,
+    limit: BATCH_DEPLOY_CONCURRENCY,
+    run: (item) => checkTarget(env, keys, apiKeys, item),
+    stop: hooks.stopPushes,
+    reserve: PACING_RESERVE,
+    now: env.now,
+    sleep: env.sleep,
+    onChange: (p) => hooks.onProgress?.({ phase: 'checking', ...p }),
+    onStopping: (inFlight) => hooks.onStopping?.({ phase: 'checking', inFlight }),
+  });
+  return looked.results.flatMap((o) => (o?.kind === 'checked' && o.scope !== undefined ? [o.scope] : []));
+}
+
+/** The conflicts a run of `plan` would meet, from one reading pass: what `--dry-run` reports. Writes nothing. */
+export async function previewBatchConflicts(plan: BatchPlan, env: BatchEnv): Promise<readonly ConflictScope[]> {
+  if (plan.targets.length === 0 || env.adapter.readsLiveValues !== true) return [];
+  return findBatchConflicts(plan, env, env.openKeys(), await resolveApiKeys(env, plan.targets), {});
+}
+
+/**
  * Deploys every target of `plan`: pushes `BATCH_DEPLOY_CONCURRENCY` at a time after ONE
  * unlock, records the deliveries, then opens one PR per pushed target. One failure never
  * blocks another, and nothing waits forever (every GitHub call and every service call has a
@@ -688,10 +821,15 @@ export async function runBatchDeploy(plan: BatchPlan, env: BatchEnv, hooks: Batc
   const keys = plan.targets.length === 0 || stoppedAtStart ? NO_KEYS : env.openKeys();
   const apiKeys = plan.targets.length === 0 || stoppedAtStart ? NO_API_KEYS : await resolveApiKeys(env, plan.targets);
 
+  // Before anything is written: every target's live values are compared (reading only) and the conflicts decided.
+  const found =
+    hooks.decide === undefined || plan.targets.length === 0 || stoppedAtStart ? [] : await findBatchConflicts(plan, env, keys, apiKeys, hooks);
+  const decisions: Resolutions = hooks.decide === undefined || found.length === 0 ? {} : hooks.decide(found);
+
   const pushedPhase = await runPool({
     items: plan.targets,
     limit: BATCH_DEPLOY_CONCURRENCY,
-    run: (item) => pushTarget(env, keys, apiKeys, item),
+    run: (item) => pushTarget(env, keys, apiKeys, item, decisions),
     stop: hooks.stopPushes,
     reserve: PACING_RESERVE,
     now: env.now,
