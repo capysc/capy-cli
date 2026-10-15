@@ -27,6 +27,8 @@ mock.module('child_process', () => ({
     };
     return child;
   },
+  // composeForward.ts (imported by runCommand) reads `docker compose config` with it.
+  spawnSync: () => ({ status: 1, stdout: '' }),
   ChildProcess: class {},
 }));
 
