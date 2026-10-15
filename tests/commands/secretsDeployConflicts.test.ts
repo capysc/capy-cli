@@ -66,14 +66,20 @@ async function capture(fn: () => Promise<number>): Promise<Captured> {
 const LIVE = 'deadbeefdeadbeef';
 const conflictFor = (theirs: string = LIVE) => ({ kind: 'target' as const, name: NAME, target: 'api', pinned: null, yours: hashOf(NAME), theirs });
 
-/** A Dokploy adapter that compares live values: `api`'s API_KEY is in conflict until an answer is given. */
-function liveAdapter(theirs: string = LIVE) {
+/**
+ * A Dokploy adapter that compares live values: `api`'s API_KEY is in conflict until an answer is given, and an answer
+ * counts only for the live value (and delivered value) it was made against, as `planTargetDelivery` does.
+ * `liveAtWrite`: what the service holds when the delivery pass reads it (the comparison pass sees `theirs`).
+ */
+function liveAdapter(theirs: string = LIVE, liveAtWrite: string = theirs) {
   const base = fakeAdapter({
     deploy: (config: TargetConfig, ctx: DeployContext): DeployResult => {
       if (config.name !== 'api' || ctx.targetCheck === undefined) return { ok: true, steps: [{ label: 'application.saveEnvironment', status: 'ok' }] };
-      const answer = ctx.targetCheck.resolutions[NAME];
-      if (ctx.dryRun) return { ok: true, steps: [], conflicts: [conflictFor(theirs)] };
-      if (answer === undefined) return { ok: false, steps: [{ label: 'application.saveEnvironment', status: 'fail', code: 'SECRETS_CONFLICT' }], conflicts: [conflictFor(theirs)] };
+      const now = ctx.dryRun ? theirs : liveAtWrite;
+      const seen = ctx.targetCheck.resolutions[NAME];
+      const answer = seen !== undefined && seen.theirs === now && seen.yours === hashOf(NAME) ? seen.choice : undefined;
+      if (ctx.dryRun) return { ok: true, steps: [], conflicts: [conflictFor(now)] };
+      if (answer === undefined) return { ok: false, steps: [{ label: 'application.saveEnvironment', status: 'fail', code: 'SECRETS_CONFLICT' }], conflicts: [conflictFor(now)] };
       return answer === 'theirs'
         ? { ok: true, steps: [{ label: 'application.saveEnvironment', status: 'ok' }], skipped: [NAME] }
         : { ok: true, steps: [{ label: 'application.saveEnvironment', status: 'ok' }] };
@@ -146,7 +152,7 @@ describe('capy secrets deploy: target conflicts', () => {
     expect(out.exitCode).toBeUndefined();
     expect(json(out).ok).toBe(true);
     const api = r.adapter.deploy.mock.calls.find(([c, ctx]) => c.name === 'api' && !ctx.dryRun);
-    expect(api?.[1].targetCheck?.resolutions).toEqual({ [NAME]: 'mine' });
+    expect(api?.[1].targetCheck?.resolutions).toEqual({ [NAME]: { choice: 'mine', theirs: LIVE, yours: hashOf(NAME) } });
     expect(r.service.pushSecrets.mock.calls.length).toBeGreaterThan(0);
     expect(r.github.createPull.mock.calls).toHaveLength(3);
   });
@@ -173,6 +179,17 @@ describe('capy secrets deploy: target conflicts', () => {
     expect(json(out).conflict_id).not.toBe(conflictId);
     expect(json(out).conflicts).toEqual([conflictFor('cafecafecafecafe')]);
     nothingWritten(second);
+  });
+
+  test('the service moved between the comparison pass and the delivery pass: the answer does not apply, api fails with SECRETS_CONFLICT and nothing is recorded for it', async () => {
+    const r = rig(liveAdapter(LIVE, 'cafecafecafecafe'));
+    const { planId, conflictId } = await preview(r);
+    const out = await run(r, { confirm: planId, conflictFlags: { resolve: [`${NAME}@api=mine`], conflict: conflictId } });
+    const body = json(out);
+    expect(body.failed).toContainEqual(expect.objectContaining({ target: 'api', code: 'SECRETS_CONFLICT' }));
+    expect(body.delivered.map((d: { target: string }) => d.target)).not.toContain('api');
+    const recorded = r.service.pushSecrets.mock.calls.map((c) => JSON.parse(String(c[1])) as { variables: Record<string, Array<{ targets?: Array<{ target: string }> }>> });
+    recorded.forEach((keep) => expect(keep.variables.API_KEY[0].targets?.map((t) => t.target) ?? []).not.toContain('api'));
   });
 
   test('a conflict id without an answer for the name is a partial answer: the names still open, under the same id', async () => {

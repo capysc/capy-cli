@@ -7,7 +7,7 @@
  * The properties: a variable the folder did not change is never delivered stale (Capy's latest is pulled in); a
  * variable both sides changed is a conflict that stops the deploy off a terminal (exit-3 payload, nothing uploaded,
  * the folder untouched) and, once answered, is either committed first and delivered (mine) or taken from Capy
- * (theirs); a folder edit nobody else touched is delivered as always and NOT committed; source and target
+ * (theirs); a folder edit nobody else touched is committed to Capy, then delivered; source and target
  * conflicts are answered in one step under one conflict_id.
  *
  * `mock.module()` is process-wide: this file runs isolated (tests/run-tests.sh).
@@ -53,6 +53,8 @@ import { reconcileDeployConflicts, type ReconcileInput } from '../../src/command
 import { ConflictRefusal, parseConflictFlags, type Conflict } from '../../src/sync/conflicts';
 import { hashValue } from '../../src/sync/compareSecrets';
 import type { KeepFile } from '../../src/types/index';
+import { staleTargets } from '../../src/deploy/targetsGate';
+import { planTargetDelivery } from '../../src/deploy/dokployApi';
 
 const BRANCH = 'production';
 const OLD = { X: 'x-old', Y: 'y-old' } as const;
@@ -79,13 +81,13 @@ function world(env: Record<string, string>, server: typeof NEW_SEED = NEW_SEED) 
 }
 
 /** An adapter that delivers plain values and, optionally, reports live-value conflicts the way Dokploy does. */
-function adapterWith(live: readonly Conflict[] = []): DeployAdapter & { readonly deploy: ReturnType<typeof mock> } {
-  const deploy = mock(async (_target: unknown, ctx: { dryRun: boolean; targetCheck?: { resolutions: Record<string, string> } }) => ({
+function adapterWith(live: readonly Conflict[] | ((env: Readonly<Record<string, string>>) => readonly Conflict[]) = []): DeployAdapter & { readonly deploy: ReturnType<typeof mock> } {
+  const deploy = mock(async (_target: unknown, ctx: { dryRun: boolean; env: Readonly<Record<string, string>>; targetCheck?: { resolutions: Record<string, unknown> } }) => ({
     ok: true,
     steps: [],
-    conflicts: ctx.dryRun ? live : undefined,
+    conflicts: ctx.dryRun ? (typeof live === 'function' ? live(ctx.env) : live) : undefined,
   }));
-  return { id: 'dokploy', label: 'x', description: '', varKind: 'runtime', defaultMode: 'ci', readsLiveValues: live.length > 0, requires: { binaries: [] }, detect: async () => ({}), preflight: async () => ({ ok: true }), deploy } as unknown as DeployAdapter & {
+  return { id: 'dokploy', label: 'x', description: '', varKind: 'runtime', defaultMode: 'ci', readsLiveValues: typeof live === 'function' || live.length > 0, requires: { binaries: [] }, detect: async () => ({}), preflight: async () => ({ ok: true }), deploy } as unknown as DeployAdapter & {
     readonly deploy: ReturnType<typeof mock>;
   };
 }
@@ -157,12 +159,27 @@ describe('capy deploy: source conflicts', () => {
     expect(folder.pin('X')).toBe(hashValue(THEIRS));
   });
 
-  test('a folder edit nobody else touched is delivered as it always was and is NOT committed by the deploy', async () => {
+  test('a folder edit nobody else touched is COMMITTED to Capy before it is delivered: Capy holds what the platform will hold, and the target is not read as behind', async () => {
     const { fake, folder } = world({ X: OLD.X, Y: 'y-edited' }, OLD_SEED);
     const done = await reconcileDeployConflicts(input(folder, adapterWith()));
     expect(done.ok).toBe(true);
-    expect(fake.pushSecrets.mock.calls).toHaveLength(0);
-    expect(folder.env().Y).toBe('y-edited'); // still the folder's edit
+    expect(fake.pushSecrets.mock.calls).toHaveLength(1);
+    expect(serverValues(fake.state(), BRANCH, KEY)).toEqual({ X: OLD.X, Y: 'y-edited' }); // Capy's latest decrypts to the folder's value
+    expect(folder.env().Y).toBe('y-edited');
+    expect(folder.pin('Y')).toBe(hashValue('y-edited'));
+    // What `recordDeployTargets` writes next: deployed_value_hash of the delivered value. Against Capy's pin it is not behind.
+    const entry = fake.state().keep?.variables.Y.find((e) => e.branch === BRANCH);
+    expect(entry).toBeDefined();
+    const delivered = { provider: 'dokploy', target: 'dokploy-production', deployed_value_hash: hashValue('y-edited') };
+    expect(staleTargets({ ...entry!, targets: [delivered] } as never)).toEqual([]);
+  });
+
+  test('an edit nobody else touched on a name Capy did not move, next to one a teammate moved: both land, nothing the folder did not change is written', async () => {
+    const { fake, folder } = world({ X: OLD.X, Y: 'y-edited' }); // the server moved X; the folder only changed Y
+    const done = await reconcileDeployConflicts(input(folder, adapterWith()));
+    expect(done.ok).toBe(true);
+    expect(serverValues(fake.state(), BRANCH, KEY)).toEqual({ X: THEIRS, Y: 'y-edited' });
+    expect(folder.env()).toEqual({ X: THEIRS, Y: 'y-edited' });
   });
 
   test('a folder that agrees with Capy is left alone: no write of any kind', async () => {
@@ -206,8 +223,59 @@ describe('capy deploy: source and target conflicts in one step', () => {
     const flags = parseConflictFlags({ resolve: ['X=mine', 'Y@dokploy-production=theirs'], conflict: first.payload.conflict_id });
     const done = await reconcileDeployConflicts(input(folder, adapter, { flags }));
     expect(done).toMatchObject({ ok: true, skipped: ['Y'] });
-    expect(done.ok && done.targetCheck?.resolutions).toEqual({ Y: 'theirs' });
+    // The decision carries the fingerprints it was made against (what the adapter re-checks at the write).
+    expect(done.ok && done.targetCheck?.resolutions).toEqual({ Y: { choice: 'theirs', theirs: live.theirs, yours: live.yours } });
     expect(serverValues(fake.state(), BRANCH, KEY).X).toBe(MINE);
+  });
+
+  test('the decision handed to the write only counts for the state it was made against: the live value moved afterwards, so the plan is a conflict again', async () => {
+    const { folder } = world({ X: MINE, Y: OLD.Y });
+    // The platform holds 'seen-live' for Y when the answer is given; the adapter reports it against the env it was handed.
+    const adapter = adapterWith((env) => [{ kind: 'target', name: 'Y', target: 'dokploy-production', pinned: null, yours: hashValue(env.Y), theirs: hashValue('seen-live') }]);
+    const first = await refusal(() => reconcileDeployConflicts(input(folder, adapter)));
+    const flags = parseConflictFlags({ resolve: ['X=mine', 'Y@dokploy-production=mine'], conflict: first.payload.conflict_id });
+    const done = await reconcileDeployConflicts(input(folder, adapter, { flags }));
+    const check = done.ok ? done.targetCheck : undefined;
+    expect(check).toBeDefined();
+    const plan = (liveValue: string) => planTargetDelivery(`Y=${liveValue}\n`, [{ name: 'Y', value: OLD.Y }], check);
+    expect(plan('seen-live').kind).toBe('clear'); // still what was seen: the answer applies
+    expect(plan('moved-live').kind).toBe('conflict'); // moved after the answer: asked again, nothing to apply
+  });
+
+  test('source answered theirs: the target comparison runs with Capy\'s latest, so the target conflict reports the value that will really be delivered', async () => {
+    const { fake, folder } = world({ X: MINE, Y: OLD.Y });
+    // The platform holds an X that is neither Capy's nor the folder's; the adapter reports it against the env it was given.
+    const platform = hashValue('x-on-the-platform');
+    const adapter = adapterWith((env) => [{ kind: 'target', name: 'X', target: 'dokploy-production', pinned: null, yours: hashValue(env.X), theirs: platform }]);
+
+    const first = await refusal(() => reconcileDeployConflicts(input(folder, adapter)));
+    expect(first.payload.conflicts.find((c) => c.kind === 'target')).toMatchObject({ yours: hashValue(MINE) }); // unanswered: read as mine
+
+    // Answering the source side `theirs` changes what is delivered, so the id from the first look no longer binds: STALE, with the real yours.
+    const answered = parseConflictFlags({ resolve: ['X=theirs', 'X@dokploy-production=theirs'], conflict: first.payload.conflict_id });
+    const stale = await refusal(() => reconcileDeployConflicts(input(folder, adapter, { flags: answered })));
+    expect(stale.payload.code).toBe('SECRETS_CONFLICT_STALE');
+    expect(stale.payload.conflicts.find((c) => c.kind === 'target')).toMatchObject({ yours: hashValue(THEIRS), theirs: platform });
+    expect(fake.pushSecrets.mock.calls).toHaveLength(0);
+
+    // The rerun with the fresh id goes through; the target decision is bound to the real yours.
+    const again = parseConflictFlags({ resolve: ['X=theirs', 'X@dokploy-production=mine'], conflict: stale.payload.conflict_id });
+    const done = await reconcileDeployConflicts(input(folder, adapter, { flags: again }));
+    expect(done.ok && done.targetCheck?.resolutions).toEqual({ X: { choice: 'mine', theirs: platform, yours: hashValue(THEIRS) } });
+    expect(folder.env().X).toBe(THEIRS);
+  });
+
+  test('in a terminal the source is asked first and the platform is compared with its answer: the target question is about Capy\'s latest, not the folder\'s value', async () => {
+    const { folder } = world({ X: MINE, Y: OLD.Y });
+    const platform = hashValue('x-on-the-platform');
+    const adapter = adapterWith((env) => [{ kind: 'target', name: 'X', target: 'dokploy-production', pinned: null, yours: hashValue(env.X), theirs: platform }]);
+    ask.mockImplementationOnce(async () => ({ X: 'theirs' })).mockImplementationOnce(async () => ({ 'X@dokploy-production': 'theirs' }));
+    const done = await reconcileDeployConflicts(input(folder, adapter, { interactive: true }));
+    expect(ask).toHaveBeenCalledTimes(2);
+    expect((ask.mock.calls[0][0] as readonly Conflict[]).map((c) => c.kind)).toEqual(['source']);
+    expect(ask.mock.calls[1][0]).toEqual([expect.objectContaining({ kind: 'target', name: 'X', yours: hashValue(THEIRS), theirs: platform })]);
+    expect(done).toMatchObject({ ok: true, skipped: ['X'] });
+    expect(done.ok && done.targetCheck?.resolutions).toEqual({ X: { choice: 'theirs', theirs: platform, yours: hashValue(THEIRS) } });
   });
 
   test('answering only the source conflict leaves the target one open: the remaining names come back and nothing is written', async () => {

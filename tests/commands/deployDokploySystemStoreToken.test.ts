@@ -65,6 +65,7 @@ import { tmpdir } from 'os';
 import { agreeingDecryptData, fixedKeyResolver } from '../helpers/deployServer';
 import { deployCommand, deployRemove } from '../../src/commands/deployCommand';
 import { mergeManagedValuesBlock } from '../../src/deploy/dokployApi';
+import { hashValue } from '../../src/sync/compareSecrets';
 
 const ROOT = join(tmpdir(), `capy-deploy-dokploy-store-token-${process.pid}-${Date.now()}`);
 const ROOT_NO_KEEP = join(tmpdir(), `capy-deploy-dokploy-store-token-no-keep-${process.pid}-${Date.now()}`);
@@ -96,7 +97,8 @@ function setUp(targetOptions: Record<string, unknown>): void {
       org_id: 'org_1',
       project_id: 'proj_1',
       project_name: 'demo',
-      variables: { STRIPE_KEY: [{ resource_id: 'r-1', branch: 'production', value_hash: 'h' }] },
+      // The pin is the real fingerprint of `.env`'s value: the folder agrees with Capy, so the deploy commits nothing (an edit would be committed first).
+      variables: { STRIPE_KEY: [{ resource_id: 'r-1', branch: 'production', value_hash: hashValue('whatever') }] },
     }),
   );
   writeFileSync(join(ROOT, '.env'), 'STRIPE_KEY=whatever\n');

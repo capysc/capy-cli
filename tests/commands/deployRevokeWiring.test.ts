@@ -156,6 +156,7 @@ afterEach(() => {
 
 import { deployCommand, deployRemove } from '../../src/commands/deployCommand';
 import { mergeManagedValuesBlock } from '../../src/deploy/dokployApi';
+import { hashValue } from '../../src/sync/compareSecrets';
 
 const APP_ID = 'app_revoke_test';
 /**
@@ -195,12 +196,12 @@ function setUp(opts: { mode?: 'ci' | 'direct'; priorSuperseded?: string[]; gitBa
           {
             resource_id: 'r-1',
             branch: 'production',
-            value_hash: 'h',
+            value_hash: hashValue('whatever'),
             targets: [
               {
                 provider: 'dokploy',
                 target: 'dokploy-direct',
-                deployed_value_hash: 'h',
+                deployed_value_hash: hashValue('whatever'),
                 deployed_at: '2026-01-01T00:00:00.000Z',
                 deploy_id: 'dep_prior',
                 ...(opts.priorSuperseded?.length ? { superseded_deploy_ids: opts.priorSuperseded } : {}),

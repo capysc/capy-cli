@@ -15,7 +15,8 @@ import { TargetConfig } from '../deploy/adapter';
 import { staleTargets } from '../deploy/targetsGate';
 import { isInteractive, refuseNonInteractive } from '../ui/interactive';
 import { checkFolder, type Resolutions } from '../sync/commit';
-import { conflictFlagsOrExit, exitOnConflictRefusal, hasConflictFlags } from '../sync/conflicts';
+import { conflictFlagsOrExit, exitOnConflictRefusal, hasConflictFlags, type ConflictDecider } from '../sync/conflicts';
+import { askConflicts } from './conflictPrompt';
 import type { RotatePlanStop } from '../ui/screens/contract';
 import { writeSync } from 'fs';
 
@@ -493,18 +494,22 @@ export class RotateCommand {
   }
 
   /**
-   * With a deciding context (the conflict protocol) and a push: the variables whose server value moved since
-   * this folder's pin are decided now (exit 3 with the payload when the flags do not decide them). `theirs` drops
-   * the variable from the run: nothing is rotated that would not be written. Without one, nothing changes.
+   * With a push: the variables whose server value moved since this folder's pin are decided now, before the first
+   * key is issued. Under the conflict protocol the flags decide (exit 3 with the payload when they do not); at a
+   * terminal each one is asked. `theirs` drops the variable from the run: nothing is rotated that would not be
+   * written. With `--no-push` nothing changes.
    */
   private async settleConflicts(
     ctx: ResolvedContext,
     toRotate: readonly { varName: string; connector: ConnectorMetadata }[],
     opts: RotateOpts,
   ): Promise<{ rotate: readonly { varName: string; connector: ConnectorMetadata }[]; resolutions: Resolutions }> {
-    if (ctx.decide === undefined || opts.noPush) return { rotate: toRotate, resolutions: {} };
+    if (opts.noPush) return { rotate: toRotate, resolutions: {} };
     // A rotation replaces the value whatever it was: for the check it is a change to the name, its new value not yet known.
-    const checked = await checkFolder(ctx, { set: {}, remove: toRotate.map((t) => t.varName) }).catch((err: unknown) => {
+    // At a terminal (no deciding context) each conflict is a question, asked now: the new key is issued once and a
+    // write refused afterwards would lose it. Cancelling the question ends the command before anything is issued.
+    const asker: ConflictDecider = (found) => askConflicts(found);
+    const checked = await checkFolder(ctx, { set: {}, remove: toRotate.map((t) => t.varName) }, ctx.decide === undefined ? { decide: asker } : {}).catch((err: unknown) => {
       exitOnConflictRefusal(err);
       return Promise.reject(err);
     });

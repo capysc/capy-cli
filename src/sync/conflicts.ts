@@ -161,9 +161,9 @@ export function conflictRefusalFor(
   );
 }
 
-/** stdout: the payload as JSON, nothing else. stderr: one line saying what to do. */
-export function printConflictRefusal(refusal: ConflictRefusal): void {
-  console.log(JSON.stringify(refusal.payload, null, 2));
+/** stdout: the payload as JSON (plus the caller's `extra` fields, e.g. a plan), nothing else. stderr: one line saying what to do. */
+export function printConflictRefusal(refusal: ConflictRefusal, extra: object = {}): void {
+  console.log(JSON.stringify({ ...refusal.payload, ...extra }, null, 2));
   console.error(refusal.message);
   console.error('Rerun with --resolve NAME=mine|theirs for each name (NAME@TARGET for a target) and --conflict <conflict_id>.'); // COPY-FLAG
 }
@@ -271,8 +271,33 @@ export const protocolDecider = (flags: ConflictFlags): ConflictDecider => (found
 export const sourceResolutions = (resolutions: Resolutions): Resolutions =>
   Object.fromEntries(Object.entries(resolutions).filter(([key]) => !key.includes('@')));
 
+/** A decision together with the fingerprints it was made against: it applies to exactly that state and no other. */
+export interface SeenResolution {
+  readonly choice: Resolution;
+  /** What the other side held when the caller decided (`null`: nothing). */
+  readonly theirs: string | null;
+  /** What was about to be written when the caller decided. */
+  readonly yours: string | null;
+}
+
+/** `SeenResolution`s by key, in the same key form as `Resolutions`. */
+export type SeenResolutions = Readonly<Record<string, SeenResolution>>;
+
+/**
+ * Binds `resolutions` to the conflicts they answered: each decision carries the `theirs` / `yours` fingerprints of
+ * the conflict it was made for. A key that answers no listed conflict is dropped. Pure; fingerprints only.
+ */
+export function seenResolutions(resolutions: Resolutions, conflicts: readonly Conflict[]): SeenResolutions {
+  return Object.fromEntries(
+    conflicts.flatMap((c) => {
+      const choice = resolutions[resolveKeyOf(c)];
+      return choice === undefined ? [] : [[resolveKeyOf(c), { choice, theirs: c.theirs, yours: c.yours }] as const];
+    }),
+  );
+}
+
 /** The decisions for `target`, keyed by bare NAME. */
-export const targetResolutions = (resolutions: Resolutions, target: string): Resolutions =>
+export const targetResolutions = <T>(resolutions: Readonly<Record<string, T>>, target: string): Readonly<Record<string, T>> =>
   Object.fromEntries(
     Object.entries(resolutions)
       .filter(([key]) => key.endsWith(`@${target}`))

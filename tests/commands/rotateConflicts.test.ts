@@ -5,10 +5,16 @@
  *
  * The properties: with the protocol on and the server's value moved since the folder's pin, nothing is rotated and the
  * payload comes back (exit 3); `theirs` drops the variable from the run (nothing is issued for a value that would not
- * be written); `mine` keeps it and hands the answer to the write; a variable nobody changed passes untouched; at a
- * terminal (no deciding context) the step is a no-op.
+ * be written); `mine` keeps it and hands the answer to the write; a variable nobody changed passes untouched.
+ * At a terminal (no deciding context) the same step ASKS (mine / theirs per variable) before anything is issued;
+ * cancelling the question ends it with nothing rotated or written.
  */
 import { describe, test, expect, afterEach, mock, spyOn } from 'bun:test';
+
+// The terminal's question. `mock.module()` is process-wide: this file runs isolated (tests/run-tests.sh).
+const ask = mock(async (_conflicts: readonly unknown[]) => ({}) as Record<string, 'mine' | 'theirs'>);
+mock.module('../../src/commands/conflictPrompt', () => ({ askConflicts: ask }));
+
 import { RotateCommand } from '../../src/commands/rotateCommand';
 import { parseConflictFlags, protocolDecider } from '../../src/sync/conflicts';
 import { hashValue } from '../../src/sync/compareSecrets';
@@ -26,7 +32,11 @@ const OLD_SEED = seedServer({ projectKey: KEY, values: { [BRANCH]: OLD } });
 const NEW_SEED = seedServer({ projectKey: KEY, values: { [BRANCH]: { STRIPE: THEIRS, OTHER: OLD.OTHER } } });
 
 const made = mock((_: Folder) => undefined);
-afterEach(() => made.mock.calls.forEach(([folder]) => removeFolder(folder)));
+afterEach(() => {
+  made.mock.calls.forEach(([folder]) => removeFolder(folder));
+  ask.mockReset();
+  ask.mockImplementation(async () => ({}));
+});
 
 const connector = (): ConnectorMetadata => ({ provider: 'stripe', source: 'cli', created_at: 1, fingerprint: 'fp' }) as unknown as ConnectorMetadata;
 const targets = (...names: string[]) => names.map((varName) => ({ varName, connector: connector() }));
@@ -100,8 +110,47 @@ describe('capy rotate: conflicts are settled before the new key is issued', () =
     expect(done.value?.resolutions).toEqual({});
   });
 
-  test('at a terminal (no deciding context) and with --no-push the step does nothing', async () => {
-    expect((await captured(() => world(undefined).settle(targets('STRIPE')))).value?.rotate).toHaveLength(1);
+  test('with --no-push the step does nothing', async () => {
     expect((await captured(() => world({}).settle(targets('STRIPE'), { noPush: true }))).value?.rotate).toHaveLength(1);
+    expect((await captured(() => world(undefined).settle(targets('STRIPE'), { noPush: true }))).value?.rotate).toHaveLength(1);
+    expect(ask).not.toHaveBeenCalled();
+  });
+});
+
+describe('capy rotate at a terminal: the conflict is asked BEFORE the new key is issued', () => {
+  test('a variable the server changed: the question comes first (names and fingerprints only), and nothing is written before the answer', async () => {
+    const { server, settle } = world(undefined);
+    ask.mockImplementationOnce(async () => ({ STRIPE: 'mine' }));
+    const done = await captured(() => settle(targets('STRIPE')));
+    expect(ask).toHaveBeenCalledTimes(1);
+    expect(ask.mock.calls[0][0]).toEqual([expect.objectContaining({ kind: 'source', name: 'STRIPE', pinned: hashValue(OLD.STRIPE), theirs: hashValue(THEIRS) })]);
+    expect(done.exitCode).toBeUndefined();
+    expect(server.pushSecrets.mock.calls).toHaveLength(0);
+  });
+
+  test('theirs drops the variable from the run (no key is issued for it); mine keeps it and carries the answer to the write', async () => {
+    ask.mockImplementationOnce(async () => ({ STRIPE: 'theirs' }));
+    const theirs = await captured(() => world(undefined).settle(targets('STRIPE', 'OTHER')));
+    expect(theirs.value?.rotate.map((t) => t.varName)).toEqual(['OTHER']);
+
+    ask.mockImplementationOnce(async () => ({ STRIPE: 'mine' }));
+    const mine = await captured(() => world(undefined).settle(targets('STRIPE', 'OTHER')));
+    expect(mine.value?.rotate.map((t) => t.varName)).toEqual(['STRIPE', 'OTHER']);
+    expect(mine.value?.resolutions).toEqual({ STRIPE: 'mine' });
+  });
+
+  test('cancelling the question ends the step with the prompt\'s own error: nothing is rotated and nothing is written', async () => {
+    const { server, settle } = world(undefined);
+    ask.mockImplementationOnce(async () => {
+      throw new Error('prompt cancelled');
+    });
+    await expect(settle(targets('STRIPE'))).rejects.toThrow('prompt cancelled');
+    expect(server.pushSecrets.mock.calls).toHaveLength(0);
+  });
+
+  test('a variable nobody else changed is not asked about', async () => {
+    const done = await captured(() => world(undefined).settle(targets('OTHER')));
+    expect(ask).not.toHaveBeenCalled();
+    expect(done.value?.rotate.map((t) => t.varName)).toEqual(['OTHER']);
   });
 });

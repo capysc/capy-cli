@@ -5,12 +5,16 @@
  *   SOURCE (folder against the Capy server). The folder's `.env` may lag Capy (a teammate saved since this folder's
  *   pin) or be ahead of it. The same planner every other write uses (`sync/commit.ts`) decides per variable:
  *     - only the server moved (folder unchanged since its pin) → deliver the server's latest, never the stale value;
- *     - only the folder changed → delivered as it always was; it stays an edit of the folder (not committed here);
+ *     - only the folder changed → committed to Capy first (the same path as `mine`), then delivered, so Capy holds
+ *       what the platform will hold;
  *     - both changed, differently → a conflict: mine commits the folder's value (through the commit path) and
  *       delivers it, theirs delivers Capy's latest and the folder takes it like a pull.
  *
  *   TARGET (Capy against the platform, Dokploy only: `adapter.readsLiveValues`). A value changed on the platform
  *   outside Capy since Capy last delivered it is a conflict: mine overwrites it, theirs skips that variable.
+ *
+ * The target comparison runs with the values that will really be delivered, i.e. after the source answers (a source
+ * `theirs` delivers Capy's latest), and every target decision is bound to the fingerprints it was made against.
  *
  * One decision step for both kinds: in a terminal one question per variable; off a terminal the protocol
  * (`sync/conflicts.ts`: nothing is written, exit 3, the payload on stdout, `--resolve` + `--conflict` answer it).
@@ -40,6 +44,7 @@ import {
   conflictRefusalFor,
   gateConflicts,
   protocolDecider,
+  seenResolutions,
   sourceResolutions,
   targetResolutions,
   type Conflict,
@@ -131,6 +136,10 @@ async function readLatest(folder: FolderContext & { serviceClient: ServiceClient
  * Settles every conflict `capy deploy <target>` would meet, and brings the folder in line with the values that
  * will be delivered. Throws a `ConflictRefusal` off a terminal when the flags do not decide every conflict
  * (nothing has been written); any other error is a failure to compare, and the caller does not deliver.
+ *
+ * The order matters: the target comparison is made with the values that will actually be delivered, and what is
+ * delivered for a name depends on its SOURCE answer (`theirs` delivers Capy's latest). So the source answers come
+ * first (asked in a terminal, read from `--resolve` off one), then the platform is compared with those values.
  */
 export async function reconcileDeployConflicts(input: ReconcileInput): Promise<Reconciled> {
   const { target, adapter } = input;
@@ -152,9 +161,20 @@ export async function reconcileDeployConflicts(input: ReconcileInput): Promise<R
   const changes: Changes = { set: Object.fromEntries(edited.map((v) => [v, folder.localPlaintext[v]])), remove: [] };
   const source = sourceConflictsOf(findConflicts({ pinned, latest: snapshot.entries, changes }), snapshot, view);
 
-  // What is delivered, if every conflict is answered `mine`: the folder's edit, else Capy's latest, else the folder's value.
+  // The source answers: asked in a terminal (never for a preview), else whatever the flags already say.
+  const flagged: Resolutions = Object.fromEntries(
+    Object.entries(sourceResolutions(input.flags.resolutions)).filter(([name]) => source.some((c) => c.name === name)),
+  );
+  const sourceAnswers: Resolutions = input.interactive && !input.dryRun && source.length > 0 ? await askConflicts(source) : flagged;
+
+  // What is delivered once the source is answered: Capy's latest for a name answered `theirs`; else the folder's
+  // edit, else Capy's latest, else the folder's value (a conflict not yet answered is read as `mine`).
   const valueFor = (name: string): string | undefined =>
-    Object.hasOwn(changes.set, name) ? changes.set[name] : (snapshot.entries[name]?.plaintext ?? folder.localPlaintext[name]);
+    sourceAnswers[name] === 'theirs'
+      ? snapshot.entries[name]?.plaintext
+      : Object.hasOwn(changes.set, name)
+        ? changes.set[name]
+        : (snapshot.entries[name]?.plaintext ?? folder.localPlaintext[name]);
   const env = Object.fromEntries(target.vars.flatMap((v) => (valueFor(v) === undefined ? [] : [[v, valueFor(v) as string] as const])));
 
   const targetCheck: TargetCheck | undefined = adapter.readsLiveValues
@@ -165,7 +185,8 @@ export async function reconcileDeployConflicts(input: ReconcileInput): Promise<R
     input.showFailure(live);
     return { ok: false, code: 1 };
   }
-  const conflicts: readonly Conflict[] = [...source, ...(live?.conflicts ?? [])];
+  const liveConflicts: readonly Conflict[] = live?.conflicts ?? [];
+  const conflicts: readonly Conflict[] = [...source, ...liveConflicts];
   const scopes = [{ ...view, conflicts }];
 
   if (input.dryRun) {
@@ -173,29 +194,32 @@ export async function reconcileDeployConflicts(input: ReconcileInput): Promise<R
     return { ok: true, skipped: [], ...(targetCheck === undefined ? {} : { targetCheck, view }) };
   }
 
-  // One decision step for both kinds.
-  const decisions: Resolutions = conflicts.length === 0 ? {} : input.interactive ? await askConflicts(conflicts) : gateConflicts(input.flags, scopes);
+  // The rest of the decision step: the platform's conflicts in a terminal (the source ones were just answered),
+  // or the whole set against the flags off one (the conflict id binds every conflict, both kinds).
+  const decisions: Resolutions = input.interactive
+    ? { ...sourceAnswers, ...(liveConflicts.length > 0 ? await askConflicts(liveConflicts) : {}) }
+    : gateConflicts(input.flags, scopes);
 
   // The folder takes what will be delivered. A variable the folder did not change is never delivered stale: Capy's
-  // latest is pulled in. A conflict is committed with its answer (mine writes the folder's value to Capy, theirs
-  // takes Capy's). A folder edit nobody else touched is not committed here: it is delivered as it always was and
-  // stays an edit of the folder, for the next `capy`/`capy push`.
-  const settled = source.map((c) => c.name);
+  // latest is pulled in. Every variable the folder changed goes through the commit path, so Capy holds what the
+  // platform will hold: a conflict with its answer (mine writes the folder's value to Capy, theirs takes Capy's),
+  // an edit nobody else touched as a plain write.
   const behind = target.vars.some(
     (v) => !edited.includes(v) && snapshot.entries[v]?.plaintext !== undefined && snapshot.entries[v].plaintext !== folder.localPlaintext[v],
   );
-  if (settled.length > 0 || behind) {
+  if (edited.length > 0 || behind) {
     await commitFolder(
       { ...folder, ...(input.interactive ? {} : { decide: protocolDecider(input.flags) }) },
-      { set: Object.fromEntries(settled.map((name) => [name, folder.localPlaintext[name]])), remove: [] },
+      { set: Object.fromEntries(edited.map((name) => [name, folder.localPlaintext[name]])), remove: [] },
       { resolutions: sourceResolutions(decisions), seen: snapshot },
     );
   }
 
-  const platform = targetResolutions(decisions, target.name);
+  // The platform decisions, each bound to the fingerprints they were made against (the adapter re-reads the service).
+  const platform = targetResolutions(seenResolutions(decisions, liveConflicts), target.name);
   return {
     ok: true,
-    skipped: Object.entries(platform).flatMap(([name, choice]) => (choice === 'theirs' ? [name] : [])),
+    skipped: Object.entries(platform).flatMap(([name, seen]) => (seen.choice === 'theirs' ? [name] : [])),
     ...(targetCheck === undefined ? {} : { targetCheck: { ...targetCheck, resolutions: platform }, view }),
   };
 }

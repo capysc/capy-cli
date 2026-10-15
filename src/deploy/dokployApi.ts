@@ -11,7 +11,7 @@
  */
 import { parse as parseDotenv } from 'dotenv';
 import { hashValue } from '../sync/compareSecrets';
-import type { Resolutions, TargetConflict } from '../sync/conflicts';
+import type { Resolution, SeenResolutions, TargetConflict } from '../sync/conflicts';
 import { ERROR_CODES } from '../types/index';
 
 /**
@@ -1543,8 +1543,12 @@ export function dokployTargetConflicts(
 export interface TargetCheck {
   /** `deployed_value_hash` by name for this target. */
   readonly pinned: Readonly<Record<string, string>>;
-  /** Decisions already made, by bare NAME. */
-  readonly resolutions: Resolutions;
+  /**
+   * Decisions already made, by bare NAME, each bound to the `theirs` / `yours` fingerprints it was made against:
+   * a decision applies only to that exact state. If the service's value (or the value being delivered) is no longer
+   * the one the caller saw, the decision does not count and the conflict is open again.
+   */
+  readonly resolutions: SeenResolutions;
 }
 
 export type TargetPlan =
@@ -1567,9 +1571,13 @@ export function planTargetDelivery(
 ): TargetPlan {
   if (check === undefined) return { kind: 'clear', deliver: values, skipped: [], found: [] };
   const found = dokployTargetConflicts(env, values, check.pinned);
-  const open = found.filter((c) => check.resolutions[c.name] === undefined);
+  const choiceFor = (c: LiveConflict): Resolution | undefined => {
+    const seen = check.resolutions[c.name];
+    return seen !== undefined && seen.theirs === c.theirs && seen.yours === c.yours ? seen.choice : undefined;
+  };
+  const open = found.filter((c) => choiceFor(c) === undefined);
   if (open.length > 0) return { kind: 'conflict', found, open };
-  const skipped = found.filter((c) => check.resolutions[c.name] === 'theirs').map((c) => c.name);
+  const skipped = found.filter((c) => choiceFor(c) === 'theirs').map((c) => c.name);
   return { kind: 'clear', deliver: values.filter((v) => !skipped.includes(v.name)), skipped, found };
 }
 

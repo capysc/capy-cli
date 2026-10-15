@@ -44,7 +44,7 @@ import { foldDeployKeep, hashValue } from './keepGate';
 import { parseTargets } from './configuredTargets';
 import { TargetDeliveryDescriptor, VarDelivery, deployedHashesFor, deliveryWorthGating } from './targetsGate';
 import { SyncEngine } from '../sync/syncEngine';
-import { targetResolutions, type ConflictScope, type Resolutions } from '../sync/conflicts';
+import { seenResolutions, targetResolutions, type ConflictScope, type Resolutions, type SeenResolutions } from '../sync/conflicts';
 import { callWithBackoff, retryOnRateLimit } from '../service/capyCalls';
 import { PACING_RESERVE, PoolItem, RateInfo, runPool } from '../utils/pool';
 import type { Sleep } from '../utils/backoff';
@@ -525,7 +525,7 @@ function specFor(p: Pushed): KeepLockFileSpec {
 }
 
 /** What one pass over a target does: look for conflicts (reading only), or deliver with the decisions made. */
-type TargetPass = { readonly kind: 'check' } | { readonly kind: 'deliver'; readonly resolutions: Resolutions };
+type TargetPass = { readonly kind: 'check' } | { readonly kind: 'deliver'; readonly resolutions: SeenResolutions };
 
 /**
  * One target, up to and including the delivery to Dokploy: preflight, read and decrypt its picked
@@ -542,7 +542,7 @@ export async function pushTarget(
   keys: KeyResolver,
   apiKeys: ApiKeys,
   item: BatchTarget,
-  resolutions: Resolutions = {},
+  resolutions: SeenResolutions = {},
 ): Promise<PoolItem<PushOutcome>> {
   const done = await passOverTarget(env, keys, apiKeys, item, { kind: 'deliver', resolutions });
   // A delivery pass never answers `checked`; if it ever did, nothing was written and the target says so.
@@ -824,7 +824,10 @@ export async function runBatchDeploy(plan: BatchPlan, env: BatchEnv, hooks: Batc
   // Before anything is written: every target's live values are compared (reading only) and the conflicts decided.
   const found =
     hooks.decide === undefined || plan.targets.length === 0 || stoppedAtStart ? [] : await findBatchConflicts(plan, env, keys, apiKeys, hooks);
-  const decisions: Resolutions = hooks.decide === undefined || found.length === 0 ? {} : hooks.decide(found);
+  const decided: Resolutions = hooks.decide === undefined || found.length === 0 ? {} : hooks.decide(found);
+  // Each decision is bound to the fingerprints it was made against: the delivery pass re-reads every service, and a
+  // decision does not apply to a value that moved in between.
+  const decisions: SeenResolutions = seenResolutions(decided, found.flatMap((s) => s.conflicts));
 
   const pushedPhase = await runPool({
     items: plan.targets,

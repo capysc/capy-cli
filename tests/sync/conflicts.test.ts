@@ -13,6 +13,7 @@ import {
   parseConflictFlags,
   protocolDecider,
   resolveKeyOf,
+  seenResolutions,
   sourceResolutions,
   targetResolutions,
   type Conflict,
@@ -167,6 +168,15 @@ describe('gateConflicts', () => {
     expect(sourceResolutions(decided)).toEqual({ A: 'mine', B: 'theirs' });
     expect(targetResolutions(decided, 'dokploy-production')).toEqual({ A: 'theirs' });
     expect(targetResolutions(decided, 'elsewhere')).toEqual({});
+  });
+
+  test('seenResolutions binds each decision to the fingerprints of the conflict it answered, and drops answers to nothing', () => {
+    const decided = gateConflicts(flags(['A=mine', 'B=theirs', 'A@dokploy-production=theirs']), scopes);
+    const seen = seenResolutions({ ...decided, 'ZZZ@dokploy-production': 'mine' }, scopes.flatMap((s) => s.conflicts));
+    const target = scopes.flatMap((s) => s.conflicts).find((c) => c.kind === 'target')!;
+    expect(seen['A@dokploy-production']).toEqual({ choice: 'theirs', theirs: target.theirs, yours: target.yours });
+    expect(Object.keys(seen).toSorted()).toEqual(['A', 'A@dokploy-production', 'B']);
+    expect(targetResolutions(seen, 'dokploy-production')).toEqual({ A: seen['A@dokploy-production'] });
   });
 
   test('answers for names that are not in the conflict are ignored, never applied', () => {

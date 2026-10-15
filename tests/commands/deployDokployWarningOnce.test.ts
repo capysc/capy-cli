@@ -65,6 +65,7 @@ import { tmpdir } from 'os';
 import { agreeingDecryptData, fixedKeyResolver } from '../helpers/deployServer';
 import { deployCommand } from '../../src/commands/deployCommand';
 import { mergeManagedValuesBlock } from '../../src/deploy/dokployApi';
+import { hashValue } from '../../src/sync/compareSecrets';
 
 const ROOT = join(tmpdir(), `capy-deploy-dokploy-warn-once-${process.pid}-${Date.now()}`);
 const COMPOSE_ID = 'compose_test';
@@ -91,7 +92,8 @@ function setUp(): void {
       org_id: 'org_1',
       project_id: 'proj_1',
       project_name: 'demo',
-      variables: { STRIPE_KEY: [{ resource_id: 'r-1', branch: 'production', value_hash: 'h' }] },
+      // The pin is the real fingerprint of `.env`'s value: the folder agrees with Capy, so the deploy commits nothing (an edit would be committed first).
+      variables: { STRIPE_KEY: [{ resource_id: 'r-1', branch: 'production', value_hash: hashValue(DECRYPTED_STRIPE_KEY) }] },
     }),
   );
   writeFileSync(join(ROOT, '.env'), `STRIPE_KEY=${DECRYPTED_STRIPE_KEY}\n`);

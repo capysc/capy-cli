@@ -59,12 +59,19 @@ describe('dokployTargetConflicts (pure)', () => {
     const check = { pinned: { STRIPE_KEY: h('old-delivered') }, resolutions: {} };
     const open = planTargetDelivery(env, both, check);
     expect(open.kind).toBe('conflict');
-    const mine = planTargetDelivery(env, both, { ...check, resolutions: { STRIPE_KEY: 'mine' } });
+    const seen = (choice: 'mine' | 'theirs') => ({ STRIPE_KEY: { choice, theirs: h('edited-outside'), yours: h('new-capy') } });
+    const mine = planTargetDelivery(env, both, { ...check, resolutions: seen('mine') });
     expect(mine).toMatchObject({ kind: 'clear', skipped: [] });
     expect(mine.kind === 'clear' && mine.deliver.map((v) => v.name)).toEqual(['STRIPE_KEY', 'PORT']);
-    const theirs = planTargetDelivery(env, both, { ...check, resolutions: { STRIPE_KEY: 'theirs' } });
+    const theirs = planTargetDelivery(env, both, { ...check, resolutions: seen('theirs') });
     expect(theirs).toMatchObject({ kind: 'clear', skipped: ['STRIPE_KEY'] });
     expect(theirs.kind === 'clear' && theirs.deliver.map((v) => v.name)).toEqual(['PORT']);
+    // A decision applies only to the state it was made against: the live value moved, or the value being delivered did.
+    const moved = planTargetDelivery('STRIPE_KEY=moved-after-the-answer\n', both, { ...check, resolutions: seen('mine') });
+    expect(moved.kind).toBe('conflict');
+    expect(moved.kind === 'conflict' && moved.open.map((c) => c.theirs)).toEqual([h('moved-after-the-answer')]);
+    const otherYours = planTargetDelivery(env, [{ name: 'STRIPE_KEY', value: 'another-capy-value' }], { ...check, resolutions: seen('theirs') });
+    expect(otherYours.kind).toBe('conflict');
     // No check at all: the delivery is as it always was.
     expect(planTargetDelivery(env, both, undefined)).toMatchObject({ kind: 'clear', skipped: [], found: [] });
   });
@@ -169,7 +176,11 @@ const ctx = (over: Partial<DeployContext>): DeployContext => ({
 const adapterWith = (fetch: FetchLike) => createDokployAdapter({ fetch, log: () => undefined });
 
 const OUTSIDE = 'NODE_ENV=production\nSTRIPE_KEY=already-there\n';
-const check = (resolutions: Record<string, 'mine' | 'theirs'> = {}, pinned: Record<string, string> = {}) => ({ pinned, resolutions });
+/** A target check whose decisions were made against the conflict OUTSIDE shows (live 'already-there', delivering 'new-capy'). */
+const check = (resolutions: Record<string, 'mine' | 'theirs'> = {}, pinned: Record<string, string> = {}) => ({
+  pinned,
+  resolutions: Object.fromEntries(Object.entries(resolutions).map(([name, choice]) => [name, { choice, theirs: h('already-there'), yours: h('new-capy') }])),
+});
 
 describe('the Dokploy adapter and target conflicts', () => {
   test('a first delivery onto a different value already on the service is refused with the conflict: nothing is written', async () => {
@@ -201,6 +212,32 @@ describe('the Dokploy adapter and target conflicts', () => {
     expect(result.ok).toBe(true);
     expect(result.skipped).toBeUndefined();
     expect(script.done()).toBe(true);
+  });
+
+  test('a decision made against one live value does not apply once the service holds another: conflict again, nothing written (mine and theirs alike)', async () => {
+    const MOVED = 'NODE_ENV=production\nSTRIPE_KEY=moved-after-the-answer\n';
+    // `check` binds its decisions to the live value OUTSIDE shows; the service now holds something else. No save step is scripted.
+    const answeredMine = scripted([read(MOVED)]);
+    const mine = await adapterWith(answeredMine.fetch).deploy(target(), ctx({ targetCheck: check({ STRIPE_KEY: 'mine' }) }));
+    expect(mine.ok).toBe(false);
+    expect(mine.steps.at(-1)?.code).toBe('SECRETS_CONFLICT');
+    expect(mine.conflicts).toEqual([
+      { kind: 'target', name: 'STRIPE_KEY', target: 'dokploy-production', pinned: null, yours: h('new-capy'), theirs: h('moved-after-the-answer') },
+    ]);
+    expect(answeredMine.done()).toBe(true);
+
+    const answeredTheirs = scripted([read(MOVED)]);
+    const theirs = await adapterWith(answeredTheirs.fetch).deploy(target(), ctx({ targetCheck: check({ STRIPE_KEY: 'theirs' }) }));
+    expect(theirs.ok).toBe(false);
+    expect(theirs.skipped).toBeUndefined();
+    expect(answeredTheirs.done()).toBe(true);
+
+    // The value being delivered moved after the answer (the decision saw 'new-capy'): the same.
+    const changedYours = scripted([read(OUTSIDE)]);
+    const other = await adapterWith(changedYours.fetch).deploy(target(), ctx({ env: { STRIPE_KEY: 'newer-capy', PORT: '3000' }, targetCheck: check({ STRIPE_KEY: 'mine' }) }));
+    expect(other.ok).toBe(false);
+    expect(other.conflicts?.[0]).toMatchObject({ yours: h('newer-capy'), theirs: h('already-there') });
+    expect(changedYours.done()).toBe(true);
   });
 
   test('theirs skips the variable: the service\'s env is not written at all when it was the only one, and nothing is recorded for it', async () => {

@@ -39,6 +39,7 @@ import {
   conflictFlagsOrExit,
   conflictRefusalFor,
   gateConflicts,
+  printConflictRefusal,
   type ConflictFlags,
   type ConflictScope,
   type RawConflictFlags,
@@ -149,9 +150,7 @@ export function refuse(json: boolean, code: string, error: string, extra: object
 
 /** A conflict ends the command: the payload (with `extra`, e.g. the plan) on stdout, the sentence on stderr, exit 3. */
 export function exitWithConflicts(refusal: ConflictRefusal, extra: object = {}): never {
-  console.log(JSON.stringify({ ...refusal.payload, ...extra }, null, 2));
-  console.error(refusal.message);
-  console.error('Rerun with --resolve NAME=mine|theirs for each name and --conflict <conflict_id>.'); // COPY-FLAG
+  printConflictRefusal(refusal, extra);
   return process.exit(EXIT_NEEDS_INPUT);
 }
 
