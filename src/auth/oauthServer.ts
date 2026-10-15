@@ -113,8 +113,11 @@ export class OAuthServer {
       // popup takes both away. Going through the helper also puts this call
       // behind CAPY_WEB_NO_OPEN for the first time; before, a suite or CI run
       // that reached authentication opened the developer's own browser.
-      void openScreen(authUrl, { kind: 'handoff' }).then((plan) => {
-        if (plan.via !== 'suppressed') console.log(`✓ Opened browser for authentication`);
+      // Only claim the browser opened once it actually did. When it could not
+      // (no `xdg-open` in a VM or container), say nothing more: the link is
+      // already on screen above, and the callback server keeps waiting for it.
+      void openScreen(authUrl, { kind: 'handoff' }).then((result) => {
+        if (result.opened) console.log(`✓ Opened browser for authentication`);
       });
 
       const timeout = setTimeout(() => {
