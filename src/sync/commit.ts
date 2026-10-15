@@ -101,6 +101,21 @@ export interface Contest {
 }
 
 /**
+ * Whether writing `yours` (a value, or `undefined` for a deletion) over the server's `latest` meets a value the
+ * server moved since `pinned`: the server's value differs from the pin (including added or removed since) AND
+ * writing would actually change it (the intended value is not already the server's; a deletion of a value the
+ * server still has). The one definition `findConflicts` and a screen's row status share.
+ */
+export function isContested(
+  pinned: string | undefined,
+  yours: string | undefined,
+  latest: Pick<LatestEntry, 'plaintext' | 'hash'> | undefined,
+): boolean {
+  const changesIt = yours === undefined ? latest !== undefined : latest?.plaintext !== yours;
+  return changesIt && latest?.hash !== pinned;
+}
+
+/**
  * Every change in `changes` that meets a value the server moved since `pinned` (different hash,
  * including added or removed on the server since) and that would actually change it: a name in
  * `set` whose intended value is not already the server's, a name in `remove` the server still has.
@@ -112,15 +127,16 @@ export function findConflicts(input: {
   readonly changes: Changes;
 }): readonly Contest[] {
   const { pinned, latest, changes } = input;
-  const writes = Object.entries(changes.set)
-    .filter(([name, value]) => latest[name]?.plaintext !== value)
-    .map(([name, value]) => ({ name, yours: hashValue(value) as string | undefined }));
-  const removals = changes.remove
-    .filter((name) => !has(changes.set, name) && has(latest, name))
-    .map((name) => ({ name, yours: undefined as string | undefined }));
+  const writes = Object.entries(changes.set).map(([name, value]) => ({ name, value }));
+  const removals = changes.remove.filter((name) => !has(changes.set, name)).map((name) => ({ name, value: undefined as string | undefined }));
   return [...writes, ...removals]
-    .filter(({ name }) => latest[name]?.hash !== pinned[name])
-    .map(({ name, yours }) => ({ name, pinned: pinned[name], yours, theirs: latest[name]?.hash }))
+    .filter(({ name, value }) => isContested(pinned[name], value, has(latest, name) ? latest[name] : undefined))
+    .map(({ name, value }) => ({
+      name,
+      pinned: pinned[name],
+      yours: value === undefined ? undefined : hashValue(value),
+      theirs: latest[name]?.hash,
+    }))
     .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 }
 

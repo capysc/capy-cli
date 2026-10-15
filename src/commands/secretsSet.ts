@@ -32,6 +32,7 @@ import { Encryptor } from '../crypto/encryptor';
 import { deriveResourceId } from '../crypto/resourceId';
 import { SyncEngine } from '../sync/syncEngine';
 import { isStaleBase } from '../sync/commit';
+import type { SourceConflict } from '../sync/conflicts';
 import { hashValue } from '../deploy/keepGate';
 import type { EditSaveRecord } from '../deploy/keepGate';
 import { writeKeepCache } from '../config/globalConfig';
@@ -417,6 +418,41 @@ export interface LocationPreview {
   readonly serverKeep: KeepFile | undefined;
   /** What the location holds now, as fingerprints (never the value); absent when it could not be read. */
   readonly current?: { readonly hash: string; readonly serverKeepHash: string; readonly changedAt?: string };
+}
+
+/** A location in conflict: its value was changed by someone else since the caller looked (CAP-717, CAP-714). */
+export interface LocationConflict {
+  readonly location: SetLocation;
+  readonly conflict: SourceConflict;
+}
+
+/** The identity a decision for a location is kept under. */
+export const locationKeyOf = (l: Pick<SetLocation, 'project_id' | 'branch'>): string => `${l.project_id}/${l.branch}`;
+
+/**
+ * The conflict at `loc`, if any: the location holds neither the value being set (`yours`) nor the one its row listed
+ * (`seen`), so someone else changed it since the caller looked. Fingerprints only. `undefined` when the location could
+ * not be read (nothing known to conflict with) or holds one of the two.
+ */
+export function secretLocationConflict(
+  name: string,
+  yours: string,
+  seen: string,
+  loc: SetLocation,
+  preview: LocationPreview | undefined,
+): SourceConflict | undefined {
+  const current = preview?.current;
+  if (current === undefined || current.hash === yours || current.hash === seen) return undefined;
+  return {
+    kind: 'source',
+    name,
+    project: loc.project_name,
+    branch: loc.branch,
+    pinned: seen,
+    yours,
+    theirs: current.hash,
+    ...(current.changedAt === undefined ? {} : { theirs_changed_at: current.changedAt }),
+  };
 }
 
 const UNKNOWN_PREVIEW: LocationPreview = { action: 'update', serverKeep: undefined };

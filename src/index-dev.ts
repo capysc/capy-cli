@@ -103,26 +103,8 @@ program
   })
   .action(async (options, cmd) => {
     if (cmd.args.length > 0) {
-      console.log(`\n  Unknown command: ${cmd.args[0]}\n`);
-      console.log('  Available commands:\n');
-      console.log(`    ${B('capy-dev')}                        \x1b[90mSync secrets\x1b[0m`);
-      console.log(`    ${B('capy-dev')} edit                   \x1b[90mInspect and edit secrets in a TUI\x1b[0m`);
-      console.log(`    ${B('capy-dev')} branch                 \x1b[90mList secret branches\x1b[0m`);
-      console.log(`    ${B('capy-dev')} checkout -b <branch>   \x1b[90mSwitch to a secret branch\x1b[0m`);
-      console.log(`    ${B('capy-dev')} invite <email>         \x1b[90mInvite a teammate\x1b[0m`);
-      console.log(`    ${B('capy-dev')} redeem <code>          \x1b[90mRedeem an invite code\x1b[0m`);
-      console.log(`    ${B('capy-dev')} transport              \x1b[90mMove your account to another machine\x1b[0m`);
-      console.log(`    ${B('capy-dev')} kick <email>           \x1b[90mRemove a teammate\x1b[0m`);
-      console.log(`    ${B('capy-dev')} users                  \x1b[90mList organization members\x1b[0m`);
-      console.log(`    ${B('capy-dev')} deploy                 \x1b[90mGenerate a deployment\x1b[0m`);
-      console.log(`    ${B('capy-dev')} decrypt                \x1b[90mDecrypt secrets offline (owner only)\x1b[0m`);
-      console.log(`    ${B('capy-dev')} end-recover            \x1b[90mEnd recovery session\x1b[0m`);
-      console.log(`    ${B('capy-dev')} recover                \x1b[90mReconstruct master key from recovery phrase\x1b[0m`);
-      console.log(`    ${B('capy-dev')} auth-decrypt           \x1b[90mDecrypt using auth (dev only)\x1b[0m`);
-      console.log(`    ${B('capy-dev')} byoc [url]             \x1b[90mConnect to a self-hosted Capy (BYOC) instance\x1b[0m`);
-      console.log(`    ${B('capy-dev')} use <profile>          \x1b[90mSwitch to a different profile\x1b[0m`);
-      console.log(`    ${B('capy-dev')} profile list           \x1b[90mList configured profiles\x1b[0m`);
-      console.log('');
+      const { unknownCommandText } = await import('./core/availableCommands');
+      console.log(unknownCommandText(program, cmd.args[0]));
       process.exit(1);
     }
 

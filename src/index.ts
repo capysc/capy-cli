@@ -88,31 +88,8 @@ program
   })
   .action(async (options, cmd) => {
     if (cmd.args.length > 0) {
-      console.log(`\n  Unknown command: ${cmd.args[0]}\n`);
-      console.log('  Available commands:\n');
-      console.log(`    ${B('capy')}                        \x1b[90mSync secrets\x1b[0m`);
-      console.log(`    ${B('capy')} run -- <cmd>           \x1b[90mRun a command with decrypted secrets\x1b[0m`);
-      console.log(`    ${B('capy')} status                 \x1b[90mShow secret drift\x1b[0m`);
-      console.log(`    ${B('capy')} edit                   \x1b[90mInspect and edit secrets in a TUI\x1b[0m`);
-      console.log(`    ${B('capy')} push                   \x1b[90mPush encrypted values to Keep\x1b[0m`);
-      console.log(`    ${B('capy')} deploy                 \x1b[90mDeploy or set up CI deploy credentials\x1b[0m`);
-      console.log(`    ${B('capy')} deploy revoke <id>     \x1b[90mRevoke a deploy token\x1b[0m`);
-      console.log(`    ${B('capy')} deploy list            \x1b[90mList deploy tokens\x1b[0m`);
-      console.log(`    ${B('capy')} invite <email>         \x1b[90mInvite a teammate\x1b[0m`);
-      console.log(`    ${B('capy')} redeem <code>          \x1b[90mRedeem an invite code\x1b[0m`);
-      console.log(`    ${B('capy')} kick <email>           \x1b[90mRemove a teammate\x1b[0m`);
-      console.log(`    ${B('capy')} users                  \x1b[90mList organization members\x1b[0m`);
-      console.log(`    ${B('capy')} org                    \x1b[90mSwitch organization\x1b[0m`);
-      console.log(`    ${B('capy')} info                   \x1b[90mShow current session info\x1b[0m`);
-      console.log(`    ${B('capy')} byoc [url]             \x1b[90mConnect to a self-hosted Capy (BYOC) instance\x1b[0m`);
-      console.log(`    ${B('capy')} use <profile>          \x1b[90mSwitch to a different profile\x1b[0m`);
-      console.log(`    ${B('capy')} profile list           \x1b[90mList configured profiles\x1b[0m`);
-      console.log(`    ${B('capy')} connect <provider>     \x1b[90mPull a credential from a provider into .env\x1b[0m`);
-      console.log(`    ${B('capy')} rotate [var]           \x1b[90mRotate a credential previously set up via connect\x1b[0m`);
-      console.log(`    ${B('capy')} decrypt                \x1b[90mDecrypt secrets offline (owner only)\x1b[0m`);
-      console.log(`    ${B('capy')} end-recover            \x1b[90mEnd recovery session\x1b[0m`);
-      console.log(`    ${B('capy')} recover                \x1b[90mReconstruct master key from recovery phrase\x1b[0m`);
-      console.log('');
+      const { unknownCommandText } = await import('./core/availableCommands');
+      console.log(unknownCommandText(program, cmd.args[0]));
       process.exit(1);
     }
 

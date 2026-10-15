@@ -67,6 +67,7 @@ import {
   repoLabel,
   resolveBases,
   runSecretSet,
+  secretLocationConflict,
 } from './secretsSet';
 import { renderSecretSetConfirmation, stoppingAfter, TERMINAL_STYLE } from './secretsSetText';
 import { PoolItem, runPool } from '../utils/pool';
@@ -204,27 +205,11 @@ export function secretConflictScopes(
 ): readonly ConflictScope[] {
   const yours = hashValue(value);
   return located.flatMap((l, i): ConflictScope[] => {
+    const conflict = secretLocationConflict(name, yours, l.seen, l, previews[i]);
     const current = previews[i]?.current;
-    if (current === undefined || current.hash === yours || current.hash === l.seen) return [];
-    return [
-      {
-        project: l.project_name,
-        branch: l.branch,
-        serverKeepHash: current.serverKeepHash,
-        conflicts: [
-          {
-            kind: 'source',
-            name,
-            project: l.project_name,
-            branch: l.branch,
-            pinned: l.seen,
-            yours,
-            theirs: current.hash,
-            ...(current.changedAt === undefined ? {} : { theirs_changed_at: current.changedAt }),
-          },
-        ],
-      },
-    ];
+    return conflict === undefined || current === undefined
+      ? []
+      : [{ project: l.project_name, branch: l.branch, serverKeepHash: current.serverKeepHash, conflicts: [conflict] }];
   });
 }
 
