@@ -95,7 +95,7 @@ import {
   printConflictRefusal,
   type RawConflictFlags,
 } from '../sync/conflicts';
-import { reconcileDeployConflicts } from './deployConflicts';
+import { isUnsavedChangesRefusal, printUnsavedChangesRefusal, reconcileDeployConflicts } from './deployConflicts';
 import { EXIT_NEEDS_INPUT } from '../ui/interactive';
 import type { DeployPlanConfirmStop } from '../ui/screens/contract';
 import { CHECKBOX_INSTRUCTIONS, CHECKBOX_THEME, LIST_THEME } from '../ui/promptStyle';
@@ -2615,7 +2615,7 @@ export async function deployCommand(
         adapter,
         devMode: options.devMode,
         dryRun: !!options.dryRun,
-        interactive: process.stdin.isTTY === true && !options.yes,
+        interactive: process.stdin.isTTY === true && !options.yes && !options.json,
         flags: conflictFlags,
         adapterCtx: adapterCallCtx,
         showFailure: renderResult,
@@ -2623,6 +2623,10 @@ export async function deployCommand(
     } catch (err: any) {
       if (isConflictRefusal(err)) {
         printConflictRefusal(err);
+        return { ok: false, code: EXIT_NEEDS_INPUT };
+      }
+      if (isUnsavedChangesRefusal(err)) {
+        printUnsavedChangesRefusal(err);
         return { ok: false, code: EXIT_NEEDS_INPUT };
       }
       // A preview that could not compare says nothing; a real deploy that could not compare does not deliver.

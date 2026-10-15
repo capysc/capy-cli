@@ -12,6 +12,19 @@ function questionFor(conflict: Conflict): string {
     : `${conflict.name} was changed in Capy since you last synced. Which value?`;
 }
 
+// COPY-FLAG: minimal, neutral wording; pending approval.
+const unsavedQuestionFor = (names: readonly string[]): string => `${names.join(', ')} changed in this folder and is not saved to Capy. Save and deploy?`;
+
+/**
+ * `capy deploy` found folder edits Capy does not hold (CAP-717): one question naming them (never a value).
+ * Enter saves them to Capy and delivers; declining stops the deploy with nothing saved and nothing delivered.
+ */
+export async function askSaveAndDeploy(names: readonly string[]): Promise<boolean> {
+  const inquirer = (await import('inquirer')).default;
+  const { save } = (await inquirer.prompt([{ type: 'confirm', name: 'save', message: unsavedQuestionFor(names), default: true }])) as { save: boolean };
+  return save;
+}
+
 /** Asks about each conflict in turn (one prompt, then the rest) and returns the answers by decision key. */
 export async function askConflicts(conflicts: readonly Conflict[]): Promise<Resolutions> {
   const inquirer = (await import('inquirer')).default;

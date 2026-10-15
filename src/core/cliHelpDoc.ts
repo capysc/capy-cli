@@ -177,7 +177,7 @@ export function buildCliHelpDoc(program: Command): CliHelpDoc {
       codes: 'Branch only on the machine-readable `code` field (from --json output or a CapyError), never on human-readable message text — messages may be reworded without notice.',
       // COPY-FLAG: minimal and neutral; the contract is docs/conflict-resolution.md.
       conflicts:
-        'A write that would replace a value someone else changed stops: nothing is written, the exit code is 3, and stdout is {ok:false, code:"SECRETS_CONFLICT", conflict_id, conflicts:[...]} (fingerprints only, never values). Ask the person, then rerun the same command with --resolve NAME=mine|theirs for every conflicting name (NAME@TARGET=... for a deploy target) and --conflict <conflict_id>. A state that moved since is SECRETS_CONFLICT_STALE with the fresh conflicts. There is no resolve-all.',
+        'A write that would replace a value someone else changed stops: nothing is written, the exit code is 3, and stdout is {ok:false, code:"SECRETS_CONFLICT", conflict_id, conflicts:[...]} (fingerprints only, never values). Ask the person, then rerun the same command with --resolve NAME=mine|theirs for every conflicting name (NAME@TARGET=... for a deploy target) and --conflict <conflict_id>. A state that moved since is SECRETS_CONFLICT_STALE with the fresh conflicts. There is no resolve-all. `capy deploy` never delivers a value Capy does not hold and never saves one unasked: off a terminal, folder edits Capy lacks stop it with exit 3 and stdout {ok:false, code:"DEPLOY_UNSAVED_CHANGES", names:[...]} (names only, never values; source conflicts are reported first). Save them with `capy push`, then rerun.',
     },
   };
 }

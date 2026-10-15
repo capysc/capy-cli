@@ -648,6 +648,12 @@ export const ERROR_CODES = {
    * with it. Exit 3.
    */
   SECRETS_CONFLICT_STALE: 'SECRETS_CONFLICT_STALE',
+  /**
+   * `capy deploy` found values in the folder that Capy does not hold (edited since the folder's pin, Capy's latest unchanged)
+   * and no person at a terminal to ask whether to save them. Nothing was saved or delivered. `names` lists the variables
+   * (names only, never values); save them with `capy push`, then rerun. Exit 3.
+   */
+  DEPLOY_UNSAVED_CHANGES: 'DEPLOY_UNSAVED_CHANGES',
   /** `--resolve` is not `NAME=mine|theirs` (or `NAME@TARGET=mine|theirs`), or `--conflict` is not a conflict id. Exit 1. */
   SECRETS_RESOLVE_INVALID: 'SECRETS_RESOLVE_INVALID',
   /** `--resolve` was given without `--conflict <id>`: a decision is only valid for the conflicts it was made against. Exit 1. */

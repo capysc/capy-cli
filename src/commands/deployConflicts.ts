@@ -5,8 +5,10 @@
  *   SOURCE (folder against the Capy server). The folder's `.env` may lag Capy (a teammate saved since this folder's
  *   pin) or be ahead of it. The same planner every other write uses (`sync/commit.ts`) decides per variable:
  *     - only the server moved (folder unchanged since its pin) → deliver the server's latest, never the stale value;
- *     - only the folder changed → committed to Capy first (the same path as `mine`), then delivered, so Capy holds
- *       what the platform will hold;
+ *     - only the folder changed (an UNSAVED EDIT) → never delivered unasked: a terminal is asked "save and deploy?"
+ *       (yes: committed to Capy first, then delivered, so Capy holds what the platform will hold; no: nothing saved,
+ *       nothing delivered); off a terminal the deploy is refused with `DEPLOY_UNSAVED_CHANGES` (names only);
+ *     - both changed to the same value → delivered, the folder adopts the pin;
  *     - both changed, differently → a conflict: mine commits the folder's value (through the commit path) and
  *       delivers it, theirs delivers Capy's latest and the folder takes it like a pull.
  *
@@ -52,7 +54,7 @@ import {
   type ConflictView,
   type Resolutions,
 } from '../sync/conflicts';
-import { askConflicts } from './conflictPrompt';
+import { askConflicts, askSaveAndDeploy } from './conflictPrompt';
 
 export interface ReconcileInput {
   readonly cwd: string;
@@ -83,6 +85,35 @@ export type Reconciled =
   | { readonly ok: false; readonly code: number };
 
 const NOTHING_TO_COMPARE: Reconciled = { ok: true, skipped: [] };
+
+/** Exactly what stdout carries when a deploy is stopped for folder edits Capy does not hold: names only, never a value. */
+export interface UnsavedChangesPayload {
+  readonly ok: false;
+  readonly code: typeof ERROR_CODES.DEPLOY_UNSAVED_CHANGES;
+  readonly names: readonly string[];
+  /** A preview (`--dry-run`) reports the same payload. */
+  readonly dry_run?: true;
+}
+
+/** A deploy was stopped because the folder holds values Capy does not, and nobody at a terminal can be asked. Nothing was saved or delivered. */
+export class UnsavedChangesRefusal extends CapyError {
+  constructor(readonly payload: UnsavedChangesPayload) {
+    super(`${payload.names.join(', ')} changed in this folder and is not saved to Capy. Nothing was deployed.`, payload.code, { names: payload.names }); // COPY-FLAG
+    this.name = 'UnsavedChangesRefusal';
+  }
+}
+
+export const isUnsavedChangesRefusal = (err: unknown): err is UnsavedChangesRefusal => err instanceof UnsavedChangesRefusal;
+
+const unsavedRefusalFor = (names: readonly string[], dryRun: boolean): UnsavedChangesRefusal =>
+  new UnsavedChangesRefusal({ ok: false, code: ERROR_CODES.DEPLOY_UNSAVED_CHANGES, names: [...names],...(dryRun ? { dry_run: true as const } : {}) });
+
+/** stdout: the payload as JSON, nothing else. stderr: what to do. */
+export function printUnsavedChangesRefusal(refusal: UnsavedChangesRefusal): void {
+  console.log(JSON.stringify(refusal.payload, null, 2));
+  console.error(refusal.message);
+  console.error('Save them with `capy push`, then run the deploy again.'); // COPY-FLAG
+}
 
 /** The folder, signed in without a prompt, with its key: what a commit needs. `undefined` when this is not a Capy project folder. */
 async function openFolder(cwd: string, branch: string, devMode: boolean | undefined): Promise<(FolderContext & { serviceClient: ServiceClient }) | undefined> {
@@ -167,6 +198,22 @@ export async function reconcileDeployConflicts(input: ReconcileInput): Promise<R
   );
   const sourceAnswers: Resolutions = input.interactive && !input.dryRun && source.length > 0 ? await askConflicts(source) : flagged;
 
+  // Unsaved edits: a name the folder changed, that is no conflict, and that Capy does not already hold. Delivering
+  // one would deliver a value Capy lacks, so it is never delivered unasked (and never saved unasked).
+  const conflicting = new Set(source.map((c) => c.name));
+  const unsaved = edited.filter((v) => !conflicting.has(v) && snapshot.entries[v]?.plaintext !== folder.localPlaintext[v]);
+  // A person at a terminal is asked once, naming them; declining stops the deploy with nothing saved and nothing delivered.
+  const mayAsk = input.interactive && !input.dryRun;
+  if (unsaved.length > 0 && mayAsk && !(await askSaveAndDeploy(unsaved))) {
+    console.log('Cancelled.');
+    return { ok: false, code: 0 };
+  }
+  // Off a terminal (or in a preview) nobody can be asked. With no source conflict to report, refuse now, before the
+  // platform is contacted at all. ORDER: source conflicts come first. When both kinds are present the caller gets
+  // the SECRETS_CONFLICT payload (exit 3) alone; once those are resolved, a rerun that still has unsaved edits
+  // reaches the check after the decision step below and gets DEPLOY_UNSAVED_CHANGES (exit 3). One response each time.
+  if (unsaved.length > 0 && !mayAsk && source.length === 0) throw unsavedRefusalFor(unsaved, input.dryRun);
+
   // What is delivered once the source is answered: Capy's latest for a name answered `theirs`; else the folder's
   // edit, else Capy's latest, else the folder's value (a conflict not yet answered is read as `mine`).
   const valueFor = (name: string): string | undefined =>
@@ -200,10 +247,15 @@ export async function reconcileDeployConflicts(input: ReconcileInput): Promise<R
     ? { ...sourceAnswers, ...(liveConflicts.length > 0 ? await askConflicts(liveConflicts) : {}) }
     : gateConflicts(input.flags, scopes);
 
+  // Every conflict is answered. Unsaved edits that nobody was asked about stop the deploy here, before anything is
+  // written (see ORDER above: reached only when the source conflicts were resolved by the flags).
+  if (unsaved.length > 0 && !mayAsk) throw unsavedRefusalFor(unsaved, false);
+
   // The folder takes what will be delivered. A variable the folder did not change is never delivered stale: Capy's
   // latest is pulled in. Every variable the folder changed goes through the commit path, so Capy holds what the
-  // platform will hold: a conflict with its answer (mine writes the folder's value to Capy, theirs takes Capy's),
-  // an edit nobody else touched as a plain write.
+  // platform will hold: a conflict with its answer (mine writes the folder's value to Capy, theirs takes Capy's;
+  // choosing mine IS the decision, no second question), an unsaved edit the person just said to save, a value Capy
+  // already holds (the folder adopts its pin).
   const behind = target.vars.some(
     (v) => !edited.includes(v) && snapshot.entries[v]?.plaintext !== undefined && snapshot.entries[v].plaintext !== folder.localPlaintext[v],
   );

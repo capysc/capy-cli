@@ -35,10 +35,10 @@
  *     env blob is the server's OWN blob passed through unchanged;
  *   - a variable that was never synced at all NEVER appears in what gets pushed, in
  *     CI mode AND direct mode (the drift bug lived in the SHARED `pushKeepTransform`).
- *     An unpushed local `.env` edit to a variable being delivered is committed to Capy
- *     FIRST (CAP-717: Capy must hold what the platform will hold, or the record reads
- *     as "behind"), then the delivery is recorded against that pin (the keep-only
- *     record itself still never rebuilds the blob from `.env`);
+ *     An unpushed local `.env` edit to a variable being delivered is never delivered
+ *     unasked and never saved unasked (CAP-717, strict): off a terminal the deploy is
+ *     refused with `DEPLOY_UNSAVED_CHANGES` (exit 3) and nothing is pushed (the keep-only
+ *     record itself never rebuilds the blob from `.env`);
  *   - the user's local keep.lock / `.env` / git tree are BYTE-IDENTICAL
  *     before and after a CI-mode run (asserted directly, not inferred from
  *     an absence of git-status noise);
@@ -380,9 +380,10 @@ describe('capy deploy — server-side target recording (CAP-687)', () => {
     fetchMock: ReturnType<typeof mock>,
     options: Parameters<typeof deployCommand>[1],
     errorMock: ReturnType<typeof mock> = mock((..._a: unknown[]) => {}),
+    logMock: ReturnType<typeof mock> = mock((..._a: unknown[]) => {}),
   ): Promise<number> {
     const fetchSpy = spyOn(globalThis, 'fetch').mockImplementation(fetchMock as never);
-    const logSpy = spyOn(console, 'log').mockImplementation((() => {}) as never);
+    const logSpy = spyOn(console, 'log').mockImplementation(logMock as never);
     const errSpy = spyOn(console, 'error').mockImplementation(errorMock as never);
     try {
       return await withTestEnv(() => deployCommand(targetName, options, REPO));
@@ -440,76 +441,65 @@ describe('capy deploy — server-side target recording (CAP-687)', () => {
     expect(after.stash).toBe('');
   }, 30_000);
 
-  test('CI mode: an unpushed local `.env` edit is COMMITTED to Capy before it is delivered (push 1), then the delivery is recorded against it (push 2); a never-synced variable is never pushed', async () => {
+  /** Whether any request the scripted Dokploy fetch saw wrote the service's env. */
+  const wroteEnv = (fetchMock: ReturnType<typeof mock>): boolean =>
+    fetchMock.mock.calls.some(([url]) => new URL(String(url)).pathname.endsWith('application.saveEnvironment'));
+
+  /** Everything printed (stdout and stderr), flattened: the sentinel scan reads this. */
+  const printed = (...mocks: readonly ReturnType<typeof mock>[]): string => mocks.flatMap((m) => m.mock.calls.map((c) => c.map(String).join(' '))).join('\n');
+
+  // CAP-717, strict: an unsaved edit is never delivered and never saved unasked. Off a terminal the deploy is refused
+  // (exit 3, DEPLOY_UNSAVED_CHANGES, names only); nothing is pushed to Capy, nothing reaches Dokploy, no PR, and the
+  // folder is byte-identical. (The terminal "save and deploy?" path is in deployConflicts.test.ts.)
+  test.each([
+    ['dokploy-ci', { yes: true }],
+    ['dokploy-direct', { yes: true, noDeploy: true }],
+  ] as const)('%s: an unpushed local `.env` edit is REFUSED off a terminal (exit 3, DEPLOY_UNSAVED_CHANGES, names only): nothing pushed to Capy, nothing written to Dokploy, the folder untouched', async (targetName, options) => {
     setUpRepo();
     process.chdir(REPO);
-    // The server's stored keep/blob agree with local keep.lock (same hash), but local `.env` has moved on: an EDITED
-    // value for the tracked var, plus a variable that was never synced (it is not in `target.vars`/keep.lock).
+    // The server agrees with local keep.lock, but local `.env` has moved on: an EDITED value for the tracked var,
+    // plus a variable that was never synced (it is not in `target.vars`/keep.lock).
     writeServerSnapshot('main');
     writeFileSync(join(REPO, '.env'), 'STRIPE_KEY=new-unpushed-value\nUNPUSHED_OTHER=stray\n');
+    const before = snapshotWorkingTree();
 
-    // Dokploy receives the CURRENT value, and so does Capy: it must not hold an older one than the platform.
-    const code = await runScriptedDeploy(
-      'dokploy-ci',
-      dokployFetchMock({ stripeKeyValue: 'new-unpushed-value' }),
-      { yes: true },
-    );
+    const fetchMock = dokployFetchMock({ stripeKeyValue: 'new-unpushed-value' });
+    const errors = mock((..._a: unknown[]) => {});
+    const logs = mock((..._a: unknown[]) => {});
+    const code = await runScriptedDeploy(targetName, fetchMock, options, errors, logs);
 
-    expect(code).toBe(0);
-    expect(pushSecretsMock).toHaveBeenCalledTimes(2);
-    const [commit, record] = pushSecretsMock.mock.calls;
-
-    // Push 1 is the edit, through the commit path: the pin moves to the edit, and the blob carries a line for it
-    // (encrypted: never the value) and for nothing the folder never synced.
-    const committedKeep = JSON.parse(commit[1]);
-    expect(committedKeep.variables.STRIPE_KEY[0].value_hash).toBe(hashValue('new-unpushed-value'));
-    expect(commit[2]).toContain('STRIPE_KEY=capy:');
-    expect(commit[2]).not.toContain('new-unpushed-value');
-    expect(commit[2]).not.toContain('UNPUSHED_OTHER');
-    expect(commit[2]).not.toContain('stray');
-
-    // Push 2 records the delivery against that pin, so the target reads as current, not behind. It re-sends the
-    // server's own (now committed) blob unchanged.
-    const recordedKeep = JSON.parse(record[1]);
-    expect(recordedKeep.variables.STRIPE_KEY[0].value_hash).toBe(hashValue('new-unpushed-value'));
-    expect(recordedKeep.variables.STRIPE_KEY[0].targets[0].deployed_value_hash).toBe(hashValue('new-unpushed-value'));
-    expect(record[2]).toBe(commit[2]);
+    expect(code).toBe(3);
+    expect(pushSecretsMock).not.toHaveBeenCalled();
+    expect(wroteEnv(fetchMock)).toBe(false);
+    expect(JSON.parse(String(logs.mock.calls[0][0]))).toEqual({ ok: false, code: 'DEPLOY_UNSAVED_CHANGES', names: ['STRIPE_KEY'] });
+    expect(printed(errors, logs)).not.toContain('new-unpushed-value');
+    expect(printed(errors, logs)).not.toContain('stray');
+    expect(snapshotWorkingTree()).toEqual(before);
   }, 30_000);
 
-  test('direct mode: the same — the edit is committed first, the delivery recorded against it; a never-synced variable is never pushed', async () => {
+  // The properties the old drift tests also held, now with a folder that agrees with Capy (the lazy fixture fixed:
+  // the pin is the hash of the `.env` value): a variable that was never synced is never pushed, in CI mode AND
+  // direct mode, and the record is the only push (the server's own blob re-sent unchanged).
+  test.each([
+    ['dokploy-ci', { yes: true }],
+    ['dokploy-direct', { yes: true, noDeploy: true }],
+  ] as const)('%s: a variable that was never synced is never pushed or delivered; the delivery is recorded against the pin with the server\'s own blob', async (targetName, options) => {
     setUpRepo();
     process.chdir(REPO);
     writeServerSnapshot('main');
-    writeFileSync(join(REPO, '.env'), 'STRIPE_KEY=new-unpushed-value\nUNPUSHED_OTHER=stray\n');
+    writeFileSync(join(REPO, '.env'), `STRIPE_KEY=${STRIPE_KEY_VALUE}\nUNPUSHED_OTHER=stray\n`);
 
-    // `--no-deploy`: writes the config (recordDeployTargets still runs) but
-    // skips the trigger+poll steps, same shape as
-    // `deployRevokeWiring.test.ts`'s own `--no-deploy` test.
-    const code = await runScriptedDeploy(
-      'dokploy-direct',
-      dokployFetchMock({ stripeKeyValue: 'new-unpushed-value' }),
-      { yes: true, noDeploy: true },
-    );
+    const code = await runScriptedDeploy(targetName, dokployFetchMock(), options);
 
     expect(code).toBe(0);
-    expect(pushSecretsMock).toHaveBeenCalledTimes(2);
-    const [commit, record] = pushSecretsMock.mock.calls;
-
-    const committedKeep = JSON.parse(commit[1]);
-    expect(committedKeep.variables.STRIPE_KEY[0].value_hash).toBe(hashValue('new-unpushed-value'));
-    expect(commit[2]).not.toContain('new-unpushed-value');
-    expect(commit[2]).not.toContain('UNPUSHED_OTHER');
-    expect(commit[2]).not.toContain('stray');
-
-    const recordedKeep = JSON.parse(record[1]);
-    expect(recordedKeep.variables.STRIPE_KEY[0].value_hash).toBe(hashValue('new-unpushed-value'));
-    expect(recordedKeep.variables.STRIPE_KEY[0].targets[0]).toMatchObject({
-      provider: 'dokploy',
-      target: 'dokploy-direct',
-      deployed: false, // --no-deploy
-      deployed_value_hash: hashValue('new-unpushed-value'),
-    });
-    expect(record[2]).toBe(commit[2]);
+    expect(pushSecretsMock).toHaveBeenCalledTimes(1);
+    const [, keepFileJson, envBlob] = pushSecretsMock.mock.calls[0];
+    const recorded = JSON.parse(keepFileJson);
+    expect(recorded.variables.STRIPE_KEY[0].value_hash).toBe(hashValue(STRIPE_KEY_VALUE));
+    expect(recorded.variables.STRIPE_KEY[0].targets[0]).toMatchObject({ target: targetName, deployed_value_hash: hashValue(STRIPE_KEY_VALUE) });
+    expect(envBlob).toBe(SERVER_ENV_FILE);
+    expect(keepFileJson).not.toContain('UNPUSHED_OTHER');
+    expect(envBlob).not.toContain('stray');
   }, 30_000);
 
   test('a second CI deploy no longer erases another target\'s record: the pushed keep is built from the SERVER\'s keep, not the local keep.lock (CAP-704)', async () => {

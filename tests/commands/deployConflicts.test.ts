@@ -7,12 +7,16 @@
  * The properties: a variable the folder did not change is never delivered stale (Capy's latest is pulled in); a
  * variable both sides changed is a conflict that stops the deploy off a terminal (exit-3 payload, nothing uploaded,
  * the folder untouched) and, once answered, is either committed first and delivered (mine) or taken from Capy
- * (theirs); a folder edit nobody else touched is committed to Capy, then delivered; source and target
- * conflicts are answered in one step under one conflict_id.
+ * (theirs); source and target conflicts are answered in one step under one conflict_id.
+ *
+ * Strict about unsaved edits (CAP-717): a folder edit Capy does not hold is never delivered unasked and never saved
+ * unasked. At a terminal one question ("save and deploy?"): yes commits it to Capy, then delivers; no stops with
+ * nothing saved and nothing delivered. Off a terminal (and in a preview) the deploy is refused with
+ * DEPLOY_UNSAVED_CHANGES (names only), and source conflicts are reported first.
  *
  * `mock.module()` is process-wide: this file runs isolated (tests/run-tests.sh).
  */
-import { describe, test, expect, mock, afterEach } from 'bun:test';
+import { describe, test, expect, mock, afterEach, spyOn } from 'bun:test';
 import type { DeployAdapter } from '../../src/deploy/adapter';
 import { FIXED_PROJECT_KEY, fixedKeyResolver } from '../helpers/deployServer';
 import { fakeCapyServer, seedServer, serverValues } from '../helpers/fakeCapyServer';
@@ -47,9 +51,10 @@ mock.module('../../src/service/serviceClient', () => ({
 }));
 mock.module('../../src/crypto/keyResolver', () => fixedKeyResolver());
 const ask = mock(async (_conflicts: readonly unknown[]) => ({}) as Record<string, 'mine' | 'theirs'>);
-mock.module('../../src/commands/conflictPrompt', () => ({ askConflicts: ask }));
+const askSave = mock(async (_names: readonly string[]) => true);
+mock.module('../../src/commands/conflictPrompt', () => ({ askConflicts: ask, askSaveAndDeploy: askSave }));
 
-import { reconcileDeployConflicts, type ReconcileInput } from '../../src/commands/deployConflicts';
+import { printUnsavedChangesRefusal, reconcileDeployConflicts, UnsavedChangesRefusal, type ReconcileInput } from '../../src/commands/deployConflicts';
 import { ConflictRefusal, parseConflictFlags, type Conflict } from '../../src/sync/conflicts';
 import { hashValue } from '../../src/sync/compareSecrets';
 import type { KeepFile } from '../../src/types/index';
@@ -69,6 +74,7 @@ afterEach(() => {
   made.mock.calls.forEach(([folder]) => removeFolder(folder));
   made.mockClear();
   ask.mockClear();
+  askSave.mockClear();
 });
 
 /** A folder pinned to the old snapshot holding `env`, and a server holding `server` (default: a teammate's newer X). */
@@ -116,6 +122,19 @@ async function refusal(run: () => Promise<unknown>): Promise<ConflictRefusal> {
   return err as ConflictRefusal;
 }
 
+/** The refusal an unsaved edit raises where nobody can be asked. */
+async function unsavedRefusal(run: () => Promise<unknown>): Promise<UnsavedChangesRefusal> {
+  const err = await run().then(
+    () => undefined,
+    (e: unknown) => e,
+  );
+  expect(err).toBeInstanceOf(UnsavedChangesRefusal);
+  return err as UnsavedChangesRefusal;
+}
+
+/** Whether any adapter call was a real delivery (not the read-only look for live conflicts). */
+const delivered = (adapter: { readonly deploy: ReturnType<typeof mock> }): boolean => adapter.deploy.mock.calls.some(([, ctx]) => (ctx as { dryRun: boolean }).dryRun === false);
+
 describe('capy deploy: source conflicts', () => {
   test('the folder changed X, a teammate changed X: off a terminal the deploy stops with the payload — nothing uploaded, the folder untouched, no value in it', async () => {
     const { fake, folder } = world({ X: MINE, Y: OLD.Y });
@@ -152,17 +171,31 @@ describe('capy deploy: source conflicts', () => {
 
   test('a variable the folder did NOT change, that Capy moved, is not a conflict: Capy\'s latest is pulled in, never the stale value', async () => {
     const { fake, folder } = world({ X: OLD.X, Y: OLD.Y }); // the folder is simply behind
-    const done = await reconcileDeployConflicts(input(folder, adapterWith()));
+    const done = await reconcileDeployConflicts(input(folder, adapterWith(), { interactive: true }));
     expect(done.ok).toBe(true);
     expect(fake.pushSecrets.mock.calls).toHaveLength(0);
     expect(folder.env().X).toBe(THEIRS);
     expect(folder.pin('X')).toBe(hashValue(THEIRS));
+    expect(ask).not.toHaveBeenCalled(); // no question of any kind: the folder simply takes Capy's latest
+    expect(askSave).not.toHaveBeenCalled();
   });
 
-  test('a folder edit nobody else touched is COMMITTED to Capy before it is delivered: Capy holds what the platform will hold, and the target is not read as behind', async () => {
-    const { fake, folder } = world({ X: OLD.X, Y: 'y-edited' }, OLD_SEED);
-    const done = await reconcileDeployConflicts(input(folder, adapterWith()));
+  test('both changed X to the SAME value: nothing to decide and nothing to save — delivered, the folder adopts the pin, no question', async () => {
+    const { fake, folder } = world({ X: THEIRS, Y: OLD.Y });
+    const done = await reconcileDeployConflicts(input(folder, adapterWith(), { interactive: true }));
     expect(done.ok).toBe(true);
+    expect(ask).not.toHaveBeenCalled();
+    expect(askSave).not.toHaveBeenCalled();
+    expect(serverValues(fake.state(), BRANCH, KEY)).toEqual({ X: THEIRS, Y: OLD.Y });
+    expect(folder.pin('X')).toBe(hashValue(THEIRS));
+  });
+
+  test('a folder edit Capy does not hold: at a terminal ONE question names it; Enter commits it to Capy first (Capy now holds what the platform will hold), then it is delivered', async () => {
+    const { fake, folder } = world({ X: OLD.X, Y: 'y-edited' }, OLD_SEED);
+    const done = await reconcileDeployConflicts(input(folder, adapterWith(), { interactive: true }));
+    expect(done.ok).toBe(true);
+    expect(askSave.mock.calls).toEqual([[['Y']]]);
+    expect(ask).not.toHaveBeenCalled(); // an unsaved edit is no conflict
     expect(fake.pushSecrets.mock.calls).toHaveLength(1);
     expect(serverValues(fake.state(), BRANCH, KEY)).toEqual({ X: OLD.X, Y: 'y-edited' }); // Capy's latest decrypts to the folder's value
     expect(folder.env().Y).toBe('y-edited');
@@ -170,16 +203,98 @@ describe('capy deploy: source conflicts', () => {
     // What `recordDeployTargets` writes next: deployed_value_hash of the delivered value. Against Capy's pin it is not behind.
     const entry = fake.state().keep?.variables.Y.find((e) => e.branch === BRANCH);
     expect(entry).toBeDefined();
-    const delivered = { provider: 'dokploy', target: 'dokploy-production', deployed_value_hash: hashValue('y-edited') };
-    expect(staleTargets({ ...entry!, targets: [delivered] } as never)).toEqual([]);
+    const recorded = { provider: 'dokploy', target: 'dokploy-production', deployed_value_hash: hashValue('y-edited') };
+    expect(staleTargets({ ...entry!, targets: [recorded] } as never)).toEqual([]);
   });
 
-  test('an edit nobody else touched on a name Capy did not move, next to one a teammate moved: both land, nothing the folder did not change is written', async () => {
+  test('declining the question stops the deploy: nothing saved to Capy, the folder untouched, the platform never contacted', async () => {
+    const { fake, folder } = world({ X: OLD.X, Y: 'y-edited' }, OLD_SEED);
+    askSave.mockImplementationOnce(async () => false);
+    const adapter = adapterWith(() => []);
+    const before = JSON.stringify(folder.keep());
+    const stopped = await reconcileDeployConflicts(input(folder, adapter, { interactive: true }));
+    expect(stopped).toEqual({ ok: false, code: 0 });
+    expect(askSave).toHaveBeenCalledTimes(1);
+    expect(fake.pushSecrets.mock.calls).toHaveLength(0);
+    expect(serverValues(fake.state(), BRANCH, KEY)).toEqual(OLD); // Capy's latest is unchanged
+    expect(folder.env()).toEqual({ X: OLD.X, Y: 'y-edited' });
+    expect(JSON.stringify(folder.keep())).toBe(before);
+    expect(adapter.deploy.mock.calls).toHaveLength(0); // no read of the platform, no write
+  });
+
+  test('off a terminal an unsaved edit REFUSES the deploy: DEPLOY_UNSAVED_CHANGES with the names only — nothing saved, nothing delivered, the platform never contacted, no value anywhere in the output', async () => {
+    const { fake, folder } = world({ X: OLD.X, Y: 'y-edited-sentinel' }, OLD_SEED);
+    const adapter = adapterWith(() => []);
+    const before = JSON.stringify(folder.keep());
+    const stopped = await unsavedRefusal(() => reconcileDeployConflicts(input(folder, adapter)));
+    expect(stopped.payload).toEqual({ ok: false, code: 'DEPLOY_UNSAVED_CHANGES', names: ['Y'] });
+    expect(stopped.code).toBe('DEPLOY_UNSAVED_CHANGES');
+    // What the command prints: JSON on stdout, prose on stderr — neither holds the value.
+    const out = spyOn(console, 'log').mockImplementation((() => {}) as never);
+    const err = spyOn(console, 'error').mockImplementation((() => {}) as never);
+    printUnsavedChangesRefusal(stopped);
+    const printed = [...out.mock.calls, ...err.mock.calls].map((c) => c.join(' ')).join('\n');
+    expect(JSON.parse(String(out.mock.calls[0][0]))).toEqual({ ok: false, code: 'DEPLOY_UNSAVED_CHANGES', names: ['Y'] });
+    out.mockRestore();
+    err.mockRestore();
+    expect(printed).not.toContain('y-edited-sentinel');
+    expect(stopped.message).not.toContain('y-edited-sentinel');
+    expect(fake.pushSecrets.mock.calls).toHaveLength(0);
+    expect(serverValues(fake.state(), BRANCH, KEY)).toEqual(OLD);
+    expect(folder.env()).toEqual({ X: OLD.X, Y: 'y-edited-sentinel' });
+    expect(JSON.stringify(folder.keep())).toBe(before);
+    expect(adapter.deploy.mock.calls).toHaveLength(0);
+    expect(askSave).not.toHaveBeenCalled();
+  });
+
+  test('an unsaved edit next to a name a teammate moved: refused off a terminal naming ONLY the unsaved one; nothing is pulled or saved either', async () => {
     const { fake, folder } = world({ X: OLD.X, Y: 'y-edited' }); // the server moved X; the folder only changed Y
-    const done = await reconcileDeployConflicts(input(folder, adapterWith()));
+    const stopped = await unsavedRefusal(() => reconcileDeployConflicts(input(folder, adapterWith())));
+    expect(stopped.payload.names).toEqual(['Y']);
+    expect(fake.pushSecrets.mock.calls).toHaveLength(0);
+    expect(folder.env()).toEqual({ X: OLD.X, Y: 'y-edited' });
+  });
+
+  test('at a terminal, an unsaved edit next to a name a teammate moved: Enter lands both (Capy\'s X pulled in, the folder\'s Y saved)', async () => {
+    const { fake, folder } = world({ X: OLD.X, Y: 'y-edited' });
+    const done = await reconcileDeployConflicts(input(folder, adapterWith(), { interactive: true }));
     expect(done.ok).toBe(true);
+    expect(askSave.mock.calls).toEqual([[['Y']]]);
     expect(serverValues(fake.state(), BRANCH, KEY)).toEqual({ X: THEIRS, Y: 'y-edited' });
     expect(folder.env()).toEqual({ X: THEIRS, Y: 'y-edited' });
+  });
+
+  test('source conflicts AND an unsaved edit at a terminal: the conflict is asked first, then the unsaved edit once; `mine` needs no second question and both are saved', async () => {
+    const { fake, folder } = world({ X: MINE, Y: 'y-edited' });
+    ask.mockImplementationOnce(async () => ({ X: 'mine' }));
+    const done = await reconcileDeployConflicts(input(folder, adapterWith(), { interactive: true }));
+    expect(done.ok).toBe(true);
+    expect((ask.mock.calls[0][0] as readonly Conflict[]).map((c) => c.name)).toEqual(['X']);
+    expect(askSave.mock.calls).toEqual([[['Y']]]); // the conflicting name is not asked about again
+    expect(serverValues(fake.state(), BRANCH, KEY)).toEqual({ X: MINE, Y: 'y-edited' });
+  });
+
+  test('source conflict AND unsaved edit off a terminal: SECRETS_CONFLICT comes first (alone); once resolved, the rerun answers DEPLOY_UNSAVED_CHANGES — and nothing was saved at either step', async () => {
+    const { fake, folder } = world({ X: MINE, Y: 'y-edited' });
+    const adapter = adapterWith(() => []);
+    const first = await refusal(() => reconcileDeployConflicts(input(folder, adapter)));
+    expect(first.payload.code).toBe('SECRETS_CONFLICT');
+    expect(first.payload.conflicts.map((c) => c.name)).toEqual(['X']); // Y is not in it: one response at a time
+    const flags = parseConflictFlags({ resolve: ['X=mine'], conflict: first.payload.conflict_id });
+    const second = await unsavedRefusal(() => reconcileDeployConflicts(input(folder, adapter, { flags })));
+    expect(second.payload).toEqual({ ok: false, code: 'DEPLOY_UNSAVED_CHANGES', names: ['Y'] });
+    expect(fake.pushSecrets.mock.calls).toHaveLength(0); // even the `mine` answer saved nothing: the deploy did not go on
+    expect(folder.env()).toEqual({ X: MINE, Y: 'y-edited' });
+    expect(delivered(adapter)).toBe(false);
+  });
+
+  test('--dry-run reports the unsaved names (dry_run: true) and neither asks nor writes — even at a terminal', async () => {
+    const { fake, folder } = world({ X: OLD.X, Y: 'y-edited' }, OLD_SEED);
+    const preview = await unsavedRefusal(() => reconcileDeployConflicts(input(folder, adapterWith(), { dryRun: true, interactive: true })));
+    expect(preview.payload).toEqual({ ok: false, code: 'DEPLOY_UNSAVED_CHANGES', names: ['Y'], dry_run: true });
+    expect(askSave).not.toHaveBeenCalled();
+    expect(fake.pushSecrets.mock.calls).toHaveLength(0);
+    expect(folder.env()).toEqual({ X: OLD.X, Y: 'y-edited' });
   });
 
   test('a folder that agrees with Capy is left alone: no write of any kind', async () => {
@@ -204,6 +319,7 @@ describe('capy deploy: source conflicts', () => {
     const done = await reconcileDeployConflicts(input(folder, adapterWith(), { interactive: true }));
     expect(done.ok).toBe(true);
     expect(ask).toHaveBeenCalledTimes(1);
+    expect(askSave).not.toHaveBeenCalled(); // choosing mine IS the decision to save: no second question
     expect(serverValues(fake.state(), BRANCH, KEY).X).toBe(MINE);
   });
 });
