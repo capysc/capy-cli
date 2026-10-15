@@ -33,7 +33,8 @@ export function readDefaultBranchTargets(cwd: string): readonly TargetConfig[] {
   }
 }
 
-function parseTargets(raw: string): readonly TargetConfig[] {
+/** The targets of a `.capy/deploy.json` text: `[]` when it is not a version-1 file or cannot be parsed. */
+export function parseTargets(raw: string): readonly TargetConfig[] {
   try {
     const parsed: unknown = JSON.parse(raw);
     if (!isRecord(parsed) || parsed.version !== '1' || !isRecord(parsed.targets)) return [];

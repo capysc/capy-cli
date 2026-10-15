@@ -91,12 +91,14 @@ export class SecretsCommand {
         const { createLocationDecryptor } = await import('./secretsValueDecryptor');
         const { runSecretsScreen } = await import('../ui/secretsScreenDriver');
         const { createEditActions } = await import('./secretsEditActions');
+        const { createDeployActions } = await import('./secretsDeployActions');
         spinner?.stop();
         await runSecretsScreen(
           rows,
           createLocationDecryptor(orgId, userId, serviceClient),
           createEditActions(orgId, userId, serviceClient, opts.dryRun === true),
           opts.dryRun === true,
+          createDeployActions(orgId, userId, serviceClient, opts.dryRun === true, this.devMode),
         );
         return;
       }

@@ -2,7 +2,7 @@
 
 # capy CLI reference
 
-Version `0.9.10`. Generated from `capy help --json`.
+Version `0.9.11`. Generated from `capy help --json`.
 
 ## Commands
 
@@ -556,6 +556,26 @@ JSON support: yes (`--json`)
 
 Dry run: yes (`--dry-run`)
 
+### `capy secrets deploy`
+
+Deploy the Dokploy targets of one or more secrets with no project folder, and open one keep.lock PR per target. Never prompts.
+
+```
+capy secrets deploy <names...> [options]
+```
+
+| Option | Description | Default |
+|---|---|---|
+| `--json` | emit machine-readable JSON instead of the human UI |  |
+| `--row <row_id>` | deploy this row of a name (repeatable; ids from `capy secrets --name NAME --json`) | `[]` |
+| `--all-rows` | deploy every row of those names |  |
+| `--exclude <project:branch>` | leave this location out (repeatable) | `[]` |
+| `--confirm <plan_id>` | run the plan that --dry-run printed (required for a real run) |  |
+
+JSON support: yes (`--json`)
+
+Dry run: yes (`--dry-run`)
+
 ## `capy grant-branch`
 
 Grant a member wildcard access to a protected branch
@@ -901,6 +921,11 @@ Every refusal carries a stable `code` — branch on it, never on message text.
 - `PLAN_REQUIRED`
 - `DISCOVER_UNSUPPORTED_TARGET`
 - `DISCOVER_PARTIAL`
+- `DEPLOY_BATCH_PARTIAL`
+- `DEPLOY_NOTHING_TO_DEPLOY`
+- `DEPLOY_VARS_MISSING`
+- `DEPLOY_PREFLIGHT_FAILED`
+- `DEPLOY_PUSH_FAILED`
 
 ## Conventions
 

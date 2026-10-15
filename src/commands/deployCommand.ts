@@ -83,6 +83,9 @@ import {
   createDokployClient,
 } from '../deploy/dokployApi';
 import { classify, isBuildTime } from '../deploy/classify';
+import { buildDeployPrBody } from '../deploy/deployPrBody';
+import { resolveDokployApiKeyOnce } from '../deploy/dokployApiKeyOnce';
+import { deliveryFor, recordDeliveriesOnServer, targetRefFor } from '../deploy/deliveryRecord';
 import { deployPlan, unansweredDeployStops, type DeployStopId } from '../core/deployPlan';
 import type { DeployPlanConfirmStop } from '../ui/screens/contract';
 import { CHECKBOX_INSTRUCTIONS, CHECKBOX_THEME, LIST_THEME } from '../ui/promptStyle';
@@ -136,53 +139,6 @@ export interface DeployCliOptions {
    * ships it later. `targets` are still recorded — the write happened.
    */
   noDeploy?: boolean;
-}
-
-/**
- * Dokploy only: resolves the org system store's API key ONCE for this whole
- * command, wiring the REAL `system/systemStore.ts#getConnectorSecret` — this
- * is the production entry point for CAP-664. The result is threaded into
- * every `preflight`/`deploy`/`onRemove` call via `ctx.resolvedApiKey`, so the
- * store is asked (and an admin prompted) at most once per command no matter
- * how many of those run. `undefined` for every other adapter — they never
- * read that field.
- *
- * Never resolves (never prompts, never touches the store) when the target
- * can't even be reached — `dokployConnectionProblem` (an unusable `baseUrl`,
- * a missing `applicationId`, or a malformed `tokenEnv`): `preflight()` fails
- * on that regardless of any token, so asking for (or prompting to save) a
- * key first would be wasted at best and a needless prompt at worst.
- * Deliberately NOT the full `optionsProblem` — `onRemove` has no vars to
- * ship and must still reach a target that check would otherwise reject.
- */
-async function resolveDokployApiKeyOnce(
-  adapter: DeployAdapter,
-  target: TargetConfig,
-  orgId: string | undefined,
-  devMode: boolean | undefined,
-  interactive: boolean,
-): Promise<ResolveDokployApiKeyResult | undefined> {
-  if (adapter.id !== 'dokploy') return undefined;
-  if (dokployConnectionProblem(target)) return undefined;
-  const { getDirectionalConnectorSecret } = await import('../system/systemStore');
-  // CAP-679 follow-up: deploy asks for `_TARGET_DOKPLOY_API_KEY` first, and
-  // — only when that's missing — offers to reuse (or shadow-refuse without a
-  // TTY) `_CONNECTOR_DOKPLOY_API_KEY`, the import-side key. See
-  // `system/systemStore.ts#getDirectionalConnectorSecret`'s own doc.
-  const getConnectorSecret = (name: string, opts: DokploySystemStoreCallOptions) =>
-    getDirectionalConnectorSecret(name, DOKPLOY_CONNECTOR_SECRET_NAME, {
-      ...opts,
-      missingWithFallbackCode: ERROR_CODES.DOKPLOY_TARGET_KEY_MISSING,
-    });
-  return resolveDokployApiKey({
-    tokenEnv: (target.options as { tokenEnv?: string }).tokenEnv,
-    env: process.env,
-    interactive,
-    orgId,
-    devMode,
-    storeName: DOKPLOY_TARGET_SECRET_NAME,
-    deps: { getConnectorSecret },
-  });
 }
 
 /**
@@ -305,14 +261,10 @@ async function decryptCurrentBranch(
   const fm = new FileManager(cwd);
   const envFromFile = fm.readEnvFile();
 
-  const out: Record<string, string> = {};
-  const toDecrypt: Array<[string, string]> = [];
-  for (const [k, v] of Object.entries(envFromFile)) {
-    if (typeof v !== 'string') continue;
-    if (fm.isEncrypted(v)) toDecrypt.push([k, v]);
-    else out[k] = v;
-  }
-  if (toDecrypt.length === 0) return out;
+  const stringEntries = Object.entries(envFromFile).filter((e): e is [string, string] => typeof e[1] === 'string');
+  const plain: Record<string, string> = Object.fromEntries(stringEntries.filter(([, v]) => !fm.isEncrypted(v)));
+  const toDecrypt = stringEntries.filter(([, v]) => fm.isEncrypted(v));
+  if (toDecrypt.length === 0) return plain;
 
   const keep = readKeep(cwd);
   if (!keep) {
@@ -342,10 +294,7 @@ async function decryptCurrentBranch(
     result.user_id,
     keyServiceOps,
   );
-  for (const [k, v] of toDecrypt) {
-    out[k] = fm.decryptValue(v, projectKeyHex);
-  }
-  return out;
+  return { ...plain, ...Object.fromEntries(toDecrypt.map(([k, v]) => [k, fm.decryptValue(v, projectKeyHex)])) };
 }
 
 /**
@@ -447,19 +396,6 @@ async function loadDeploySecrets(
 }
 
 // ── Targets recording (CAP-679) ─────────────────────────────────────────────
-
-/**
- * Adapter-specific handle for what a target actually points at, when one is
- * knowable from `target.options` alone. Only Dokploy defines this today
- * (`composeId` / `applicationId`); every other adapter gets `undefined` —
- * there is no spec'd `ref` shape for them yet.
- */
-function targetRefFor(target: TargetConfig): Record<string, string> | undefined {
-  const opts = target.options as Record<string, unknown>;
-  if (typeof opts.composeId === 'string') return { composeId: opts.composeId };
-  if (typeof opts.applicationId === 'string') return { applicationId: opts.applicationId };
-  return undefined;
-}
 
 /**
  * Read → transform → push keep.lock through the existing sync path, for a
@@ -658,35 +594,6 @@ function warnIfTokenUntracked(result: { ok: boolean }, deployId: string | undefi
 }
 
 /**
- * The delivery descriptor + delivered-values pair shared by every "record
- * this target's delivery" caller below (direct mode, CI mode, and
- * `buildFinalCiKeep`'s own PR-content version) — same shape, same
- * `noDeploy` → `deployed: false` rule (CAP-679 follow-up, "pending"; see
- * `targetsGate.ts#upsertTargetElement`'s doc for why absent/false OMITS the
- * field instead of writing `deployed: true`, and how this also clears a
- * PRIOR pending element once a real deploy follows it).
- */
-function deliveryFor(
-  target: TargetConfig,
-  adapter: DeployAdapter,
-  deployId: string | undefined,
-  noDeploy: boolean,
-  valueHashes: Record<string, string>,
-): { delivery: TargetDeliveryDescriptor; values: readonly VarDelivery[] } {
-  const delivery: TargetDeliveryDescriptor = {
-    provider: adapter.id,
-    target: target.name,
-    ref: targetRefFor(target),
-    deployId,
-    ...(noDeploy ? { deployed: false } : {}),
-  };
-  const values = target.vars
-    .filter((v) => valueHashes[v] !== undefined)
-    .map((v) => ({ name: v, valueHash: valueHashes[v] }));
-  return { delivery, values };
-}
-
-/**
  * Direct-mode-only: after a verified successful deploy (or, when `noDeploy`,
  * after the config write `--no-deploy` still performs), record this
  * target's delivery into every (var, branch) entry it actually shipped.
@@ -735,12 +642,12 @@ async function recordDeployTargets(
  * CI-mode target's delivery never shows up in `capy secrets` — the bug this
  * function fixes.
  *
- * Server-only: `pushKeepTransform`'s `writeLocal: false` means this call
- * pushes exactly like direct mode's `recordDeployTargets` (same server
- * snapshot fetch, same re-sent-unchanged blob — see `pushKeepTransform`'s
- * own doc) but never writes keep.lock to disk and never auto-commits. CI
- * mode must NEVER touch the user's working tree — see `openCiDeployPr`'s
- * own doc for why.
+ * Server-only: the pushed keep is built from the SERVER's own keep and the
+ * branch's blob is re-sent unchanged (`recordCiDeliveryOnServer` below) — it
+ * never reads, writes or commits the local keep.lock. CI mode must NEVER
+ * touch the user's working tree — see `openCiDeployPr`'s own doc for why.
+ * (Until this was fixed it built the keep from the LOCAL keep.lock, so a second
+ * CI deploy could erase another target's record the local copy did not have.)
  *
  * Best-effort, same contract as `recordDeployTargets`: the CI delivery
  * already succeeded by the time this runs, so a failure here is warned
@@ -759,15 +666,48 @@ async function recordDeployTargetsCi(
   const deliveredAt = new Date().toISOString();
   const { delivery, values } = deliveryFor(target, adapter, deployId, noDeploy, valueHashes);
   if (values.length === 0) return;
-  const result = await pushKeepTransform(
-    cwd,
-    target.branch,
-    (keep) => recordTargetDeliveries(keep, target.branch, delivery, deliveredAt, values),
-    devMode,
-    'record deploy targets',
-    { writeLocal: false, warnCode: ERROR_CODES.CI_DEPLOY_TARGETS_RECORD_FAILED },
-  );
-  warnIfTokenUntracked(result, deployId, target.name);
+  const outcome = await recordCiDeliveryOnServer(cwd, target.branch, [{ delivery, values, deliveredAt }], devMode);
+  if (!outcome.ok) {
+    console.error(
+      `  ${YELLOW('!')} could not record deploy targets in keep.lock: ${ERROR_CODES.CI_DEPLOY_TARGETS_RECORD_FAILED}: ${outcome.detail}`,
+    );
+  }
+  warnIfTokenUntracked(outcome, deployId, target.name);
+}
+
+/**
+ * The server-side half of `recordDeployTargetsCi`: authenticates (never
+ * prompting), then builds the pushed keep FROM THE SERVER'S keep
+ * (`recordDeliveriesOnServer`), never from the local keep.lock. A local copy
+ * can lag the server — it may lack another target's CI record — and a keep
+ * pushed from it erased that record. The local keep.lock is not read, written
+ * or compared at all. Never throws.
+ */
+async function recordCiDeliveryOnServer(
+  cwd: string,
+  branch: string,
+  deliveries: Parameters<typeof recordDeliveriesOnServer>[3],
+  devMode: boolean | undefined,
+): Promise<{ ok: true } | { ok: false; detail: string }> {
+  try {
+    const projectState = await new ProjectManager(cwd).detectProjectState();
+    if (!projectState.initialized || !projectState.organizationId || !projectState.projectId) {
+      return { ok: false, detail: ERROR_CODES.NO_KEEP_FILE };
+    }
+    const { AuthService, silentAuthFailureMessage } = await import('../auth/authService');
+    const { ServiceClient } = await import('../service/serviceClient');
+    const authService = new AuthService(undefined, devMode, projectState.userId);
+    const serviceClient = new ServiceClient(undefined, devMode);
+    serviceClient.setTokenProvider(() => authService.getValidToken());
+    const authResult = await authenticateSilentWithFallback(authService, projectState.organizationId);
+    if (!authResult.success || !authResult.user_id) {
+      return { ok: false, detail: silentAuthFailureMessage(authResult) };
+    }
+    const recorded = await recordDeliveriesOnServer(serviceClient, projectState.projectId, branch, deliveries);
+    return recorded.ok ? { ok: true } : { ok: false, detail: recorded.code };
+  } catch (err: any) {
+    return { ok: false, detail: String(err?.message ?? err) };
+  }
 }
 
 /**
@@ -2855,71 +2795,4 @@ async function unwindGitState(
   }
 }
 
-export function buildDeployPrBody(target: TargetConfig): string {
-  const adapter = getAdapter(target.kind);
-  const adapterLabel = adapter ? adapter.label : target.kind;
-  const optionsTable = Object.entries(target.options)
-    .map(([k, v]) => `- \`${k}\`: \`${String(v)}\``)
-    .join('\n');
-  const baseLine = target.gitBaseBranch
-    ? `- **Git base:** \`${target.gitBaseBranch}\``
-    : '';
-
-  // Secret-delivery wording depends on the adapter. Blob adapters (Vercel) push
-  // SECRETS_BLOB + PROJECT_KEY and let the build decrypt via `capy run`; others
-  // push the individual secrets into the vendor's store.
-  const varsSection = adapter?.needsDeployToken
-    ? [
-        `Delivered to ${adapterLabel} as \`SECRETS_BLOB\` + \`PROJECT_KEY\` **before** this`,
-        `PR was opened — the encrypted bundle of your secrets plus its build-time`,
-        `key. Your individual secret values stay encrypted in the bundle and never`,
-        `appear in git history; the build decrypts them with \`capy run\`:`,
-        ``,
-        `- \`SECRETS_BLOB\``,
-        `- \`PROJECT_KEY\``,
-      ].join('\n')
-    : [
-        `Already delivered to the vendor's secret store **before** this PR was`,
-        `opened (e.g. \`wrangler secret bulk\` for cf-worker). Names only — values`,
-        `stay in the vendor's store and never appear in git history:`,
-        ``,
-        target.vars.map((v) => `- \`${v}\``).join('\n'),
-      ].join('\n');
-
-  // CAP-702: capy does not track releases. The values are already in the
-  // vendor's store; merging records them in keep.lock and starts a release
-  // only where the vendor builds on merge. Wording approved by Vince
-  // (2026-10-04), verbatim from the ticket.
-  const mergeSection = [
-    `The new values are already in ${adapterLabel}. The next release of this branch will use them.`,
-    `Merging this PR records them in keep.lock, and it starts a release if ${adapterLabel} builds on merge.`,
-  ].join(' ');
-
-  return [
-    `Automated deploy PR opened by \`capy deploy\`.`,
-    ``,
-    `## What this ships`,
-    ``,
-    `- **Target:** \`${target.name}\``,
-    `- **Adapter:** ${adapterLabel} (\`${target.kind}\`)`,
-    `- **Capy branch:** \`${target.branch}\` — secrets snapshot pinned by \`keep.lock\` in this commit.`,
-    baseLine,
-    optionsTable,
-    ``,
-    `## Vars pushed`,
-    ``,
-    varsSection,
-    ``,
-    `## What happens on merge`,
-    ``,
-    mergeSection,
-    ``,
-    `## Diff scope`,
-    ``,
-    `This PR touches at most one file: \`keep.lock\`. An empty diff means the`,
-    `pinned snapshot already matched and this is a forced redeploy. Other`,
-    `working-tree changes on the author's machine were not picked up.`,
-    ``,
-    `_Generated by \`capy deploy\`._`,
-  ].join('\n');
-}
+export { buildDeployPrBody };

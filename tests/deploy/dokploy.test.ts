@@ -680,7 +680,8 @@ describe('dokploy — deploy', () => {
     expect(shadowedEnv.split('\n')).toContain(`${CAPY_OFF_MARKER}STRIPE_KEY=stale`);
     expect(shadowedEnv).not.toContain('\nSTRIPE_KEY=stale\n');
     // Capy's own block carries the live value
-    expect(shadowedEnv).toContain(`STRIPE_KEY='${VALUES.STRIPE_KEY}'`);
+    // a plain-characters value is written bare (no quotes)
+    expect(shadowedEnv.split('\n')).toContain(`STRIPE_KEY=${VALUES.STRIPE_KEY}`);
   });
 
   test('an existing Capy block is replaced, not duplicated', async () => {

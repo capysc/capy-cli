@@ -1110,6 +1110,14 @@ export function stripManagedBlock(split: EnvSplit): string {
 // COPY-FLAG: new on-disk marker text (not user-facing prose, but visible in the Dokploy dashboard).
 export const CAPY_OFF_MARKER = '# capy:off ';
 
+/** Characters that survive unquoted through both `dotenv` and Docker Compose unchanged. */
+const BARE_SAFE_VALUE = /^[A-Za-z0-9_\-./:@,+=]+$/;
+
+/** True when `value` is non-empty and made only of bare-safe characters. */
+export function isBareSafeValue(value: string): boolean {
+  return BARE_SAFE_VALUE.test(value);
+}
+
 export type DotenvValueProblem = 'DOKPLOY_VALUE_UNREPRESENTABLE' | 'DOKPLOY_VALUE_HAS_REFERENCE';
 
 /**
@@ -1118,11 +1126,18 @@ export type DotenvValueProblem = 'DOKPLOY_VALUE_UNREPRESENTABLE' | 'DOKPLOY_VALU
  * exactly `value` — see `tests/deploy/dokployPlainDelivery.test.ts` for the
  * adversarial property test (and seeded fuzz test) this is built to satisfy.
  *
- * ALWAYS quotes (never emits an unquoted value): dotenv trims an unquoted
- * value's surrounding whitespace and cuts it at the first `#`, and — subtler
- * — a value that itself happens to start and end with the same quote
- * character would be re-stripped by `dotenv.parse`'s own quote-removal step
- * if left unquoted. Quoting unconditionally sidesteps both.
+ * Bare when the value is only plain characters: a non-empty value made
+ * entirely of `[A-Za-z0-9_\-./:@,+=]` is written UNQUOTED (`KEY=180`,
+ * `KEY=https://x.y/z`) — nothing in it can be misread by `dotenv` or by
+ * Docker Compose, so the Dokploy dashboard shows the value exactly as it is.
+ *
+ * Quoted otherwise, because each of these breaks an unquoted value: `#`
+ * starts a comment (dotenv cuts the value there); leading/trailing
+ * whitespace is trimmed; a value that itself starts and ends with the same
+ * quote character is re-stripped by `dotenv.parse`'s own quote-removal step;
+ * and `$` is interpolated by Docker Compose in an unquoted value (so `$` is
+ * deliberately NOT in the bare set). An empty value is also quoted, so the
+ * line never reads as "no value".
  *
  * FIRST, independent of quoting: `dotenv.parse` normalizes every `\r\n` (and
  * a lone `\r`) to `\n` on the WHOLE input text before any quote-aware parsing
@@ -1169,6 +1184,7 @@ export type DotenvValueProblem = 'DOKPLOY_VALUE_UNREPRESENTABLE' | 'DOKPLOY_VALU
 export function formatDotenvValue(value: string): { ok: true; rendered: string } | { ok: false; code: DotenvValueProblem } {
   if (value.includes('${{')) return { ok: false, code: 'DOKPLOY_VALUE_HAS_REFERENCE' };
   if (value.includes('\r')) return { ok: false, code: 'DOKPLOY_VALUE_UNREPRESENTABLE' };
+  if (isBareSafeValue(value)) return { ok: true, rendered: value };
   if (!value.includes("'")) return { ok: true, rendered: `'${value}'` };
   if (!value.includes('`')) return { ok: true, rendered: `\`${value}\`` };
   // Both literal two-character sequences `dotenv.parse` decodes inside a

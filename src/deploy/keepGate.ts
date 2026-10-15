@@ -64,12 +64,45 @@ export function buildDeployKeep(
   delivery?: TargetDeliveryDescriptor,
   deliveredAt: string = new Date().toISOString(),
 ): DeployKeep {
+  const hashes = Object.fromEntries(
+    vars.filter((name) => envValues[name] !== undefined).map((name) => [name, hashValue(envValues[name])]),
+  );
+  return buildDeployKeepFromHashes(baseKeep, hashes, vars, branch, delivery, deliveredAt);
+}
+
+/**
+ * `buildDeployKeep` for a caller that only holds the hashes of the values (the
+ * repo-free batch deploy keeps no plaintext past the push). `hashes` is by
+ * variable name; a name in `vars` with no hash is skipped, exactly like a name
+ * with no value above.
+ */
+export function buildDeployKeepFromHashes(
+  baseKeep: KeepFile,
+  hashes: Readonly<Record<string, string>>,
+  vars: readonly string[],
+  branch: string,
+  delivery?: TargetDeliveryDescriptor,
+  deliveredAt: string = new Date().toISOString(),
+): DeployKeep {
+  const keep = foldDeployKeep(baseKeep, hashes, vars, branch, delivery, deliveredAt);
+  const content = serializeKeep(keep);
+  return { content, changed: content !== serializeKeep(baseKeep) };
+}
+
+/** `buildDeployKeepFromHashes`, as the keep itself (what a caller that writes it through `serializeKeep` itself needs). */
+export function foldDeployKeep(
+  baseKeep: KeepFile,
+  hashes: Readonly<Record<string, string>>,
+  vars: readonly string[],
+  branch: string,
+  delivery?: TargetDeliveryDescriptor,
+  deliveredAt: string = new Date().toISOString(),
+): KeepFile {
   const validDelivery = isDeliveryDescriptor(delivery) ? delivery : undefined;
 
   const nextVariables = vars.reduce<Record<string, Entry[]>>((acc, name) => {
-    const value = envValues[name];
-    if (value === undefined) return acc; // missing var — var-set reconcile handles it
-    const hash = hashValue(value);
+    const hash = hashes[name];
+    if (hash === undefined) return acc; // missing var — var-set reconcile handles it
     const existingEntries = acc[name] ?? (baseKeep.variables[name] as Entry[] | undefined) ?? [];
     const entry = entryFor(existingEntries, branch);
     const withHash: Entry = entry
@@ -92,9 +125,7 @@ export function buildDeployKeep(
     return { ...acc, [name]: nextEntries };
   }, { ...baseKeep.variables } as Record<string, Entry[]>);
 
-  const keep: KeepFile = { ...baseKeep, variables: nextVariables };
-  const content = serializeKeep(keep);
-  return { content, changed: content !== serializeKeep(baseKeep) };
+  return { ...baseKeep, variables: nextVariables };
 }
 
 /**

@@ -120,6 +120,52 @@ describe('formatDotenvValue — property: dotenv.parse(render(x)) === x', () => 
     }
   });
 
+  test('a value made only of plain characters is emitted bare, unquoted', () => {
+    const cases: ReadonlyArray<readonly [string, string]> = [
+      ['180', '180'],
+      ['https://x.y/z', 'https://x.y/z'],
+      ['a=b', 'a=b'],
+      ['user@host:5432,other+1_2-3./x', 'user@host:5432,other+1_2-3./x'],
+    ];
+    for (const [value, expected] of cases) {
+      const r = formatDotenvValue(value);
+      expect(r).toEqual({ ok: true, rendered: expected });
+      expect(parseDotenv(`V=${expected}`).V).toBe(value);
+    }
+  });
+
+  test('a value that needs protection is still quoted: #, leading space, $, quote characters, empty', () => {
+    const cases: ReadonlyArray<readonly [string, string]> = [
+      ['a#b', "'a#b'"],
+      [' lead', "' lead'"],
+      ['trail ', "'trail '"],
+      ['$HOME', "'$HOME'"],
+      ["'x'", '`\'x\'`'],
+      ['"x"', `'"x"'`],
+      ['a b', "'a b'"],
+      ['a\\b', "'a\\b'"],
+      ['a\nb', "'a\nb'"],
+      ['', "''"],
+    ];
+    for (const [value, expected] of cases) {
+      const r = formatDotenvValue(value);
+      expect(r).toEqual({ ok: true, rendered: expected });
+      expect(parseDotenv(`V=${r.ok ? r.rendered : ''}`).V).toBe(value);
+    }
+  });
+
+  test('property: any rendered output that does not start with a quote character matches the safe charset', () => {
+    const SAFE = /^[A-Za-z0-9_\-./:@,+=]+$/;
+    const values = [...ADVERSARIAL_VALUES, ...fuzzCases(0xbeef, 2000), '180', 'https://x.y/z', 'a=b', 'a#b', ' lead', '$HOME'];
+    const rendered = values.flatMap((v) => {
+      const r = formatDotenvValue(v);
+      return r.ok ? [r.rendered] : [];
+    });
+    const bare = rendered.filter((r) => !["'", '`', '"'].includes(r[0] ?? ''));
+    expect(bare.length).toBeGreaterThan(0);
+    expect(bare.filter((r) => !SAFE.test(r))).toEqual([]);
+  });
+
   test('a value using all three quote characters, with a double-quote AND a literal backslash-n, refuses rather than writing lossy', () => {
     const value = "has ' and " + '\u0060' + ' and " and a literal \\n sequence';
     const r = formatDotenvValue(value);

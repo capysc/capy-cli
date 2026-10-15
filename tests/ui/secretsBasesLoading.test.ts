@@ -158,7 +158,7 @@ describe('through the real driver: one read, table first', () => {
       await wait(150);
       return BASES;
     });
-    // Ctrl+E, value, Enter, Enter (locations), 40ms: table up (read in flight), 250ms: read done, Enter (run), 40, any key.
+    // Ctrl+E, value, Enter, Enter (locations), 40ms: table up (read in flight), 250ms: read done, Ctrl+C.
     const frames = await drive(loadBases, ['\x05', 'v', '\r', '\r', 40, 250, '\x03']);
     const repoFrames = frames.filter((f) => f.includes('REPO') && f.includes('Acme/web-app'));
     expect(repoFrames.length).toBeGreaterThanOrEqual(2);
@@ -173,8 +173,8 @@ describe('through the real driver: one read, table first', () => {
       await wait(150);
       return BASES;
     });
-    // Ctrl+E, value, Enter, Enter (locations), then Enter AT ONCE on the table (read still in flight), wait, then any key to leave.
-    await drive(loadBases, ['\x05', 'v', '\r', '\r', 30, '\r', 400, 'x']);
+    // Ctrl+E, value, Enter, Enter (locations), then Enter AT ONCE on the table (read still in flight), wait, then Esc to leave.
+    await drive(loadBases, ['\x05', 'v', '\r', '\r', 30, '\r', 400, '\x1b']);
     expect(loadBases.mock.calls).toHaveLength(1);
     expect(run.mock.calls).toHaveLength(1);
     expect(run.mock.calls[0][0].bases).toEqual(BASES);

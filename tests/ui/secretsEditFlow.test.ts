@@ -7,6 +7,7 @@
 import { describe, test, expect } from 'bun:test';
 import {
   SecretsScreenState,
+  applyCopied,
   applyRepos,
   applyRunDone,
   handleKey,
@@ -370,7 +371,7 @@ until its PR is merged and pulled.`);
     expect(text).toContain(`web · production  ✗ ${ERROR_CODES.PERMISSION_DENIED}`);
   });
 
-  test('through the screen: the run finishing shows the confirmation, any key leaves and hands it to stdout', () => {
+  test('through the screen: the run finishing shows the confirmation, only Esc leaves and hands it to stdout', () => {
     const running = handleKey(
       applyRepos(handleKey(atLocations(), ENTER).state, { ok: true, links: LINKS, bases: {} }),
       ENTER,
@@ -379,7 +380,14 @@ until its PR is merged and pulled.`);
     expect(flowOf(done).step).toBe('done');
     expect(frame(done)).toContain('✓ ANTHROPIC_API_KEY updated in 4 locations.');
     expect(frame(done)).not.toContain(VALUE);
-    const left = press(done, 'x');
+    expect(frame(done)).toContain('esc exit');
+    // Any other key leaves the result on screen, so the links can be selected and copied.
+    for (const key of ['x', ENTER, ' ']) {
+      const stays = press(done, key);
+      expect(stays.quit).toBe(false);
+      expect(flowOf(stays).step).toBe('done');
+    }
+    const left = press(done, ESC);
     expect(left.quit).toBe(true);
     expect(left.exitText).toContain('https://github.com/SlideSpeak/slidespeak-monorepo/pull/1');
     expect(left.exitText).not.toContain(VALUE);
@@ -393,6 +401,70 @@ until its PR is merged and pulled.`);
     const done = applyRunDone(running, { ok: false, code: 'UNAVAILABLE' });
     expect(frame(done)).toContain('(UNAVAILABLE)');
     expect(frame(done)).not.toContain(VALUE);
+  });
+
+  describe('`c` copies the PR links from the result', () => {
+    const runningState = () =>
+      handleKey(applyRepos(handleKey(atLocations(), ENTER).state, { ok: true, links: LINKS, bases: {} }), ENTER).state;
+    const URL_A = 'https://github.com/SlideSpeak/slidespeak-monorepo/pull/1';
+    const URL_B = 'https://github.com/SlideSpeak/swot-analysis-generator-server/pull/15';
+    const doneWith = (result: SecretSetResult) => applyRunDone(runningState(), { ok: true, result });
+
+    test('`c` asks for a copy of exactly the PR urls (newline-joined, once each), the screen stays, and the footer offers it', () => {
+      const done = doneWith({
+        ...base,
+        prs: [pr('SlideSpeak/slidespeak-monorepo', 1), pr('SlideSpeak/swot-analysis-generator-server', 15), pr('SlideSpeak/slidespeak-monorepo', 1)],
+        failed: [{ kind: 'repo', repo: 'SlideSpeak/other', code: ERROR_CODES.KEEP_PR_CREATE_FAILED }],
+      });
+      expect((flowOf(done) as { prUrls: readonly string[] }).prUrls).toEqual([URL_A, URL_B]);
+      expect(frame(done)).toContain('c copy PRs · esc exit');
+      for (const key of ['c', 'C']) {
+        const pressed = handleKey(done, key);
+        expect(pressed.effect).toEqual({ type: 'copyToClipboard', text: `${URL_A}\n${URL_B}` });
+        expect(pressed.state.quit).toBe(false);
+        expect(flowOf(pressed.state)).toBe(flowOf(done));
+      }
+    });
+
+    test('Esc is still the only way out, and any other key still does nothing', () => {
+      const done = doneWith({ ...base, prs: [pr('SlideSpeak/slidespeak-monorepo', 1)] });
+      for (const key of ['x', ENTER, ' ', 'q']) {
+        const stays = handleKey(done, key);
+        expect(stays.effect).toBeNull();
+        expect(stays.state.quit).toBe(false);
+        expect(flowOf(stays.state).step).toBe('done');
+      }
+      const left = press(done, ESC);
+      expect(left.quit).toBe(true);
+      expect(left.exitText).toContain(URL_A);
+    });
+
+    test('with no PR: `c` does nothing and the footer does not offer it (also after a failed run)', () => {
+      const none = doneWith({ ...base, prs: [], no_pr: [{ repo: 'SlideSpeak/slidespeak-monorepo', reason: 'NO_DIFF_VS_BASE' }] });
+      const failed = applyRunDone(runningState(), { ok: false, code: 'UNAVAILABLE' });
+      for (const done of [none, failed]) {
+        const pressed = handleKey(done, 'c');
+        expect(pressed.effect).toBeNull();
+        expect(pressed.state.quit).toBe(false);
+        expect(flowOf(pressed.state)).toBe(flowOf(done));
+        expect(frame(done)).not.toContain('copy PRs');
+        expect(frame(done)).toContain('esc exit');
+      }
+    });
+
+    test('the outcome is shown on the screen: copied (with the count) or could not copy; the screen stays open', () => {
+      const done = doneWith({ ...base, prs: [pr('SlideSpeak/slidespeak-monorepo', 1), pr('SlideSpeak/swot-analysis-generator-server', 15)] });
+      expect(frame(applyCopied(done, true))).toContain('Copied 2 PR links');
+      expect(frame(applyCopied(done, false))).toContain('Could not copy to clipboard');
+      expect(flowOf(applyCopied(done, false)).step).toBe('done');
+      const one = doneWith({ ...base, prs: [pr('SlideSpeak/slidespeak-monorepo', 1)] });
+      expect(frame(applyCopied(one, true))).toContain('Copied 1 PR link');
+      expect(frame(applyCopied(one, true))).not.toContain('Copied 1 PR links');
+      // The exit text is the confirmation alone: the copy line is not part of what is printed after the screen.
+      expect(press(applyCopied(one, true), ESC).exitText).toBe(press(one, ESC).exitText);
+      // A late answer on another screen is dropped.
+      expect(applyCopied(start(), true).edit).toBeNull();
+    });
   });
 });
 

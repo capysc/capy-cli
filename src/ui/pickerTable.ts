@@ -111,6 +111,8 @@ export interface PickerTable {
   readonly size: number;
   /** No line is wider than this. */
   readonly maxWidth: number;
+  /** Rows listed under the choices, greyed and without a checkbox: not selectable, never filtered. Their cells count toward the column widths. */
+  readonly inert?: readonly (readonly string[])[];
 }
 
 function pageOf(count: number, active: number, size: number): readonly [number, number] {
@@ -120,7 +122,8 @@ function pageOf(count: number, active: number, size: number): readonly [number, 
 
 /** The filter line (while searching), the headings and the visible rows. */
 export function pickerTableLines(t: PickerTable): readonly string[] {
-  const widths = columnWidths(t.columns, t.rows, t.maxWidth);
+  const inert = t.inert ?? [];
+  const widths = columnWidths(t.columns, [...t.rows, ...inert], t.maxWidth);
   const line = (box: string, cells: readonly string[]): string =>
     `${box}${GAP}${cells.map((c, i) => padCell(c, widths[i])).join(GAP)}`.trimEnd();
 
@@ -133,5 +136,6 @@ export function pickerTableLines(t: PickerTable): readonly string[] {
   });
   const heading = `${DIM}${clipLine(line(' '.repeat(BOX_WIDTH), t.columns.map((c) => c.heading)), t.maxWidth)}${RESET}`;
   const search = t.box.searching ? [`${DIM}search:${RESET} ${t.box.query}▏`] : [];
-  return [...search, heading, ...(body.length === 0 ? [`${DIM}No matches.${RESET}`] : body)];
+  const greyed = inert.map((cells) => `${DIM}${clipLine(line(' '.repeat(BOX_WIDTH), cells), t.maxWidth)}${RESET}`);
+  return [...search, heading, ...(body.length === 0 ? [`${DIM}No matches.${RESET}`] : body), ...greyed];
 }
