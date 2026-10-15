@@ -1,10 +1,9 @@
-import { createHash } from 'crypto';
 import { ProjectManager } from '../core/projectManager';
 import { FileManager } from '../files/fileManager';
 import { AuthService } from '../auth/authService';
 import { ServiceClient } from '../service/serviceClient';
 import { SyncEngine } from '../sync/syncEngine';
-import { fetchSecretsWithCache, readKeepCache, writeKeepCache, readSecretsLocal, LOCAL_USER_ID } from '../config/globalConfig';
+import { fetchSecretsWithCache, readKeepCache, readSecretsLocal, LOCAL_USER_ID } from '../config/globalConfig';
 import { isLocalOnly } from '../config/profileConfig';
 import { resolveLocalProjectKey } from '../core/localUnlock';
 import { hashValue } from './statusCommand';
@@ -12,9 +11,8 @@ import { EditScreen, EditRow, EditState, classifyLocalRow, focusedOn, withDeploy
 import { deployedHashesFor } from '../core/deployStatus';
 import { readDefaultBranchTargets } from '../deploy/configuredTargets';
 import { formatRelativeTime } from '../ui/relativeTime';
-import { Encryptor } from '../crypto/encryptor';
-import { deriveResourceId } from '../crypto/resourceId';
-import { setSyncKeepHash, KeepFile } from '../types/index';
+import { KeepFile } from '../types/index';
+import { commitFolder, pinnedHashes, readLocalPlaintext, type FolderContext } from '../sync/commit';
 import { reportKeepLockHuman, refuseBadPrFlags, runKeepLockPrStep, type PrFlags } from './keepLockPr';
 import { startSaveLog } from './sessionSaveLog';
 import { decideEditMode, editPipedCommand, refuseEditNeedsTty } from './editPiped';
@@ -40,29 +38,6 @@ function classifyStatus(
   if (localDiffers) return 'local';
   if (remoteDiffers) return 'remote';
   return 'in sync';
-}
-
-/**
- * Decrypts `.env`. A value this profile holds no key for is skipped;
- * plaintext values pass through.
- */
-function decryptLocalEnv(
-  fileManager: FileManager,
-  projectKey: string,
-): { localPlaintext: Record<string, string> } {
-  const decrypted = Object.entries(fileManager.readEnvFile()).map(([key, value]) => {
-    if (!value.startsWith('capy:')) return { key, plain: value as string | undefined };
-    try {
-      return { key, plain: fileManager.decryptValue(value, projectKey) as string | undefined };
-    } catch {
-      return { key, plain: undefined }; // Skip values we can't decrypt
-    }
-  });
-  return {
-    localPlaintext: Object.fromEntries(
-      decrypted.flatMap(({ key, plain }) => (plain === undefined ? [] : [[key, plain] as const])),
-    ),
-  };
 }
 
 interface Baseline {
@@ -146,6 +121,51 @@ function cacheProbeThrew(localMode: boolean, orgId: string, projectId: string, k
   } catch {
     return true;
   }
+}
+
+/**
+ * One save from the edit screen (`c`, or commit on quit). The one commit path (sync/commit.ts):
+ * only the edited rows change, on top of the server's latest. A row someone else changed since
+ * this folder's pin is a `SECRETS_CONFLICT` (nothing uploaded), which the screen shows as the
+ * error. The folder is read afresh for every save, because an earlier save in the same session
+ * moved keep.lock and `.env`. Resolves to the server-assigned `changed_at` of every variable on
+ * the branch, for the screen's UPDATED column.
+ */
+export async function saveEdits(
+  folder: Omit<FolderContext, 'keep' | 'localPlaintext'>,
+  startKeep: KeepFile,
+  edits: Readonly<Record<string, string>>,
+  saveLog: Pick<ReturnType<typeof startSaveLog>, 'record'>,
+): Promise<Record<string, string>> {
+  const { branch } = folder;
+  const committed = await commitFolder(
+    {
+      ...folder,
+      keep: folder.pm.readKeepFile() ?? startKeep,
+      localPlaintext: readLocalPlaintext(folder.fileManager, folder.projectKey),
+    },
+    { set: edits, remove: [] },
+  );
+  const adoptedKeep = committed.keep;
+
+  // Record this save for the exit-time PR: the resulting (or deleted)
+  // entry, for THIS branch only, of every variable this save touched.
+  saveLog.record({
+    branch,
+    entries: Object.keys(edits).map((variable) => ({
+      variable,
+      entry: adoptedKeep.variables[variable]?.find((e) => e.branch === branch) ?? null,
+    })),
+  });
+
+  // Hand the server-assigned changed_at back to the TUI so the UPDATED
+  // column reflects the authoritative stamp for this commit, not a
+  // client-side guess.
+  return Object.fromEntries(
+    Object.entries(adoptedKeep.variables)
+      .map(([varName, entries]) => [varName, entries.find((e) => e.branch === branch)?.changed_at] as const)
+      .filter((pair): pair is [string, string] => pair[1] !== undefined),
+  );
 }
 
 export interface EditOpts {
@@ -274,12 +294,7 @@ export class EditCommand {
     const fileManager = new FileManager();
 
     // Pinned hashes for the active branch
-    const pinned: Record<string, string> = Object.fromEntries(
-      Object.entries(keep.variables).flatMap(([varName, entries]) => {
-        const entry = entries.find((e) => e.branch === branch);
-        return entry ? [[varName, entry.value_hash] as const] : [];
-      }),
-    );
+    const pinned = pinnedHashes(keep, branch);
 
     // Local-only mode: no auth, no server. Identity is synthetic; the key is
     // unwrapped from the passphrase session. No AuthService/ServiceClient is
@@ -296,7 +311,7 @@ export class EditCommand {
 
     // Decrypt local .env values. Local ciphertext this profile does not hold
     // the key for is skipped.
-    const { localPlaintext } = decryptLocalEnv(fileManager, projectKey);
+    const localPlaintext = readLocalPlaintext(fileManager, projectKey);
 
     // Baseline the working copy is compared against:
     //  - remote mode: the latest committed blob fetched from the server.
@@ -373,98 +388,8 @@ export class EditCommand {
     const saveLog = startSaveLog();
 
     const editContext = {
-      saveLocalEdits: async (edits: Record<string, string>) => {
-        // Same flow as the conflict-resolution "commit local" action and
-        // PushCommand: encrypt the merged local state, mergeWithKeep, push
-        // to the server, then cache + write keep.lock + .env + sync state.
-        const finalEnv: Record<string, string> = { ...localPlaintext, ...edits };
-
-        const encrypted = Object.fromEntries(
-          Object.entries(finalEnv).map(([key, value]) => {
-            const resourceId = deriveResourceId(branch, key);
-            const enc = Encryptor.encrypt(value, projectKey);
-            return [key, `capy:${resourceId}:${enc}`];
-          }),
-        );
-        const envBlob = Object.entries(encrypted)
-          .map(([k, v]) => `${k}=${v}`)
-          .join('\n');
-
-        const pushedVars = Object.fromEntries(
-          Object.entries(finalEnv).map(([key, value]) => [
-            key,
-            {
-              resource_id: deriveResourceId(branch, key),
-              value_hash: createHash('sha256').update(value).digest('hex').slice(0, 16),
-            },
-          ]),
-        );
-
-        const syncEngine = new SyncEngine();
-        const mergedKeep = syncEngine.mergeWithKeep(keep, pushedVars, branch);
-
-        // Drop branch entries for variables no longer in finalEnv — built as
-        // a new object rather than mutated in place (was a `for` loop doing
-        // `finalKeep.variables[varName] = entries` / `delete
-        // finalKeep.variables[varName]` on the value mergeWithKeep returned).
-        const finalKeep: KeepFile = {
-          ...mergedKeep,
-          variables: Object.fromEntries(
-            Object.entries(mergedKeep.variables).flatMap(([varName, entries]) => {
-              if (varName in finalEnv) return [[varName, entries]];
-              const kept = entries.filter((e) => e.branch !== branch);
-              return kept.length > 0 ? [[varName, kept]] : [];
-            }),
-          ),
-        };
-
-        // keep_hash is computed locally; the server returns the same value on
-        // push. In local-only mode there is no push — the local writes below
-        // ARE the commit.
-        const localKeepHash = SyncEngine.computeKeepHash(finalKeep, branch);
-        const pushResult = localMode
-          ? null
-          : await serviceClient!.pushSecrets(
-              projectId,
-              JSON.stringify(finalKeep),
-              envBlob,
-              branch,
-            );
-        const keepHashForCache = pushResult ? pushResult.keep_hash : localKeepHash;
-
-        writeKeepCache(orgId, projectId, keepHashForCache, envBlob);
-        // Prefer the server's copy — it carries server-assigned changed_at
-        const adoptedKeep = SyncEngine.adoptServerKeep(pushResult?.keep_file, finalKeep, branch);
-        fileManager.writeKeepFile(adoptedKeep);
-        fileManager.writeEncryptedEnvFile(finalEnv, projectKey, undefined, finalKeep, branch);
-
-        const existingSyncState = pm.readSyncState();
-        fileManager.writeSyncState({
-          ...existingSyncState,
-          last_sync: new Date().toISOString(),
-          synced_variables: Object.keys(finalEnv),
-          user_id: userId,
-          keep_hash: setSyncKeepHash(existingSyncState, branch, localKeepHash),
-        });
-
-        // Record this save for the exit-time PR: the resulting (or deleted)
-        // entry, for THIS branch only, of every variable this save touched.
-        const touchedEntries = Object.keys(edits).map((variable) => ({
-          variable,
-          entry: adoptedKeep.variables[variable]?.find((e) => e.branch === branch) ?? null,
-        }));
-        saveLog.record({ branch, entries: touchedEntries });
-
-        // Hand the server-assigned changed_at back to the TUI so the UPDATED
-        // column reflects the authoritative stamp for this commit, not a
-        // client-side guess.
-        const changedAtByKey = Object.fromEntries(
-          Object.entries(adoptedKeep.variables)
-            .map(([varName, entries]) => [varName, entries.find((e) => e.branch === branch)?.changed_at] as const)
-            .filter((pair): pair is [string, string] => pair[1] !== undefined),
-        );
-        return changedAtByKey;
-      },
+      saveLocalEdits: (edits: Record<string, string>) =>
+        saveEdits({ pm, fileManager, serviceClient, orgId, projectId, branch, userId, projectKey }, keep, edits, saveLog),
     };
 
     // CAP-697: started now, collected after the TUI closes (it has long since finished by then).

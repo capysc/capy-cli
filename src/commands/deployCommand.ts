@@ -483,7 +483,7 @@ async function pushKeepTransform(
     const fresh = await resolveFreshSnapshot(cwd, branch, devMode, `${label} in keep.lock`, opts.warnCode);
     if (!fresh) return { ok: false };
 
-    const pushed = await fresh.serviceClient.pushSecrets(fresh.projectId, JSON.stringify(nextKeep), fresh.latest.env_file, branch);
+    const pushed = await fresh.serviceClient.pushSecrets(fresh.projectId, JSON.stringify(nextKeep), fresh.latest.env_file, branch, undefined, fresh.latest.keep_hash);
 
     if (writeLocal) {
       const { SyncEngine } = await import('../sync/syncEngine');

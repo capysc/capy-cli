@@ -310,13 +310,16 @@ describe('capy remove NAME --dry-run', () => {
     });
   });
 
-  test('a local drift on OTHER variables still refuses, as in a real run', async () => {
+  test('a local-only variable no longer blocks a removal (CAP-712): only the named variable is ever removed, and nothing is changed', async () => {
     await withWorld(async (h, env) => {
       await seedReal(h, env);
-      // A second variable that exists only locally (unpushed): removing NAME would carry it along.
+      // A second variable that exists only locally (unpushed): a removal does not carry it along any more.
       await h.run(['edit', 'DRY_OTHER', '--json', '--no-push'], 'x\n', undefined, { ...env, CAPY_NO_REPO_LINK: '1' });
+      const before = state(h);
+      const pushes = h.pushCount();
       const out = await h.run(['remove', NAME, '--yes', '--json', '--dry-run'], undefined, undefined, env);
-      expect(json(out)).toMatchObject({ ok: false, code: 'REMOVE_LOCAL_DRIFT' });
+      expect(json(out)).toMatchObject({ removed: [NAME], dry_run: true });
+      expectNothingWritten(h, before, pushes);
     });
   });
 });

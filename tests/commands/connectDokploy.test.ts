@@ -29,6 +29,7 @@ import {
 import type { ResolvedContext } from '../../src/commands/connectors/shared';
 import { writeImportedAndSync, writeImportOutcome } from '../../src/commands/connectors/shared';
 import { FileManager } from '../../src/files/fileManager';
+import { Encryptor } from '../../src/crypto/encryptor';
 import { ConnectCommand } from '../../src/commands/connectCommand';
 import { DokployApiError } from '../../src/deploy/dokployApi';
 import type { DokploySystemStoreCallOptions, FetchLike } from '../../src/deploy/dokployApi';
@@ -730,6 +731,16 @@ describe('writeImportOutcome — unchanged-value connector backfill', () => {
         writeSyncState: () => {},
       },
       serviceClient: {
+        // The commit path reads the server's latest first: the server already holds PORT=3000.
+        getDecryptData: async () => ({
+          env_content: `PORT=capy:r1:${Encryptor.encrypt('3000', 'k')}`,
+          decrypt_key: '',
+          expires_at: '',
+          keep_file: JSON.stringify({
+            ...keep,
+            variables: { PORT: [{ resource_id: 'r1', branch: 'development', value_hash: createHash('sha256').update('3000').digest('hex').slice(0, 16) }] },
+          }),
+        }),
         pushSecrets: async (projectId: string, keepFile: string, envBlob: string, branch: string) => {
           pushCalls.push({ projectId, keepFile, envBlob, branch });
           return { keep_hash: 'h'.repeat(16) };

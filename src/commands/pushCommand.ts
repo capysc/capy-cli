@@ -3,17 +3,11 @@ import { ProjectManager } from '../core/projectManager';
 import { FileManager } from '../files/fileManager';
 import { AuthService } from '../auth/authService';
 import { ServiceClient } from '../service/serviceClient';
-import { SyncEngine } from '../sync/syncEngine';
+import { commitFolder, localChanges, pinnedHashes } from '../sync/commit';
 import { debugLine } from '../ui/debug';
-import { createHash } from 'crypto';
-import {
-  CapyError,
-  ERROR_CODES,
-  setSyncKeepHash,
-} from '../types/index';
+import { CapyError, ERROR_CODES } from '../types/index';
 import { resolveProjectKey, KeyServiceOps } from '../crypto/keyResolver';
-import { deriveResourceId } from '../crypto/resourceId';
-import { writeKeepCache, LOCAL_USER_ID } from '../config/globalConfig';
+import { LOCAL_USER_ID } from '../config/globalConfig';
 import { isLocalOnly } from '../config/profileConfig';
 import { resolveLocalProjectKey } from '../core/localUnlock';
 import { reportRepoLinkForCommand } from '../core/repoLinkReporter';
@@ -166,7 +160,6 @@ export class PushCommand {
       });
     }
 
-    // Read and encrypt .env file
     const pushSpinner = ora(localMode ? 'Storing secrets locally...' : 'Pushing secrets to Keep...').start();
 
     const rawLocal = this.fileManager.readEnvFile();
@@ -176,92 +169,37 @@ export class PushCommand {
       return;
     }
 
-    // Encrypt all values
-    const { Encryptor } = await import('../crypto/encryptor');
-    const encrypted = Object.fromEntries(
-      Object.entries(rawLocal).map(([key, value]) => {
-        if (value.startsWith('capy:')) {
-          this.debug(`${key}: already encrypted, passing through`);
-          return [key, value]; // Already encrypted
-        }
-        const enc = Encryptor.encrypt(value, encryptionKey);
-        const resourceId = deriveResourceId(branch, key);
-        this.debug(`${key}: encrypted`, { resourceId, encLength: enc.length });
-        return [key, `capy:${resourceId}:${enc}`];
-      }),
+    // What this folder has to commit is what it CHANGED: a value that differs from the one
+    // keep.lock pins (an edit, or a new name). Values it merely still holds from an older
+    // sync are not pushed, so a stale folder cannot revert what someone else saved since.
+    const localPlaintext = Object.fromEntries(
+      Object.entries(rawLocal).map(([key, value]) => [key, value.startsWith('capy:') ? this.fileManager.decryptValue(value, encryptionKey) : value]),
     );
+    const changes = localChanges(localPlaintext, pinnedHashes(keep, branch), { removals: false });
+    this.debug('local edits', Object.keys(changes.set));
 
-    const envBlob = Object.entries(encrypted)
-      .map(([key, value]) => `${key}=${value}`)
-      .join('\n');
-    this.debug('envBlob length', envBlob.length);
-
-    // Update keep.lock hashes for the active branch
-    const pushedVars = Object.fromEntries(
-      Object.entries(rawLocal).map(([key, value]) => {
-        const plaintext = value.startsWith('capy:')
-          ? this.fileManager.decryptValue(value, encryptionKey)
-          : value;
-        const valueHash = createHash('sha256').update(plaintext).digest('hex').slice(0, 16);
-        const resourceId = deriveResourceId(branch, key);
-        return [key, { resource_id: resourceId, value_hash: valueHash }];
-      }),
+    const committed = await commitFolder(
+      {
+        pm: this.projectManager,
+        fileManager: this.fileManager,
+        serviceClient: localMode ? undefined : this.serviceClient,
+        orgId: projectState.organizationId!,
+        projectId: projectState.projectId!,
+        branch,
+        userId,
+        projectKey: encryptionKey,
+        keep,
+        localPlaintext,
+      },
+      changes,
     );
-    this.debug('pushedVars', pushedVars);
+    this.debug('push complete', { localMode, uploaded: committed.uploaded, written: committed.written });
 
-    const syncEngine = new SyncEngine();
-    const updatedKeep = syncEngine.mergeWithKeep(keep, pushedVars, branch);
-
-    // Push to Keep
-    const keepFileContent = JSON.stringify(updatedKeep);
-    this.debug('pushSecrets request', {
-      projectId: projectState.projectId,
-      branch,
-      keepFileLength: keepFileContent.length,
-      envBlobLength: envBlob.length,
-    });
-    // keep_hash is computed locally; the server returns the same value on a
-    // push. In local-only mode there is no push.
-    const localKeepHash = SyncEngine.computeKeepHash(updatedKeep, branch);
-    const pushResult = localMode
-      ? null
-      : await this.serviceClient.pushSecrets(
-          projectState.projectId!,
-          keepFileContent,
-          envBlob,
-          branch,
-        );
-    const cacheKeepHash = pushResult ? pushResult.keep_hash : localKeepHash;
-    this.debug('push complete', { localMode, cacheKeepHash });
-
-    // Cache encrypted blob locally
-    writeKeepCache(
-      projectState.organizationId!,
-      projectState.projectId!,
-      cacheKeepHash,
-      envBlob,
-    );
-    this.debug('keep cache written');
-
-    // Update keep.lock with new state, preferring the server's copy (it
-    // carries server-assigned changed_at timestamps)
-    this.fileManager.writeKeepFile(SyncEngine.adoptServerKeep(pushResult?.keep_file, updatedKeep, branch));
-    this.debug('keep.lock written to disk');
-
-    // Update sync state with keep_hash so direction detection works
-    const existingSyncState = this.projectManager.readSyncState();
-    this.fileManager.writeSyncState({
-      ...existingSyncState,
-      last_sync: new Date().toISOString(),
-      synced_variables: Object.keys(rawLocal),
-      user_id: userId,
-      keep_hash: setSyncKeepHash(existingSyncState, branch, localKeepHash),
-    });
-
+    const count = Object.keys(changes.set).length;
     pushSpinner.succeed(
       localMode
-        ? `Stored ${Object.keys(rawLocal).length} secret(s) locally (local-only mode)`
-        : `Pushed ${Object.keys(rawLocal).length} secret(s) to Keep`
+        ? `Stored ${count} secret(s) locally (local-only mode)`
+        : `Pushed ${count} secret(s) to Keep`
     );
 
     const { printExpiryWarnings } = await import('./connectors/shared');

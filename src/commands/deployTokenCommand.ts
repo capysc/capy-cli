@@ -18,6 +18,7 @@ import inquirer from 'inquirer';
 import { generateDeployHtml } from '../ui/deployPage/html';
 import { hashValue } from '../deploy/keepGate';
 import { stripTargetsForDeployId } from '../deploy/targetsGate';
+import { adoptedKeepFor, commitToServer } from '../sync/commit';
 import { ERROR_CODES } from '../types/index';
 import type { ProjectState } from '../types/index';
 
@@ -65,23 +66,22 @@ async function stripRevokedTargets(
     }
 
     const { resolveProjectKey: resolveKey } = await import('../crypto/keyResolver');
-    const { Encryptor } = await import('../crypto/encryptor');
-    const { deriveResourceId } = await import('../crypto/resourceId');
     const projectKey = await resolveKey(projectState.organizationId, projectState.projectId, userId, {
       coDecrypt: (o, c) => serviceClient.coDecrypt(o, c).then((r) => r.plaintext),
       wrapOuterLayer: (o, p) => serviceClient.wrapOuterLayer(o, p).then((r) => r.ciphertext),
     });
-    const fm = new FileManager();
-    const rawLocal = fm.readEnvFile();
-    const localPlaintext = Object.fromEntries(
-      Object.entries(rawLocal).map(([k, v]) => [k, v.startsWith('capy:') ? fm.decryptValue(v, projectKey) : v]),
-    );
-    const envBlob = Object.entries(localPlaintext)
-      .map(([k, v]) => `${k}=capy:${deriveResourceId(branch, k)}:${Encryptor.encrypt(v, projectKey)}`)
-      .join('\n');
-    const pushed = await serviceClient.pushSecrets(projectState.projectId, JSON.stringify(nextKeep), envBlob, branch);
-    const { SyncEngine } = await import('../sync/syncEngine');
-    fm.writeKeepFile(SyncEngine.adoptServerKeep(pushed.keep_file, nextKeep, branch));
+    // A keep-only change on the SERVER's latest (sync/commit.ts): no value moves, so nothing
+    // in this folder's `.env` can leak into the blob or revert anyone's value.
+    const committed = await commitToServer({
+      client: serviceClient,
+      projectId: projectState.projectId,
+      branch,
+      projectKey,
+      startKeep: keep,
+      changes: { set: {}, remove: [] },
+      transformKeep: (latest) => stripTargetsForDeployId(latest, deployId),
+    });
+    if (committed.result) new FileManager().writeKeepFile(adoptedKeepFor(keep, committed, branch));
   } catch (err: any) {
     console.error(`  \x1b[33m!\x1b[0m could not strip revoked deploy targets in keep.lock: ${err?.message ?? err}`);
   }

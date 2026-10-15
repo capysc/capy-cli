@@ -2,16 +2,16 @@
  * `capy remove NAME [NAME...]` (CAP-686).
  *
  * Three layers, tested at the layer where they're cheapest to prove:
- *  - the pure helpers (`computeDrift`, `deployTargetWarnings`,
- *    `confirmationMessage`, `pinnedHashesFor`) — plain unit tests, no I/O;
+ *  - the pure helpers (`deployTargetWarnings`, `confirmationMessage`) —
+ *    plain unit tests, no I/O;
  *  - `removeAndSync` (`connectors/shared.ts`) — the actual push mechanics,
- *    exercised the same way `writeImportedAndSync`'s own tests
- *    (`connectDokploy.test.ts`) do: a hand-built `ResolvedContext` with a
- *    mocked `serviceClient.pushSecrets` and a real `FileManager` writing
- *    into a throwaway directory, so `.env`'s layout survives for real;
+ *    exercised against an in-memory server (tests/helpers/fakeCapyServer.ts)
+ *    holding the variables, with a hand-built `ResolvedContext` and a real
+ *    `FileManager` writing into a throwaway directory, so `.env`'s layout
+ *    survives for real;
  *  - `RemoveCommand.execute`'s local-only refusals (VAR_NOT_FOUND, the
  *    non-interactive/--json confirmation gate) and `proceedWithRemoval`'s
- *    drift refusal / deploy-target warning / --json purity — driven end to
+ *    deploy-target warning / --json purity — driven end to
  *    end against a real temp project directory, the same pattern
  *    `rotateRefusals.test.ts` uses, with no auth or network involved because
  *    every one of these paths returns before `resolveContext()` is reached.
@@ -27,15 +27,16 @@ import { mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import {
-  computeDrift,
   deployTargetWarnings,
   confirmationMessage,
-  pinnedHashesFor,
   proceedWithRemoval,
   RemoveCommand,
 } from '../../src/commands/removeCommand';
 import { removeAndSync, ResolvedContext } from '../../src/commands/connectors/shared';
 import { hashValue } from '../../src/commands/statusCommand';
+import { Encryptor } from '../../src/crypto/encryptor';
+import { SyncEngine } from '../../src/sync/syncEngine';
+import { fakeCapyServer } from '../helpers/fakeCapyServer';
 import { FileManager } from '../../src/files/fileManager';
 import { ProjectManager } from '../../src/core/projectManager';
 import { upsertTarget } from '../../src/deploy/config';
@@ -109,26 +110,6 @@ afterEach(() => {
 
 // ── pure helpers ─────────────────────────────────────────────────────────
 
-describe('computeDrift', () => {
-  test('flags a value changed locally, a new-locally value, and a pinned value missing from .env', () => {
-    const pinned = { CHANGED: hashValue('old'), MISSING: hashValue('gone'), INSYNC: hashValue('same') };
-    const local = { CHANGED: 'new', NEW_LOCAL: 'brand-new', INSYNC: 'same' };
-    expect(computeDrift(pinned, local, [])).toEqual(['CHANGED', 'MISSING', 'NEW_LOCAL']);
-  });
-
-  test('excludes the names being removed even when they themselves are drifted', () => {
-    const pinned = { REMOVED: hashValue('old') };
-    const local = { REMOVED: 'changed-but-being-removed-anyway' };
-    expect(computeDrift(pinned, local, ['REMOVED'])).toEqual([]);
-  });
-
-  test('nothing drifted → empty array', () => {
-    const pinned = { A: hashValue('a'), B: hashValue('b') };
-    const local = { A: 'a', B: 'b' };
-    expect(computeDrift(pinned, local, [])).toEqual([]);
-  });
-});
-
 describe('deployTargetWarnings', () => {
   test('names every target whose vars include a removed name', () => {
     upsertTarget(TEST_DIR, baseTarget({ name: 'prod', vars: ['STRIPE_KEY', 'OTHER'] }));
@@ -164,26 +145,15 @@ describe('confirmationMessage', () => {
   });
 });
 
-describe('pinnedHashesFor', () => {
-  test('picks each variable\'s entry for the given branch, ignoring other branches', () => {
-    const keep: KeepFile = {
-      version: '3.0',
-      org_id: 'o',
-      project_id: 'p',
-      project_name: 'demo',
-      variables: {
-        A: [
-          { resource_id: 'r1', branch: 'development', value_hash: 'hash-dev' },
-          { resource_id: 'r1b', branch: 'staging', value_hash: 'hash-staging' },
-        ],
-        B: [{ resource_id: 'r2', branch: 'staging', value_hash: 'hash-b-staging' }],
-      },
-    };
-    expect(pinnedHashesFor(keep, 'development')).toEqual({ A: 'hash-dev' });
-  });
-});
-
 // ── removeAndSync — the actual push mechanics ───────────────────────────
+
+/** A server that holds `values` on development, pinned as `keep` says: the way the folder last synced them. */
+function serverHolding(keep: KeepFile, values: Record<string, string>) {
+  const lines = Object.entries(values).map(
+    ([name, value]) => `${name}=capy:${keep.variables[name]?.find((e) => e.branch === 'development')?.resource_id ?? 'r'}:${Encryptor.encrypt(value, 'test-key')}`,
+  );
+  return fakeCapyServer({ initial: { keep, blobs: { [SyncEngine.computeKeepHash(keep, 'development')]: lines.join('\n') } } });
+}
 
 describe('removeAndSync', () => {
   function ctxWith(over: Partial<ResolvedContext>): ResolvedContext {
@@ -245,20 +215,20 @@ describe('removeAndSync', () => {
         },
       };
 
-      const pushSecrets = mock(async () => ({ keep_hash: 'h'.repeat(16) }));
+      const server = serverHolding(keep, { FOO: 'foo-value', BAR: 'bar-value', BAZ: 'baz-value' });
 
       const ctx = ctxWith({
         pm: new ProjectManager(TEST_DIR) as unknown as ResolvedContext['pm'],
         fileManager: new FileManager(TEST_DIR) as unknown as ResolvedContext['fileManager'],
-        serviceClient: { pushSecrets } as unknown as ResolvedContext['serviceClient'],
+        serviceClient: server.client as unknown as ResolvedContext['serviceClient'],
         keep,
         localPlaintext: { FOO: 'foo-value', BAR: 'bar-value', BAZ: 'baz-value' },
       });
 
       await removeAndSync(ctx, ['BAR']);
 
-      expect(pushSecrets.mock.calls.length).toBe(1);
-      const [, pushedKeepFile, pushedEnvBlob] = pushSecrets.mock.calls[0];
+      expect(server.pushSecrets.mock.calls.length).toBe(1);
+      const [, pushedKeepFile, pushedEnvBlob] = server.pushSecrets.mock.calls[0];
       // The pushed keep.lock carries FOO and BAZ; BAR's branch entry is gone
       // entirely (it had no other-branch entries to fall back to).
       const pushedKeep = JSON.parse(pushedKeepFile as string) as KeepFile;
@@ -302,23 +272,21 @@ describe('removeAndSync', () => {
         },
       };
 
-      const pushSecrets = mock(async (_projectId: string, _keepFile: string, envBlob: string) => {
-        expect(envBlob).toBe('');
-        return { keep_hash: 'h'.repeat(16) };
-      });
+      const server = serverHolding(keep, { ONLY_ONE: 'value' });
 
       const ctx = ctxWith({
         pm: new ProjectManager(TEST_DIR) as unknown as ResolvedContext['pm'],
         fileManager: new FileManager(TEST_DIR) as unknown as ResolvedContext['fileManager'],
-        serviceClient: { pushSecrets } as unknown as ResolvedContext['serviceClient'],
+        serviceClient: server.client as unknown as ResolvedContext['serviceClient'],
         keep,
         localPlaintext: { ONLY_ONE: 'value' },
       });
 
       await removeAndSync(ctx, ['ONLY_ONE']);
 
-      expect(pushSecrets.mock.calls.length).toBe(1);
-      const pushedKeep = JSON.parse(pushSecrets.mock.calls[0][1] as string) as KeepFile;
+      expect(server.pushSecrets.mock.calls.length).toBe(1);
+      expect(server.pushSecrets.mock.calls[0][2]).toBe('');
+      const pushedKeep = JSON.parse(server.pushSecrets.mock.calls[0][1] as string) as KeepFile;
       expect(Object.keys(pushedKeep.variables)).toEqual([]);
     });
   });
@@ -328,62 +296,23 @@ describe('removeAndSync', () => {
 
 describe('proceedWithRemoval', () => {
   function ctxWith(over: Partial<ResolvedContext>): ResolvedContext {
-    const keep: KeepFile = { version: '3.0', org_id: 'o', project_id: 'p', project_name: 'demo', variables: {} };
+    const keep: KeepFile = over.keep ?? { version: '3.0', org_id: 'o', project_id: 'p', project_name: 'demo', variables: {} };
+    const localPlaintext = over.localPlaintext ?? {};
     return {
       pm: { readSyncState: () => null },
       fileManager: { writeKeepFile: () => {}, writeEncryptedEnvFile: () => {}, writeSyncState: () => {} },
-      serviceClient: { pushSecrets: async () => ({ keep_hash: 'h'.repeat(16) }) },
+      // The server holds what the folder last synced.
+      serviceClient: serverHolding(keep, localPlaintext).client,
       orgId: 'o',
       projectId: 'p',
       branch: 'development',
       userId: 'u',
       projectKey: 'test-key',
       keep,
-      localPlaintext: {},
+      localPlaintext,
       ...over,
     } as unknown as ResolvedContext;
   }
-
-  test('refuses with REMOVE_LOCAL_DRIFT when another variable has an unpushed local change', async () => {
-    const keep: KeepFile = {
-      version: '3.0',
-      org_id: 'o',
-      project_id: 'p',
-      project_name: 'demo',
-      variables: {
-        TARGET: [{ resource_id: 'r1', branch: 'development', value_hash: hashValue('target-value') }],
-        OTHER: [{ resource_id: 'r2', branch: 'development', value_hash: hashValue('old-other-value') }],
-      },
-    };
-    const ctx = ctxWith({
-      keep,
-      localPlaintext: { TARGET: 'target-value', OTHER: 'a-changed-value-not-yet-pushed' },
-    });
-
-    const r = await capture(() => proceedWithRemoval(ctx, ['TARGET'], { json: false, cwd: TEST_DIR }));
-    expect(r.exitCode).toBe(1);
-    expect(r.stderr).toContain('OTHER');
-    expect(r.stderr).toContain('unpushed local changes');
-  });
-
-  test('--json drift refusal is coded and pure JSON on stdout', async () => {
-    const keep: KeepFile = {
-      version: '3.0',
-      org_id: 'o',
-      project_id: 'p',
-      project_name: 'demo',
-      variables: {
-        TARGET: [{ resource_id: 'r1', branch: 'development', value_hash: hashValue('target-value') }],
-        OTHER: [{ resource_id: 'r2', branch: 'development', value_hash: hashValue('old') }],
-      },
-    };
-    const ctx = ctxWith({ keep, localPlaintext: { TARGET: 'target-value', OTHER: 'new-unpushed' } });
-
-    const r = await capture(() => proceedWithRemoval(ctx, ['TARGET'], { json: true, cwd: TEST_DIR }));
-    expect(r.exitCode).toBe(1);
-    const parsed = JSON.parse(r.stdout.trim());
-    expect(parsed).toEqual({ ok: false, code: 'REMOVE_LOCAL_DRIFT', error: expect.any(String), drifted: ['OTHER'] });
-  });
 
   test('warns (stderr) about a deploy target still listing a removed variable, in human mode', async () => {
     upsertTarget(TEST_DIR, baseTarget({ name: 'prod', vars: ['TARGET', 'OTHER'] }));

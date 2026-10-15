@@ -14,6 +14,9 @@
 import type { DeployAdapter, TargetConfig } from './adapter';
 import { TargetDeliveryDescriptor, VarDelivery, recordTargetDeliveries } from './targetsGate';
 import { CapyError, ERROR_CODES, KeepFile } from '../types/index';
+import { SyncEngine } from '../sync/syncEngine';
+import { isStaleBase } from '../sync/commit';
+import type { RateInfo } from '../utils/pool';
 
 /**
  * Adapter-specific handle for what a target actually points at, when one is
@@ -59,7 +62,15 @@ export function deliveryFor(
 /** What the recorder needs from the service client. */
 export interface RecordClient {
   getLatestSecrets(projectId: string, branch: string): Promise<{ env_file: string; keep_hash: string; keep_file?: string } | null>;
-  pushSecrets(projectId: string, keepFile: string, envBlob: string, branch: string): Promise<unknown>;
+  pushSecrets(
+    projectId: string,
+    keepFile: string,
+    envBlob: string,
+    branch: string,
+    onRateLimit?: (rate: RateInfo) => void,
+    /** The branch hash of the keep this push was built from; the server refuses (SECRETS_STALE_BASE) when it is no longer the latest. */
+    baseKeepHash?: string,
+  ): Promise<unknown>;
 }
 
 export type RecordResult =
@@ -97,27 +108,14 @@ async function readServerSnapshot(
   }
 }
 
-/**
- * Fetches the server's keep for (project, branch), applies every delivery in
- * `deliveries` to it, and pushes the result back server-only with the blob
- * unchanged. Nothing is pushed when every delivery is already recorded.
- * Never throws; a failure is a code.
- *
- * Two callers must not run this for the SAME (project, branch) at once: each
- * would read the same keep and the later push would drop the earlier record.
- * Put every delivery of one (project, branch) in one call instead.
- */
-export async function recordDeliveriesOnServer(
-  client: RecordClient,
-  projectId: string,
-  branch: string,
-  deliveries: ReadonlyArray<{
-    readonly delivery: TargetDeliveryDescriptor;
-    readonly values: readonly VarDelivery[];
-    /** ISO time the values reached the platform. */
-    readonly deliveredAt: string;
-  }>,
-): Promise<RecordResult> {
+type Deliveries = ReadonlyArray<{
+  readonly delivery: TargetDeliveryDescriptor;
+  readonly values: readonly VarDelivery[];
+  /** ISO time the values reached the platform. */
+  readonly deliveredAt: string;
+}>;
+
+async function recordOnce(client: RecordClient, projectId: string, branch: string, deliveries: Deliveries, mayRetry: boolean): Promise<RecordResult> {
   const snapshot = await readServerSnapshot(client, projectId, branch);
   if (!snapshot.ok) return snapshot;
   const next = deliveries.reduce(
@@ -126,9 +124,26 @@ export async function recordDeliveriesOnServer(
   );
   if (next === snapshot.keep) return { ok: true, pushed: false };
   try {
-    await client.pushSecrets(projectId, JSON.stringify(next), snapshot.envFile, branch);
+    await client.pushSecrets(projectId, JSON.stringify(next), snapshot.envFile, branch, undefined, SyncEngine.computeKeepHash(snapshot.keep, branch));
     return { ok: true, pushed: true };
   } catch (err) {
-    return { ok: false, code: codeOf(err) };
+    // Someone saved between the read and the push: read again and record on top of that, once.
+    return mayRetry && isStaleBase(err) ? recordOnce(client, projectId, branch, deliveries, false) : { ok: false, code: codeOf(err) };
   }
+}
+
+/**
+ * Fetches the server's keep for (project, branch), applies every delivery in
+ * `deliveries` to it, and pushes the result back server-only with the blob
+ * unchanged. Nothing is pushed when every delivery is already recorded. The push
+ * names the keep it was built from; if the server says it is no longer the latest
+ * (`SECRETS_STALE_BASE`) the keep is read and built once more. Never throws; a
+ * failure is a code.
+ *
+ * Two callers must not run this for the SAME (project, branch) at once: each
+ * would read the same keep and the later push would drop the earlier record.
+ * Put every delivery of one (project, branch) in one call instead.
+ */
+export function recordDeliveriesOnServer(client: RecordClient, projectId: string, branch: string, deliveries: Deliveries): Promise<RecordResult> {
+  return recordOnce(client, projectId, branch, deliveries, true);
 }

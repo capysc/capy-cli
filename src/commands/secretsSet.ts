@@ -31,6 +31,7 @@ import { FileManager } from '../files/fileManager';
 import { Encryptor } from '../crypto/encryptor';
 import { deriveResourceId } from '../crypto/resourceId';
 import { SyncEngine } from '../sync/syncEngine';
+import { isStaleBase } from '../sync/commit';
 import { hashValue } from '../deploy/keepGate';
 import type { EditSaveRecord } from '../deploy/keepGate';
 import { writeKeepCache } from '../config/globalConfig';
@@ -332,8 +333,12 @@ const withRate = <R>(result: R, rate: RateInfo | undefined): PoolItem<R> => ({ r
 const failedItem = (location: SetLocation, err: unknown, rate?: RateInfo): PoolItem<LocationOutcome> =>
   withRate<LocationOutcome>({ kind: 'failed', location, code: codeOf(err) }, rate);
 
-/** One location: read the current branch, replace `name`, push, write the cache. Never throws; reports the rate-limit reading it saw. */
-async function pushLocation(env: SetEnv, keys: KeyResolver, loc: SetLocation, name: string, value: string): Promise<PoolItem<LocationOutcome>> {
+/**
+ * One location: read the current branch, replace `name`, push, write the cache. Never throws; reports the rate-limit
+ * reading it saw. The push names the keep it was built from (`base_keep_hash`); if the server says someone saved
+ * since the read (`SECRETS_STALE_BASE`), the location is read and replaced once more from the new latest.
+ */
+async function pushLocation(env: SetEnv, keys: KeyResolver, loc: SetLocation, name: string, value: string, retried: boolean = false): Promise<PoolItem<LocationOutcome>> {
   const key = await settled(keys(loc.project_id));
   if (!key.ok) return failedItem(loc, key.error);
   const read = await callWithBackoff((onRate) => env.client.getDecryptData(loc.project_id, loc.branch, undefined, true, onRate), env.sleep);
@@ -358,9 +363,18 @@ async function pushLocation(env: SetEnv, keys: KeyResolver, loc: SetLocation, na
   if (!write.ok) return failedItem(loc, write.error, read.rate);
 
   const pushed = await callWithBackoff(
-    (onRate) => env.client.pushSecrets(loc.project_id, JSON.stringify(write.value.merged), write.value.envBlob, loc.branch, onRate),
+    (onRate) =>
+      env.client.pushSecrets(
+        loc.project_id,
+        JSON.stringify(write.value.merged),
+        write.value.envBlob,
+        loc.branch,
+        onRate,
+        SyncEngine.computeKeepHash(current.value.serverKeep, loc.branch),
+      ),
     env.sleep,
   );
+  if (!pushed.ok && !retried && isStaleBase(pushed.error)) return pushLocation(env, keys, loc, name, value, true);
   const rate = mergeRates(read.rate, pushed.rate, (env.now ?? Date.now)());
   if (!pushed.ok) return failedItem(loc, pushed.error, rate);
 

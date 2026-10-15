@@ -624,16 +624,21 @@ export const ERROR_CODES = {
   // --- capy remove (CAP-686) ---
   /** `capy remove NAME...`: one or more names given are not on the active branch. */
   VAR_NOT_FOUND: 'VAR_NOT_FOUND',
-  /**
-   * `capy remove` refused: the working `.env` has unpushed differences (new,
-   * changed, or locally-missing values) for variables OTHER than the ones
-   * being removed. Removing would push that full remaining set — including
-   * those unrelated edits — as a side effect, so it's refused instead of
-   * carrying someone else's in-progress change along for the ride.
-   */
-  REMOVE_LOCAL_DRIFT: 'REMOVE_LOCAL_DRIFT',
   /** `capy remove` needs a human (confirmation) and there is no TTY, and `--yes` wasn't passed. */
   REMOVE_NEEDS_TTY: 'REMOVE_NEEDS_TTY',
+  // --- One commit path (CAP-712) ---
+  /**
+   * The server refused a push because the keep it was built from is no longer
+   * the server's latest (HTTP 409). Mirrors the server's `code`. The commit
+   * path re-reads and re-plans once; it is only seen when that fails too.
+   */
+  SECRETS_STALE_BASE: 'SECRETS_STALE_BASE',
+  /**
+   * A save would overwrite a value someone else changed on the server since this
+   * folder last synced. Nothing was uploaded. `details.names` lists the
+   * variables (names only, never values); never auto-resolved.
+   */
+  SECRETS_CONFLICT: 'SECRETS_CONFLICT',
   // --- keep.lock PR step (capy add / edit / remove, CAP-699) ---
   // Reported as `keep_lock.error.code`: the secret change itself still succeeded.
   /** keep.lock PR step: the working directory is not inside a git repository. */

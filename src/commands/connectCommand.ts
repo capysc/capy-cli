@@ -2,6 +2,7 @@ import { resolveContext, writeAndSync, writeImportOutcome, ResolvedContext } fro
 import { listProviders, loadProvider, ConnectOpts, ConnectorModule } from './connectors/registry';
 import { EXIT_NEEDS_INPUT, isInteractive } from '../ui/interactive';
 import { resolveOrgContext } from '../core/orgContext';
+import { isSecretsConflict } from '../sync/commit';
 import type { DiscoveryContext } from './connectors/dokployDiscovery';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
@@ -215,7 +216,21 @@ export class ConnectCommand {
     // `writeImportOutcome` never auto-commits keep.lock and never prints
     // anything itself, so there is nothing left for a `quiet` flag to
     // suppress here.
-    const { wrote } = await writeImportOutcome(ctx, outcome, { push: !opts.noPush, dryRun });
+    // A name someone else changed on the server since this folder's pin is a refusal naming it (nothing was uploaded).
+    const written = await writeImportOutcome(ctx, outcome, { push: !opts.noPush, dryRun }).then(
+      (result) => ({ conflict: undefined, wrote: result.wrote }),
+      (err: unknown) => (isSecretsConflict(err) ? { conflict: err, wrote: false } : Promise.reject(err)),
+    );
+    if (written.conflict) {
+      if (opts.json) {
+        console.log(JSON.stringify({ ok: false, code: written.conflict.code, message: written.conflict.message, names: written.conflict.details?.names }));
+      } else {
+        console.error(`\n  ${written.conflict.message}\n`);
+      }
+      process.exitCode = 1;
+      return { linked: false };
+    }
+    const { wrote } = written;
     const pushed = !opts.noPush && wrote;
     const cleared = outcome.cleared ?? [];
     const hasChange = outcome.imported.length > 0 || cleared.length > 0;

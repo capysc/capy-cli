@@ -119,7 +119,7 @@ export function withPlaceholderRecords(keep: KeepFile, branch: string, missing: 
 /** What `recordConfiguredTargets` needs from the service client. */
 export interface ConfiguredTargetsClient {
   getLatestSecrets(projectId: string, branch: string): Promise<{ env_file: string; keep_hash: string; keep_file?: string } | null>;
-  pushSecrets(projectId: string, keepFile: string, envBlob: string, branch?: string): Promise<unknown>;
+  pushSecrets(projectId: string, keepFile: string, envBlob: string, branch?: string, onRateLimit?: undefined, baseKeepHash?: string): Promise<unknown>;
 }
 
 /**
@@ -157,7 +157,7 @@ async function recordBranch(
     if (!latest || !keep) return 0;
     const missing = missingTargetRecords(targets, keep, branch);
     if (missing.length === 0) return 0;
-    await input.client.pushSecrets(input.projectId, JSON.stringify(withPlaceholderRecords(keep, branch, missing)), latest.env_file, branch);
+    await input.client.pushSecrets(input.projectId, JSON.stringify(withPlaceholderRecords(keep, branch, missing)), latest.env_file, branch, undefined, latest.keep_hash);
     return missing.length;
   } catch {
     return 0;

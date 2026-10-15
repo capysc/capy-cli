@@ -878,8 +878,9 @@ Every refusal carries a stable `code` — branch on it, never on message text.
 - `PAIR_NO_KEYS`
 - `PAIR_LOCAL_KEY_CONFLICT`
 - `VAR_NOT_FOUND`
-- `REMOVE_LOCAL_DRIFT`
 - `REMOVE_NEEDS_TTY`
+- `SECRETS_STALE_BASE`
+- `SECRETS_CONFLICT`
 - `KEEP_PR_NOT_GIT_REPO`
 - `KEEP_PR_NO_GITHUB_REMOTE`
 - `KEEP_PR_GH_UNAVAILABLE`

@@ -228,6 +228,8 @@ function allWrittenBytes(): string {
 describe('systemStore', () => {
   beforeEach(async () => {
     servers.clear();
+    // A new fake server is a new org: this machine's copy of its store (keep.lock pins) starts over too.
+    rmSync(getSystemStoreDir(ORG_A), { recursive: true, force: true });
     calls.length = 0;
     promptedWith = [];
     promptQueue = [];
@@ -287,6 +289,36 @@ describe('systemStore', () => {
     expect(store2.listNames()).toEqual([]);
   });
 
+  it('CAP-712: another admin\'s entry saved after this handle opened survives this handle\'s set, and two sets through one handle both land', async () => {
+    const mine = await openSystemStore({ orgId: ORG_A, devMode: true });
+    const theirs = await openSystemStore({ orgId: ORG_A, devMode: true });
+    await theirs.set('_CONNECTOR_THEIRS_KEY', 'theirs');
+
+    await mine.set('_CONNECTOR_MINE_KEY', 'mine-1');
+    await mine.set('_CONNECTOR_MINE_OTHER', 'mine-2');
+
+    const reopened = await openSystemStore({ orgId: ORG_A, devMode: true });
+    expect(reopened.listNames().map((e) => e.name).sort()).toEqual(['_CONNECTOR_MINE_KEY', '_CONNECTOR_MINE_OTHER', '_CONNECTOR_THEIRS_KEY']);
+    expect(reopened.get('_CONNECTOR_THEIRS_KEY')).toBe('theirs');
+  });
+
+  it('CAP-712: an entry another admin changed since this handle opened is a SECRETS_CONFLICT, and nothing is pushed', async () => {
+    const seed = await openSystemStore({ orgId: ORG_A, devMode: true });
+    await seed.set('_CONNECTOR_SHARED_KEY', 'v0');
+    const mine = await openSystemStore({ orgId: ORG_A, devMode: true });
+    const theirs = await openSystemStore({ orgId: ORG_A, devMode: true });
+    // The other admin is on another machine: this machine's copy of the store never sees their save.
+    const gc = await import('../../src/config/globalConfig');
+    const mineOnDisk = gc.readSystemKeepFile(ORG_A)!;
+    await theirs.set('_CONNECTOR_SHARED_KEY', 'v-theirs');
+    gc.saveSystemKeepFile(ORG_A, mineOnDisk);
+    const pushesBefore = serverFor(ORG_A).pushCount;
+
+    await expect(mine.set('_CONNECTOR_SHARED_KEY', 'v-mine')).rejects.toMatchObject({ code: ERROR_CODES.SECRETS_CONFLICT, details: { names: ['_CONNECTOR_SHARED_KEY'] } });
+    expect(serverFor(ORG_A).pushCount).toBe(pushesBefore);
+    expect((await openSystemStore({ orgId: ORG_A, devMode: true })).get('_CONNECTOR_SHARED_KEY')).toBe('v-theirs');
+  });
+
   it('rejects a bad name before any network call (Proof: SYSTEM_STORE_BAD_NAME)', () => {
     expect(() => assertValidConnectorName('NOT_A_CONNECTOR_NAME')).toThrow();
     try {
@@ -338,6 +370,7 @@ describe('systemStore', () => {
   it('owner and admin roles both succeed on read and write', async () => {
     for (const role of ['owner', 'admin'] as const) {
       servers.clear();
+      rmSync(getSystemStoreDir(ORG_A), { recursive: true, force: true });
       await seedMasterKey(ORG_A, USER_A);
       serverFor(ORG_A).role = role;
       const store = await openSystemStore({ orgId: ORG_A, devMode: true });

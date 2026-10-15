@@ -64,6 +64,7 @@ import { listOrgProjectsOrUnavailable } from '../capyCommand';
 import { commitDiscoveryChanges, defaultDiscoveryCommitBranchName, isValidDiscoveryCommitBranchName, snapshotPathStatus } from '../../git/discoveryCommit';
 import { BaseUrlStore, Unanswered, offerSaveAskedBaseUrl, realBaseUrlStoreOpener, resolveDokployBaseUrl, settingsUnanswered } from '../../deploy/dokployBaseUrl';
 import { fingerprint, writeImportedAndSync, writeImportOutcome, ResolvedContext } from './shared';
+import { isSecretsConflict } from '../../sync/commit';
 import { ConnectOpts, ConnectorModule, ConnectResult, ImportOutcome, ImportWarning, RotateResult } from './registry';
 import { discoveryProjectQuestion } from '../../ui/projectQuestions';
 import {
@@ -1898,7 +1899,8 @@ async function importIntoBranchSafe(
   try {
     await writeImportOutcome(resolvedCtx, outcome, { push: !runOpts.noPush, dryRun: false });
   } catch (err) {
-    return { ok: false, code: 'DOKPLOY_PUSH_FAILED', message: err instanceof Error ? err.message : String(err) };
+    // A conflict keeps its own code (and names the variables); anything else is the push failing.
+    return { ok: false, code: isSecretsConflict(err) ? err.code : 'DOKPLOY_PUSH_FAILED', message: err instanceof Error ? err.message : String(err) };
   }
   return outcome;
 }

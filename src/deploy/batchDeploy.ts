@@ -571,7 +571,8 @@ const groupKey = (p: Pushed): string => `${p.item.project_id}\u0000${p.item.bran
 /** The recorder's client, with a 429 waited out (bounded) like every other bulk call. */
 const patientClient = (env: BatchEnv): RecordClient => ({
   getLatestSecrets: (projectId, branch) => retryOnRateLimit(() => env.client.getLatestSecrets(projectId, branch), env.sleep),
-  pushSecrets: (projectId, keepFile, envBlob, branch) => retryOnRateLimit(() => env.client.pushSecrets(projectId, keepFile, envBlob, branch), env.sleep),
+  pushSecrets: (projectId, keepFile, envBlob, branch, _onRateLimit, baseKeepHash) =>
+    retryOnRateLimit(() => env.client.pushSecrets(projectId, keepFile, envBlob, branch, undefined, baseKeepHash), env.sleep),
 });
 
 /** Records every pushed target of ONE (project, branch) with ONE server write. */

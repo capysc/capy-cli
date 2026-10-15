@@ -9,6 +9,7 @@
  *   POST /orgs/:org/co-decrypt   identity (the on-disk blob is already the inner layer)
  *   POST /orgs/:org/wrap         identity
  *   POST /secrets/:project       answers like the real one, or 500 once `failPushes()` was called
+ *   GET  /secrets/:project?branch=  the branch fixture if set, else what was pushed (404 before any push)
  *
  * Every request it receives is appended to a log file (and the push-failure
  * switch is a flag file) rather than held in a mutable variable, so tests can
@@ -161,6 +162,12 @@ function walkFiles(dir: string): readonly (readonly [string, Buffer])[] {
   });
 }
 
+/** What the mock service has been pushed so far (CAP-712: a save reads the server's latest first, so the mock must remember). */
+function readStore(root: string): { readonly keep: KeepFile | undefined; readonly blobs: Readonly<Record<string, string>> } {
+  const file = join(root, 'store.json');
+  return existsSync(file) ? (JSON.parse(readFileSync(file, 'utf8')) as ReturnType<typeof readStore>) : { keep: undefined, blobs: {} };
+}
+
 interface MockService {
   readonly server: Server;
   readonly url: string;
@@ -200,14 +207,24 @@ async function startMockService(requestLog: string, failFlag: string, root: stri
       const [project, query] = path.slice('/secrets/'.length).split('?');
       const branch = new URLSearchParams(query).get('branch') ?? '';
       const data = fixture(`branch-${project}-${branch}.json`);
-      return data === undefined ? send(404, { error: 'no branch fixture' }) : send(200, data);
+      if (data !== undefined) return send(200, data);
+      // No fixture: answer like the real server does, from what was pushed (nothing pushed yet: 404).
+      const stored = readStore(root);
+      if (stored.keep === undefined) return send(404, { error: 'no branch fixture' });
+      const hash = SyncEngine.computeKeepHash(stored.keep, branch);
+      return send(200, { env_file: stored.blobs[hash] ?? '', permissions: ['*'], keep_hash: hash, keep_file: JSON.stringify(stored.keep) });
     }
     if (path.endsWith('/co-decrypt')) return send(200, { plaintext: (JSON.parse(body) as { ciphertext: string }).ciphertext });
     if (path.endsWith('/wrap')) return send(200, { ciphertext: (JSON.parse(body) as { plaintext: string }).plaintext });
     if (path.startsWith('/secrets/') && req.method === 'POST') {
       if (existsSync(failFlag)) return send(500, { error: 'mock push failure' });
-      const parsed = JSON.parse(body) as { keep_file: string; branch: string };
+      const parsed = JSON.parse(body) as { keep_file: string; env_blob?: string; branch: string };
       const keep = JSON.parse(parsed.keep_file) as KeepFile;
+      // Remember the push, like the real server: the next read answers with it.
+      const before = readStore(root);
+      const spliced = SyncEngine.spliceKeepBranch(before.keep ?? null, keep, parsed.branch);
+      const hash = SyncEngine.computeKeepHash(spliced, parsed.branch);
+      writeFileSync(join(root, 'store.json'), JSON.stringify({ keep: spliced, blobs: { ...before.blobs, [hash]: parsed.env_blob ?? '' } }));
       return send(200, { keep_hash: SyncEngine.computeKeepHash(keep, parsed.branch) });
     }
     return send(404, { error: 'unexpected request' });

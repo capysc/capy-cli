@@ -1,5 +1,5 @@
 import { describe, test, expect } from 'bun:test';
-import { compareSecrets, hashValue } from '../../src/commands/statusCommand';
+import { compareSecrets, hashValue } from '../../src/sync/compareSecrets';
 
 // compareSecrets takes maps of variable -> value_hash for pinned, and
 // variable -> plaintext for local/remote (it hashes local/remote internally...

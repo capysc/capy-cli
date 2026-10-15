@@ -15,11 +15,11 @@
 import inquirer from 'inquirer';
 import { ProjectManager } from '../core/projectManager';
 import { resolveContext, removeAndSync, listAllVarsOnBranch, ResolvedContext } from './connectors/shared';
-import { hashValue } from './statusCommand';
 import { isInteractive, EXIT_NEEDS_INPUT } from '../ui/interactive';
 import { DRY_RUN_UNSUPPORTED_MESSAGES } from './pipedValue';
 import { listTargets } from '../deploy/config';
-import { CapyError, ERROR_CODES, KeepFile } from '../types/index';
+import { CapyError, ERROR_CODES } from '../types/index';
+import { isSecretsConflict } from '../sync/commit';
 import {
   previewKeepLockPrStep,
   recordsForRemoval,
@@ -57,36 +57,6 @@ function refuse(json: boolean, err: CapyError, exitCode: number = 1): never {
   refuseHuman(err.message, exitCode);
 }
 
-/** Pinned value hashes for `branch`, keyed by variable name — same shape editCommand/statusCommand build. */
-export function pinnedHashesFor(keep: KeepFile, branch: string): Record<string, string> {
-  return Object.fromEntries(
-    Object.entries(keep.variables).flatMap(([varName, entries]) => {
-      const entry = entries.find((e) => e.branch === branch);
-      return entry ? ([[varName, entry.value_hash]] as const) : [];
-    }),
-  );
-}
-
-/**
- * Names, OTHER than the ones being removed, whose local `.env` value
- * disagrees with the pinned baseline — new locally, changed locally, or
- * pinned but missing from `.env` entirely. Any of these would ride along,
- * unrelated, on the push `capy remove` is about to make.
- */
-export function computeDrift(
-  pinned: Record<string, string>,
-  localPlaintext: Record<string, string>,
-  removedNames: readonly string[],
-): string[] {
-  const removed = new Set(removedNames);
-  const otherKeys = new Set(
-    [...Object.keys(pinned), ...Object.keys(localPlaintext)].filter((k) => !removed.has(k)),
-  );
-  return Array.from(otherKeys)
-    .filter((k) => pinned[k] !== (localPlaintext[k] !== undefined ? hashValue(localPlaintext[k]) : undefined))
-    .sort();
-}
-
 export interface DeployTargetWarning {
   target: string;
   variable: string;
@@ -119,7 +89,7 @@ async function promptRemovalConfirmation(message: string): Promise<boolean> {
 
 /**
  * Everything that needs `ctx` (an authenticated, decrypted `ResolvedContext`)
- * — the drift check, the deploy-target warning, the push, and the output.
+ * — the deploy-target warning, the push, and the output.
  *
  * Split out from `RemoveCommand.execute` so it is directly testable with a
  * hand-built `ResolvedContext` (the same technique
@@ -131,19 +101,6 @@ export async function proceedWithRemoval(
   names: readonly string[],
   opts: { json: boolean; cwd: string; pr?: PrFlags; nonTty?: boolean; dryRun?: boolean },
 ): Promise<void> {
-  const pinned = pinnedHashesFor(ctx.keep, ctx.branch);
-  const drifted = computeDrift(pinned, ctx.localPlaintext, names);
-  if (drifted.length > 0) {
-    refuse(
-      opts.json,
-      new CapyError(
-        `${drifted.join(', ')} ${drifted.length === 1 ? 'has' : 'have'} unpushed local changes. Push or revert them before removing.`, // COPY-FLAG
-        ERROR_CODES.REMOVE_LOCAL_DRIFT,
-        { drifted },
-      ),
-    );
-  }
-
   const warnings = deployTargetWarnings(opts.cwd, names);
 
   if (opts.dryRun === true) {
@@ -172,7 +129,8 @@ export async function proceedWithRemoval(
     return;
   }
 
-  await removeAndSync(ctx, names);
+  // A name someone else changed on the server since this folder's pin is a refusal, not a silent overwrite.
+  await removeAndSync(ctx, names).catch((err: unknown) => (isSecretsConflict(err) ? refuse(opts.json, err) : Promise.reject(err)));
 
   // The removal is done whatever the PR step reports (it never throws).
   const outcome = await runKeepLockPrStep({
@@ -275,8 +233,7 @@ export class RemoveCommand {
     }
 
     // Everything above is local-only — no auth, no network. Only now do we
-    // authenticate and decrypt `.env`, which the drift check and the push
-    // both need.
+    // authenticate and decrypt `.env`, which the push needs.
     const ctx = await resolveContext({ devMode: this.devMode, json, dryRun: opts.dryRun === true });
     await proceedWithRemoval(ctx, names, { json, cwd: process.cwd(), pr: opts.pr, nonTty: opts.nonTty, dryRun: opts.dryRun === true });
   }

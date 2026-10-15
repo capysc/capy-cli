@@ -199,12 +199,7 @@ describe('CapyCommand', () => {
     } as any;
 
     mockSyncEngine = {
-      compareEnvironments: mock(() => undefined),
-      formatSyncSummary: mock(() => undefined),
-      validateDecisions: mock(() => []),
-      applyDecisions: mock(() => undefined),
       mergeWithKeep: mock(() => undefined),
-      generateSyncResult: mock(() => undefined)
     } as any;
 
     mockPromptEngine = {

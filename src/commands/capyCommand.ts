@@ -43,7 +43,9 @@ import { isLocalOnly } from '../config/profileConfig';
 import { resolveLocalProjectKey } from '../core/localUnlock';
 import { isMembershipRevokedError } from '../errors/membershipRevoked';
 import { cleanupOrgData } from '../cleanup/orgCleanup';
-import { compareSecrets, hashValue, formatSnippet } from './statusCommand';
+import { formatSnippet } from './statusCommand';
+import { compareSecrets, hashValue } from '../sync/compareSecrets';
+import { commitLocalValues, envBlobOf, keepForEnv, pinnedHashes, snapshotFrom, type Snapshot } from '../sync/commit';
 import { ACCENT } from '../ui/colors';
 import { installSyncHooks } from '../git/syncHooks';
 import { initProjectQuestion } from '../ui/projectQuestions';
@@ -1280,13 +1282,7 @@ export class CapyCommand {
       variables: Object.keys(initialKeep.variables),
     } : 'NOT FOUND');
 
-    const rebuildPinned = (keep: KeepFile | null): Record<string, string> =>
-      Object.fromEntries(
-        Object.entries(keep?.variables ?? {})
-          .map(([varName, entries]) => [varName, entries.find(e => e.branch === branch)?.value_hash])
-          .filter((pair): pair is [string, string] => pair[1] !== undefined),
-      );
-    const pinned = rebuildPinned(initialKeep);
+    const pinned = pinnedHashes(initialKeep, branch);
     this.debug('pinned', pinned);
 
     // Read local .env and compute hashes. A read/decrypt failure that isn't a
@@ -1326,16 +1322,17 @@ export class CapyCommand {
     // file at all — see the comment above `initialKeep`) rather than
     // reassigning it, and `networkAvailable`/`remotePlaintext`/`remoteHashes`
     // likewise, in place of the `let`s and in-loop mutation this used to be.
-    const { currentKeep, networkAvailable, remotePlaintext, remoteHashes } = await (async (): Promise<{
+    const { currentKeep, networkAvailable, remotePlaintext, remoteHashes, seenSnapshot } = await (async (): Promise<{
       currentKeep: KeepFile | null;
       networkAvailable: boolean;
       remotePlaintext: Record<string, string>;
       remoteHashes: Record<string, string>;
+      /** The server read the user is shown (and decides against); the commit is planned against it. */
+      seenSnapshot: Snapshot | undefined;
     }> => {
-      const remotePlaintext: Record<string, string> = {};
-      const remoteHashes: Record<string, string> = {};
+      const noRemote = { remotePlaintext: {}, remoteHashes: {}, seenSnapshot: undefined };
       if (localMode) {
-        return { currentKeep: initialKeep, networkAvailable: false, remotePlaintext, remoteHashes };
+        return { currentKeep: initialKeep, networkAvailable: false, ...noRemote };
       }
 
       const fetchSpinner = ora('Fetching remote secrets...').start();
@@ -1362,18 +1359,12 @@ export class CapyCommand {
           hasKeepFile: !!decryptData.keep_file,
         });
 
-        if (decryptData.env_content) {
-          const encrypted = this.fileManager.parseEnvContent(decryptData.env_content);
-          for (const [key, value] of Object.entries(encrypted)) {
-            try {
-              const plaintext = this.fileManager.decryptValue(value, encryptionKey);
-              remotePlaintext[key] = plaintext;
-              remoteHashes[key] = hashValue(plaintext);
-            } catch (decryptErr) {
-              this.debugError(`remote decrypt failed for ${key}`, decryptErr);
-            }
-          }
-        }
+        // Lines this key cannot decrypt are left out of the comparison (and kept verbatim by a commit).
+        const snapshot = snapshotFrom(decryptData, branch, encryptionKey, this.fileManager);
+        const remotePlaintext = Object.fromEntries(
+          Object.entries(snapshot.entries).flatMap(([key, entry]) => (entry.plaintext === undefined ? [] : [[key, entry.plaintext] as const])),
+        );
+        const remoteHashes = Object.fromEntries(Object.entries(remotePlaintext).map(([key, value]) => [key, hashValue(value)]));
         this.debug('remote hashes', remoteHashes);
 
         // Bootstrap only (CAP-303): an existing keep.lock is git-owned and is
@@ -1389,7 +1380,7 @@ export class CapyCommand {
           return serverKeep;
         })();
         fetchSpinner.stop();
-        return { currentKeep: bootstrappedKeep, networkAvailable: true, remotePlaintext, remoteHashes };
+        return { currentKeep: bootstrappedKeep, networkAvailable: true, remotePlaintext, remoteHashes, seenSnapshot: snapshot };
       } catch (err: any) {
         this.debugError('remote fetch failed', err);
         // 403 may be one of two different cases:
@@ -1435,7 +1426,7 @@ export class CapyCommand {
           }
         }
         fetchSpinner.fail('Cannot reach remote. Showing local changes only.');
-        return { currentKeep: initialKeep, networkAvailable: false, remotePlaintext, remoteHashes };
+        return { currentKeep: initialKeep, networkAvailable: false, ...noRemote };
       }
     })();
 
@@ -1692,10 +1683,6 @@ export class CapyCommand {
     if (finalEnvDecision.kind === 'abort') return;
     const { finalEnv } = finalEnvDecision;
 
-    // Update keep.lock
-    const { createHash } = await import('crypto');
-    const { deriveResourceId } = await import('../crypto/resourceId');
-
     const keep = currentKeep || {
       version: '3.0',
       org_id: projectState.organizationId!,
@@ -1704,62 +1691,49 @@ export class CapyCommand {
       variables: {},
     };
 
-    const pushedVars = Object.fromEntries(
-      Object.entries(finalEnv).map(([key, value]) => [
-        key,
-        {
-          resource_id: deriveResourceId(branch, key),
-          value_hash: createHash('sha256').update(value).digest('hex').slice(0, 16),
-        },
-      ]),
-    );
-
-    const mergedKeep = this.syncEngine.mergeWithKeep(keep, pushedVars, branch);
-
-    // Remove variables not in finalEnv from keep (for this branch) — built as
-    // a new object rather than mutated in place (was a `for` loop doing
-    // `finalKeep.variables[varName] = entries` / `delete
-    // finalKeep.variables[varName]` on the value mergeWithKeep returned).
-    const finalKeep: KeepFile = {
-      ...mergedKeep,
-      variables: Object.fromEntries(
-        Object.entries(mergedKeep.variables).flatMap(([varName, entries]) => {
-          if (varName in finalEnv) return [[varName, entries]];
-          const kept = entries.filter(e => e.branch !== branch);
-          return kept.length > 0 ? [[varName, kept]] : [];
-        }),
-      ),
-    };
-
-    this.fileManager.writeKeepFile(finalKeep);
-
-    // Build the encrypted env blob (used for both push and local cache).
-    const { Encryptor } = await import('../crypto/encryptor');
-    const cacheKeepHash = SyncEngine.computeKeepHash(finalKeep, branch);
-    const envBlob = Object.entries(finalEnv)
-      .map(([k, v]) => {
-        const resourceId = deriveResourceId(branch, k);
-        const enc = Encryptor.encrypt(v, encryptionKey);
-        return `${k}=capy:${resourceId}:${enc}`;
-      })
-      .join('\n');
-
     // Commit + push are coupled: choosing "commit local" pushes too — except
-    // in local-only mode, where there is no remote. The local writes below
-    // (keep cache, encrypted .env, sync-state) ARE the commit.
-    if (action === 'commit_local' && !localMode) {
-      const pushResult = await this.serviceClient.pushSecrets(
-        projectState.projectId!,
-        JSON.stringify(finalKeep),
-        envBlob,
-        branch,
+    // in local-only mode, where there is no remote and the local writes ARE the commit.
+    if (action === 'commit_local') {
+      // What the user committed is what they CHANGED, on top of the server's latest (sync/commit.ts).
+      const { changed: changeCount } = await commitLocalValues(
+        {
+          pm: this.projectManager,
+          fileManager: this.fileManager,
+          serviceClient: localMode ? undefined : this.serviceClient,
+          orgId: projectState.organizationId!,
+          projectId: projectState.projectId!,
+          branch,
+          userId: authResult.user_id!,
+          projectKey: encryptionKey,
+          keep,
+          localPlaintext,
+        },
+        { pinned, remoteHashes, seen: seenSnapshot },
       );
-      // Re-write keep.lock with the server's copy — it carries the
-      // server-assigned changed_at timestamps for this push.
-      this.fileManager.writeKeepFile(SyncEngine.adoptServerKeep(pushResult.keep_file, finalKeep, branch));
+      console.log(`\n> keep.lock updated (${diffs.length} changes)`);
+      console.log(
+        localMode
+          ? `\nStored ${changeCount} change(s) locally (local-only mode).`
+          : `\nPushed ${changeCount} change(s) to Keep.`,
+      );
+      this.installGitHooks();
+      return;
     }
 
-    writeKeepCache(projectState.organizationId!, projectState.projectId!, cacheKeepHash, envBlob);
+    // Retrieving (pinned or remote values) or resolving row by row only moves this folder:
+    // keep.lock's pins and `.env` follow the chosen values, and nothing is pushed.
+    const finalKeep = keepForEnv(keep, branch, finalEnv);
+    this.fileManager.writeKeepFile(finalKeep);
+
+    // Build the encrypted env blob (the local cache).
+    const { deriveResourceId } = await import('../crypto/resourceId');
+    const { Encryptor } = await import('../crypto/encryptor');
+    const envBlob = envBlobOf(
+      Object.fromEntries(
+        Object.entries(finalEnv).map(([k, v]) => [k, `capy:${deriveResourceId(branch, k)}:${Encryptor.encrypt(v, encryptionKey)}`]),
+      ),
+    );
+    writeKeepCache(projectState.organizationId!, projectState.projectId!, SyncEngine.computeKeepHash(finalKeep, branch), envBlob);
 
     // Encrypt and write .env
     this.fileManager.writeEncryptedEnvFile(finalEnv, encryptionKey, undefined, finalKeep, branch);
@@ -1774,16 +1748,7 @@ export class CapyCommand {
       keep_hash: setSyncKeepHash(existingSyncState, branch, SyncEngine.computeKeepHash(finalKeep, branch)),
     });
 
-    const changeCount = Object.keys(pushedVars).length;
     console.log(`\n> keep.lock updated (${diffs.length} changes)`);
-
-    if (action === 'commit_local') {
-      console.log(
-        localMode
-          ? `\nStored ${changeCount} change(s) locally (local-only mode).`
-          : `\nPushed ${changeCount} change(s) to Keep.`,
-      );
-    }
 
     // Install hooks on every run (idempotent)
     this.installGitHooks();
