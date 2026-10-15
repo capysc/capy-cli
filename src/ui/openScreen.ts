@@ -340,29 +340,91 @@ export function planOpen(url: string, opts: PlanOptions): OpenPlan {
  * caller before this runs, so a browser that will not start is an inconvenience
  * and not a failure of the flow.
  */
-export async function openScreen(url: string, opts: PlanOptions): Promise<OpenPlan> {
+export async function openScreen(
+  url: string,
+  opts: PlanOptions,
+  deps: OpenDeps = {},
+): Promise<OpenPlan & { readonly opened: boolean }> {
   const plan = planOpen(url, opts);
-  try {
-    if (plan.via === 'app-window') {
-      // Detached: the window outlives the CLI process, which is the whole point
-      // for an ending page served just before exit.
-      const child = spawn(plan.exec, plan.args, { detached: true, stdio: 'ignore' });
-      child.on('error', () => void fallback(url));
-      child.unref();
-    } else if (plan.via === 'default-browser') {
-      await fallback(url);
-    }
-  } catch {
-    /* best-effort; the printed URL is the real fallback */
-  }
-  return plan;
+  const opened = await carryOut(plan, url, deps);
+  return { ...plan, opened };
 }
 
-async function fallback(url: string): Promise<void> {
+/**
+ * A started process, as far as this module needs to know: Node's ChildProcess
+ * fits. `once` is optional because a stand-in (a test double, or a launcher
+ * that hands back nothing useful) may not have it; that counts as started.
+ */
+export interface Launchable {
+  readonly pid?: number;
+  once?(event: 'error', listener: (err: Error) => void): unknown;
+  unref?(): unknown;
+}
+
+/** Injection seams, so tests can stand in for a missing launcher without starting one. */
+export interface OpenDeps {
+  readonly spawnApp?: (exec: string, args: readonly string[]) => Launchable;
+  readonly openDefault?: (url: string) => Promise<Launchable>;
+}
+
+/**
+ * True when the process started, false when it could not be started (ENOENT:
+ * no `xdg-open` in a VM or container, no Chrome binary).
+ *
+ * Attaching the `error` listener is the load-bearing part: Node reports a
+ * failed spawn as an `error` event on the next tick, and an `error` event with
+ * no listener throws after every surrounding try/catch has returned, taking the
+ * whole CLI down. The listener stays attached, so a later error is harmless too.
+ *
+ * Whether it started is read from `pid`, which Node leaves undefined when the
+ * spawn failed — known synchronously, with no wait on an event. A stand-in with
+ * no `pid` field at all counts as started.
+ */
+export function launched(child: Launchable): boolean {
+  child?.once?.('error', () => {
+    /* reported through the return value; see above */
+  });
+  if (!child || !('pid' in child)) return true;
+  return typeof child.pid === 'number';
+}
+
+async function carryOut(plan: OpenPlan, url: string, deps: OpenDeps): Promise<boolean> {
+  if (plan.via === 'suppressed') return false;
+  if (plan.via === 'default-browser') return fallback(url, deps);
+  // Detached: the window outlives the CLI process, which is the whole point
+  // for an ending page served just before exit.
+  const started = await tryLaunch(() =>
+    (deps.spawnApp ?? spawnDetached)(plan.exec, plan.args),
+  );
+  return started ? true : fallback(url, deps);
+}
+
+function spawnDetached(exec: string, args: readonly string[]): Launchable {
+  return spawn(exec, [...args], { detached: true, stdio: 'ignore' });
+}
+
+async function tryLaunch(start: () => Launchable | Promise<Launchable>): Promise<boolean> {
   try {
-    const open = (await import('open')).default;
-    await open(url);
+    // No `await` between a synchronous spawn and `launched`: the failure
+    // arrives on the next tick, and an await here could let it land before the
+    // listener does. An async starter (the `open` package) returns its child
+    // in the same microtask drain, which still runs ahead of that tick.
+    const started = start();
+    const child = started instanceof Promise ? await started : started;
+    const ok = launched(child);
+    if (ok) child.unref?.();
+    return ok;
   } catch {
-    /* best-effort */
+    /* best-effort; the printed URL is the real fallback */
+    return false;
   }
+}
+
+async function defaultOpen(url: string): Promise<Launchable> {
+  const open = (await import('open')).default;
+  return open(url);
+}
+
+function fallback(url: string, deps: OpenDeps): Promise<boolean> {
+  return tryLaunch(() => (deps.openDefault ?? defaultOpen)(url));
 }
