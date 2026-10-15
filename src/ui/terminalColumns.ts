@@ -27,7 +27,7 @@ export const terminalWidth = (text: string): number => graphemes(text).reduce((w
 
 export function clipTerminalText(text: string, width: number, fromEnd = false): string {
   const parts = graphemes(text);
-  const ordered = fromEnd ? parts.toReversed() : parts;
+  const ordered = fromEnd ? parts.reduce<readonly string[]>((reversed, part) => [part, ...reversed], []) : parts;
   return ordered.reduce((state, part) => {
     const nextWidth = state.width + graphemeWidth(part);
     if (state.done || nextWidth > width) return { ...state, done: true };
