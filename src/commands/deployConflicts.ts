@@ -205,7 +205,7 @@ export async function reconcileDeployConflicts(input: ReconcileInput): Promise<R
   // A person at a terminal is asked once, naming them; declining stops the deploy with nothing saved and nothing delivered.
   const mayAsk = input.interactive && !input.dryRun;
   if (unsaved.length > 0 && mayAsk && !(await askSaveAndDeploy(unsaved))) {
-    console.log('Cancelled.');
+    console.log('Cancelled.'); // COPY-FLAG
     return { ok: false, code: 0 };
   }
   // Off a terminal (or in a preview) nobody can be asked. With no source conflict to report, refuse now, before the
@@ -249,7 +249,7 @@ export async function reconcileDeployConflicts(input: ReconcileInput): Promise<R
 
   // Every conflict is answered. Unsaved edits that nobody was asked about stop the deploy here, before anything is
   // written (see ORDER above: reached only when the source conflicts were resolved by the flags).
-  if (unsaved.length > 0 && !mayAsk) throw unsavedRefusalFor(unsaved, false);
+  if (unsaved.length > 0 && !mayAsk) throw unsavedRefusalFor(unsaved, input.dryRun);
 
   // The folder takes what will be delivered. A variable the folder did not change is never delivered stale: Capy's
   // latest is pulled in. Every variable the folder changed goes through the commit path, so Capy holds what the

@@ -588,7 +588,7 @@ function renderConflicts(flow: Extract<EditFlow, { step: 'conflicts' }>, maxWidt
   const row = (c: LocationConflict, i: number): string => {
     const choice = choiceAt(flow, c);
     const when = c.conflict.theirs_changed_at === undefined ? '' : ` · changed ${formatRelativeTime(c.conflict.theirs_changed_at)}`; // COPY-FLAG
-    const line = `${i === flow.cursor ? '▶' : ' '} ${c.location.project_name} ${c.location.branch}${when}  ${choice === undefined ? '—' : choice}`;
+    const line = `${i === flow.cursor ? '▶' : ' '} ${c.location.project_name} ${c.location.branch}${when}  ${choice === undefined ? '—' : choice}`; // COPY-FLAG
     return i === flow.cursor ? `${BOLD}${clipLine(line, maxWidth)}${RESET}` : clipLine(line, maxWidth);
   };
   return {
