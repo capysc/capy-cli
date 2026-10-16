@@ -2,10 +2,13 @@
  * Bare `capy` runs first (CAP-711; the contract is docs/conflict-resolution.md).
  *
  * Every command that writes from a folder (`capy edit`, `add`, `remove`, `connect` (discovery too), `rotate`, `push`,
- * `deploy` in every mode, `deploy revoke`, `deploy targets-remove`) calls `gateFirst` as its VERY FIRST step, before any prompt, preflight, plan or confirm screen, and nothing
- * lets a command skip it. It runs bare `capy`'s own sync (`CapyCommand.runSync`: the code `capy` runs, not a
- * copy) and then runs it again until the folder and Capy agree on every variable of the branch, or until the
- * person cancels or chooses "Continue working", in which case the command writes nothing and ends.
+ * `checkout <existing branch>` (not `-b`), `org`, `deploy` in every mode, `deploy revoke`, `deploy targets-remove`) calls
+ * `gateFirst` as its VERY FIRST step, before any prompt, preflight, plan or confirm screen, and nothing lets a command
+ * skip it. The only things allowed before it: flag validation (a bad `--resolve` is refused before anything is read) and
+ * `deploy --json`'s route description (it reads no values and writes nothing). It runs bare `capy`'s own sync
+ * (`CapyCommand.runSync`: the code `capy` runs, not a copy) and then runs it again until the folder and Capy agree on
+ * every variable of the branch, or until the person cancels or chooses "Continue working", in which case the command
+ * writes nothing and ends.
  *
  * Off a terminal (`--non-tty`, `--json`, an agent, CI, or given `--resolve`) nobody can answer bare `capy`'s
  * menu: the differences stop the command (exit 3, the rows and a `conflict_id` on stdout), and a rerun with
@@ -101,7 +104,11 @@ const runBareCapy: SyncRunner = (opts, protocol) =>
     opts.cwd,
     async () => {
       const { CapyCommand } = await import('../commands/capyCommand');
-      return new CapyCommand({ protocol, silentAuthOnly: protocol, quiet: true, conflictFlags: opts.conflictFlags, dryRun: opts.dryRun }, opts.devMode === true).runSync();
+      // A torn checkout (`.capy/branch` and the `.env` header name different branches) must not end the process here: in the
+      // working directory the header's branch is compared (so `capy checkout <branch>`, the recovery, can run); in another
+      // checkout it is that folder's coded failure, so a multi-folder run goes on to the next folder.
+      const onBranchMismatch = opts.cwd === undefined ? 'follow-env-header' : 'throw';
+      return new CapyCommand({ protocol, silentAuthOnly: protocol, quiet: true, conflictFlags: opts.conflictFlags, dryRun: opts.dryRun, onBranchMismatch }, opts.devMode === true).runSync();
     },
     'up-to-date',
   );

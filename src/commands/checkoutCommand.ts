@@ -147,16 +147,20 @@ export class CheckoutCommand {
     // Switching to an existing branch runs bare `capy` first, like every folder write (docs/conflict-resolution.md).
     // The one exception is `-b`: creating a branch carries the folder's uncommitted values onto a brand-new branch
     // nobody else has written to, and bare `capy` offers to push them there on the next sync (Vince, 2026-10-16).
+    // In seed-phrase recovery mode the gate is skipped too (as `capy decrypt` is): it needs the server, and the offline
+    // fallback below is the very case recovery mode exists for.
+    const { isRecoveryActive } = await import('../config/globalConfig');
     if (!options.create) {
       conflictFlagsOrExit(options.conflictFlags ?? {}, options.json === true);
-      const gate: GateOptions = { devMode: this.devMode, json: options.json, nonTty: options.nonTty, conflictFlags: options.conflictFlags };
-      await gateFirst(gate);
+      if (!isRecoveryActive()) {
+        const gate: GateOptions = { devMode: this.devMode, json: options.json, nonTty: options.nonTty, conflictFlags: options.conflictFlags };
+        await gateFirst(gate);
+      }
     }
     try {
       await this._execute(branchName, options);
     } catch (error: any) {
       // In recovery mode, fall back to offline branch switch
-      const { isRecoveryActive } = await import('../config/globalConfig');
       if (isRecoveryActive()) {
         this.projectManager.writeActiveBranch(branchName);
         console.log(`\nSwitched to branch "${branchName}" (offline — recovery mode)`);

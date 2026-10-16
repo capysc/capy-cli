@@ -20,7 +20,7 @@
  * The property asserted is always the server's: what its latest DECRYPTS to.
  */
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { Encryptor } from '../../src/crypto/encryptor';
@@ -582,6 +582,149 @@ describe('every other write path meets bare capy first (built cli)', () => {
     expect(first.code).toBe(3);
     expect(json(first)).toMatchObject({ ok: false, code: 'SECRETS_CONFLICT' });
     noValuesIn(first);
+    expect(h().pushCount()).toBe(0);
+  });
+
+  /** The folder as a command could have changed it: keep.lock, the branch cache, and X in `.env`. */
+  const folderNow = () => ({
+    keep: h().keepLockText(),
+    branch: readFileSync(join(h().project, '.capy', 'branch'), 'utf8'),
+    x: h().envValue('X'),
+  });
+
+  /** Everything the mock saw that is not a read (the gate's own co-decrypt / wrap are not writes). */
+  const writesSeen = () => h().requests().filter((r) => r.method !== 'GET' && !/\/(co-decrypt|wrap)$/.test(r.path));
+
+  /** The command meets bare capy first: exit 3 with the stale row and no value, and nothing was written, minted, removed or switched. */
+  async function stoppedAtTheGate(args: readonly string[]): Promise<CliResult> {
+    const before = folderNow();
+    const result = await h().run(args);
+    expect(result.code).toBe(3);
+    expect(json(result)).toMatchObject({ ok: false, code: 'SECRETS_CONFLICT' });
+    expect(Object.keys(json(result)).toSorted()).toEqual(['code', 'conflict_id', 'conflicts', 'ok']);
+    expect(json(result).conflicts).toEqual([rowX(OLD.X, OLD.X, THEIRS)]);
+    noValuesIn(result);
+    expect(writesSeen()).toEqual([]);
+    expect(mintedAnything()).toBe(false);
+    expect(h().pushCount()).toBe(0);
+    expect(folderNow()).toEqual(before);
+    return result;
+  }
+
+  test('capy rotate: stops at the difference before any credential is minted or rotated', async () => {
+    await stoppedAtTheGate(['rotate', '--non-tty']);
+  });
+
+  test('capy connect stripe (a link, not a discovery): stops at the difference before the provider is touched or the link recorded', async () => {
+    await stoppedAtTheGate(['connect', 'stripe', '--var', 'X', '--non-tty']);
+  });
+
+  test('capy deploy targets-remove: stops at the difference before the target is removed from the config or anything is redeployed', async () => {
+    await stoppedAtTheGate(['deploy', 'targets-remove', 'staging', '--non-tty']);
+  });
+
+  test('capy checkout <existing branch>: stops at the difference before the branch is switched (keep.lock, .env and the branch cache untouched; the target branch is never read)', async () => {
+    seedBranch(h(), 'development', { X: 'SENTINEL-x-dev-0b6e' });
+    h().setBranches(PROJECT_ID, [
+      { id: 'b1', name: BRANCH, is_protected: false },
+      { id: 'b2', name: 'development', is_protected: false },
+    ]);
+    await stoppedAtTheGate(['checkout', 'development', '--non-tty']);
+    expect(h().requests().some((r) => r.path.includes('branch=development'))).toBe(false);
+  });
+
+  test('capy org: stops at the difference before the folder is re-linked to another organization', async () => {
+    await stoppedAtTheGate(['org', '--non-tty']);
+  });
+
+  test('a folder whose keep.lock was deleted (the .env header still names project and branch) is synced by the gate exactly as bare capy syncs it', async () => {
+    rmSync(join(h().project, 'keep.lock'));
+    const bare = await h().run([], '');
+    expect(bare.code).toBe(3);
+    expect(json(bare)).toMatchObject({ ok: false, code: 'SECRETS_CONFLICT' });
+    const gated = await h().run(['push']);
+    expect(gated.code).toBe(3);
+    expect(json(gated)).toMatchObject({ ok: false, code: 'SECRETS_CONFLICT' });
+    // The same rows (and so the same conflict_id) as bare capy's own run in that folder.
+    expect(json(gated).conflicts).toEqual(json(bare).conflicts);
+    expect(json(gated).conflict_id).toBe(json(bare).conflict_id);
+    noValuesIn(gated);
+    expect(h().pushCount()).toBe(0);
+  });
+});
+
+describe('capy checkout after an interrupted checkout (built cli)', () => {
+  const state = { h: undefined as Harness | undefined };
+  const h = (): Harness => {
+    if (!state.h) throw new Error('harness not ready');
+    return state.h;
+  };
+  const DEV = 'development';
+  const DEV_X = 'SENTINEL-x-dev-0b6e';
+  const branchCache = () => readFileSync(join(h().project, '.capy', 'branch'), 'utf8').trim();
+  beforeEach(async () => {
+    Object.assign(state, { h: await createHarness() });
+    // The torn state: `.env` holds production (its header says so) but `.capy/branch` already says development.
+    seedFolder(h(), OLD, OLD);
+    writeFileSync(join(h().project, '.capy', 'branch'), DEV);
+    seedServer(h(), OLD); // Capy agrees with the folder's production
+    seedBranch(h(), DEV, { X: DEV_X });
+    h().setBranches(PROJECT_ID, [
+      { id: 'b1', name: BRANCH, is_protected: false },
+      { id: 'b2', name: DEV, is_protected: false },
+    ]);
+  });
+  afterEach(async () => {
+    await state.h?.dispose();
+  });
+
+  test('capy checkout production (the branch .env holds) is the recovery, and it works: bare capy compares against the .env header instead of ending the run', async () => {
+    const result = await h().run(['checkout', BRANCH, '--non-tty']);
+    expect(result.code).toBe(0);
+    expect(branchCache()).toBe(BRANCH);
+    expect(h().envValue('X')).toBe(OLD.X);
+    noValuesIn(result);
+  });
+
+  test('capy checkout development (the branch .capy/branch claims) works too: production was compared first, then the switch finishes', async () => {
+    const result = await h().run(['checkout', DEV, '--non-tty']);
+    expect(result.code).toBe(0);
+    expect(branchCache()).toBe(DEV);
+    expect(h().envValue('X')).toBe(DEV_X);
+    // The gate compared production (what .env holds), not development.
+    expect(h().requests().some((r) => r.method === 'GET' && r.path.includes(`/secrets/${PROJECT_ID}?branch=${BRANCH}`))).toBe(true);
+  });
+
+  test('the comparison is against production: a production value that differs from Capy stops the checkout with that row, and the local production values are not lost', async () => {
+    seedServer(h(), { X: THEIRS, Y: OLD.Y }); // a teammate saved a newer production X
+    const result = await h().run(['checkout', DEV, '--non-tty']);
+    expect(result.code).toBe(3);
+    expect(json(result)).toMatchObject({ ok: false, code: 'SECRETS_CONFLICT' });
+    expect(json(result).conflicts).toEqual([rowX(OLD.X, OLD.X, THEIRS)]);
+    noValuesIn(result);
+    // Nothing switched, nothing lost: production's X is still in .env, the branch cache is as the interrupted checkout left it.
+    expect(h().envValue('X')).toBe(OLD.X);
+    expect(branchCache()).toBe(DEV);
+    expect(h().pushCount()).toBe(0);
+  });
+
+  test('bare capy typed by a person keeps its recovery message and exit 1 (it is not a gate)', async () => {
+    const result = await h().run([], '');
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain(`capy checkout ${BRANCH}`);
+    expect(result.stderr).toContain(`capy checkout ${DEV}`);
+  });
+
+  test('in seed-phrase recovery mode the gate is skipped (as for capy decrypt): a folder that differs from Capy still switches, offline, and the server is never asked for the folder\'s branch', async () => {
+    seedServer(h(), { X: THEIRS, Y: OLD.Y }); // outside recovery mode this stops at the difference (exit 3)
+    rmSync(join(h().root, `branches-${PROJECT_ID}.json`)); // and the online checkout cannot finish (no branch list): the offline fallback is what remains
+    mkdirSync(join(h().home, '.capy', 'recover'), { recursive: true });
+    writeFileSync(join(h().home, '.capy', 'recover', 'session.json'), JSON.stringify({ master_key: '00', org_id: ORG_ID, created_at: '2026-10-16T00:00:00.000Z' }));
+    const result = await h().run(['checkout', 'staging', '--non-tty']);
+    expect(result.code).toBe(0);
+    expect(branchCache()).toBe('staging');
+    // The gate reads the folder's branch from the server; recovery mode never asked.
+    expect(h().requests().some((r) => r.method === 'GET' && r.path.includes('/secrets/'))).toBe(false);
     expect(h().pushCount()).toBe(0);
   });
 });

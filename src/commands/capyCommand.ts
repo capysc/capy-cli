@@ -185,17 +185,9 @@ export class CapyCommand {
     // A bad --resolve / --conflict is refused before anything is read.
     conflictFlagsOrExit(this.options.conflictFlags ?? {}, false);
     try {
-      // Detect project state
-      const detected = await this.projectManager.detectProjectState();
+      const projectState = await this.detectOrRecoverProjectState();
 
-      // Check if .env has metadata we can recover from (e.g. keep.lock was deleted)
-      const envMeta = detected.initialized ? undefined : this.fileManager.readEnvMeta(this.options.envPath);
-      const recovered: ProjectState | undefined =
-        envMeta?.org_id && envMeta.project_id
-          ? { ...detected, initialized: true, organizationId: envMeta.org_id, projectId: envMeta.project_id, activeBranch: envMeta.branch ?? null }
-          : undefined;
-
-      if (!detected.initialized && recovered === undefined) {
+      if (projectState === undefined) {
         if (isLocalOnly()) {
           // Local-only mode: bootstrap a project entirely on this machine
           // (synthetic org, generated projectId) instead of server onboarding.
@@ -205,7 +197,6 @@ export class CapyCommand {
         await this.initializeProject();
         return;
       }
-      const projectState = recovered ?? detected;
 
       await this.syncProject(projectState);
       // CAP-697: auth is established by now. Reporting never changes this command's output or exit code.
@@ -236,8 +227,23 @@ export class CapyCommand {
    * alone: the command that called it refuses that on its own.
    */
   async runSync(): Promise<SyncOutcome> {
-    const projectState = await this.projectManager.detectProjectState();
-    return projectState.initialized ? this.syncProject(projectState) : 'up-to-date';
+    const projectState = await this.detectOrRecoverProjectState();
+    return projectState === undefined ? 'up-to-date' : this.syncProject(projectState);
+  }
+
+  /**
+   * The project this folder is: keep.lock's, or, when keep.lock was deleted, the one the `.env` metadata names
+   * (org, project, branch). `undefined`: not a Capy project yet. The one step `execute()` and `runSync()` share, so the
+   * gate syncs a folder exactly as bare `capy` would.
+   */
+  private async detectOrRecoverProjectState(): Promise<ProjectState | undefined> {
+    const detected = await this.projectManager.detectProjectState();
+    if (detected.initialized) return detected;
+    // Check if .env has metadata we can recover from (e.g. keep.lock was deleted)
+    const envMeta = this.fileManager.readEnvMeta(this.options.envPath);
+    return envMeta?.org_id && envMeta.project_id
+      ? { ...detected, initialized: true, organizationId: envMeta.org_id, projectId: envMeta.project_id, activeBranch: envMeta.branch ?? null }
+      : undefined;
   }
 
   /**
@@ -338,6 +344,18 @@ export class CapyCommand {
       console.log(`Ignoring stale .capy/branch (${B(fileBranch)} is not a branch in this project); staying on ${B(envBranch)}.`);
       this.projectManager.writeActiveBranch(envBranch);
       return envBranch;
+    }
+
+    // Bare `capy` as another command's first step must not end the process: `capy checkout <branch>` is the recovery
+    // below, and it runs this first (so exiting would loop); and one folder of a multi-folder run must not end the
+    // run. The header outranks `.capy/branch`; a folder run reports it as a coded error instead.
+    if (this.options.onBranchMismatch === 'follow-env-header') return envBranch;
+    if (this.options.onBranchMismatch === 'throw') {
+      throw new CapyError(
+        `Local state is inconsistent: .capy/branch says ${fileBranch}, .env was encrypted for ${envBranch}. Run \`capy checkout ${envBranch}\` in this folder.`, // COPY-FLAG
+        ERROR_CODES.BRANCH_STATE_INCONSISTENT,
+        { env_branch: envBranch, file_branch: fileBranch },
+      );
     }
 
     console.error(`\nLocal state is inconsistent:`);

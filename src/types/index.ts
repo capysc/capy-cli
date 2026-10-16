@@ -396,6 +396,15 @@ export interface CliOptions {
   quiet?: boolean;
   /** Never the browser sign-in: a command that runs the sync as its first step and has no one to sign in is told why instead. */
   silentAuthOnly?: boolean;
+  /**
+   * Bare `capy` as a command's first step (sync/gate.ts), not typed by a person: what to do when `.capy/branch` and the
+   * `.env` header name different, real branches (an interrupted checkout). Absent (a person ran `capy`): stop with the
+   * recovery message, exit 1. `follow-env-header`: the header outranks `.capy/branch`, so compare against the header's
+   * branch and leave `.capy/branch` for the command to settle (this is what lets `capy checkout <branch>` recover).
+   * `throw`: a coded `BRANCH_STATE_INCONSISTENT` error, for a folder other than the working directory, so one folder's
+   * state ends only that folder's sync.
+   */
+  onBranchMismatch?: 'follow-env-header' | 'throw';
 }
 
 export interface ProjectInitResult {
@@ -454,6 +463,8 @@ export const ERROR_CODES = {
   BRANCH_NOT_FOUND: 'BRANCH_NOT_FOUND',
   // No .env header, no .capy/branch, and no unambiguous local fallback.
   NO_ACTIVE_BRANCH: 'NO_ACTIVE_BRANCH',
+  // .capy/branch and the .env header name different, real branches (an interrupted checkout) and the run cannot follow either.
+  BRANCH_STATE_INCONSISTENT: 'BRANCH_STATE_INCONSISTENT',
   SNAPSHOT_NOT_FOUND: 'SNAPSHOT_NOT_FOUND',
   NO_SECRETS: 'NO_SECRETS',
   DEPLOY_TOKEN_NOT_FOUND: 'DEPLOY_TOKEN_NOT_FOUND',

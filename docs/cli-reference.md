@@ -864,6 +864,7 @@ Every refusal carries a stable `code` — branch on it, never on message text.
 - `PROJECT_NOT_FOUND`
 - `BRANCH_NOT_FOUND`
 - `NO_ACTIVE_BRANCH`
+- `BRANCH_STATE_INCONSISTENT`
 - `SNAPSHOT_NOT_FOUND`
 - `NO_SECRETS`
 - `DEPLOY_TOKEN_NOT_FOUND`
