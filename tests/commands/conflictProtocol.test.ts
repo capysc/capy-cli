@@ -67,6 +67,24 @@ function seedServer(h: Harness, values: Readonly<Record<string, string>>): void 
   h.setBranchData(PROJECT_ID, BRANCH, { env_file: lines.join('\n'), permissions: [], keep_hash: SyncEngine.computeKeepHash(keepOf(values), BRANCH), keep_file: JSON.stringify(keepOf(values)) });
 }
 
+/** What the server holds for `branch` of the same project (replaces that branch's last fixture): another location of a row. */
+function seedBranch(h: Harness, branch: string, values: Readonly<Record<string, string>>): void {
+  const keep: KeepFile = {
+    version: '3.0',
+    org_id: ORG_ID,
+    project_id: PROJECT_ID,
+    project_name: 'piped-test',
+    variables: Object.fromEntries(
+      Object.entries(values).map(([name, value]) => [
+        name,
+        [{ resource_id: deriveResourceId(branch, name), branch, value_hash: hash16(value), changed_at: '2026-10-01T21:44:18.000Z' }],
+      ]),
+    ),
+  };
+  const lines = Object.entries(values).map(([name, value]) => `${name}=capy:${deriveResourceId(branch, name)}:${Encryptor.encrypt(value, h.projectKey)}`);
+  h.setBranchData(PROJECT_ID, branch, { env_file: lines.join('\n'), permissions: [], keep_hash: SyncEngine.computeKeepHash(keep, branch), keep_file: JSON.stringify(keep) });
+}
+
 /** What the server's latest decrypts to for `name`: the last accepted push, else the fixture. */
 function serverValue(h: Harness, name: string): string | undefined {
   const file = join(h.root, 'store.json');
@@ -382,13 +400,56 @@ describe('capy secrets set NAME with no folder (built cli)', () => {
     expect(JSON.parse(push?.body ?? '{}').base_keep_hash).toMatch(/^[0-9a-f]{64}$/);
   });
 
-  test('pinned and delete are not answers to setting a value: refused with a code, nothing pushed', async () => {
+  test('pinned, when no other location of the row still holds the value that was shown: refused with a code (it cannot be written back, and is never guessed); nothing pushed', async () => {
     const preview = json(await h().run([...SET, '--dry-run'], `${MINE}\n`));
     const base = [...SET, '--confirm', preview.plan_id as string, '--conflict', preview.conflict_id as string];
     const pinned = await h().run([...base, '--resolve', 'X=pinned'], `${MINE}\n`);
     expect(pinned.code).toBe(1);
     expect(json(pinned)).toMatchObject({ ok: false, code: 'SECRETS_RESOLVE_INVALID' });
+    noValuesIn(pinned);
     expect(h().pushCount()).toBe(0);
+    expect(serverValue(h(), 'X')).toBe(THEIRS);
+  });
+
+  test('delete removes the variable at the moved location, through the shared upload (base_keep_hash), and says so; no value in the output', async () => {
+    const preview = json(await h().run([...SET, '--dry-run'], `${MINE}\n`));
+    const base = [...SET, '--confirm', preview.plan_id as string, '--conflict', preview.conflict_id as string];
+    const deleted = await h().run([...base, '--resolve', 'X=delete'], `${MINE}\n`);
+    expect(deleted.code).toBe(0);
+    expect(json(deleted).removed).toEqual([{ project: 'piped-test', branch: BRANCH, protected: false }]);
+    noValuesIn(deleted);
+    expect(h().pushCount()).toBe(1);
+    expect(serverValue(h(), 'X')).toBeUndefined();
+    const push = h().requests().find((r) => r.method === 'POST' && r.path.startsWith('/secrets/'));
+    expect(JSON.parse(push?.body ?? '{}').base_keep_hash).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  test('pinned, when another location of the row still holds the value that was shown: that value is read there and written back over THEIR newer one', async () => {
+    // The row also lists `staging`, where nobody changed X: it still holds the value the row listed.
+    h().setSecretsIndex({
+      org_id: ORG_ID,
+      skipped: [],
+      rows: [
+        {
+          name: 'X',
+          value_hash: hash16(OLD.X),
+          locations: [
+            { project_id: PROJECT_ID, project_name: 'piped-test', branch: BRANCH, protected: false, service: null },
+            { project_id: PROJECT_ID, project_name: 'piped-test', branch: 'staging', protected: false, service: null },
+          ],
+          users: [],
+        },
+      ],
+    });
+    seedBranch(h(), 'staging', { X: OLD.X });
+    const preview = json(await h().run([...SET, '--dry-run'], `${MINE}\n`));
+    expect(preview.conflicts).toEqual([row]);
+    const base = [...SET, '--confirm', preview.plan_id as string, '--conflict', preview.conflict_id as string];
+    const pinned = await h().run([...base, '--resolve', 'X=pinned'], `${MINE}\n`);
+    expect(pinned.code).toBe(0);
+    noValuesIn(pinned);
+    // The property: what Capy holds for the moved location now DECRYPTS to the value that was shown, not THEIRS and not MINE.
+    expect(serverValue(h(), 'X')).toBe(OLD.X);
   });
 
   test('a rerun whose location moved again is stale: a new id, nothing pushed', async () => {
@@ -408,5 +469,119 @@ describe('capy secrets set NAME with no folder (built cli)', () => {
     const real = await h().run([...SET, '--confirm', preview.plan_id as string], `${MINE}\n`);
     expect(real.code).toBe(0);
     expect(serverValue(h(), 'X')).toBe(MINE);
+  });
+});
+
+describe('protocol answers with no value behind them are refused, never turned into a deletion (built cli)', () => {
+  const state = { h: undefined as Harness | undefined };
+  const h = (): Harness => {
+    if (!state.h) throw new Error('harness not ready');
+    return state.h;
+  };
+  beforeEach(async () => {
+    Object.assign(state, { h: await createHarness() });
+  });
+  afterEach(async () => {
+    await state.h?.dispose();
+  });
+
+  /** Stops at the difference, then reruns `push` with `X=<choice>`: what bare capy does with an answer its source cannot back. */
+  async function answered(choice: string): Promise<CliResult> {
+    const first = await h().run(['push']);
+    expect(first.code).toBe(3);
+    return h().run(['push', '--resolve', `X=${choice}`, '--conflict', json(first).conflict_id as string]);
+  }
+
+  /** Refused with a code before anything is written; no value anywhere; the folder is as it was. */
+  function refused(result: CliResult, envBefore: string | undefined): void {
+    expect(result.code).toBe(1);
+    expect(`${result.stdout}${result.stderr}`).toContain('SECRETS_RESOLVE_INVALID');
+    noValuesIn(result);
+    expect(h().pushCount()).toBe(0);
+    expect(h().envValue('X')).toBe(envBefore);
+  }
+
+  test('local, on a row the folder no longer has (deleted here): refused; only delete deletes', async () => {
+    seedFolder(h(), OLD, { Y: OLD.Y }); // X was removed from .env; keep.lock still pins it
+    seedServer(h(), OLD);
+    refused(await answered('local'), undefined);
+    // The same row answered with delete goes through.
+    const first = await h().run(['push']);
+    const deleted = await h().run(['push', '--resolve', 'X=delete', '--conflict', json(first).conflict_id as string]);
+    expect(deleted.code).toBe(0);
+    expect(serverValue(h(), 'X')).toBeUndefined();
+  });
+
+  test('remote, on a row Capy no longer has (deleted there): refused', async () => {
+    seedFolder(h(), OLD, OLD);
+    seedServer(h(), { Y: OLD.Y });
+    refused(await answered('remote'), OLD.X);
+  });
+
+  test('pinned, on a row keep.lock never pinned (a new local variable): refused', async () => {
+    seedFolder(h(), { Y: OLD.Y }, { X: MINE, Y: OLD.Y });
+    seedServer(h(), { Y: OLD.Y });
+    refused(await answered('pinned'), MINE);
+  });
+});
+
+describe('every other write path meets bare capy first (built cli)', () => {
+  const state = { h: undefined as Harness | undefined };
+  const h = (): Harness => {
+    if (!state.h) throw new Error('harness not ready');
+    return state.h;
+  };
+  beforeEach(async () => {
+    Object.assign(state, { h: await createHarness() });
+    // The Oct 2 world: the folder is pinned to the old snapshot, a teammate has saved a newer X since.
+    seedFolder(h(), OLD, OLD);
+    seedServer(h(), { X: THEIRS, Y: OLD.Y });
+  });
+  afterEach(async () => {
+    await state.h?.dispose();
+  });
+
+  const mintedAnything = (): boolean => h().requests().some((r) => r.method === 'POST' && /^\/orgs\/[^/]+\/deploy$/.test(r.path));
+
+  test('the default capy deploy (token + docs) stops at the difference: nothing minted, no deploy token created, until it is answered', async () => {
+    const args = ['deploy', '--platform', 'other', '--mode', 'token', '--yes'];
+    const first = await h().run(args);
+    expect(first.code).toBe(3);
+    expect(json(first)).toMatchObject({ ok: false, code: 'SECRETS_CONFLICT' });
+    expect(json(first).conflicts).toEqual([rowX(OLD.X, OLD.X, THEIRS)]);
+    noValuesIn(first);
+    expect(mintedAnything()).toBe(false);
+    expect(h().pushCount()).toBe(0);
+    expect(h().envValue('X')).toBe(OLD.X);
+
+    // Answered: the folder takes Capy's X, and only then does the deploy go on to mint.
+    const rerun = await h().run([...args, '--resolve', 'X=remote', '--conflict', json(first).conflict_id as string]);
+    expect(h().envValue('X')).toBe(THEIRS);
+    expect(mintedAnything()).toBe(true);
+    noValuesIn(rerun);
+  });
+
+  test('capy deploy revoke: stops at the difference before any revoke is sent', async () => {
+    const first = await h().run(['deploy', 'revoke', 'dep_0123456789ab']);
+    expect(first.code).toBe(3);
+    expect(json(first)).toMatchObject({ ok: false, code: 'SECRETS_CONFLICT' });
+    expect(h().requests().some((r) => r.method === 'DELETE')).toBe(false);
+    expect(h().pushCount()).toBe(0);
+  });
+
+  test('capy deploy dokploy --discover: stops at the difference in the working directory before anything is discovered or written', async () => {
+    const first = await h().run(['deploy', 'dokploy', '--discover']);
+    expect(first.code).toBe(3);
+    expect(json(first)).toMatchObject({ ok: false, code: 'SECRETS_CONFLICT' });
+    noValuesIn(first);
+    expect(h().pushCount()).toBe(0);
+  });
+
+  test('capy connect dokploy --discover: the same, in the working directory (no conditional skip)', async () => {
+    const first = await h().run(['connect', 'dokploy', '--discover']);
+    expect(first.code).toBe(3);
+    expect(json(first)).toMatchObject({ ok: false, code: 'SECRETS_CONFLICT' });
+    noValuesIn(first);
+    expect(h().pushCount()).toBe(0);
   });
 });

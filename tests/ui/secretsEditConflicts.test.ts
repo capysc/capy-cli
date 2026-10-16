@@ -9,6 +9,7 @@ import {
   SecretsScreenState,
   applyRepos,
   applyRunDone,
+  applyValueResult,
   handleKey,
   initialSecretsScreenState,
   render,
@@ -154,6 +155,41 @@ describe('deciding', () => {
     const left = handleKey(atConflicts(), '\x03');
     expect(left.effect).toBeNull();
     expect(left.state.quit).toBe(true);
+  });
+});
+
+describe('pinned and delete: all four of bare capy\'s choices', () => {
+  const OLD = 'SENTINEL-old-value-31';
+  const atConflicts = (oldReadable: boolean) => {
+    const base = applyRunDone(running().state, found(conflict('p1', 'aaaa'), conflict('p2', 'bbbb')));
+    return oldReadable ? applyValueResult(base, { name: 'API_KEY', value_hash: ROW_HASH }, { status: 'ok', value: OLD }) : base;
+  };
+
+  test('d decides delete; p decides pinned only when the old value was read (else the key does nothing and the footer does not offer it)', () => {
+    const unreadable = atConflicts(false);
+    expect(frame(unreadable)).not.toContain('p pinned');
+    expect(frame(press(unreadable, 'p'))).not.toMatch(/web production.*pinned/);
+    expect(frame(press(unreadable, 'd'))).toMatch(/web production.*delete/);
+
+    const readable = atConflicts(true);
+    expect(frame(readable)).toContain('p pinned');
+    expect(frame(readable)).toContain('d delete');
+    expect(frame(press(readable, 'p'))).toMatch(/web production.*pinned/);
+  });
+
+  test('Enter runs again with the old value attached for each location answered pinned; delete carries none', () => {
+    const decided = press(atConflicts(true), 'p', DOWN, 'd');
+    const again = handleKey(decided, ENTER);
+    const request = (again.effect as { type: 'runSet'; request: RunRequest }).request;
+    expect(request.decisions).toEqual({
+      'p1/production': { choice: 'pinned', remote: 'aaaa', local: 'local-fp' },
+      'p2/development': { choice: 'delete', remote: 'bbbb', local: 'local-fp' },
+    });
+    expect(request.restore).toEqual({ 'p1/production': OLD });
+  });
+
+  test('no value appears on screen', () => {
+    expect(frame(press(atConflicts(true), 'p'))).not.toContain(OLD);
   });
 });
 

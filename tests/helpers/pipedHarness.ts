@@ -79,6 +79,8 @@ export interface Harness {
   setOrgRepos(body: unknown): void;
   /** Makes the mock answer `GET /secrets/:project?branch=<branch>` with this body. */
   setBranchData(project: string, branch: string, body: unknown): void;
+  /** Makes the mock answer `GET /projects/:project/branches` with these branches (without it: 404, like an unknown project). */
+  setBranches(project: string, branches: readonly { readonly id: string; readonly name: string; readonly is_protected: boolean }[]): void;
   /** How `PUT /orgs/:org/projects/:project/repos` answers: `ok`, `mismatch` (other repos known), `500`, or `hang` (never). Default `ok`. */
   setRepoPutMode(mode: 'ok' | 'mismatch' | '500' | 'hang'): void;
   /** The `PUT .../repos` requests the mock has received (parsed bodies). */
@@ -203,6 +205,10 @@ async function startMockService(requestLog: string, failFlag: string, root: stri
         known_repos: mode === 'mismatch' ? [{ host: 'github.com', owner: 'someone-else', name: 'copied-from', path: '.' }] : [],
       });
     }
+    if (req.method === 'GET' && /^\/projects\/[^/?]+\/branches$/.test(path)) {
+      const data = fixture(`branches-${path.split('/')[2]}.json`);
+      return data === undefined ? send(404, { error: 'no branches fixture' }) : send(200, data);
+    }
     if (req.method === 'GET' && /^\/secrets\/[^/?]+\?/.test(path)) {
       const [project, query] = path.slice('/secrets/'.length).split('?');
       const branch = new URLSearchParams(query).get('branch') ?? '';
@@ -291,6 +297,7 @@ export async function createHarness(): Promise<Harness> {
     setSecretsIndex: (body) => writeFileSync(join(root, 'secrets-index.json'), JSON.stringify(body)),
     setOrgRepos: (body) => writeFileSync(join(root, 'org-repos.json'), JSON.stringify(body)),
     setBranchData: (projectId, branch, body) => writeFileSync(join(root, `branch-${projectId}-${branch}.json`), JSON.stringify(body)),
+    setBranches: (projectId, branches) => writeFileSync(join(root, `branches-${projectId}.json`), JSON.stringify({ branches })),
     setRepoPutMode: (mode) => writeFileSync(join(root, 'repo-put-mode'), mode),
     repoPuts: () =>
       requests()

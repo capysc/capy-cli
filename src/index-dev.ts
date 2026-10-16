@@ -351,7 +351,7 @@ const deploy = program
 
     // `capy-dev deploy dokploy --discover` (CAP-703): always JSON, never prompts.
     const { routeDeployDiscover } = await import('./commands/deployDiscover/route');
-    const discoverCode = await routeDeployDiscover(target, options, (options.dryRun ?? merged.dryRun) === true, true);
+    const discoverCode = await routeDeployDiscover(target, options, (options.dryRun ?? merged.dryRun) === true, true, rawConflictFlagsOf(cmd));
     if (discoverCode !== undefined) process.exit(discoverCode);
 
     // CI/explicit connector path — go straight to the adapter flow (devMode).
@@ -377,6 +377,9 @@ const deploy = program
       scope: options.scope,
       envName: options.envName,
       yes: !!options.yes,
+      json: !!options.json,
+      dryRun: (options.dryRun ?? merged.dryRun) === true,
+      conflictFlags: rawConflictFlagsOf(cmd),
     });
     await c.execute();
   });
@@ -384,10 +387,13 @@ const deploy = program
 deploy
   .command('revoke <deployId>')
   .description('Revoke a deploy token')
-  .action(async (deployId: string, _options: unknown, command: any) => {
+  .option('--non-tty', 'treat stdin as not a terminal; differences from Capy stop the revoke with the conflict_id (agents/CI)') // COPY-FLAG
+  .addOption(resolveOption())
+  .addOption(conflictOption())
+  .action(async (deployId: string, options: any, command: any) => {
     const { DeployRevokeCommand } = await import('./commands/deployTokenCommand');
     const cmd = new DeployRevokeCommand(process.env.CAPY_API_URL, true);
-    await cmd.execute(deployId);
+    await cmd.execute(deployId, { nonTty: options.nonTty, conflictFlags: rawConflictFlagsOf(command) });
   });
 
 deploy
@@ -416,10 +422,13 @@ deploy
 deploy
   .command('targets-remove <name>')
   .description('Remove a configured connector target')
-  .action(async (name: string, _options, command) => {
+  .option('--non-tty', 'treat stdin as not a terminal; differences from Capy stop the removal with the conflict_id (agents/CI)') // COPY-FLAG
+  .addOption(resolveOption())
+  .addOption(conflictOption())
+  .action(async (name: string, options: any, command) => {
     const { deployRemove } = await import('./commands/deployCommand');
     process.exit(
-      await deployRemove(name, process.cwd(), { devMode: true }),
+      await deployRemove(name, process.cwd(), { devMode: true, nonTty: options.nonTty, conflictFlags: rawConflictFlagsOf(command) }),
     );
   });
 

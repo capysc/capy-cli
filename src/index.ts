@@ -390,7 +390,7 @@ const deploy = program
 
     // `capy deploy dokploy --discover` (CAP-703): always JSON, never prompts.
     const { routeDeployDiscover } = await import('./commands/deployDiscover/route');
-    const discoverCode = await routeDeployDiscover(target, options, (options.dryRun ?? merged.dryRun) === true, false);
+    const discoverCode = await routeDeployDiscover(target, options, (options.dryRun ?? merged.dryRun) === true, false, rawConflictFlagsOf(cmd));
     if (discoverCode !== undefined) process.exit(discoverCode);
 
     // CI/explicit target path — go straight to the adapter flow.
@@ -427,6 +427,9 @@ const deploy = program
       envName: options.envName,
       yes: !!options.yes,
       force: !!options.force,
+      json: !!options.json,
+      dryRun: (options.dryRun ?? merged.dryRun) === true,
+      conflictFlags: rawConflictFlagsOf(cmd),
     });
     await c.execute();
   });
@@ -434,11 +437,14 @@ const deploy = program
 deploy
   .command('revoke <deployId>')
   .description('Revoke a deploy token')
-  .action(async (deployId: string, _options, command) => {
+  .option('--non-tty', 'treat stdin as not a terminal; differences from Capy stop the revoke with the conflict_id (agents/CI)') // COPY-FLAG
+  .addOption(resolveOption())
+  .addOption(conflictOption())
+  .action(async (deployId: string, options: any, command) => {
     assertNotLocalOnly('deploy revoke');
     const { DeployRevokeCommand } = await import('./commands/deployTokenCommand');
     const cmd = new DeployRevokeCommand();
-    await cmd.execute(deployId);
+    await cmd.execute(deployId, { nonTty: options.nonTty, conflictFlags: rawConflictFlagsOf(command) });
   });
 
 deploy
@@ -464,6 +470,9 @@ deploy
   .command('targets-remove <name>')
   .description('Remove a configured target')
   .option('--no-deploy', 'strip the config but skip the redeploy that would apply the revert')
+  .option('--non-tty', 'treat stdin as not a terminal; differences from Capy stop the removal with the conflict_id (agents/CI)') // COPY-FLAG
+  .addOption(resolveOption())
+  .addOption(conflictOption())
   .action(async (name: string, options: any, command) => {
     assertNotLocalOnly('deploy targets-remove');
     const { deployRemove } = await import('./commands/deployCommand');
@@ -471,6 +480,8 @@ deploy
       await deployRemove(name, process.cwd(), {
         // commander negates `--no-deploy` onto the positive `deploy` property.
         noDeploy: options.deploy === false,
+        nonTty: options.nonTty,
+        conflictFlags: rawConflictFlagsOf(command),
       }),
     );
   });

@@ -14,6 +14,17 @@ function exitCodeForRefusalCode(code: string): number {
 }
 
 /**
+ * The exit code of a discovery run from its per-folder results: `undefined` when every folder was applied; `EXIT_NEEDS_INPUT`
+ * when a folder differed from Capy and nobody could answer (its rows and `conflict_id` are in the report, nothing was
+ * written into it); 1 for any other per-folder failure. The OTHER folders' steps still ran.
+ */
+export function discoveryExitCode(applied: ReadonlyArray<{ readonly ok: boolean; readonly conflict?: unknown }> | undefined): number | undefined {
+  const failed = (applied ?? []).filter((f) => !f.ok);
+  if (failed.length === 0) return undefined;
+  return failed.some((f) => f.conflict !== undefined) ? EXIT_NEEDS_INPUT : 1;
+}
+
+/**
  * Discovery's own context — org + auth + serviceClient, exactly what
  * `resolveOrgContext` already gives org-level commands (`invite`, `kick`,
  * the system store) that don't require a project either. Deliberately NOT
@@ -81,16 +92,19 @@ export class ConnectCommand {
 
     // A bad --resolve / --conflict is refused before anything is read.
     conflictFlagsOrExit(effective.conflictFlags ?? {}, effective.json === true);
+    // Discovery never prompts (it always answers like `--json --non-tty`), so its gate answers by protocol too.
+    const discovering = effective.discover === true && mod.discover !== undefined;
     const gate: GateOptions = {
       devMode: this.devMode,
-      json: effective.json === true,
-      nonTty: effective.nonTty,
+      json: discovering || effective.json === true,
+      nonTty: discovering || effective.nonTty,
       conflictFlags: effective.conflictFlags,
       dryRun: effective.dryRun === true,
     };
-    // Bare `capy` runs before anything else: the folder and Capy must agree before this writes (docs/conflict-resolution.md).
-    // Discovery is the one exception: it writes other checkouts than this folder, and applies its own plan there.
-    if (!(effective.discover && mod.discover)) await gateFirst(gate);
+    // Bare `capy` runs before anything else, in every mode: the folder and Capy must agree before this writes
+    // (docs/conflict-resolution.md). Discovery writes into OTHER checkouts too: each of them is synced by bare `capy`
+    // before anything is written into it (dokployDiscovery.ts `syncFolder`), after this one in the working directory.
+    await gateFirst(gate);
 
     if (mod.precheck) mod.precheck();
 
@@ -393,6 +407,8 @@ export class ConnectCommand {
             ok: false as const,
             code: f.code,
             message: f.message,
+            // A folder that differs from Capy and could not be asked: its rows and id, answered by a rerun (fingerprints only).
+            ...(f.conflict === undefined ? {} : { conflict_id: f.conflict.conflict_id, conflicts: f.conflict.conflicts }),
             environments: f.environments.map((e) => ({
               branch: e.environmentName,
               branchCreated: e.branchCreated,
@@ -421,7 +437,8 @@ export class ConnectCommand {
     // A per-folder failure still lets the OTHER folders' steps run (see
     // `runDiscoverySequences`) — but the run as a whole did not fully
     // succeed, so CI watching the exit code still sees it.
-    if (outcome.applied?.some((f) => !f.ok)) process.exitCode = 1;
+    const failedExit = discoveryExitCode(outcome.applied);
+    if (failedExit !== undefined) process.exitCode = failedExit;
 
     if (opts.json) {
       console.log(

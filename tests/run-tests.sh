@@ -67,6 +67,7 @@ ISOLATED_FILES=(
   tests/commands/removeCommand.test.ts
   tests/commands/connectDokploy.test.ts
   tests/commands/gateFirst.test.ts
+  tests/commands/bootstrapNoSecrets.test.ts
   tests/commands/bareCapyCommit.test.ts
   tests/commands/deployGate.test.ts
   tests/system/systemStore.test.ts

@@ -317,7 +317,7 @@ const collectResolve = (value: string, previous: string[]): string[] => [...prev
 export const resolveOption = (): Option =>
   new Option(
     '--resolve <NAME=pinned|local|remote|delete>',
-    'answer a difference from Capy: pinned, local, remote or delete (secrets set: local or remote); NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict)', // COPY-FLAG
+    'answer a difference from Capy: pinned, local, remote or delete; NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict)', // COPY-FLAG
   )
     .default([])
     .argParser(collectResolve);

@@ -120,7 +120,9 @@ import { EditCommand } from '../../src/commands/editCommand';
 import { PushCommand } from '../../src/commands/pushCommand';
 import { RemoveCommand } from '../../src/commands/removeCommand';
 import { RotateCommand } from '../../src/commands/rotateCommand';
-import { deployCommand } from '../../src/commands/deployCommand';
+import { deployCommand, deployRemove } from '../../src/commands/deployCommand';
+import { DeployCommand, DeployRevokeCommand } from '../../src/commands/deployTokenCommand';
+import { routeDeployDiscover } from '../../src/commands/deployDiscover/route';
 
 class ExitSignal extends Error {
   constructor(public readonly code: number | undefined) {
@@ -202,6 +204,14 @@ const COMMANDS: ReadonlyArray<readonly [string, () => Promise<unknown>, boolean]
   ['capy push', () => new PushCommand().execute({}), false],
   ['capy deploy t (its preflight and confirm screen)', () => deployCommand('t', {}, process.cwd()), true],
   ['capy deploy t --yes', () => deployCommand('t', { yes: true }, process.cwd()), false],
+  // The default `capy deploy` (token + docs): it mints a deploy token from the folder's .env, so it is gated first too.
+  ['capy deploy (token + docs, its platform picker is a prompt)', () => new DeployCommand(undefined, false, {}).execute(), true],
+  ['capy deploy --platform other --mode token --yes', () => new DeployCommand(undefined, false, { platform: 'other', mode: 'token', yes: true }).execute(), false],
+  ['capy deploy revoke ID', () => new DeployRevokeCommand().execute('dep_0123456789ab', { nonTty: true }), false],
+  ['capy deploy targets-remove t', () => deployRemove('t', process.cwd(), { nonTty: true }), false],
+  ['capy deploy dokploy --discover', () => routeDeployDiscover('dokploy', { discover: true }, false, false), false],
+  // Discovery has no conditional skip: the working directory is gated, then each discovered folder is synced before it is written.
+  ['capy connect dokploy --discover', () => new ConnectCommand().execute('dokploy', { discover: true, nonTty: true, json: true }), false],
 ];
 
 describe.each(COMMANDS)('%s', (_name, run, tty) => {

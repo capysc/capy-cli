@@ -4,12 +4,14 @@
  * built cli, and tests/commands/bareCapyCommit.test.ts through `CapyCommand`).
  */
 import { describe, test, expect, spyOn, mock, beforeAll, afterAll, afterEach } from 'bun:test';
-import { rmSync } from 'fs';
+import { mkdtempSync, rmSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
 import { Encryptor } from '../../src/crypto/encryptor';
 import { getGlobalCapyDir } from '../../src/config/globalConfig';
 import type { SyncOutcome } from '../../src/commands/capyCommand';
 import { conflictRefusalFor, sourceRowsOf } from '../../src/sync/conflicts';
-import { answersByProtocol, commitGated, ensureInSync, gateFirst, stopWithNothingWritten, type SyncRunner } from '../../src/sync/gate';
+import { FOLDER_SYNC_STOPPED, answersByProtocol, commitGated, ensureInSync, gateFirst, stopWithNothingWritten, syncFolder, type SyncRunner } from '../../src/sync/gate';
 import { hashValue } from '../../src/sync/compareSecrets';
 import { CapyError, ERROR_CODES, type KeepFile } from '../../src/types/index';
 import { fakeCapyServer, pushOf, seedServer, serverValues } from '../helpers/fakeCapyServer';
@@ -226,11 +228,94 @@ describe('commitGated: the command\'s own change, and on a stale refusal bare ca
     expect(serverValues(w.server.state(), DEV, KEY).Z).toBeUndefined();
   });
 
-  test('a context with no gate (a folder other than the working directory) is not retried: the stale refusal is thrown', async () => {
+  test('a discovered folder\'s context carries a gate with ITS directory: the stale retry runs bare capy there, not in the working directory', async () => {
+    const w = world({ racing: (n) => (n === 1 ? [teammate] : []) });
+    const dirs = mock((_cwd: string | undefined) => undefined);
+    const r: SyncRunner = async (opts) => {
+      dirs(opts.cwd);
+      w.folder.fileManager.writeKeepFile(w.server.state().keep as KeepFile);
+      w.folder.fileManager.writeEncryptedEnvFile({ X: 'x-TEAMMATE', Y: 'y-1' }, KEY, undefined, w.server.state().keep as KeepFile, DEV);
+      return 'up-to-date';
+    };
+    const ctx = { ...w.folder.ctx, gate: { cwd: '/work/repo/svc', json: true, nonTty: true, throwConflicts: true } };
+    const done = await commitGated(ctx, { set: { Z: 'z' }, remove: [] }, {}, r);
+    expect(done.uploaded).toBe(true);
+    expect(dirs).toHaveBeenCalledWith('/work/repo/svc');
+    expect(serverValues(w.server.state(), DEV, KEY)).toEqual({ X: 'x-TEAMMATE', Y: 'y-1', Z: 'z' });
+  });
+
+  test('a context with no gate is not retried: the stale refusal is thrown', async () => {
     const w = world({ racing: (n) => (n === 1 ? [teammate] : []) });
     const r = runnerOf();
     await expect(commitGated(w.folder.ctx, { set: { Z: 'z' }, remove: [] }, {}, r.run)).rejects.toMatchObject({ code: ERROR_CODES.SECRETS_STALE_BASE });
     expect(r.asked).not.toHaveBeenCalled();
+  });
+});
+
+
+describe('another checkout than the working directory (discovery writes into several)', () => {
+  const refusal = () =>
+    conflictRefusalFor(ERROR_CODES.SECRETS_CONFLICT, [{ project: 'p', branch: 'b', serverKeepHash: 'h', conflicts: sourceRowsOf([{ variable: 'X', type: 'changed', pinned: 'aa', local: 'aa', remote: 'bb' }], { project: 'p', branch: 'b', serverKeepHash: 'h' }) }]);
+
+  test('syncFolder asks the runner for THAT folder and says in sync when bare capy has nothing to settle', async () => {
+    const seen = mock((_cwd: string | undefined) => undefined);
+    const run: SyncRunner = async (opts) => {
+      seen(opts.cwd);
+      return 'up-to-date';
+    };
+    expect(await syncFolder('/work/repo/svc', { json: true, nonTty: true }, run)).toEqual({ ok: true });
+    expect(seen).toHaveBeenCalledWith('/work/repo/svc');
+  });
+
+  test('syncFolder never ends the process: a difference nobody can answer comes back as the folder\'s coded result with its rows and id', async () => {
+    const exit = exiting();
+    const log = spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      const refused = refusal();
+      const result = await syncFolder('/work/repo/svc', { json: true, nonTty: true }, async () => Promise.reject(refused));
+      expect(result).toMatchObject({ ok: false, code: 'SECRETS_CONFLICT', conflict: refused.payload });
+      expect(exit).not.toHaveBeenCalled();
+      expect(log).not.toHaveBeenCalled();
+    } finally {
+      exit.mockRestore();
+      log.mockRestore();
+    }
+  });
+
+  test('syncFolder: a stop and a failure of the sync are coded results too (the stop never exits 0 for the whole run)', async () => {
+    const exit = exiting();
+    try {
+      expect(await syncFolder('/work/a', {}, runnerOf('stopped').run)).toMatchObject({ ok: false, code: FOLDER_SYNC_STOPPED });
+      expect(await syncFolder('/work/a', {}, async () => Promise.reject(new CapyError('no session', ERROR_CODES.AUTH_FAILED)))).toMatchObject({ ok: false, code: 'AUTH_FAILED' });
+      expect(await syncFolder('/work/a', {}, async () => Promise.reject(new Error('boom')))).toMatchObject({ ok: false, code: ERROR_CODES.SERVICE_ERROR });
+      expect(exit).not.toHaveBeenCalled();
+    } finally {
+      exit.mockRestore();
+    }
+  });
+
+  test('ensureInSync with throwConflicts throws the refusal instead of ending the process', async () => {
+    const exit = exiting();
+    try {
+      const refused = refusal();
+      await expect(ensureInSync({ throwConflicts: true }, async () => Promise.reject(refused))).rejects.toBe(refused);
+      expect(exit).not.toHaveBeenCalled();
+    } finally {
+      exit.mockRestore();
+    }
+  });
+
+  test('the real runner syncs a folder by standing in it and comes back: a folder with no keep.lock has nothing to compare, a folder that does not exist yet is in sync', async () => {
+    const origin = process.cwd();
+    const dir = mkdtempSync(join(tmpdir(), 'capy-gate-folder-'));
+    try {
+      expect(await syncFolder(dir, { json: true, nonTty: true })).toEqual({ ok: true });
+      expect(process.cwd()).toBe(origin);
+      expect(await syncFolder(join(dir, 'not', 'yet'), { json: true, nonTty: true })).toEqual({ ok: true });
+      expect(process.cwd()).toBe(origin);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

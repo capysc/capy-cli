@@ -27,6 +27,7 @@ const HEADER_NOTHING_TO_DO = (name: string) =>
   `${name} already has this value in every selected location. Nothing changed.`; // COPY-FLAG
 const NOT_UPDATED = 'Not updated:'; // COPY-FLAG
 const SAVED_NO_PR = 'The new value is saved in Capy now.'; // COPY-FLAG
+const removedHeader = (name: string, n: number): string => `✓ ${name} removed from ${n} location${n === 1 ? '' : 's'}.`; // COPY-FLAG
 export const CANCELLED_NOTHING = 'Cancelled. Nothing was changed.'; // COPY-FLAG
 /** The line after a stop: every item already running is waited for, none is started. */
 export const stoppingAfter = (inFlight: number): string => `Stopping after the ${inFlight} in progress…`; // COPY-FLAG
@@ -60,7 +61,10 @@ function header(result: SecretSetResult): string {
       ? `✓ ${result.name} updated in ${n} of ${plural(total)} (cancelled).` // COPY-FLAG
       : CANCELLED_NOTHING;
   }
+  const removed = result.removed?.length ?? 0;
+  if (n > 0 && removed > 0) return `✓ ${result.name} updated in ${plural(n)}.\n${removedHeader(result.name, removed)}`;
   if (n > 0) return `✓ ${result.name} updated in ${plural(n)}.`;
+  if (removed > 0) return removedHeader(result.name, removed);
   const locationFailures = result.failed.filter((f) => f.kind === 'location');
   return locationFailures.length > 0 ? HEADER_FAILED(result.name) : HEADER_NOTHING_TO_DO(result.name);
 }

@@ -20,10 +20,12 @@
 //              location is read; one whose value someone else changed since the row was listed comes
 //              back as a row (`compareSecrets`: pinned = the listed value, local = the new one,
 //              remote = what is there now) and the flow goes to `conflicts` (nothing has been written).
-//   conflicts  one line per such location, answered with bare `capy`'s choices as far as setting a value
-//              allows: l writes the new value there (local), r leaves the location (remote). Enter runs
-//              once every one is answered, Esc cancels with nothing written. An answer holds only for the
-//              value it was made against: if the location moved again, the run comes back here with it.
+//   conflicts  one line per such location, answered with bare `capy`'s four choices: l writes the new value
+//              there (local), r leaves the location (remote), p writes back the value you were shown
+//              (pinned; only when that old value could be read, it is on screen as the Old value), d removes
+//              the variable there (delete). Enter runs once every one is answered, Esc cancels with nothing
+//              written. An answer holds only for the value it was made against: if the location moved again,
+//              the run comes back here with it.
 //   done       the confirmation; only Esc leaves it. `c` copies the PR links to the clipboard (and the
 //              screen stays), so they can also be selected and copied by hand first.
 
@@ -152,6 +154,8 @@ export interface RunRequest {
   readonly seen?: string;
   /** The answers for moved locations, by `locationKeyOf`, with the fingerprints they were made against. */
   readonly decisions?: Readonly<Record<string, BoundAnswer>>;
+  /** The old value (what the person was shown) for each location answered `pinned`, by `locationKeyOf`: written back there. */
+  readonly restore?: Readonly<Record<string, string>>;
 }
 
 export type EditEffect =
@@ -404,6 +408,7 @@ export const allDecided = (flow: Extract<EditFlow, { step: 'conflicts' }>): bool
 
 /** The run again, with each answer bound to the fingerprints it was made against. */
 function withDecisions(flow: Extract<EditFlow, { step: 'conflicts' }>): RunRequest {
+  const oldValue = flow.old.status === 'ok' ? flow.old.value : undefined;
   return {
     ...flow.request,
     decisions: Object.fromEntries(
@@ -412,6 +417,11 @@ function withDecisions(flow: Extract<EditFlow, { step: 'conflicts' }>): RunReque
         return choice === undefined ? [] : [[locationKeyOf(c.location), bindAnswer(choice, c.conflict)] as const];
       }),
     ),
+    // `pinned` writes back the old value (the one that was shown); `p` is only offered when it could be read.
+    restore:
+      oldValue === undefined
+        ? undefined
+        : Object.fromEntries(flow.conflicts.filter((c) => choiceAt(flow, c) === 'pinned').map((c) => [locationKeyOf(c.location), oldValue] as const)),
   };
 }
 
@@ -425,6 +435,9 @@ function stepConflicts(flow: Extract<EditFlow, { step: 'conflicts' }>, key: stri
   };
   if (key === 'l' || key === 'L') return decide('local');
   if (key === 'r' || key === 'R') return decide('remote');
+  if (key === 'd' || key === 'D') return decide('delete');
+  // Pinned writes back the value the person was shown: unavailable (a key that does nothing) when it could not be read.
+  if ((key === 'p' || key === 'P') && flow.old.status === 'ok') return decide('pinned');
   if (key !== '\r' || !allDecided(flow)) return stay(flow);
   const request = withDecisions(flow);
   const kept = flow.conflicts.filter((c) => choiceAt(flow, c) === 'remote').length;
@@ -596,7 +609,7 @@ function renderConflicts(flow: Extract<EditFlow, { step: 'conflicts' }>, maxWidt
       '',
       ...flow.conflicts.map(row),
     ],
-    footer: hint(['l', 'local'], ['r', 'remote'], ...(allDecided(flow) ? ([['enter', 'continue']] as const) : []), ['esc', 'cancel']), // COPY-FLAG
+    footer: hint(['l', 'local'], ['r', 'remote'], ...(flow.old.status === 'ok' ? ([['p', 'pinned']] as const) : []), ['d', 'delete'], ...(allDecided(flow) ? ([['enter', 'continue']] as const) : []), ['esc', 'cancel']), // COPY-FLAG
   };
 }
 

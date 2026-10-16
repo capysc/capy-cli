@@ -64,6 +64,8 @@ import { findDirtyBranchIssue } from '../checkoutCommand';
 import { listOrgProjectsOrUnavailable } from '../capyCommand';
 import { commitDiscoveryChanges, defaultDiscoveryCommitBranchName, isValidDiscoveryCommitBranchName, snapshotPathStatus } from '../../git/discoveryCommit';
 import { BaseUrlStore, Unanswered, offerSaveAskedBaseUrl, realBaseUrlStoreOpener, resolveDokployBaseUrl, settingsUnanswered } from '../../deploy/dokployBaseUrl';
+import { syncFolder, type FolderSync, type GateOptions } from '../../sync/gate';
+import { isConflictRefusal } from '../../sync/conflicts';
 import { fingerprint, writeImportedAndSync, writeImportOutcome, ResolvedContext } from './shared';
 import { ConnectOpts, ConnectorModule, ConnectResult, ImportOutcome, ImportWarning, RotateResult } from './registry';
 import { discoveryProjectQuestion } from '../../ui/projectQuestions';
@@ -370,6 +372,11 @@ async function fetchComposeEnv(client: DokployClient, composeId: string): Promis
 // ── Connector ────────────────────────────────────────────────────────────────
 
 export interface DokployConnectorDeps {
+  /**
+   * Discovery mode only: bare `capy` in one discovered folder (sync/gate.ts `syncFolder`). Injectable for tests that drive
+   * discovery over throwaway folders with a fake service; the real sync otherwise.
+   */
+  syncFolder?: (dir: string, gate: GateOptions) => Promise<FolderSync>;
   fetch?: FetchLike;
   env?: Record<string, string | undefined>;
   cwd?: string;
@@ -1244,6 +1251,9 @@ export function createDokployConnector(deps: DokployConnectorDeps = {}): Connect
         yes: !!opts.yes,
         baseUrl: resolvedBaseUrl,
         tokenEnv,
+        // Discovery never prompts: a folder that differs from Capy is reported (its rows and `conflict_id`), not asked.
+        gate: { devMode: opts.devMode, json: true, nonTty: true, conflictFlags: opts.conflictFlags },
+        syncFolder: deps.syncFolder ?? syncFolder,
         askExistingOrNewProject,
         askProjectName: askDiscoveryProjectName,
         existingProjectsSnapshot,
@@ -1815,7 +1825,7 @@ async function importIntoBranchSafe(
   folder: string,
   env: DiscoveryPlanEnv,
   overwrite: boolean,
-  runOpts: { noPush: boolean; interactive: boolean; json: boolean; yes: boolean; baseUrl: string; tokenEnv: string },
+  runOpts: { noPush: boolean; interactive: boolean; json: boolean; yes: boolean; baseUrl: string; tokenEnv: string; gate: GateOptions },
   /** CAP-673: this environment's Dokploy PROJECT name — already known from the plan's own `project.all` read, threaded through so `import()` never re-fetches it (see `ConnectOpts.dokployProjectName`'s doc). */
   projectName: string,
 ): Promise<ImportOutcome> {
@@ -1874,6 +1884,8 @@ async function importIntoBranchSafe(
     projectKey,
     keep,
     localPlaintext,
+    // This folder's own gate: if Capy refuses the upload as stale, bare `capy` runs again IN THIS FOLDER and the write retries.
+    gate: { ...runOpts.gate, cwd: path, throwConflicts: true },
   };
   const importOpts: ConnectOpts = {
     ...(env.serviceKind === 'application' ? { application: env.serviceId } : { compose: env.serviceId }),
@@ -1900,9 +1912,15 @@ async function importIntoBranchSafe(
     await writeImportOutcome(resolvedCtx, outcome, { push: !runOpts.noPush, dryRun: false });
   } catch (err) {
     // A refused-as-stale upload keeps its own code; anything else is the push failing.
-    return { ok: false, code: isStaleBase(err) ? ERROR_CODES.SECRETS_STALE_BASE : 'DOKPLOY_PUSH_FAILED', message: err instanceof Error ? err.message : String(err) };
+    return { ok: false, code: stalePushCode(err), message: err instanceof Error ? err.message : String(err) };
   }
   return outcome;
+}
+
+/** The coded reason a folder's upload failed: a difference found by the retry's bare `capy` and a second stale refusal keep their own codes. */
+function stalePushCode(err: unknown): string {
+  if (isConflictRefusal(err)) return err.code;
+  return isStaleBase(err) ? ERROR_CODES.SECRETS_STALE_BASE : 'DOKPLOY_PUSH_FAILED';
 }
 
 /**
@@ -1920,6 +1938,10 @@ function buildRealDiscoverySequenceDeps(
     yes: boolean;
     baseUrl: string;
     tokenEnv: string;
+    /** How bare `capy` runs in each discovered folder (discovery never prompts: it answers by protocol). */
+    gate: GateOptions;
+    /** Runs bare `capy` in one folder: the real `syncFolder` unless a test supplies its own. */
+    syncFolder: (dir: string, gate: GateOptions) => Promise<FolderSync>;
     askExistingOrNewProject: (existing: ReadonlyArray<{ id: string; name: string }>, defaultName: string) => Promise<string>;
     askProjectName: (defaultName: string) => Promise<string>;
     /**
@@ -1943,6 +1965,7 @@ function buildRealDiscoverySequenceDeps(
   },
 ): DiscoverySequenceDeps {
   return {
+    syncFolder: (repoDir, folder) => runOpts.syncFolder(folderPath(repoDir, folder), runOpts.gate),
     ensureProject: (repoDir, folder, remote) =>
       ensureProjectSafe(ctx, repoDir, folder, remote, {
         interactive: runOpts.interactive,

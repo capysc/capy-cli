@@ -56,9 +56,15 @@ import {
   type DiscoveryPlanEnv,
   type DiscoveryPlanFolder,
 } from '../../src/commands/connectors/dokployDiscovery';
-import { createDokployConnector, computeOverwritePlan, DISCOVERY_NEW_PROJECT } from '../../src/commands/connectors/dokploy';
+import { createDokployConnector as createRealDokployConnector, computeOverwritePlan, DISCOVERY_NEW_PROJECT } from '../../src/commands/connectors/dokploy';
+import type { DokployConnectorDeps } from '../../src/commands/connectors/dokploy';
+
+// These tests drive discovery over throwaway folders with a fake service and no session; bare `capy` in each folder
+// (sync/gate.ts) is the real thing unless a test supplies its own `syncFolder`. The default here reports every folder in sync;
+// that bare capy runs first in each folder is tested at the end of this file.
+const createDokployConnector = (deps: DokployConnectorDeps = {}) => createRealDokployConnector({ syncFolder: async () => ({ ok: true }), ...deps });
 import { commitDiscoveryChanges, snapshotPathStatus, defaultDiscoveryCommitBranchName, isValidDiscoveryCommitBranchName } from '../../src/git/discoveryCommit';
-import { ConnectCommand } from '../../src/commands/connectCommand';
+import { ConnectCommand, discoveryExitCode } from '../../src/commands/connectCommand';
 import type { DiscoveryContext } from '../../src/commands/connectors/dokployDiscovery';
 import type { ImportOutcome } from '../../src/commands/connectors/registry';
 import type { FetchLike } from '../../src/deploy/dokployApi';
@@ -773,6 +779,7 @@ describe('runDiscoverySequence', () => {
       ],
     });
     const deps: DiscoverySequenceDeps = {
+      syncFolder: async () => ({ ok: true }),
       ensureProject: async () => {
         calls.push('ensureProject');
         return { ok: true, projectId: 'proj_1', created: false };
@@ -812,6 +819,7 @@ describe('runDiscoverySequence', () => {
   test('CAP-673: importIntoBranch is called with this folder\'s Dokploy project name', async () => {
     const seen: Array<{ projectName: string; environmentName: string }> = [];
     const deps: DiscoverySequenceDeps = {
+      syncFolder: async () => ({ ok: true }),
       ensureProject: async () => ({ ok: true, projectId: 'proj_1', created: false }),
       checkFolderDirty: async () => ({ ok: true }),
       checkoutBranch: async () => ({ ok: true, created: false }),
@@ -829,6 +837,7 @@ describe('runDiscoverySequence', () => {
   test('ensureProject refusing aborts the folder before any checkout/import runs', async () => {
     const calls: string[] = [];
     const deps: DiscoverySequenceDeps = {
+      syncFolder: async () => ({ ok: true }),
       ensureProject: async () => ({ ok: false, code: 'DOKPLOY_FOLDER_NOT_INITIALIZED', message: 'no keep.lock' }),
       checkFolderDirty: async () => {
         calls.push('checkFolderDirty');
@@ -859,6 +868,7 @@ describe('runDiscoverySequence', () => {
       environments: [samplePlanEnv({ environmentName: 'production' }), samplePlanEnv({ environmentName: 'staging' })],
     });
     const deps: DiscoverySequenceDeps = {
+      syncFolder: async () => ({ ok: true }),
       ensureProject: async () => ({ ok: true, projectId: 'proj_1', created: false }),
       checkFolderDirty: async () => ({ ok: true }),
       checkoutBranch: async (_r, _f, _p, branchName) => {
@@ -883,6 +893,7 @@ describe('runDiscoverySequence', () => {
       environments: [samplePlanEnv({ environmentName: 'production' })],
     });
     const deps: DiscoverySequenceDeps = {
+      syncFolder: async () => ({ ok: true }),
       ensureProject: async () => ({ ok: true, projectId: 'proj_1', created: false }),
       checkFolderDirty: async () => ({ ok: true }),
       checkoutBranch: async () => ({ ok: true, created: false }),
@@ -898,6 +909,7 @@ describe('runDiscoverySequence', () => {
   test('a dirty folder (checkFolderDirty refuses) aborts with zero checkout/import calls (defect fix)', async () => {
     const calls: string[] = [];
     const deps: DiscoverySequenceDeps = {
+      syncFolder: async () => ({ ok: true }),
       ensureProject: async () => ({ ok: true, projectId: 'proj_1', created: false }),
       checkFolderDirty: async () => ({ ok: false, code: 'DOKPLOY_FOLDER_DIRTY', message: 'unpushed changes' }),
       checkoutBranch: async () => {
@@ -920,6 +932,7 @@ describe('runDiscoverySequence', () => {
   test('checkFolderDirty is never called for a folder whose project was just created this run', async () => {
     const dirtyCalls: true[] = [];
     const deps: DiscoverySequenceDeps = {
+      syncFolder: async () => ({ ok: true }),
       ensureProject: async () => ({ ok: true, projectId: 'proj_new', created: true }),
       checkFolderDirty: async () => {
         dirtyCalls.push(true);
@@ -939,6 +952,7 @@ describe('runDiscoverySequence', () => {
       environments: [samplePlanEnv({ environmentName: 'production' }), samplePlanEnv({ environmentName: 'staging' })],
     });
     const deps: DiscoverySequenceDeps = {
+      syncFolder: async () => ({ ok: true }),
       ensureProject: async () => ({ ok: true, projectId: 'proj_1', created: false }),
       checkFolderDirty: async () => ({ ok: true }),
       checkoutBranch: async () => ({ ok: true, created: false }),
@@ -952,11 +966,95 @@ describe('runDiscoverySequence', () => {
   });
 });
 
+describe('runDiscoverySequence: bare capy first, in each folder, before anything is written into it', () => {
+  test('syncFolder runs FIRST (before ensureProject), for this folder\'s repoDir and folder', async () => {
+    const calls: string[] = [];
+    const deps: DiscoverySequenceDeps = {
+      syncFolder: async (repoDir, folder) => {
+        calls.push(`sync:${repoDir}:${folder}`);
+        return { ok: true };
+      },
+      ensureProject: async () => {
+        calls.push('ensureProject');
+        return { ok: true, projectId: 'proj_1', created: false };
+      },
+      checkFolderDirty: async () => {
+        calls.push('checkFolderDirty');
+        return { ok: true };
+      },
+      checkoutBranch: async () => {
+        calls.push('checkout');
+        return { ok: true, created: false };
+      },
+      importIntoBranch: async () => {
+        calls.push('import');
+        return okImport(['A']);
+      },
+    };
+    const result = await runDiscoverySequence(samplePlanFolder({ repoDir: '/repos/a', folder: 'svc' }), { overwrite: false }, deps);
+    expect(result.ok).toBe(true);
+    expect(calls).toEqual(['sync:/repos/a:svc', 'ensureProject', 'checkFolderDirty', 'checkout', 'import']);
+  });
+
+  test('a folder bare capy could not settle is skipped with its coded failure and the rows: nothing is initialised, checked out or imported into it', async () => {
+    const calls: string[] = [];
+    const conflict = { ok: false as const, code: 'SECRETS_CONFLICT' as const, conflict_id: 'c_9f2e41a07b3d', conflicts: [] };
+    const deps: DiscoverySequenceDeps = {
+      syncFolder: async () => ({ ok: false, code: 'SECRETS_CONFLICT', message: 'X differs', conflict }),
+      ensureProject: async () => {
+        calls.push('ensureProject');
+        return { ok: true, projectId: 'proj_1', created: false };
+      },
+      checkFolderDirty: async () => {
+        calls.push('checkFolderDirty');
+        return { ok: true };
+      },
+      checkoutBranch: async () => {
+        calls.push('checkout');
+        return { ok: true, created: false };
+      },
+      importIntoBranch: async () => {
+        calls.push('import');
+        return okImport(['A']);
+      },
+    };
+    const result = await runDiscoverySequence(samplePlanFolder(), { overwrite: false }, deps);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.code).toBe('SECRETS_CONFLICT');
+    expect(result.conflict).toEqual(conflict);
+    expect(result.environments).toEqual([]);
+    expect(calls).toEqual([]);
+  });
+
+  test('one stopped folder does not stop the next: each folder is synced on its own', async () => {
+    const synced: string[] = [];
+    const deps: DiscoverySequenceDeps = {
+      syncFolder: async (repoDir) => {
+        synced.push(repoDir);
+        return repoDir === '/repos/a' ? { ok: false, code: 'STOPPED', message: 'Stopped.' } : { ok: true };
+      },
+      ensureProject: async () => ({ ok: true, projectId: 'proj_b', created: false }),
+      checkFolderDirty: async () => ({ ok: true }),
+      checkoutBranch: async () => ({ ok: true, created: false }),
+      importIntoBranch: async () => okImport(['A']),
+    };
+    const results = await runDiscoverySequences(
+      [samplePlanFolder({ repoDir: '/repos/a', serviceName: 'a' }), samplePlanFolder({ repoDir: '/repos/b', serviceName: 'b' })],
+      { overwrite: false },
+      deps,
+    );
+    expect(synced).toEqual(['/repos/a', '/repos/b']);
+    expect(results.map((r) => r.ok)).toEqual([false, true]);
+  });
+});
+
 describe('runDiscoverySequences', () => {
   test('one folder failing does not stop the NEXT folder from running', async () => {
     const folderA = samplePlanFolder({ repoDir: '/repos/a', serviceName: 'a' });
     const folderB = samplePlanFolder({ repoDir: '/repos/b', serviceName: 'b' });
     const deps: DiscoverySequenceDeps = {
+      syncFolder: async () => ({ ok: true }),
       ensureProject: async (repoDir) =>
         repoDir === '/repos/a' ? { ok: false, code: 'DOKPLOY_FOLDER_NOT_INITIALIZED', message: 'x' } : { ok: true, projectId: 'proj_b', created: false },
       checkFolderDirty: async () => ({ ok: true }),
@@ -2466,6 +2564,124 @@ describe('connector.discover — a real apply honors --no-push', () => {
       rmSync(join(homedir(), globalDirName), { recursive: true, force: true });
       rmSync(ROOT, { recursive: true, force: true });
     }
+  });
+});
+
+describe('connector.discover - bare capy runs in each discovered folder before anything is written into it', () => {
+  /** An initialised folder in a repo, a fake service that records pushes, and a Dokploy with one compose service. */
+  async function world<T>(run: (w: { ROOT: string; ctx: DiscoveryContext; pushCalls: true[]; fetchImpl: FetchLike; keepBefore: string }) => Promise<T>): Promise<T> {
+    const ROOT = realpathSync(mkdtempSync(join(tmpdir(), 'capy-discover-sync-')));
+    const globalDirName = `.capy-test-discsync-${process.pid}-${Date.now()}`;
+    const savedDirName = process.env.CAPY_GLOBAL_DIR_NAME;
+    process.env.CAPY_GLOBAL_DIR_NAME = globalDirName;
+    try {
+      initRepo(ROOT, 'git@github.com:acme/widgets.git');
+      const orgId = 'org_discsync_test';
+      const userId = 'user_discsync_test';
+      await wrapAndSaveMasterKey(randomBytes(32), orgId, userId, {
+        coDecrypt: async (_oid: string, ct: string) => ct,
+        wrapOuterLayer: async (_oid: string, pt: string) => pt,
+      });
+      const projectId = 'proj_discsync';
+      const keepBefore = JSON.stringify({ version: '3.0', org_id: orgId, project_id: projectId, project_name: 'widgets', variables: {} });
+      writeFileSync(join(ROOT, 'keep.lock'), keepBefore);
+      const pushCalls: true[] = [];
+      const ctx: DiscoveryContext = {
+        orgId,
+        userId,
+        authService: {} as unknown as DiscoveryContext['authService'],
+        serviceClient: {
+          coDecrypt: async (_oid: string, ct: string) => ({ plaintext: ct }),
+          wrapOuterLayer: async (_oid: string, pt: string) => ({ ciphertext: pt }),
+          listBranches: async () => [],
+          createBranch: async () => ({ id: 'b1', name: 'production', project_id: projectId, is_protected: false }),
+          getDecryptData: async () => ({ env_content: '', keep_file: '', decrypt_key: '', expires_at: new Date().toISOString() }),
+          pushSecrets: async () => {
+            pushCalls.push(true);
+            return { keep_hash: 'h', keep_file: keepBefore };
+          },
+        } as unknown as DiscoveryContext['serviceClient'],
+      };
+      const fetchImpl: FetchLike = (async (url: string) => {
+        if (url.includes('project.all')) {
+          return {
+            status: 200,
+            ok: true,
+            text: async () =>
+              JSON.stringify([
+                { projectId: 'proj_1', name: 'acme', environments: [{ environmentId: 'env_1', name: 'production', compose: [{ composeId: 'compose_1', name: 'widgets' }] }] },
+              ]),
+          };
+        }
+        return {
+          status: 200,
+          ok: true,
+          text: async () => JSON.stringify({ composeId: 'compose_1', env: 'A=1', createEnvFile: true, owner: 'acme', repository: 'widgets', sourceType: 'github', composePath: 'docker-compose.yml' }),
+        };
+      }) as FetchLike;
+      return await run({ ROOT, ctx, pushCalls, fetchImpl, keepBefore });
+    } finally {
+      if (savedDirName === undefined) delete process.env.CAPY_GLOBAL_DIR_NAME;
+      else process.env.CAPY_GLOBAL_DIR_NAME = savedDirName;
+      rmSync(join(homedir(), globalDirName), { recursive: true, force: true });
+      rmSync(ROOT, { recursive: true, force: true });
+    }
+  }
+
+  const OPTS = { nonTty: true, baseUrl: 'https://d', tokenEnv: 'T', yes: true } as ConnectOpts;
+
+  test('the folder is synced first - asked for its own path, answered by protocol (never a prompt)', async () => {
+    await world(async ({ ROOT, ctx, fetchImpl }) => {
+      const asked: Array<{ dir: string; json: boolean | undefined; nonTty: boolean | undefined }> = [];
+      const connector = createDokployConnector({
+        fetch: fetchImpl,
+        env: { T: 'x' },
+        cwd: ROOT,
+        syncFolder: async (dir, gate) => {
+          asked.push({ dir, json: gate.json, nonTty: gate.nonTty });
+          return { ok: true };
+        },
+      });
+      const outcome = await connector.discover!(ctx, OPTS);
+      expect(outcome.ok).toBe(true);
+      expect(asked).toEqual([{ dir: ROOT, json: true, nonTty: true }]);
+      if (!outcome.ok) return;
+      expect(outcome.applied?.[0].ok).toBe(true);
+    });
+  });
+
+  test('a folder that differs from Capy (nobody can answer) is skipped: coded failure and its rows reported, nothing written into it, exit code 3', async () => {
+    await world(async ({ ROOT, ctx, pushCalls, fetchImpl, keepBefore }) => {
+      const conflict = {
+        ok: false as const,
+        code: 'SECRETS_CONFLICT' as const,
+        conflict_id: 'c_9f2e41a07b3d',
+        conflicts: [{ name: 'X', project: 'widgets', branch: 'production', type: 'changed' as const, pinned: 'aa', local: 'aa', remote: 'bb' }],
+      };
+      const connector = createDokployConnector({
+        fetch: fetchImpl,
+        env: { T: 'x' },
+        cwd: ROOT,
+        syncFolder: async () => ({ ok: false, code: 'SECRETS_CONFLICT', message: 'X differs', conflict }),
+      });
+      const outcome = await connector.discover!(ctx, OPTS);
+      expect(outcome.ok).toBe(true);
+      if (!outcome.ok) return;
+      const folder = outcome.applied?.[0];
+      expect(folder).toMatchObject({ ok: false, code: 'SECRETS_CONFLICT', conflict });
+      expect(discoveryExitCode(outcome.applied)).toBe(3);
+      // Nothing was written into the folder or sent to Capy.
+      expect(existsSync(join(ROOT, '.env'))).toBe(false);
+      expect(readFileSync(join(ROOT, 'keep.lock'), 'utf-8')).toBe(keepBefore);
+      expect(pushCalls.length).toBe(0);
+    });
+  });
+
+  test('discoveryExitCode: none failed is undefined, a plain failure is 1, a folder that needs a decision is 3 (even beside other failures)', () => {
+    expect(discoveryExitCode(undefined)).toBeUndefined();
+    expect(discoveryExitCode([{ ok: true }])).toBeUndefined();
+    expect(discoveryExitCode([{ ok: true }, { ok: false }])).toBe(1);
+    expect(discoveryExitCode([{ ok: false }, { ok: false, conflict: {} }])).toBe(3);
   });
 });
 

@@ -1626,8 +1626,13 @@ export async function deployList(cwd: string = process.cwd()): Promise<number> {
 export async function deployRemove(
   name: string,
   cwd: string = process.cwd(),
-  opts: { devMode?: boolean; noDeploy?: boolean } = {},
+  opts: { devMode?: boolean; noDeploy?: boolean; nonTty?: boolean; conflictFlags?: RawConflictFlags } = {},
 ): Promise<number> {
+  // A bad --resolve / --conflict is refused before anything is read.
+  conflictFlagsOrExit(opts.conflictFlags ?? {}, false);
+  // Bare `capy` runs first (docs/conflict-resolution.md), before the platform cleanup, the keep.lock strip (a Keep-only
+  // upload) and the token revoke: removing a target writes from this folder like every other command does.
+  await gateFirst({ devMode: opts.devMode, nonTty: opts.nonTty, conflictFlags: opts.conflictFlags });
   // Best-effort cleanup for adapters that left something outside
   // `.capy/deploy.json` (Dokploy's Capy-managed env block). Never gates the
   // local removal below — it is an offer, not a precondition.

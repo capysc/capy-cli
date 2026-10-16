@@ -34,9 +34,9 @@
  * and nothing here ever prints, returns or throws the value or any hash of it.
  */
 import { SyncEngine } from '../sync/syncEngine';
-import { UploadIo, envBlobOf, isStaleBase, snapshotFrom, uploadChanges } from '../sync/commit';
+import { UploadIo, envBlobOf, isStaleBase, snapshotFrom, uploadChanges, type Changes } from '../sync/commit';
 import type { SourceConflict } from '../sync/conflicts';
-import { BoundAnswer, actionFor, holdsFor, movedRow } from '../sync/noFolder';
+import { BoundAnswer, actionFor, holdsFor, movedRow, shownValueUnavailable } from '../sync/noFolder';
 import { hashValue } from '../deploy/keepGate';
 import type { EditSaveRecord } from '../deploy/keepGate';
 import { writeKeepCache } from '../config/globalConfig';
@@ -105,6 +105,8 @@ export interface SetRequest {
   readonly shown?: Readonly<Record<string, string>>;
   /** The answers for locations that moved, by `locationKeyOf`, each bound to the state it was made against. */
   readonly answers?: Readonly<Record<string, BoundAnswer>>;
+  /** The value each location answered `pinned` gets written back: the plaintext of what the person was shown, by `locationKeyOf`. */
+  readonly restore?: Readonly<Record<string, string>>;
   /** The run's key resolver, when the caller already unlocked (the unlock is once per run). Absent: opened here. */
   readonly keys?: KeyResolver;
 }
@@ -126,6 +128,8 @@ export interface SecretSetResult {
   readonly name: string;
   readonly updated: readonly LocationRef[];
   readonly unchanged: readonly LocationRef[];
+  /** Locations whose variable was removed (the answer was `delete`). Left out of JSON when there are none. */
+  readonly removed?: readonly LocationRef[];
   readonly prs: readonly PrResult[];
   /** Repos whose keep.lock on the default branch already carries these entries: no PR was needed. */
   readonly no_pr: ReadonlyArray<{ readonly repo: string; readonly reason: 'NO_DIFF_VS_BASE' }>;
@@ -288,6 +292,7 @@ export function keepDiverged(
 type LocationOutcome =
   | { readonly kind: 'updated'; readonly location: SetLocation; readonly entry: KeepVariableEntry; readonly serverKeep: KeepFile }
   | { readonly kind: 'unchanged'; readonly location: SetLocation }
+  | { readonly kind: 'removed'; readonly location: SetLocation }
   | { readonly kind: 'failed'; readonly location: SetLocation; readonly code: string };
 
 function parseKeepJson(raw: string | undefined): KeepFile | undefined {
@@ -355,7 +360,7 @@ async function pushLocation(
   loc: SetLocation,
   name: string,
   value: string,
-  check: { readonly shown?: string; readonly answer?: BoundAnswer },
+  check: { readonly shown?: string; readonly answer?: BoundAnswer; readonly restore?: string },
   retried: boolean = false,
 ): Promise<PoolItem<LocationOutcome>> {
   const key = await settled(keys(loc.project_id));
@@ -385,12 +390,13 @@ async function pushLocation(
           remote: entry?.hash,
           serverKeepHash: SyncEngine.computeKeepHash(snapshot.keep, loc.branch),
         });
-  if (moved !== undefined) {
-    if (!holdsFor(check.answer, moved)) return failedItem(loc, new CapyError('changed since it was read', ERROR_CODES.SECRETS_CONFLICT), readRate);
-    const action = attemptAction(check.answer.choice);
-    if (!action.ok) return failedItem(loc, action.error, readRate);
-    if (action.value === 'leave') return withRate<LocationOutcome>({ kind: 'unchanged', location: loc }, readRate);
-  }
+  const answered = moved === undefined ? { ok: true as const, value: 'write' as const } : answerAt(check, moved);
+  if (!answered.ok) return failedItem(loc, answered.error, readRate);
+  const action = answered.value;
+  // Nothing to remove where the variable is already gone.
+  if (action === 'leave' || (action === 'remove' && entry === undefined)) return withRate<LocationOutcome>({ kind: 'unchanged', location: loc }, readRate);
+  // `pinned` writes back the value that was shown; no plaintext for it is a refusal, never a guess.
+  if (action === 'restore' && check.restore === undefined) return failedItem(loc, shownValueUnavailable(name), readRate);
 
   const uploaded = await settled(
     uploadChanges({
@@ -399,7 +405,7 @@ async function pushLocation(
       branch: loc.branch,
       projectKey: key.value,
       startKeep: snapshot.keep,
-      changes: { set: { [name]: value }, remove: [] },
+      changes: changesFor(action, name, value, check.restore),
       seen: snapshot,
       io,
     }),
@@ -419,6 +425,7 @@ async function pushLocation(
     return { adopted, entry: adopted.variables[name]?.find((e) => e.branch === loc.branch) };
   });
   if (!done.ok) return failedItem(loc, done.error, rate);
+  if (action === 'remove') return withRate<LocationOutcome>({ kind: 'removed', location: loc }, rate);
   return withRate<LocationOutcome>(
     done.value.entry === undefined
       ? { kind: 'failed', location: loc, code: ERROR_CODES.SERVICE_ERROR }
@@ -436,7 +443,41 @@ function attemptSync<T>(f: () => T): Tried<T> {
   }
 }
 
-const attemptAction = (choice: Parameters<typeof actionFor>[0]): Tried<ReturnType<typeof actionFor>> => attemptSync(() => actionFor(choice));
+/** What the answer for a moved location does there: it must be bound to exactly the state that was read, else the location is not written. */
+function answerAt(check: { readonly answer?: BoundAnswer }, moved: SourceConflict): Tried<ReturnType<typeof actionFor>> {
+  return holdsFor(check.answer, moved)
+    ? { ok: true, value: actionFor(check.answer.choice) }
+    : { ok: false, error: new CapyError('changed since it was read', ERROR_CODES.SECRETS_CONFLICT) };
+}
+
+/** The change one location gets: the new value (`write`), the value that was shown (`restore`), or the variable removed (`remove`). */
+const changesFor = (action: ReturnType<typeof actionFor>, name: string, value: string, restore: string | undefined): Changes =>
+  action === 'remove' ? { set: {}, remove: [name] } : { set: { [name]: action === 'restore' && restore !== undefined ? restore : value }, remove: [] };
+
+/** The plaintext of the value `hash` names, read from the first of `candidates` that still holds it (a location of the same row); `undefined` if none does. */
+export async function recoverShownValue(
+  env: SetEnv,
+  keys: KeyResolver,
+  candidates: readonly SetLocation[],
+  name: string,
+  hash: string,
+): Promise<string | undefined> {
+  const at = async (i: number): Promise<string | undefined> => {
+    const loc = candidates[i];
+    if (loc === undefined) return undefined;
+    const found = await settled(
+      (async (): Promise<string | undefined> => {
+        const key = await keys(loc.project_id);
+        const read = await callWithBackoff((onRate) => env.client.getDecryptData(loc.project_id, loc.branch, undefined, true, onRate), env.sleep);
+        if (!read.ok) return undefined;
+        const entry = snapshotFrom(read.value, loc.branch, key).entries[name];
+        return entry !== undefined && entry.hash === hash ? entry.plaintext : undefined;
+      })(),
+    );
+    return found.ok && found.value !== undefined ? found.value : at(i + 1);
+  };
+  return at(0);
+}
 
 export interface LocationPreview {
   readonly action: 'update' | 'unchanged';
@@ -682,6 +723,7 @@ export async function runSecretSet(req: SetRequest, env: SetEnv, hooks: RunHooks
       pushLocation(env, keys, loc, req.name, req.value, {
         shown: req.shown?.[locationKeyOf(loc)],
         answer: req.answers?.[locationKeyOf(loc)],
+        restore: req.restore?.[locationKeyOf(loc)],
       }),
     stop: hooks.stopPushes,
     reserve: PACING_RESERVE,
@@ -737,6 +779,7 @@ export async function runSecretSet(req: SetRequest, env: SetEnv, hooks: RunHooks
     name: req.name,
     updated: refsFor(updated),
     unchanged: outcomes.flatMap((o) => (o.kind === 'unchanged' ? [locationRef(o.location)] : [])),
+    ...(outcomes.some((o) => o.kind === 'removed') ? { removed: outcomes.flatMap((o) => (o.kind === 'removed' ? [locationRef(o.location)] : [])) } : {}),
     prs: present.flatMap((o) => (o.kind === 'pr' ? [o.pr] : [])),
     no_pr: present.flatMap((o) => (o.kind === 'no_pr' ? [{ repo: o.repo, reason: 'NO_DIFF_VS_BASE' as const }] : [])),
     failed: [

@@ -152,129 +152,152 @@ describe('capy deploy — branch check (CAP-679)', () => {
     });
   });
 
-  test('no active-branch signal at all: bare capy, which runs first, cannot pick a branch, so the deploy never reaches its own check', async () => {
+  test('no active-branch signal at all: bare capy, which runs first, stops with the coded NO_ACTIVE_BRANCH and the `capy checkout` hint, so the deploy never reaches its own check', async () => {
     await withHarness(async (h) => {
-      // two branches — nothing to pick one by: no header, no .capy/branch (and the mock service lists no branches)
+      // two branches on the server — nothing to pick one by: no header, no .capy/branch
+      h.setBranches(PROJECT_ID, TWO_BRANCHES);
       syncedProject(h, { branchFile: null });
       const r = await h.run(['deploy', 'dokploy-target', '--yes'], undefined, undefined, { DOKPLOY_API_KEY: '' });
       expect(r.code).toBe(1);
+      // The code and the way out are on stderr; stdout (a payload's place) stays empty.
+      expect(r.stderr).toContain('NO_ACTIVE_BRANCH');
+      expect(r.stderr).toContain('capy checkout');
+      expect(r.stdout).toBe('');
       expect(r.stderr).not.toContain('DEPLOY_BRANCH_MISMATCH');
       expect(r.stderr).not.toContain('preflight');
     });
   });
+
+  test('...and under --json the same stop is coded JSON on stdout (capy edit NAME --json), with the hint in it', async () => {
+    await withHarness(async (h) => {
+      h.setBranches(PROJECT_ID, TWO_BRANCHES);
+      syncedProject(h, { branchFile: null });
+      const r = await h.run(['edit', 'Z', '--json'], 'a-value\n');
+      expect(r.code).toBe(1);
+      const out = JSON.parse(r.stdout) as { ok: boolean; code: string; error: string };
+      expect(out).toMatchObject({ ok: false, code: 'NO_ACTIVE_BRANCH' });
+      expect(out.error).toContain('capy checkout');
+    });
+  });
 });
 
-function writeKeepWithTargets(
-  dir: string,
-  branch: string,
-  targetsEl: Record<string, unknown>,
-): void {
-  writeFileSync(
-    join(dir, 'keep.lock'),
-    JSON.stringify(
-      {
-        version: '3.0',
-        org_id: 'org-test',
-        project_id: 'proj-test',
-        project_name: 'test',
-        variables: {
-          DATABASE_URL: [
-            { resource_id: 'rid1', branch, value_hash: 'hhh', targets: [targetsEl] },
-          ],
-        },
-      },
-      null,
-      2,
-    ),
-  );
+const TWO_BRANCHES = [
+  { id: 'b-dev', name: 'development', is_protected: false },
+  { id: 'b-prod', name: 'production', is_protected: false },
+] as const;
+
+/**
+ * A project in `h` for `capy deploy targets-remove`: every branch pins the hash of `x` (what `.env` holds, so bare capy,
+ * which runs first, finds the folder in sync) and `production`'s entry carries the deploy record of `dokploy-target`.
+ */
+function targetsProject(h: Harness, opts: { header?: string; branchFile?: string | null; branches?: readonly string[]; targetsEl: Record<string, unknown> }): void {
+  const branches = opts.branches ?? ['development', 'production'];
+  const variables = {
+    DATABASE_URL: branches.map((b) => ({
+      resource_id: 'rid' + b[0],
+      branch: b,
+      value_hash: hashValue('x'),
+      ...(b === 'production' ? { targets: [opts.targetsEl] } : {}),
+    })),
+  };
+  writeFileSync(join(h.project, 'keep.lock'), JSON.stringify({ version: '3.0', org_id: ORG_ID, project_id: PROJECT_ID, project_name: 'test', variables }, null, 2));
+  writeDeployConfig(h.project, [dokployTarget('production')]);
+  writeFileSync(join(h.project, '.env'), `${opts.header === undefined ? '' : `${opts.header}\n`}DATABASE_URL=x\n`);
+  if (opts.branchFile === null) rmSync(join(h.project, '.capy', 'branch'), { force: true });
+  else if (opts.branchFile !== undefined) writeFileSync(join(h.project, '.capy', 'branch'), opts.branchFile);
 }
 
-describe('capy deploy targets-remove — never pushes a wrong-branch env blob (CAP-679)', () => {
-  test('active branch differs from target.branch → refuses the keep.lock push, leaves targets untouched', () => {
-    writeKeepWithTargets(ROOT, 'production', {
-      provider: 'dokploy',
-      target: 'dokploy-target',
-      deployed_value_hash: 'hhh',
-      deployed_at: '2026-09-01T00:00:00.000Z',
+const DOKPLOY_RECORD = {
+  provider: 'dokploy',
+  target: 'dokploy-target',
+  deployed_value_hash: 'hhh',
+  deployed_at: '2026-09-01T00:00:00.000Z',
+};
+
+describe('capy deploy targets-remove — bare capy runs first, then never pushes a wrong-branch env blob (CAP-679)', () => {
+  test('active branch differs from target.branch → refuses the keep.lock push, leaves targets untouched', async () => {
+    await withHarness(async (h) => {
+      targetsProject(h, { header: '# capy:branch=development', branchFile: 'development', targetsEl: DOKPLOY_RECORD });
+      const before = h.keepLockText();
+
+      const r = await h.run(['deploy', 'targets-remove', 'dokploy-target']);
+      expect(r.code).toBe(0); // local removal still succeeds
+      expect(r.stderr).toContain('DEPLOY_BRANCH_MISMATCH');
+
+      const after = h.keepLockText();
+      expect(after).toBe(before); // the push never happened — targets record untouched
+      expect(JSON.parse(after).variables.DATABASE_URL.find((e: { branch: string }) => e.branch === 'production').targets).toHaveLength(1);
+      expect(h.pushCount()).toBe(0);
     });
-    writeDeployConfig(ROOT, [dokployTarget('production')]);
-    writeFileSync(join(ROOT, '.env'), '# capy:branch=development\nDATABASE_URL=x\n');
-    const before = readFileSync(join(ROOT, 'keep.lock'), 'utf-8');
-
-    const r = capy(['deploy', 'targets-remove', 'dokploy-target']);
-    expect(r.code).toBe(0); // local removal still succeeds
-    expect(r.stderr).toContain('DEPLOY_BRANCH_MISMATCH');
-
-    const after = readFileSync(join(ROOT, 'keep.lock'), 'utf-8');
-    expect(after).toBe(before); // the push never happened — targets record untouched
-    expect(JSON.parse(after).variables.DATABASE_URL[0].targets).toHaveLength(1);
   });
 
-  test('no active-branch signal at all → refuses with DEPLOY_BRANCH_UNKNOWN, leaves targets untouched', () => {
-    writeKeepWithTargets(ROOT, 'production', {
-      provider: 'dokploy',
-      target: 'dokploy-target',
-      deployed_value_hash: 'hhh',
-      deployed_at: '2026-09-01T00:00:00.000Z',
+  test('no active-branch signal at all → bare capy stops it first with NO_ACTIVE_BRANCH (exit 1): nothing removed, nothing pushed, keep.lock untouched', async () => {
+    await withHarness(async (h) => {
+      // Two branches on the server and in keep.lock, no header, no .capy/branch: nothing to pick one by.
+      h.setBranches(PROJECT_ID, TWO_BRANCHES);
+      targetsProject(h, { branchFile: null, targetsEl: DOKPLOY_RECORD });
+      const before = h.keepLockText();
+
+      const r = await h.run(['deploy', 'targets-remove', 'dokploy-target']);
+      expect(r.code).toBe(1);
+      expect(r.stderr).toContain('NO_ACTIVE_BRANCH');
+      expect(r.stderr).toContain('capy checkout');
+      expect(h.keepLockText()).toBe(before);
+      expect(h.pushCount()).toBe(0);
     });
-    writeDeployConfig(ROOT, [dokployTarget('production')]);
-    writeFileSync(join(ROOT, '.env'), 'DATABASE_URL=x\n'); // no header, ambiguous
-    // Give keep.lock a SECOND branch too so deriveActiveBranch's keep-branches
-    // fallback also can't pick one — same "unknown" shape as the main-deploy test above.
-    const keep = JSON.parse(readFileSync(join(ROOT, 'keep.lock'), 'utf-8'));
-    const withSecondBranch = {
-      ...keep,
-      variables: {
-        ...keep.variables,
-        DATABASE_URL: [...keep.variables.DATABASE_URL, { resource_id: 'rid2', branch: 'staging', value_hash: 'zzz' }],
-      },
-    };
-    writeFileSync(join(ROOT, 'keep.lock'), JSON.stringify(withSecondBranch, null, 2));
-    const before = readFileSync(join(ROOT, 'keep.lock'), 'utf-8');
-
-    const r = capy(['deploy', 'targets-remove', 'dokploy-target']);
-    expect(r.code).toBe(0);
-    expect(r.stderr).toContain('DEPLOY_BRANCH_UNKNOWN');
-
-    const after = readFileSync(join(ROOT, 'keep.lock'), 'utf-8');
-    expect(after).toBe(before);
   });
 
-  test('matching active branch → the push proceeds (fails downstream at auth, never at the branch check)', () => {
-    writeKeepWithTargets(ROOT, 'production', {
-      provider: 'dokploy',
-      target: 'dokploy-target',
-      deployed_value_hash: 'hhh',
-      deployed_at: '2026-09-01T00:00:00.000Z',
-    });
-    writeDeployConfig(ROOT, [dokployTarget('production')]);
-    writeFileSync(join(ROOT, '.env'), '# capy:branch=production\nDATABASE_URL=x\n');
+  test('matching active branch → the push proceeds (never refused at the branch check)', async () => {
+    await withHarness(async (h) => {
+      targetsProject(h, { header: '# capy:branch=production', branchFile: 'production', targetsEl: DOKPLOY_RECORD });
 
-    const r = capy(['deploy', 'targets-remove', 'dokploy-target']);
-    expect(r.code).toBe(0);
-    expect(r.stderr).not.toContain('DEPLOY_BRANCH_MISMATCH');
-    expect(r.stderr).not.toContain('DEPLOY_BRANCH_UNKNOWN');
+      const r = await h.run(['deploy', 'targets-remove', 'dokploy-target']);
+      expect(r.code).toBe(0);
+      expect(r.stderr).not.toContain('DEPLOY_BRANCH_MISMATCH');
+      expect(r.stderr).not.toContain('DEPLOY_BRANCH_UNKNOWN');
+    });
+  });
+
+  test('a folder that differs from Capy is stopped before anything is removed or pushed: exit 3, the rows, and --resolve + --conflict answer it', async () => {
+    await withHarness(async (h) => {
+      targetsProject(h, { header: '# capy:branch=production', branchFile: 'production', targetsEl: DOKPLOY_RECORD });
+      // The folder's .env holds a different value than keep.lock pins: bare capy must ask.
+      writeFileSync(join(h.project, '.env'), '# capy:branch=production\nDATABASE_URL=SENTINEL-local-edit-7c1d\n');
+      const before = h.keepLockText();
+      const deployJson = readFileSync(join(h.project, '.capy', 'deploy.json'), 'utf-8');
+
+      const first = await h.run(['deploy', 'targets-remove', 'dokploy-target']);
+      expect(first.code).toBe(3);
+      const out = JSON.parse(first.stdout) as { code: string; conflict_id: string; conflicts: { name: string }[] };
+      expect(out.code).toBe('SECRETS_CONFLICT');
+      expect(out.conflicts.map((c) => c.name)).toEqual(['DATABASE_URL']);
+      expect(first.stdout + first.stderr).not.toContain('SENTINEL-local-edit-7c1d');
+      // Nothing removed from .capy/deploy.json, keep.lock untouched, nothing pushed.
+      expect(readFileSync(join(h.project, '.capy', 'deploy.json'), 'utf-8')).toBe(deployJson);
+      expect(h.keepLockText()).toBe(before);
+      expect(h.pushCount()).toBe(0);
+
+      // The rerun with the answer (the flags reach bare capy through the subcommand): the folder's value is committed, then the removal goes on.
+      const rerun = await h.run(['deploy', 'targets-remove', 'dokploy-target', '--resolve', 'DATABASE_URL=local', '--conflict', out.conflict_id]);
+      expect(rerun.code).toBe(0);
+      expect(h.pushCount()).toBeGreaterThanOrEqual(1);
+      expect(JSON.parse(readFileSync(join(h.project, '.capy', 'deploy.json'), 'utf-8')).targets['dokploy-target']).toBeUndefined();
+    });
   });
 });
 
 describe('capy deploy targets-remove — token revocation gated on strip outcome (CAP-679)', () => {
-  test('onRemove could not clean up the platform side (no token) → the deploy token is KEPT, not revoked', () => {
-    writeKeepWithTargets(ROOT, 'production', {
-      provider: 'dokploy',
-      target: 'dokploy-target',
-      deployed_value_hash: 'hhh',
-      deployed_at: '2026-09-01T00:00:00.000Z',
-      deploy_id: 'dep_test123',
-    });
-    writeDeployConfig(ROOT, [dokployTarget('production')]);
-    // No DOKPLOY_API_KEY anywhere → onRemove refuses with code "no_token".
-    writeFileSync(join(ROOT, '.env'), '# capy:branch=production\nDATABASE_URL=x\n');
+  test('onRemove could not clean up the platform side (no token) → the deploy token is KEPT, not revoked', async () => {
+    await withHarness(async (h) => {
+      // No DOKPLOY_API_KEY anywhere → onRemove refuses with code "no_token".
+      targetsProject(h, { header: '# capy:branch=production', branchFile: 'production', targetsEl: { ...DOKPLOY_RECORD, deploy_id: 'dep_test123' } });
 
-    const r = capy(['deploy', 'targets-remove', 'dokploy-target']);
-    expect(r.code).toBe(0);
-    expect(r.stdout).toContain('left untouched'); // the onRemove offer's own refusal (offer.ok === false)
-    expect(r.stdout).toContain('keeping 1 deploy token(s)');
-    expect(r.stdout).not.toContain('revoked 1 deploy token(s)');
+      const r = await h.run(['deploy', 'targets-remove', 'dokploy-target'], undefined, undefined, { DOKPLOY_API_KEY: '' });
+      expect(r.code).toBe(0);
+      expect(r.stdout).toContain('left untouched'); // the onRemove offer's own refusal (offer.ok === false)
+      expect(r.stdout).toContain('keeping 1 deploy token(s)');
+      expect(r.stdout).not.toContain('revoked 1 deploy token(s)');
+    });
   });
 });
 

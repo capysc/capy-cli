@@ -288,6 +288,14 @@ export class CapyCommand {
       listBranches: () => this.serviceClient.listBranches(projectState.projectId!),
       syncedBranches: syncedBranchNames(this.projectManager.readSyncState()),
       promptPick: async (branches, defaultName) => {
+        // Off a terminal nobody can pick: the run ends with a code and the command that records the choice.
+        if (this.protocol) {
+          throw new CapyError(
+            `No branch is checked out in this directory. Run \`capy checkout <branch>\` first (branches: ${branches.map((b) => b.name).join(', ')}).`, // COPY-FLAG
+            ERROR_CODES.NO_ACTIVE_BRANCH,
+            { branches: branches.map((b) => b.name) },
+          );
+        }
         const grey = (s: string) => `\x1b[90m${s}\x1b[0m`;
         console.log('\nNo branch is checked out in this directory yet.');
         const { selected: pick } = await inquirer.prompt([{
@@ -978,8 +986,8 @@ export class CapyCommand {
     );
     if (!fetched.ok) {
       const err = fetched.err;
-      // 404 with "No secrets" → empty project, write a stub keep.lock and exit
-      if (err instanceof CapyError && err.details?.status === 404 && /No secrets/i.test(err.message)) {
+      // 404 coded NO_SECRETS (minted once, in serviceClient's classifyResponse) → empty project, write a stub keep.lock and exit
+      if (err instanceof CapyError && err.details?.status === 404 && err.code === ERROR_CODES.NO_SECRETS) {
         fetchSpinner.stop();
         const stub: KeepFile = {
           version: '3.0',
@@ -1771,14 +1779,16 @@ export class CapyCommand {
           { dryRun: this.options.dryRun === true },
         );
         const answered = this.mapResolveChoicesToEnv(answers, diffs, pinned, localPlaintext, remotePlaintext, pinnedPlaintext);
-        // `pinned` for a value whose pinned snapshot cannot be read here would drop the variable (the table marks it
-        // "unresolvable" and never picks it for anyone): off a terminal that is refused, not guessed. `delete` says delete.
-        const unreadable = Object.entries(answers).filter(([name, choice]) => choice === 'pinned' && pinned[name] !== undefined && !Object.hasOwn(answered, name));
-        if (unreadable.length > 0) {
+        // An answer whose source has no value for that row would drop the variable (`pinned` with no pinned value, or one
+        // that cannot be read here; `local` with no local value; `remote` with no remote value; the table greys these
+        // out and never picks them): off a terminal that is refused before anything is written, not guessed. Only
+        // `delete` deletes.
+        const valueless = Object.entries(answers).filter(([name, choice]) => choice !== 'delete' && !Object.hasOwn(answered, name));
+        if (valueless.length > 0) {
           throw new CapyError(
-            `${unreadable.map(([name]) => name).join(', ')}: the pinned value cannot be read here, so pinned would delete it. Answer local, remote or delete.`, // COPY-FLAG
+            `${valueless.map(([name, choice]) => `${name} (${choice})`).join(', ')}: that source has no value to keep, so the answer would delete the variable. Answer another source or delete.`, // COPY-FLAG
             ERROR_CODES.SECRETS_RESOLVE_INVALID,
-            { names: unreadable.map(([name]) => name) },
+            { names: valueless.map(([name]) => name) },
           );
         }
         return { kind: 'proceed', finalEnv: answered };

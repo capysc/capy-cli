@@ -4,7 +4,7 @@
  * holds there now). Unchanged since it was shown, or already holding the new value: no decision. Moved: a row.
  */
 import { describe, test, expect } from 'bun:test';
-import { bindAnswer, actionFor, holdsFor, movedRow, type WriteComparison } from '../../src/sync/noFolder';
+import { bindAnswer, actionFor, holdsFor, movedRow, shownValueUnavailable, type WriteComparison } from '../../src/sync/noFolder';
 import { CapyError, ERROR_CODES } from '../../src/types/index';
 
 const base: WriteComparison = {
@@ -46,11 +46,18 @@ describe('movedRow', () => {
 describe('answers', () => {
   const row = movedRow({ ...base, remote: 'cccccccccccccccc' });
 
-  test('local writes, remote leaves the location; pinned and delete are refused with a code', () => {
+  test('all four of bare capy\'s choices mean something: local writes, remote leaves the location, pinned writes the shown value back, delete removes the variable', () => {
     expect(actionFor('local')).toBe('write');
     expect(actionFor('remote')).toBe('leave');
-    expect(() => actionFor('pinned')).toThrow(expect.objectContaining({ code: ERROR_CODES.SECRETS_RESOLVE_INVALID }));
-    expect(() => actionFor('delete')).toThrow(CapyError);
+    expect(actionFor('pinned')).toBe('restore');
+    expect(actionFor('delete')).toBe('remove');
+  });
+
+  test('a pinned answer whose shown value cannot be recovered is refused with a code and names only', () => {
+    const refusal = shownValueUnavailable('API_KEY');
+    expect(refusal).toBeInstanceOf(CapyError);
+    expect(refusal.code).toBe(ERROR_CODES.SECRETS_RESOLVE_INVALID);
+    expect(refusal.details).toEqual({ names: ['API_KEY'] });
   });
 
   test('an answer holds only for the state it was made against', () => {

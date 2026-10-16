@@ -153,6 +153,51 @@ describe('local and remote', () => {
   });
 });
 
+describe('pinned and delete (all four of bare capy\'s choices)', () => {
+  const key = 'pA/staging';
+  const answer = (choice: 'pinned' | 'delete') => ({ choice, remote: hashValue(MOVED), local: hashValue(SENTINEL) });
+  const keepPushedTo = (service: ReturnType<typeof fakeService>, project: string) => {
+    const call = service.pushSecrets.mock.calls.find((c) => c[0] === project);
+    return JSON.parse(String(call?.[1])) as { variables: Record<string, Array<{ branch: string; value_hash: string }> | undefined> };
+  };
+
+  test('pinned: the value that was shown is written back at the moved location (the new value goes to the others)', async () => {
+    const r = rig();
+    const out = await r.actions.run(request({ decisions: { [key]: answer('pinned') }, restore: { [key]: OLD_VALUE } }));
+    expect(out.ok).toBe(true);
+    if (!out.ok || !('result' in out)) throw new Error('expected a result');
+    expect(out.result.failed).toEqual([]);
+    expect(pushedProjects(r.service).toSorted()).toEqual(['pA', 'pC']);
+    // The property: what pA/staging pins now is the OLD value, and pC/development got the new one.
+    expect(keepPushedTo(r.service, 'pA').variables[NAME]?.find((e) => e.branch === 'staging')?.value_hash).toBe(hashValue(OLD_VALUE));
+    expect(keepPushedTo(r.service, 'pC').variables[NAME]?.find((e) => e.branch === 'development')?.value_hash).toBe(hashValue(SENTINEL));
+  });
+
+  test('pinned with no value to write back is refused at that location with SECRETS_RESOLVE_INVALID: never guessed, nothing pushed there', async () => {
+    const r = rig();
+    const out = await r.actions.run(request({ decisions: { [key]: answer('pinned') } }));
+    expect(out.ok).toBe(true);
+    if (!out.ok || !('result' in out)) throw new Error('expected a result');
+    expect(out.result.failed).toEqual([expect.objectContaining({ kind: 'location', project: PROJECT_NAMES.pA, branch: 'staging', code: ERROR_CODES.SECRETS_RESOLVE_INVALID })]);
+    expect(pushedProjects(r.service)).toEqual(['pC']);
+  });
+
+  test('delete: the variable is removed at the moved location (through the shared upload, with base_keep_hash) and reported as removed', async () => {
+    const r = rig();
+    const out = await r.actions.run(request({ decisions: { [key]: answer('delete') } }));
+    expect(out.ok).toBe(true);
+    if (!out.ok || !('result' in out)) throw new Error('expected a result');
+    expect(out.result.failed).toEqual([]);
+    expect(out.result.removed?.map((l) => `${l.project}/${l.branch}`)).toEqual([`${PROJECT_NAMES.pA}/staging`]);
+    expect(out.result.updated.map((l) => l.project)).toEqual([PROJECT_NAMES.pC]);
+    expect(keepPushedTo(r.service, 'pA').variables[NAME]?.some((e) => e.branch === 'staging')).toBeFalsy();
+    const pushedA = r.service.pushSecrets.mock.calls.find((c) => c[0] === 'pA');
+    expect(String(pushedA?.[5])).toMatch(/^[0-9a-f]{64}$/);
+    // The moved location's own value never goes anywhere.
+    expect(JSON.stringify(pushedA)).not.toContain(MOVED);
+  });
+});
+
 describe('the upload names the keep it was built from', () => {
   test('every push carries base_keep_hash: the keep hash of the branch it read', async () => {
     const r = rig(OLD_VALUE);

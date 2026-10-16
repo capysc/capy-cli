@@ -51,6 +51,8 @@ import { MAX_PIPED_BYTES, PipedValueResult, readPipedValue, refuseInvalidName, e
 import { isValidVarName } from './pipedWrite';
 import { rowIdOf } from './secretsRowId';
 import {
+  KeyResolver,
+  LocationConflict,
   LocationPreview,
   LocationRef,
   RepoTarget,
@@ -69,8 +71,9 @@ import {
   runSecretSet,
   locationKeyOf,
   movedLocations,
+  recoverShownValue,
 } from './secretsSet';
-import { actionFor, bindAnswer, type BoundAnswer } from '../sync/noFolder';
+import { bindAnswer, shownValueUnavailable, type BoundAnswer } from '../sync/noFolder';
 import { renderSecretSetConfirmation, stoppingAfter, TERMINAL_STYLE } from './secretsSetText';
 import { PoolItem, runPool } from '../utils/pool';
 
@@ -164,16 +167,6 @@ export function decideOrExit(scopes: readonly ConflictScope[], flags: ConflictFl
   } catch (err) {
     if (err instanceof ConflictRefusal) return exitWithConflicts(err);
     throw err;
-  }
-}
-
-/** The refusal for an answer that setting a value cannot honour (`pinned`, `delete`), or `undefined` when it can. */
-function unusableAnswer(choice: Parameters<typeof actionFor>[0]): { readonly code: string; readonly message: string } | undefined {
-  try {
-    actionFor(choice);
-    return undefined;
-  } catch (err) {
-    return describe(err);
   }
 }
 
@@ -441,6 +434,31 @@ export async function readSecretIndex(io: Pick<SecretsSetIo, 'orgId' | 'client'>
   }
 }
 
+/**
+ * The plaintext each moved location gets written back (`pinned`), by `locationKeyOf`: the value its row listed, read
+ * from a location of that row that still holds it (never one of the moved ones). `undefined` when any moved location's
+ * value cannot be recovered.
+ */
+async function restoreValues(
+  env: SetEnv,
+  keys: KeyResolver,
+  name: string,
+  moved: readonly LocationConflict[],
+  shown: Readonly<Record<string, string>>,
+  everyLocation: readonly Located[],
+): Promise<Readonly<Record<string, string>> | undefined> {
+  const movedKeys = new Set(moved.map((c) => locationKeyOf(c.location)));
+  const hashes = [...new Set(moved.map((c) => shown[locationKeyOf(c.location)]))].flatMap((h) => (h === undefined ? [] : [h]));
+  const recovered = await Promise.all(
+    hashes.map(async (hash) => [hash, await recoverShownValue(env, keys, everyLocation.filter((l) => l.seen === hash && !movedKeys.has(locationKeyOf(l))), name, hash)] as const),
+  );
+  const byHash = Object.fromEntries(recovered);
+  const entries = moved.map((c) => [locationKeyOf(c.location), byHash[shown[locationKeyOf(c.location)] ?? '']] as const);
+  return entries.some(([, value]) => value === undefined)
+    ? undefined
+    : Object.fromEntries(entries.flatMap(([key, value]) => (value === undefined ? [] : [[key, value] as const])));
+}
+
 /** The value for a real run, from stdin only. A terminal on stdin is "nothing was piped". */
 async function requireValue(io: SecretsSetIo, json: boolean): Promise<string> {
   const piped: PipedValueResult = io.stdinIsTTY
@@ -467,7 +485,8 @@ export async function runSecretsSet(name: string, opts: SecretsSetOpts, io: Secr
   const flags = conflictFlagsOrExit(opts.conflictFlags ?? {}, json);
 
   const rows = selectRows(await readSecretIndex(io, json), name, opts, json);
-  const located = excludeLocations(rows.flatMap(withRowId), opts.exclude ?? [], json);
+  const everyLocation = rows.flatMap(withRowId);
+  const located = excludeLocations(everyLocation, opts.exclude ?? [], json);
   if (located.length === 0) {
     refuse(json, ERROR_CODES.SECRETS_NOTHING_SELECTED, 'No location is left to change.'); // COPY-FLAG
   }
@@ -524,14 +543,19 @@ export async function runSecretsSet(name: string, opts: SecretsSetOpts, io: Secr
   const decided = await decideOrExit(scopes, flags);
   const moved = movedLocations(name, value, located, shownOf(located), reads);
   const choice = decided[name];
-  const unusable = choice === undefined || moved.length === 0 ? undefined : unusableAnswer(choice);
-  if (unusable !== undefined) return refuse(json, unusable.code, unusable.message);
+  // `pinned` writes back the value the person was shown: recovered before anything is pushed, from a location of the same
+  // row that still holds it (the listing carries a fingerprint only). If it cannot be, the run ends with a code, writing nothing.
+  const restore = choice === 'pinned' ? await restoreValues(io.env, keys, name, moved, shownOf(located), everyLocation) : {};
+  if (restore === undefined) {
+    const refusal = shownValueUnavailable(name);
+    return refuse(json, refusal.code, refusal.message);
+  }
   const answers: Readonly<Record<string, BoundAnswer>> = Object.fromEntries(
     choice === undefined ? [] : moved.map((c) => [locationKeyOf(c.location), bindAnswer(choice, c.conflict)] as const),
   );
   const leftAlone = new Set(moved.filter(() => choice === 'remote').map((c) => locationKeyOf(c.location)));
   const pushTo = located.filter((l) => !leftAlone.has(locationKeyOf(l)));
-  const result = await runSecretSet({ name, value, locations: pushTo, repos: targets, bases, shown: shownOf(located), answers, keys }, io.env, {
+  const result = await runSecretSet({ name, value, locations: pushTo, repos: targets, bases, shown: shownOf(located), answers, restore, keys }, io.env, {
     stopPushes: io.control?.pushes,
     stopPrs: io.control?.prs,
     // Said once per phase when a stop is noticed with items still running; silent when nothing is in progress.
@@ -551,6 +575,7 @@ export async function runSecretsSet(name: string, opts: SecretsSetOpts, io: Secr
           plan_id: planId,
           updated: result.updated,
           unchanged: result.unchanged,
+          ...(result.removed === undefined ? {} : { removed: result.removed }),
           prs: result.prs,
           no_pr: result.no_pr,
           ...(result.skipped !== undefined ? { skipped: result.skipped } : {}),

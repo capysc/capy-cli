@@ -119,6 +119,8 @@ import { KeepFile } from '../../types/index';
 import type { AuthService } from '../../auth/authService';
 import type { ServiceClient } from '../../service/serviceClient';
 import type { ImportOutcome } from './registry';
+import type { FolderSync } from '../../sync/gate';
+import type { ConflictPayload } from '../../sync/conflicts';
 import type { DiscoveryCommitOutcome } from '../../git/discoveryCommit';
 
 /**
@@ -1005,6 +1007,13 @@ export function orderEnvironments<T extends { environmentName: string }>(environ
  */
 export interface DiscoverySequenceDeps {
   /**
+   * Bare `capy` in (repoDir, folder), until it and Capy agree: the FIRST step for every folder, before anything is written
+   * into it (docs/conflict-resolution.md). A folder that is not a Capy project yet has nothing to compare. A difference
+   * nobody can answer (discovery never prompts), a stop or a failure skips the folder: nothing was written into it, and the
+   * result carries the folder's coded failure (and, for a difference, its `conflict_id` and rows).
+   */
+  syncFolder: (repoDir: string, folder: string) => Promise<FolderSync>;
+  /**
    * No keep.lock at (repoDir, folder) → run the init flow (existing-project
    * picking, or create new, in the caller's org) — interactive only; a
    * non-interactive run refuses `DOKPLOY_FOLDER_NOT_INITIALIZED` naming the
@@ -1086,6 +1095,8 @@ export type DiscoveryFolderResult =
       message: string;
       /** Environments this folder finished BEFORE the step that aborted it. */
       environments: readonly DiscoverySequenceEnvResult[];
+      /** The folder differed from Capy and nobody could answer: the rows and `conflict_id` for a rerun with `--resolve` + `--conflict`. */
+      conflict?: ConflictPayload;
     };
 
 interface SequenceAcc {
@@ -1116,6 +1127,20 @@ export async function runDiscoverySequence(
   opts: { overwrite: boolean },
   deps: DiscoverySequenceDeps,
 ): Promise<DiscoveryFolderResult> {
+  // Bare `capy` first, in this folder, before anything is written into it.
+  const synced = await deps.syncFolder(folder.repoDir, folder.folder);
+  if (!synced.ok) {
+    return {
+      repoDir: folder.repoDir,
+      folder: folder.folder,
+      ok: false,
+      code: synced.code,
+      message: synced.message,
+      environments: [],
+      ...(synced.conflict === undefined ? {} : { conflict: synced.conflict }),
+    };
+  }
+
   const project = await deps.ensureProject(folder.repoDir, folder.folder, folder.remote);
   if (!project.ok) {
     return { repoDir: folder.repoDir, folder: folder.folder, ok: false, code: project.code, message: project.message, environments: [] };

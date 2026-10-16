@@ -1,8 +1,8 @@
 /**
  * Bare `capy` runs first (CAP-711; the contract is docs/conflict-resolution.md).
  *
- * Every command that writes from a folder (`capy edit`, `add`, `remove`, `connect`, `rotate`, `push`, `deploy`)
- * calls `gateFirst` as its VERY FIRST step, before any prompt, preflight, plan or confirm screen, and nothing
+ * Every command that writes from a folder (`capy edit`, `add`, `remove`, `connect` (discovery too), `rotate`, `push`,
+ * `deploy` in every mode, `deploy revoke`, `deploy targets-remove`) calls `gateFirst` as its VERY FIRST step, before any prompt, preflight, plan or confirm screen, and nothing
  * lets a command skip it. It runs bare `capy`'s own sync (`CapyCommand.runSync`: the code `capy` runs, not a
  * copy) and then runs it again until the folder and Capy agree on every variable of the branch, or until the
  * person cancels or chooses "Continue working", in which case the command writes nothing and ends.
@@ -15,8 +15,16 @@
  * Capy's latest and uploads it with `base_keep_hash` (sync/commit.ts). If the server refuses that upload as stale
  * (someone saved in between) the command runs this gate again and tries once more (`commitGated`).
  */
+import { existsSync } from 'fs';
 import { isInteractive } from '../ui/interactive';
-import { exitOnConflictRefusal, hasConflictFlags, parseConflictFlags, type RawConflictFlags } from './conflicts';
+import {
+  exitOnConflictRefusal,
+  hasConflictFlags,
+  isConflictRefusal,
+  parseConflictFlags,
+  type ConflictPayload,
+  type RawConflictFlags,
+} from './conflicts';
 import {
   commitFolder,
   isStaleBase,
@@ -41,6 +49,13 @@ export interface GateOptions {
   readonly dryRun?: boolean;
   /** How a failure of the sync itself (no session, Capy unreachable) ends the command. Default: coded JSON under `--json`, the error screen otherwise. */
   readonly refuse?: (err: unknown) => never;
+  /**
+   * The folder bare `capy` runs in, when it is not the working directory (discovery writes into other checkouts).
+   * A folder that does not exist yet has nothing to compare, so it counts as in sync.
+   */
+  readonly cwd?: string;
+  /** A difference nobody can answer is thrown to the caller instead of ending the process (a multi-folder run reports it per folder). */
+  readonly throwConflicts?: boolean;
 }
 
 /** `in-sync`: the command may go on. `stopped`: the person cancelled; the command writes nothing and ends (exit 0). */
@@ -63,11 +78,33 @@ export function answersByProtocol(opts: GateOptions): boolean {
   return opts.dryRun === true || opts.json === true || !isInteractive(opts.nonTty) || givesFlags(opts.conflictFlags ?? {});
 }
 
-/** The real runner: a fresh `CapyCommand` doing exactly what `capy` does. */
-const runBareCapy: SyncRunner = async (opts, protocol) => {
-  const { CapyCommand } = await import('../commands/capyCommand');
-  return new CapyCommand({ protocol, silentAuthOnly: protocol, quiet: true, conflictFlags: opts.conflictFlags, dryRun: opts.dryRun }, opts.devMode === true).runSync();
-};
+/**
+ * `work` with `dir` as the working directory, then back. Bare `capy` is written against the working directory (its
+ * managers, git, the kick cleanup), so another checkout is synced by standing in it, not by a second implementation.
+ * Callers run one folder at a time: nothing else may run while the directory is changed.
+ */
+async function inDirectory<T>(dir: string | undefined, work: () => Promise<T>, absent: T): Promise<T> {
+  if (dir === undefined) return work();
+  if (!existsSync(dir)) return absent;
+  const origin = process.cwd();
+  process.chdir(dir);
+  try {
+    return await work();
+  } finally {
+    process.chdir(origin);
+  }
+}
+
+/** The real runner: a fresh `CapyCommand` doing exactly what `capy` does, in `opts.cwd` when given. */
+const runBareCapy: SyncRunner = (opts, protocol) =>
+  inDirectory<SyncOutcome>(
+    opts.cwd,
+    async () => {
+      const { CapyCommand } = await import('../commands/capyCommand');
+      return new CapyCommand({ protocol, silentAuthOnly: protocol, quiet: true, conflictFlags: opts.conflictFlags, dryRun: opts.dryRun }, opts.devMode === true).runSync();
+    },
+    'up-to-date',
+  );
 
 async function repeat(run: () => Promise<SyncOutcome>): Promise<GateResult> {
   const outcome = await run();
@@ -94,8 +131,40 @@ const outcomeOf = <T>(work: Promise<T>) =>
 export async function ensureInSync(opts: GateOptions = {}, runner: SyncRunner = runBareCapy): Promise<GateResult> {
   const done = await outcomeOf(syncUntilInSync(opts, runner));
   if (done.ok) return done.value;
-  exitOnConflictRefusal(done.error);
+  if (opts.throwConflicts !== true) exitOnConflictRefusal(done.error);
   throw done.error;
+}
+
+/** What bare `capy` found in one folder that is not the working directory. */
+export type FolderSync =
+  | { readonly ok: true }
+  | {
+      readonly ok: false;
+      /** `SECRETS_CONFLICT` / `SECRETS_CONFLICT_STALE` for a difference to decide, `FOLDER_SYNC_STOPPED` when the person stopped, else the error's own code. */
+      readonly code: string;
+      readonly message: string;
+      /** The rows and `conflict_id` of a difference nobody could answer (fingerprints only). */
+      readonly conflict?: ConflictPayload;
+    };
+
+/** The code of a sync that was stopped (the person cancelled or chose "Continue working"). */
+export const FOLDER_SYNC_STOPPED = 'STOPPED';
+
+const folderSyncFailure = (err: unknown): FolderSync => {
+  if (isConflictRefusal(err)) return { ok: false, code: err.code, message: err.message, conflict: err.payload };
+  if (err instanceof CapyError) return { ok: false, code: err.code, message: err.message };
+  return { ok: false, code: ERROR_CODES.SERVICE_ERROR, message: 'The sync did not complete.' }; // COPY-FLAG
+};
+
+/**
+ * Bare `capy` in `dir` (a checkout other than the working directory) until it and Capy agree: the step before anything is
+ * written into that folder. Never ends the process: a difference nobody can answer, a stop or a failure comes back as the
+ * folder's own coded result, and nothing has been written into it.
+ */
+export async function syncFolder(dir: string, opts: GateOptions = {}, runner: SyncRunner = runBareCapy): Promise<FolderSync> {
+  const done = await outcomeOf(syncUntilInSync({ ...opts, cwd: dir }, runner));
+  if (!done.ok) return folderSyncFailure(done.error);
+  return done.value === 'in-sync' ? { ok: true } : { ok: false, code: FOLDER_SYNC_STOPPED, message: 'Stopped. Nothing was written.' }; // COPY-FLAG
 }
 
 /** The gate stopped (the person cancelled or chose "Continue working"): the command ends here, exit 0, nothing written. */
@@ -107,9 +176,14 @@ export function stopWithNothingWritten(): never {
 /** The sync itself failed (a coded `CapyError`: no session, Capy unreachable): the command ends with that code, not a stack. */
 async function failedSync(err: unknown, opts: GateOptions): Promise<never> {
   if (opts.refuse !== undefined) return opts.refuse(err);
+  const coded = err instanceof CapyError ? err : new CapyError('The sync did not complete.', ERROR_CODES.SERVICE_ERROR); // COPY-FLAG
   if (opts.json === true) {
-    const coded = err instanceof CapyError ? err : new CapyError('The sync did not complete.', ERROR_CODES.SERVICE_ERROR); // COPY-FLAG
     console.log(JSON.stringify({ ok: false, code: coded.code, error: coded.message }, null, 2));
+    return process.exit(1);
+  }
+  // Off a terminal (no one to read the error screen, stdout reserved for payloads): the code and what to do, on stderr.
+  if (answersByProtocol(opts)) {
+    console.error(`${coded.code}: ${coded.message}`);
     return process.exit(1);
   }
   const { displayErrorAndExit } = await import('../ui/errorScreen');
@@ -138,8 +212,9 @@ function reread<C extends GatedFolder>(ctx: C): C {
  * `commitFolder` (the command's own change onto Capy's latest, with `base_keep_hash`) and, if the server refuses it
  * as stale because someone saved in between, bare `capy` again and one more attempt from the folder as it is then.
  * A stop in that second gate ends the command (nothing written); a second stale refusal is thrown
- * (`SECRETS_STALE_BASE`, exit 1). A context without `gate` (a folder other than the working directory, which bare
- * `capy` would not be run for) throws the stale refusal as it is.
+ * (`SECRETS_STALE_BASE`, exit 1). A context without `gate` throws the stale refusal as it is. A context for another
+ * checkout than the working directory (discovery) carries a gate with that folder as `cwd`, so the retry runs bare `capy`
+ * there.
  */
 export async function commitGated<C extends GatedFolder>(
   ctx: C,
