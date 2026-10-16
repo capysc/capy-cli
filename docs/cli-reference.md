@@ -84,6 +84,9 @@ capy checkout <branch> [options]
 | `--protected` | Mark as a protected branch (invite-only) |  |
 | `--no-protected` | Create it open to the project |  |
 | `--json` | emit machine-readable JSON instead of the human UI |  |
+| `--non-tty` | treat stdin as not a terminal; differences from Capy stop the checkout with the conflict_id (agents/CI) |  |
+| `--resolve <NAME=pinned|local|remote|delete>` | answer a difference from Capy: pinned, local, remote or delete; NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict) | `[]` |
+| `--conflict <conflict_id>` | the conflict_id a conflict returned: binds --resolve to what was seen |  |
 
 JSON support: yes (`--json`)
 
@@ -467,10 +470,14 @@ JSON support: yes (`--json`)
 Switch organization
 
 ```
-capy org
+capy org [options]
 ```
 
-_No options._
+| Option | Description | Default |
+|---|---|---|
+| `--non-tty` | treat stdin as not a terminal; differences from Capy stop the switch with the conflict_id (agents/CI) |  |
+| `--resolve <NAME=pinned|local|remote|delete>` | answer a difference from Capy: pinned, local, remote or delete; NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict) | `[]` |
+| `--conflict <conflict_id>` | the conflict_id a conflict returned: binds --resolve to what was seen |  |
 
 JSON support: no
 
@@ -963,4 +970,4 @@ Every refusal carries a stable `code` — branch on it, never on message text.
 
 - **JSON**: Pass --json on any command whose supportsJson is true and parse stdout as JSON; prose (progress, prompts, errors) goes to stderr so stdout stays pure JSON.
 - **Codes**: Branch only on the machine-readable `code` field (from --json output or a CapyError), never on human-readable message text — messages may be reworded without notice.
-- **Conflicts**: Every command that writes from a folder (edit, add, remove, connect, rotate, push, deploy, deploy revoke, deploy targets-remove) runs bare `capy` first. Off a terminal, if the folder and Capy differ on any variable, nothing is written, the exit code is 3, and stdout is {ok:false, code:"SECRETS_CONFLICT", conflict_id, conflicts:[{name, project, branch, type, pinned, local, remote}]} (fingerprints only, never values; a Dokploy value has {name, target, pinned, local, remote}). Ask the person, then rerun the same command with --resolve NAME=pinned|local|remote|delete for every row (NAME@TARGET=local|remote for a Dokploy value) and --conflict <conflict_id>. A state that moved since is SECRETS_CONFLICT_STALE with the fresh rows. There is no resolve-all.
+- **Conflicts**: Every command that writes from a folder (edit, add, remove, connect, rotate, push, checkout, org, deploy, deploy revoke, deploy targets-remove) runs bare `capy` first; `checkout -b` is the one exception (a new branch carries the uncommitted values of the folder). Off a terminal, if the folder and Capy differ on any variable, nothing is written, the exit code is 3, and stdout is {ok:false, code:"SECRETS_CONFLICT", conflict_id, conflicts:[{name, project, branch, type, pinned, local, remote}]} (fingerprints only, never values; a Dokploy value has {name, target, pinned, local, remote}). Ask the person, then rerun the same command with --resolve NAME=pinned|local|remote|delete for every row (NAME@TARGET=local|remote for a Dokploy value) and --conflict <conflict_id>. A state that moved since is SECRETS_CONFLICT_STALE with the fresh rows. There is no resolve-all.

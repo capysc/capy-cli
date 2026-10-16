@@ -308,6 +308,9 @@ program
   .option('--protected', 'Mark as a protected branch (invite-only)')
   .option('--no-protected', 'Create it open to the project')
   .option('--json', 'emit machine-readable JSON instead of the human UI')
+  .option('--non-tty', 'treat stdin as not a terminal; differences from Capy stop the checkout with the conflict_id (agents/CI)') // COPY-FLAG
+  .addOption(resolveOption())
+  .addOption(conflictOption())
   .action(async (branch, options, command) => {
     assertNotLocalOnly('checkout');
 
@@ -331,6 +334,9 @@ program
     await cmd.execute(branch, {
       create: options.create,
       protected: options.protected,
+      json: options.json === true,
+      nonTty: options.nonTty === true,
+      conflictFlags: rawConflictFlagsOf(command),
     });
   });
 
@@ -760,13 +766,16 @@ systemCmd
 program
   .command('org')
   .description('Switch organization')
-  .action(async (_options, command) => {
+  .option('--non-tty', 'treat stdin as not a terminal; differences from Capy stop the switch with the conflict_id (agents/CI)') // COPY-FLAG
+  .addOption(resolveOption())
+  .addOption(conflictOption())
+  .action(async (options, command) => {
     assertNotLocalOnly('org');
     const { OrgCommand } = await import('./commands/orgCommand');
     // OrgCommand takes it at construction — see its own note on why a
     // subcommand must read the inherited global rather than its own options.
     const cmd = new OrgCommand();
-    await cmd.execute();
+    await cmd.execute({ nonTty: options.nonTty === true, conflictFlags: rawConflictFlagsOf(command) });
   });
 
 program

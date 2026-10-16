@@ -8,6 +8,8 @@ import { CapyError, ERROR_CODES, getSyncKeepHash, KeepFile } from '../types/inde
 import { resolveProjectKey, KeyServiceOps } from '../crypto/keyResolver';
 import { SyncEngine } from '../sync/syncEngine';
 import { hashValue } from './statusCommand';
+import { gateFirst, type GateOptions } from '../sync/gate';
+import { conflictFlagsOrExit, type RawConflictFlags } from '../sync/conflicts';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -114,6 +116,12 @@ export interface CheckoutOptions {
   create?: boolean;
   /** Settled by `--protected` / `--no-protected`; undefined means ask. */
   protected?: boolean;
+  /** `--json`: differences from Capy are reported as JSON (stdout) instead of asked. */
+  json?: boolean;
+  /** `--non-tty`: treat stdin as not a terminal. */
+  nonTty?: boolean;
+  /** `--resolve` / `--conflict` as typed. */
+  conflictFlags?: RawConflictFlags;
 }
 
 type DecryptData = Awaited<ReturnType<ServiceClient['getDecryptData']>>;
@@ -136,6 +144,14 @@ export class CheckoutCommand {
   }
 
   async execute(branchName: string, options: CheckoutOptions = {}): Promise<void> {
+    // Switching to an existing branch runs bare `capy` first, like every folder write (docs/conflict-resolution.md).
+    // The one exception is `-b`: creating a branch carries the folder's uncommitted values onto a brand-new branch
+    // nobody else has written to, and bare `capy` offers to push them there on the next sync (Vince, 2026-10-16).
+    if (!options.create) {
+      conflictFlagsOrExit(options.conflictFlags ?? {}, options.json === true);
+      const gate: GateOptions = { devMode: this.devMode, json: options.json, nonTty: options.nonTty, conflictFlags: options.conflictFlags };
+      await gateFirst(gate);
+    }
     try {
       await this._execute(branchName, options);
     } catch (error: any) {

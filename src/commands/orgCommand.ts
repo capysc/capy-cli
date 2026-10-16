@@ -11,6 +11,8 @@ import { excludeSystemProject, assertProjectNameAllowed, isReservedProjectName, 
 import { execSync } from 'child_process';
 import { ACCENT } from '../ui/colors';
 import { orgProjectQuestion } from '../ui/projectQuestions';
+import { gateFirst, type GateOptions } from '../sync/gate';
+import { conflictFlagsOrExit } from '../sync/conflicts';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -38,8 +40,10 @@ export class OrgCommand {
   private fileManager: FileManager;
   private authService: AuthService;
   private serviceClient: ServiceClient;
+  private readonly devMode: boolean;
 
   constructor(apiUrl?: string, devMode: boolean = false) {
+    this.devMode = devMode;
     this.projectManager = new ProjectManager();
     this.fileManager = new FileManager();
     this.authService = new AuthService(apiUrl, devMode);
@@ -48,7 +52,12 @@ export class OrgCommand {
     this.serviceClient.setTokenProvider(() => this.authService.getValidToken());
   }
 
-  async execute(): Promise<void> {
+  /** `gate`: how bare `capy` runs first (`--non-tty`, `--resolve`, `--conflict` as typed). */
+  async execute(gate: GateOptions = {}): Promise<void> {
+    // Re-linking the folder to another organization rewrites its keep.lock: bare `capy` runs first, like every
+    // folder write (docs/conflict-resolution.md), so nothing the folder and Capy disagree on is left behind.
+    conflictFlagsOrExit(gate.conflictFlags ?? {}, gate.json === true);
+    await gateFirst({ ...gate, devMode: this.devMode });
     try {
       await this._execute();
     } catch (error: any) {

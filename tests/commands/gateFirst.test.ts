@@ -49,12 +49,20 @@ mock.module('../../src/commands/connectors/shared', () => ({
     throw new Halt('resolveContext');
   },
 }));
-// A command that gets past the gate and wants to sign in on its own is as far as these runs go.
+// A command that gets past the gate and wants to sign in on its own is as far as these runs go. Constructing the
+// service is not signing in (checkout and org build theirs in their constructors): the first USE of it is.
 mock.module('../../src/auth/authService', () => ({
   AuthService: class {
     constructor() {
-      event('auth');
-      throw new Halt('auth');
+      return new Proxy(this, {
+        get: (_target, prop) =>
+          typeof prop === 'string' && prop !== 'then'
+            ? () => {
+                event('auth');
+                throw new Halt('auth');
+              }
+            : undefined,
+      });
     }
   },
   silentAuthFailureMessage: () => 'no session',
@@ -123,6 +131,8 @@ import { RotateCommand } from '../../src/commands/rotateCommand';
 import { deployCommand, deployRemove } from '../../src/commands/deployCommand';
 import { DeployCommand, DeployRevokeCommand } from '../../src/commands/deployTokenCommand';
 import { routeDeployDiscover } from '../../src/commands/deployDiscover/route';
+import { CheckoutCommand } from '../../src/commands/checkoutCommand';
+import { OrgCommand } from '../../src/commands/orgCommand';
 
 class ExitSignal extends Error {
   constructor(public readonly code: number | undefined) {
@@ -212,7 +222,19 @@ const COMMANDS: ReadonlyArray<readonly [string, () => Promise<unknown>, boolean]
   ['capy deploy dokploy --discover', () => routeDeployDiscover('dokploy', { discover: true }, false, false), false],
   // Discovery has no conditional skip: the working directory is gated, then each discovered folder is synced before it is written.
   ['capy connect dokploy --discover', () => new ConnectCommand().execute('dokploy', { discover: true, nonTty: true, json: true }), false],
+  // Switching to an existing branch rewrites keep.lock and .env from Capy: gated like every folder write.
+  ['capy checkout <existing branch>', () => new CheckoutCommand().execute('development', { nonTty: true }), false],
+  // Re-linking the folder to another organization rewrites its keep.lock.
+  ['capy org', () => new OrgCommand().execute({ nonTty: true }), false],
 ];
+
+describe('the one exception: capy checkout -b', () => {
+  test('creating a branch does not run bare capy: the uncommitted values travel to the new branch', async () => {
+    project();
+    await ran(() => new CheckoutCommand().execute('feature-x', { create: true, nonTty: true }), false);
+    expect(events()).not.toContain('gate');
+  });
+});
 
 describe.each(COMMANDS)('%s', (_name, run, tty) => {
   test('bare capy runs first: before any prompt, context, preflight, adapter, confirm or screen', async () => {

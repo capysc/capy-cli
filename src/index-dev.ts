@@ -262,12 +262,17 @@ program
   .description('Switch to a secret branch')
   .option('-b, --create', 'Create the branch if it does not exist')
   .option('--protected', 'Mark as a protected branch (invite-only)')
+  .option('--non-tty', 'treat stdin as not a terminal; differences from Capy stop the checkout with the conflict_id (agents/CI)') // COPY-FLAG
+  .addOption(resolveOption())
+  .addOption(conflictOption())
   .action(async (branch, options, command) => {
     const { CheckoutCommand } = await import('./commands/checkoutCommand');
     const cmd = new CheckoutCommand(true);
     await cmd.execute(branch, {
       create: options.create,
       protected: options.protected,
+      nonTty: options.nonTty === true,
+      conflictFlags: rawConflictFlagsOf(command),
     });
   });
 
@@ -731,10 +736,13 @@ program
 program
   .command('org')
   .description('Switch organization')
-  .action(async (_options, command) => {
+  .option('--non-tty', 'treat stdin as not a terminal; differences from Capy stop the switch with the conflict_id (agents/CI)') // COPY-FLAG
+  .addOption(resolveOption())
+  .addOption(conflictOption())
+  .action(async (options, command) => {
     const { OrgCommand } = await import('./commands/orgCommand');
     const cmd = new OrgCommand(process.env.CAPY_API_URL, true);
-    await cmd.execute();
+    await cmd.execute({ nonTty: options.nonTty === true, conflictFlags: rawConflictFlagsOf(command) });
   });
 
 program
