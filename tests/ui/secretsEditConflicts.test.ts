@@ -60,18 +60,18 @@ const loc = (p: 'p1' | 'p2'): SetLocation =>
     ? { project_id: 'p1', project_name: 'web', branch: 'production', protected: true }
     : { project_id: 'p2', project_name: 'api', branch: 'development', protected: false };
 
-const conflict = (p: 'p1' | 'p2', theirs: string, changedAt?: string): LocationConflict => ({
+const conflict = (p: 'p1' | 'p2', remote: string, changedAt?: string): LocationConflict => ({
   location: loc(p),
   conflict: {
-    kind: 'source',
     name: 'API_KEY',
     project: loc(p).project_name,
     branch: loc(p).branch,
+    type: 'changed',
     pinned: ROW_HASH,
-    yours: 'yours-fp',
-    theirs,
-    ...(changedAt === undefined ? {} : { theirs_changed_at: changedAt }),
+    local: 'local-fp',
+    remote,
   },
+  ...(changedAt === undefined ? {} : { changedAt }),
 });
 
 const found = (...conflicts: LocationConflict[]) => ({ ok: false as const, code: ERROR_CODES.SECRETS_CONFLICT, conflicts });
@@ -90,12 +90,12 @@ describe('a run that finds conflicts', () => {
     expect(text).toContain('web production');
     expect(text).toContain('api development');
     expect(text).toContain('changed since you looked in 2 locations');
-    expect(text).toContain('m mine');
-    expect(text).toContain('t theirs');
+    expect(text).toContain('l local');
+    expect(text).toContain('r remote');
     // Never a value, never a fingerprint.
     expect(text).not.toContain(VALUE);
     expect(text).not.toContain('aaaa');
-    expect(text).not.toContain('yours-fp');
+    expect(text).not.toContain('local-fp');
   });
 
   test('says when the other value was set, if the service says', () => {
@@ -113,30 +113,30 @@ describe('deciding', () => {
   const atConflicts = () => applyRunDone(running().state, found(conflict('p1', 'aaaa'), conflict('p2', 'bbbb')));
 
   test('m and t decide the location under the cursor; ↓ moves; each choice is shown on its line', () => {
-    const decided = press(atConflicts(), 'm', DOWN, 't');
+    const decided = press(atConflicts(), 'l', DOWN, 'r');
     const lines = frame(decided).split('\n');
-    expect(lines.find((l) => l.includes('web production'))).toContain('mine');
-    expect(lines.find((l) => l.includes('api development'))).toContain('theirs');
+    expect(lines.find((l) => l.includes('web production'))).toContain('local');
+    expect(lines.find((l) => l.includes('api development'))).toContain('remote');
   });
 
   test('Enter does nothing until every location is decided, and the footer offers it only then', () => {
-    const half = press(atConflicts(), 'm');
+    const half = press(atConflicts(), 'l');
     const blocked = handleKey(half, ENTER);
     expect(blocked.effect).toBeNull();
     expect(flowOf(blocked.state).step).toBe('conflicts');
     expect(frame(half)).not.toContain('enter continue');
-    expect(frame(press(half, DOWN, 't'))).toContain('enter continue');
+    expect(frame(press(half, DOWN, 'r'))).toContain('enter continue');
   });
 
   test('Enter runs again with each decision bound to the fingerprints it was made against', () => {
-    const decided = press(atConflicts(), 'm', DOWN, 't');
+    const decided = press(atConflicts(), 'l', DOWN, 'r');
     const again = handleKey(decided, ENTER);
     expect(flowOf(again.state).step).toBe('running');
     const effect = again.effect as { type: 'runSet'; request: RunRequest };
     expect(effect.type).toBe('runSet');
     expect(effect.request.decisions).toEqual({
-      'p1/production': { choice: 'mine', theirs: 'aaaa', yours: 'yours-fp' },
-      'p2/development': { choice: 'theirs', theirs: 'bbbb', yours: 'yours-fp' },
+      'p1/production': { choice: 'local', remote: 'aaaa', local: 'local-fp' },
+      'p2/development': { choice: 'remote', remote: 'bbbb', local: 'local-fp' },
     });
     // The rest of the request is what was asked the first time.
     expect(effect.request.locations.map((l) => `${l.project_id}/${l.branch}`)).toEqual(['p1/production', 'p2/development']);
@@ -144,7 +144,7 @@ describe('deciding', () => {
   });
 
   test('Esc leaves with nothing written: no effect, the list is back with the cancelled note', () => {
-    const left = handleKey(press(atConflicts(), 'm'), ESC);
+    const left = handleKey(press(atConflicts(), 'l'), ESC);
     expect(left.effect).toBeNull();
     expect(left.state.edit).toBeNull();
     expect(frame(left.state)).toContain('Cancelled');
@@ -158,7 +158,7 @@ describe('deciding', () => {
 });
 
 describe('a decision never carries over to a value it was not made against', () => {
-  const decidedBoth = () => handleKey(press(applyRunDone(running().state, found(conflict('p1', 'aaaa'), conflict('p2', 'bbbb'))), 'm', DOWN, 't'), ENTER);
+  const decidedBoth = () => handleKey(press(applyRunDone(running().state, found(conflict('p1', 'aaaa'), conflict('p2', 'bbbb'))), 'l', DOWN, 'r'), ENTER);
 
   test('the run comes back with the location moved again: that location is undecided, the unmoved one keeps its answer', () => {
     const { state } = decidedBoth();
@@ -166,8 +166,8 @@ describe('a decision never carries over to a value it was not made against', () 
     const back = applyRunDone(state, found(conflict('p1', 'cccc'), conflict('p2', 'bbbb')));
     expect(flowOf(back).step).toBe('conflicts');
     const lines = frame(back).split('\n');
-    expect(lines.find((l) => l.includes('web production'))).not.toMatch(/mine|theirs/);
-    expect(lines.find((l) => l.includes('api development'))).toContain('theirs');
+    expect(lines.find((l) => l.includes('web production'))).not.toMatch(/local|remote/);
+    expect(lines.find((l) => l.includes('api development'))).toContain('remote');
     // Not continuable until the moved one is decided again.
     expect(handleKey(back, ENTER).effect).toBeNull();
   });

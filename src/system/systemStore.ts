@@ -30,7 +30,7 @@ import { resolveOrgContext } from '../core/orgContext';
 import { resolveProjectKey } from '../crypto/keyResolver';
 import { Encryptor } from '../crypto/encryptor';
 import { SyncEngine } from '../sync/syncEngine';
-import { adoptedKeepFor, commitToServer, envBlobOf, type Changes } from '../sync/commit';
+import { adoptedKeepFor, envBlobOf, uploadChangesRereading, type Changes } from '../sync/commit';
 import {
   writeKeepCache,
   readSystemKeepFile,
@@ -206,16 +206,15 @@ function decryptStoredValue(raw: string, projectKey: string): string | null {
 }
 
 /**
- * Commit `changes` to the system store's `ctx.branch` (sync/commit.ts) and self-heal the local
- * cache. Only the changed names move: another admin's entries are never re-sent from this
- * (possibly older) snapshot, and a name another admin changed since this store was opened is a
- * `SECRETS_CONFLICT`. The pin is the store's keep as last written locally, so several writes
- * through one handle each build on the one before.
+ * Commit `changes` to the system store's `ctx.branch` through the shared upload (sync/commit.ts) and
+ * self-heal the local cache. Only the changed names move: another admin's entries are never re-sent from
+ * this (possibly older) snapshot, and the upload names the keep it was built from (`base_keep_hash`), read
+ * again once if another admin saved in between.
  */
 async function commitSystemStore(ctx: SystemStoreContext, changes: Changes): Promise<void> {
   const startKeep = readSystemKeepFile(ctx.orgId) ?? ctx.keep;
   const committed = await withAdminOnlyTranslation(() =>
-    commitToServer({
+    uploadChangesRereading({
       client: ctx.serviceClient,
       projectId: ctx.projectId,
       branch: ctx.branch,

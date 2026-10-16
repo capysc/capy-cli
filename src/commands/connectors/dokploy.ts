@@ -53,6 +53,7 @@ import {
   resolveDokployApiKey,
 } from '../../deploy/dokployApi';
 import { ConnectorMetadata, ERROR_CODES, KeepFile } from '../../types/index';
+import { isStaleBase } from '../../sync/commit';
 import { isInteractive } from '../../ui/interactive';
 import { ProjectManager } from '../../core/projectManager';
 import { FileManager } from '../../files/fileManager';
@@ -64,7 +65,6 @@ import { listOrgProjectsOrUnavailable } from '../capyCommand';
 import { commitDiscoveryChanges, defaultDiscoveryCommitBranchName, isValidDiscoveryCommitBranchName, snapshotPathStatus } from '../../git/discoveryCommit';
 import { BaseUrlStore, Unanswered, offerSaveAskedBaseUrl, realBaseUrlStoreOpener, resolveDokployBaseUrl, settingsUnanswered } from '../../deploy/dokployBaseUrl';
 import { fingerprint, writeImportedAndSync, writeImportOutcome, ResolvedContext } from './shared';
-import { isSecretsConflict } from '../../sync/commit';
 import { ConnectOpts, ConnectorModule, ConnectResult, ImportOutcome, ImportWarning, RotateResult } from './registry';
 import { discoveryProjectQuestion } from '../../ui/projectQuestions';
 import {
@@ -1899,8 +1899,8 @@ async function importIntoBranchSafe(
   try {
     await writeImportOutcome(resolvedCtx, outcome, { push: !runOpts.noPush, dryRun: false });
   } catch (err) {
-    // A conflict keeps its own code (and names the variables); anything else is the push failing.
-    return { ok: false, code: isSecretsConflict(err) ? err.code : 'DOKPLOY_PUSH_FAILED', message: err instanceof Error ? err.message : String(err) };
+    // A refused-as-stale upload keeps its own code; anything else is the push failing.
+    return { ok: false, code: isStaleBase(err) ? ERROR_CODES.SECRETS_STALE_BASE : 'DOKPLOY_PUSH_FAILED', message: err instanceof Error ? err.message : String(err) };
   }
   return outcome;
 }

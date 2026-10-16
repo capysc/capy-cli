@@ -18,7 +18,8 @@ import inquirer from 'inquirer';
 import { generateDeployHtml } from '../ui/deployPage/html';
 import { hashValue } from '../deploy/keepGate';
 import { stripTargetsForDeployId } from '../deploy/targetsGate';
-import { adoptedKeepFor, commitToServer } from '../sync/commit';
+import { uploadKeepOnly } from '../sync/commit';
+import { SyncEngine } from '../sync/syncEngine';
 import { ERROR_CODES } from '../types/index';
 import type { ProjectState } from '../types/index';
 
@@ -65,23 +66,16 @@ async function stripRevokedTargets(
       return;
     }
 
-    const { resolveProjectKey: resolveKey } = await import('../crypto/keyResolver');
-    const projectKey = await resolveKey(projectState.organizationId, projectState.projectId, userId, {
-      coDecrypt: (o, c) => serviceClient.coDecrypt(o, c).then((r) => r.plaintext),
-      wrapOuterLayer: (o, p) => serviceClient.wrapOuterLayer(o, p).then((r) => r.ciphertext),
-    });
-    // A keep-only change on the SERVER's latest (sync/commit.ts): no value moves, so nothing
-    // in this folder's `.env` can leak into the blob or revert anyone's value.
-    const committed = await commitToServer({
-      client: serviceClient,
-      projectId: projectState.projectId,
-      branch,
-      projectKey,
-      startKeep: keep,
-      changes: { set: {}, remove: [] },
-      transformKeep: (latest) => stripTargetsForDeployId(latest, deployId),
-    });
-    if (committed.result) new FileManager().writeKeepFile(adoptedKeepFor(keep, committed, branch));
+    // A keep-only change on the SERVER's latest, through the shared keep-only upload (sync/commit.ts): no value
+    // moves, so nothing in this folder's `.env` can leak into the blob or revert anyone's value.
+    const done = await uploadKeepOnly(serviceClient, projectState.projectId, branch, (latest) => stripTargetsForDeployId(latest, deployId));
+    if (!done.ok) {
+      console.error(`  \x1b[33m!\x1b[0m could not strip revoked deploy targets in keep.lock: ${done.code}`);
+      return;
+    }
+    if (done.pushed) {
+      new FileManager().writeKeepFile(SyncEngine.spliceKeepBranch(keep, SyncEngine.adoptServerKeep(done.serverKeepFile, done.keep, branch), branch));
+    }
   } catch (err: any) {
     console.error(`  \x1b[33m!\x1b[0m could not strip revoked deploy targets in keep.lock: ${err?.message ?? err}`);
   }

@@ -35,10 +35,9 @@
  *     env blob is the server's OWN blob passed through unchanged;
  *   - a variable that was never synced at all NEVER appears in what gets pushed, in
  *     CI mode AND direct mode (the drift bug lived in the SHARED `pushKeepTransform`).
- *     An unpushed local `.env` edit to a variable being delivered is never delivered
- *     unasked and never saved unasked (CAP-717, strict): off a terminal the deploy is
- *     refused with `DEPLOY_UNSAVED_CHANGES` (exit 3) and nothing is pushed (the keep-only
- *     record itself never rebuilds the blob from `.env`);
+ *     (An unpushed local `.env` edit is a difference bare `capy` settles BEFORE a deploy
+ *     starts: tests/sync/gate.test.ts and tests/commands/gateFirst.test.ts. The keep-only
+ *     record itself never rebuilds the blob from `.env`.);
  *   - the user's local keep.lock / `.env` / git tree are BYTE-IDENTICAL
  *     before and after a CI-mode run (asserted directly, not inferred from
  *     an absence of git-status noise);
@@ -73,6 +72,10 @@ import { join } from 'path';
 import { tmpdir } from 'os';
 import { SyncEngine } from '../../src/sync/syncEngine';
 import { agreeingDecryptData, fixedKeyResolver } from '../helpers/deployServer';
+import { stubbedGate } from '../helpers/gateMock';
+
+// Bare `capy` (a deploy's first step) is tested in tests/sync/gate.test.ts and tests/commands/gateFirst.test.ts.
+mock.module('../../src/sync/gate', () => stubbedGate());
 
 // Declared before the mocks below (which close over them) — every binding
 // here is fully initialized before any test() callback runs, so the mocked
@@ -439,42 +442,6 @@ describe('capy deploy — server-side target recording (CAP-687)', () => {
     expect(after.headSha).toBe(before.headSha);
     expect(after.status).toBe('');
     expect(after.stash).toBe('');
-  }, 30_000);
-
-  /** Whether any request the scripted Dokploy fetch saw wrote the service's env. */
-  const wroteEnv = (fetchMock: ReturnType<typeof mock>): boolean =>
-    fetchMock.mock.calls.some(([url]) => new URL(String(url)).pathname.endsWith('application.saveEnvironment'));
-
-  /** Everything printed (stdout and stderr), flattened: the sentinel scan reads this. */
-  const printed = (...mocks: readonly ReturnType<typeof mock>[]): string => mocks.flatMap((m) => m.mock.calls.map((c) => c.map(String).join(' '))).join('\n');
-
-  // CAP-717, strict: an unsaved edit is never delivered and never saved unasked. Off a terminal the deploy is refused
-  // (exit 3, DEPLOY_UNSAVED_CHANGES, names only); nothing is pushed to Capy, nothing reaches Dokploy, no PR, and the
-  // folder is byte-identical. (The terminal "save and deploy?" path is in deployConflicts.test.ts.)
-  test.each([
-    ['dokploy-ci', { yes: true }],
-    ['dokploy-direct', { yes: true, noDeploy: true }],
-  ] as const)('%s: an unpushed local `.env` edit is REFUSED off a terminal (exit 3, DEPLOY_UNSAVED_CHANGES, names only): nothing pushed to Capy, nothing written to Dokploy, the folder untouched', async (targetName, options) => {
-    setUpRepo();
-    process.chdir(REPO);
-    // The server agrees with local keep.lock, but local `.env` has moved on: an EDITED value for the tracked var,
-    // plus a variable that was never synced (it is not in `target.vars`/keep.lock).
-    writeServerSnapshot('main');
-    writeFileSync(join(REPO, '.env'), 'STRIPE_KEY=new-unpushed-value\nUNPUSHED_OTHER=stray\n');
-    const before = snapshotWorkingTree();
-
-    const fetchMock = dokployFetchMock({ stripeKeyValue: 'new-unpushed-value' });
-    const errors = mock((..._a: unknown[]) => {});
-    const logs = mock((..._a: unknown[]) => {});
-    const code = await runScriptedDeploy(targetName, fetchMock, options, errors, logs);
-
-    expect(code).toBe(3);
-    expect(pushSecretsMock).not.toHaveBeenCalled();
-    expect(wroteEnv(fetchMock)).toBe(false);
-    expect(JSON.parse(String(logs.mock.calls[0][0]))).toEqual({ ok: false, code: 'DEPLOY_UNSAVED_CHANGES', names: ['STRIPE_KEY'] });
-    expect(printed(errors, logs)).not.toContain('new-unpushed-value');
-    expect(printed(errors, logs)).not.toContain('stray');
-    expect(snapshotWorkingTree()).toEqual(before);
   }, 30_000);
 
   // The properties the old drift tests also held, now with a folder that agrees with Capy (the lazy fixture fixed:

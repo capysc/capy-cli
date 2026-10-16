@@ -8,13 +8,19 @@
  * (the keep.lock hash), so clones on the old keep.lock keep getting the old
  * value until they pull the merged PR.
  *
- * HOW A LOCATION IS PUSHED, with no project folder: the same sequence the org
- * system store uses (system/systemStore.ts) and `capy edit` uses — resolve the
- * project key, fetch the branch's blob + keep from the service, change only
- * this variable, push with the keep update through the same `pushSecrets`
- * route, `writeKeepCache`. Every OTHER variable's line in the blob is carried
- * over byte for byte (it is never decrypted and re-encrypted), so a push
- * touches this one variable and nothing else. Each branch is its own push.
+ * HOW A LOCATION IS PUSHED, with no project folder: the shared upload every
+ * write uses (sync/commit.ts `uploadChanges`) — resolve the project key, read the
+ * branch's blob + keep from the service, change only this variable, push with the
+ * keep update and `base_keep_hash` through the same `pushSecrets` route,
+ * `writeKeepCache`. Every OTHER variable's line in the blob is carried over byte
+ * for byte (it is never decrypted and re-encrypted), so a push touches this one
+ * variable and nothing else. Each branch is its own push.
+ *
+ * WHEN A LOCATION MOVED (docs/conflict-resolution.md, "Commands with no folder"):
+ * `compareSecrets` over the fingerprint the row listed (pinned), the new value
+ * (local) and what the location holds now (remote). Unchanged since the row was
+ * listed: written. Moved: written only as the person answered (`local` writes,
+ * `remote` leaves it), and an answer holds only for the state it was made against.
  *
  * HOW A REPO IS UPDATED: one PR on the repo's default branch through
  * keepLockPr's `openKeepLockPullRequest` (blob per keep.lock, one tree, one
@@ -27,12 +33,10 @@
  * Locations and repos fail independently. A failure is a code, never a message,
  * and nothing here ever prints, returns or throws the value or any hash of it.
  */
-import { FileManager } from '../files/fileManager';
-import { Encryptor } from '../crypto/encryptor';
-import { deriveResourceId } from '../crypto/resourceId';
 import { SyncEngine } from '../sync/syncEngine';
-import { isStaleBase } from '../sync/commit';
+import { UploadIo, envBlobOf, isStaleBase, snapshotFrom, uploadChanges } from '../sync/commit';
 import type { SourceConflict } from '../sync/conflicts';
+import { BoundAnswer, actionFor, holdsFor, movedRow } from '../sync/noFolder';
 import { hashValue } from '../deploy/keepGate';
 import type { EditSaveRecord } from '../deploy/keepGate';
 import { writeKeepCache } from '../config/globalConfig';
@@ -94,11 +98,13 @@ export interface SetRequest {
   /** Each repo's PR base, by `repoKey`. Absent: the repo's default branch. */
   readonly bases?: Readonly<Record<string, string>>;
   /**
-   * The fingerprints a location's current value may have for this push to go on (CAP-717): what the caller
-   * saw and decided against. A location holding anything else was changed by someone else since, and is
-   * `failed` with `SECRETS_CONFLICT` (nothing pushed to it). Absent: the location is not checked.
+   * The fingerprint each location's row listed, by `locationKeyOf` (CAP-717): what the person was shown. A location
+   * that holds something else now (and not the new value) moved since, and is written only as `answers` say.
+   * Absent: the location is not compared.
    */
-  readonly allowed?: (location: SetLocation) => readonly string[];
+  readonly shown?: Readonly<Record<string, string>>;
+  /** The answers for locations that moved, by `locationKeyOf`, each bound to the state it was made against. */
+  readonly answers?: Readonly<Record<string, BoundAnswer>>;
   /** The run's key resolver, when the caller already unlocked (the unlock is once per run). Absent: opened here. */
   readonly keys?: KeyResolver;
 }
@@ -284,14 +290,6 @@ type LocationOutcome =
   | { readonly kind: 'unchanged'; readonly location: SetLocation }
   | { readonly kind: 'failed'; readonly location: SetLocation; readonly code: string };
 
-/** What a branch holds right now: its blob lines (kept verbatim), the server's keep, and the current plaintext of `name`. */
-interface Current {
-  readonly lines: readonly string[];
-  readonly serverKeep: KeepFile;
-  readonly index: number;
-  readonly plaintext: string;
-}
-
 function parseKeepJson(raw: string | undefined): KeepFile | undefined {
   if (raw === undefined || raw === '') return undefined;
   try {
@@ -304,19 +302,7 @@ function parseKeepJson(raw: string | undefined): KeepFile | undefined {
   }
 }
 
-const lineIndexOf = (lines: readonly string[], name: string): number =>
-  lines.findIndex((l) => l.startsWith(`${name}=`));
-
 type Tried<T> = { readonly ok: true; readonly value: T } | { readonly ok: false; readonly error: unknown };
-
-/** `f()` as a result instead of a throw. */
-function attempt<T>(f: () => T): Tried<T> {
-  try {
-    return { ok: true, value: f() };
-  } catch (error) {
-    return { ok: false, error };
-  }
-}
 
 const settled = <T>(promise: Promise<T>): Promise<Tried<T>> =>
   promise.then(
@@ -324,28 +310,44 @@ const settled = <T>(promise: Promise<T>): Promise<Tried<T>> =>
     (error: unknown): Tried<T> => ({ ok: false, error }),
   );
 
-type Fetched = Awaited<ReturnType<SetEnv['client']['getDecryptData']>>;
-
-/** What a branch holds, from its fetched data: blob lines (kept verbatim), the server's keep, and the plaintext of `name`. Throws a coded `CapyError`; the value is never in what it throws. */
-function currentFrom(data: Fetched, name: string, projectKey: string): Current {
-  const lines = (data.env_content ?? '').split('\n').filter((l) => l.trim().length > 0);
-  const serverKeep = parseKeepJson(data.keep_file);
-  if (serverKeep === undefined) throw new CapyError('keep.lock unavailable', ERROR_CODES.NO_KEEP_FILE);
-  const index = lineIndexOf(lines, name);
-  if (index === -1) throw new CapyError('variable not found', ERROR_CODES.VARIABLE_NOT_FOUND);
-  const raw = lines[index].slice(name.length + 1);
-  const plaintext = new FileManager().decryptValue(raw, projectKey);
-  return { lines, serverKeep, index, plaintext };
-}
-
 const withRate = <R>(result: R, rate: RateInfo | undefined): PoolItem<R> => ({ result, ...(rate === undefined ? {} : { rate }) });
 const failedItem = (location: SetLocation, err: unknown, rate?: RateInfo): PoolItem<LocationOutcome> =>
   withRate<LocationOutcome>({ kind: 'failed', location, code: codeOf(err) }, rate);
 
+/** A call that failed, with the rate-limit reading it saw: how the bulk transport reports it through the shared upload. */
+class RatedFailure extends Error {
+  constructor(
+    readonly error: unknown,
+    readonly rate: RateInfo | undefined,
+  ) {
+    super('rated failure');
+  }
+}
+
+/** The error a failure carries (a transport failure wraps the real one), and its reading. */
+const unwrapped = (err: unknown): { readonly error: unknown; readonly rate: RateInfo | undefined } =>
+  err instanceof RatedFailure ? { error: err.error, rate: err.rate } : { error: err, rate: undefined };
+
+/** The shared upload's transport for the bulk writes: every call reads the rate-limit headers and waits out a 429. */
+function bulkIo(env: SetEnv, loc: SetLocation, projectKey: string): UploadIo {
+  return {
+    read: async () => {
+      const read = await callWithBackoff((onRate) => env.client.getDecryptData(loc.project_id, loc.branch, undefined, true, onRate), env.sleep);
+      if (!read.ok) throw new RatedFailure(read.error, read.rate);
+      return { snapshot: snapshotFrom(read.value, loc.branch, projectKey), rate: read.rate };
+    },
+    push: async (keepFile, envBlob, baseKeepHash) => {
+      const pushed = await callWithBackoff((onRate) => env.client.pushSecrets(loc.project_id, keepFile, envBlob, loc.branch, onRate, baseKeepHash), env.sleep);
+      if (!pushed.ok) throw new RatedFailure(pushed.error, pushed.rate);
+      return { result: pushed.value, rate: pushed.rate };
+    },
+  };
+}
+
 /**
- * One location: read the current branch, replace `name`, push, write the cache. Never throws; reports the rate-limit
- * reading it saw. The push names the keep it was built from (`base_keep_hash`); if the server says someone saved
- * since the read (`SECRETS_STALE_BASE`), the location is read and replaced once more from the new latest.
+ * One location: read the current branch, replace `name`, push (the shared upload, with `base_keep_hash`), write the
+ * cache. Never throws; reports the rate-limit reading it saw. If the server says someone saved since the read
+ * (`SECRETS_STALE_BASE`), the location is read and compared once more from the new latest.
  */
 async function pushLocation(
   env: SetEnv,
@@ -353,55 +355,67 @@ async function pushLocation(
   loc: SetLocation,
   name: string,
   value: string,
-  allowed?: (location: SetLocation) => readonly string[],
+  check: { readonly shown?: string; readonly answer?: BoundAnswer },
   retried: boolean = false,
 ): Promise<PoolItem<LocationOutcome>> {
   const key = await settled(keys(loc.project_id));
   if (!key.ok) return failedItem(loc, key.error);
-  const read = await callWithBackoff((onRate) => env.client.getDecryptData(loc.project_id, loc.branch, undefined, true, onRate), env.sleep);
-  if (!read.ok) return failedItem(loc, read.error, read.rate);
-  const current = attempt(() => currentFrom(read.value, name, key.value));
-  if (!current.ok) return failedItem(loc, current.error, read.rate);
-  if (current.value.plaintext === value) return withRate<LocationOutcome>({ kind: 'unchanged', location: loc }, read.rate);
-  // Someone else changed it since the caller looked (or again, since it decided): not overwritten.
-  if (allowed !== undefined && !allowed(loc).includes(hashValue(current.value.plaintext))) {
-    return failedItem(loc, new CapyError('changed since it was read', ERROR_CODES.SECRETS_CONFLICT), read.rate);
+  const io = bulkIo(env, loc, key.value);
+  const read = await settled(io.read());
+  if (!read.ok) {
+    const failure = unwrapped(read.error);
+    return failedItem(loc, failure.error, failure.rate);
+  }
+  const { snapshot, rate: readRate } = read.value;
+  const entry = snapshot.entries[name];
+  if (entry?.plaintext === value) return withRate<LocationOutcome>({ kind: 'unchanged', location: loc }, readRate);
+  if (snapshot.keep === undefined) return failedItem(loc, new CapyError('keep.lock unavailable', ERROR_CODES.NO_KEEP_FILE), readRate);
+  if (entry !== undefined && entry.plaintext === undefined) return failedItem(loc, new CapyError('variable not readable', ERROR_CODES.PERMISSION_DENIED), readRate);
+
+  // Someone else changed it since the person looked: not overwritten unless they answered, against exactly this state.
+  const moved =
+    check.shown === undefined
+      ? undefined
+      : movedRow({
+          name,
+          project: loc.project_name,
+          branch: loc.branch,
+          shown: check.shown,
+          local: hashValue(value),
+          remote: entry?.hash,
+          serverKeepHash: SyncEngine.computeKeepHash(snapshot.keep, loc.branch),
+        });
+  if (moved !== undefined) {
+    if (!holdsFor(check.answer, moved)) return failedItem(loc, new CapyError('changed since it was read', ERROR_CODES.SECRETS_CONFLICT), readRate);
+    const action = attemptAction(check.answer.choice);
+    if (!action.ok) return failedItem(loc, action.error, readRate);
+    if (action.value === 'leave') return withRate<LocationOutcome>({ kind: 'unchanged', location: loc }, readRate);
   }
 
-  const write = attempt(() => {
-    const existing = current.value.serverKeep.variables[name]?.find((e) => e.branch === loc.branch);
-    const resourceId = existing?.resource_id ?? deriveResourceId(loc.branch, name);
-    const newLine = `${name}=capy:${resourceId}:${Encryptor.encrypt(value, key.value)}`;
-    return {
-      envBlob: current.value.lines.map((l, i) => (i === current.value.index ? newLine : l)).join('\n'),
-      merged: new SyncEngine().mergeWithKeep(
-        current.value.serverKeep,
-        { [name]: { resource_id: resourceId, value_hash: hashValue(value) } },
-        loc.branch,
-      ),
-    };
-  });
-  if (!write.ok) return failedItem(loc, write.error, read.rate);
-
-  const pushed = await callWithBackoff(
-    (onRate) =>
-      env.client.pushSecrets(
-        loc.project_id,
-        JSON.stringify(write.value.merged),
-        write.value.envBlob,
-        loc.branch,
-        onRate,
-        SyncEngine.computeKeepHash(current.value.serverKeep, loc.branch),
-      ),
-    env.sleep,
+  const uploaded = await settled(
+    uploadChanges({
+      client: env.client,
+      projectId: loc.project_id,
+      branch: loc.branch,
+      projectKey: key.value,
+      startKeep: snapshot.keep,
+      changes: { set: { [name]: value }, remove: [] },
+      seen: snapshot,
+      io,
+    }),
   );
-  if (!pushed.ok && !retried && isStaleBase(pushed.error)) return pushLocation(env, keys, loc, name, value, allowed, true);
-  const rate = mergeRates(read.rate, pushed.rate, (env.now ?? Date.now)());
-  if (!pushed.ok) return failedItem(loc, pushed.error, rate);
+  if (!uploaded.ok) {
+    if (!retried && isStaleBase(unwrapped(uploaded.error).error)) return pushLocation(env, keys, loc, name, value, check, true);
+    const failure = unwrapped(uploaded.error);
+    return failedItem(loc, failure.error, mergeRates(readRate, failure.rate, (env.now ?? Date.now)()));
+  }
+  const rate = mergeRates(readRate, uploaded.value.rates.push, (env.now ?? Date.now)());
+  const pushedResult = uploaded.value.result;
+  if (pushedResult === undefined) return failedItem(loc, new CapyError('nothing was pushed', ERROR_CODES.SERVICE_ERROR), rate);
 
-  const done = attempt(() => {
-    env.writeCache(env.orgId, loc.project_id, pushed.value.keep_hash, write.value.envBlob);
-    const adopted = SyncEngine.adoptServerKeep(pushed.value.keep_file, write.value.merged, loc.branch);
+  const done = attemptSync(() => {
+    env.writeCache(env.orgId, loc.project_id, pushedResult.keep_hash, envBlobOf(uploaded.value.lines));
+    const adopted = SyncEngine.adoptServerKeep(pushedResult.keep_file, uploaded.value.keep, loc.branch);
     return { adopted, entry: adopted.variables[name]?.find((e) => e.branch === loc.branch) };
   });
   if (!done.ok) return failedItem(loc, done.error, rate);
@@ -413,46 +427,61 @@ async function pushLocation(
   );
 }
 
+/** `f()` as a result instead of a throw. */
+function attemptSync<T>(f: () => T): Tried<T> {
+  try {
+    return { ok: true, value: f() };
+  } catch (error) {
+    return { ok: false, error };
+  }
+}
+
+const attemptAction = (choice: Parameters<typeof actionFor>[0]): Tried<ReturnType<typeof actionFor>> => attemptSync(() => actionFor(choice));
+
 export interface LocationPreview {
   readonly action: 'update' | 'unchanged';
   readonly serverKeep: KeepFile | undefined;
-  /** What the location holds now, as fingerprints (never the value); absent when it could not be read. */
-  readonly current?: { readonly hash: string; readonly serverKeepHash: string; readonly changedAt?: string };
+  /** What the location holds now, as fingerprints (never the value); absent when it could not be read. `hash` is absent when the location no longer has the variable. */
+  readonly current?: { readonly hash: string | undefined; readonly serverKeepHash: string; readonly changedAt?: string };
 }
 
-/** A location in conflict: its value was changed by someone else since the caller looked (CAP-717, CAP-714). */
+/** A location whose value moved since its row was listed (CAP-717): the row `compareSecrets` gives, and when Capy's value last changed. */
 export interface LocationConflict {
   readonly location: SetLocation;
   readonly conflict: SourceConflict;
+  readonly changedAt?: string;
 }
 
-/** The identity a decision for a location is kept under. */
+/** The identity an answer for a location is kept under. */
 export const locationKeyOf = (l: Pick<SetLocation, 'project_id' | 'branch'>): string => `${l.project_id}/${l.branch}`;
 
 /**
- * The conflict at `loc`, if any: the location holds neither the value being set (`yours`) nor the one its row listed
- * (`seen`), so someone else changed it since the caller looked. Fingerprints only. `undefined` when the location could
- * not be read (nothing known to conflict with) or holds one of the two.
+ * The locations whose value moved since their row was listed, and what they hold now: `shown` is each row's
+ * fingerprint by `locationKeyOf`, `previews` are the reads of `locations`, in order. A location that could not be
+ * read has nothing known to compare. Fingerprints only.
  */
-export function secretLocationConflict(
+export function movedLocations(
   name: string,
-  yours: string,
-  seen: string,
-  loc: SetLocation,
-  preview: LocationPreview | undefined,
-): SourceConflict | undefined {
-  const current = preview?.current;
-  if (current === undefined || current.hash === yours || current.hash === seen) return undefined;
-  return {
-    kind: 'source',
-    name,
-    project: loc.project_name,
-    branch: loc.branch,
-    pinned: seen,
-    yours,
-    theirs: current.hash,
-    ...(current.changedAt === undefined ? {} : { theirs_changed_at: current.changedAt }),
-  };
+  value: string,
+  locations: readonly SetLocation[],
+  shown: Readonly<Record<string, string>>,
+  previews: readonly LocationPreview[],
+): readonly LocationConflict[] {
+  return locations.flatMap((location, i): LocationConflict[] => {
+    const current = previews[i]?.current;
+    const was = shown[locationKeyOf(location)];
+    if (current === undefined || was === undefined) return [];
+    const conflict = movedRow({
+      name,
+      project: location.project_name,
+      branch: location.branch,
+      shown: was,
+      local: hashValue(value),
+      remote: current.hash,
+      serverKeepHash: current.serverKeepHash,
+    });
+    return conflict === undefined ? [] : [{ location, conflict, ...(current.changedAt === undefined ? {} : { changedAt: current.changedAt }) }];
+  });
 }
 
 const UNKNOWN_PREVIEW: LocationPreview = { action: 'update', serverKeep: undefined };
@@ -470,19 +499,21 @@ async function previewItem(
   const read = await callWithBackoff((onRate) => env.client.getDecryptData(loc.project_id, loc.branch, undefined, true, onRate), env.sleep);
   if (!read.ok) return withRate(UNKNOWN_PREVIEW, read.rate);
   if (key === undefined || !key.ok) return withRate({ action: 'update', serverKeep: parseKeepJson(read.value.keep_file) }, read.rate);
-  const current = attempt(() => currentFrom(read.value, name, key.value));
+  const snapshot = attemptSync(() => snapshotFrom(read.value, loc.branch, key.value));
+  const serverKeep = snapshot.ok ? snapshot.value.keep : undefined;
+  const entry = snapshot.ok ? snapshot.value.entries[name] : undefined;
   return withRate<LocationPreview>(
-    current.ok
-      ? {
-          action: current.value.plaintext === value ? 'unchanged' : 'update',
-          serverKeep: current.value.serverKeep,
+    serverKeep === undefined || (entry !== undefined && entry.plaintext === undefined)
+      ? UNKNOWN_PREVIEW
+      : {
+          action: entry?.plaintext === value ? 'unchanged' : 'update',
+          serverKeep,
           current: {
-            hash: hashValue(current.value.plaintext),
-            serverKeepHash: SyncEngine.computeKeepHash(current.value.serverKeep, loc.branch),
-            changedAt: current.value.serverKeep.variables[name]?.find((e) => e.branch === loc.branch)?.changed_at,
+            hash: entry?.hash,
+            serverKeepHash: SyncEngine.computeKeepHash(serverKeep, loc.branch),
+            changedAt: serverKeep.variables[name]?.find((e) => e.branch === loc.branch)?.changed_at,
           },
-        }
-      : UNKNOWN_PREVIEW,
+        },
     read.rate,
   );
 }
@@ -647,7 +678,11 @@ export async function runSecretSet(req: SetRequest, env: SetEnv, hooks: RunHooks
   const pushed = await runPool({
     items: req.locations,
     limit: LOCATION_CONCURRENCY,
-    run: (loc) => pushLocation(env, keys, loc, req.name, req.value, req.allowed),
+    run: (loc) =>
+      pushLocation(env, keys, loc, req.name, req.value, {
+        shown: req.shown?.[locationKeyOf(loc)],
+        answer: req.answers?.[locationKeyOf(loc)],
+      }),
     stop: hooks.stopPushes,
     reserve: PACING_RESERVE,
     now: env.now,

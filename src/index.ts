@@ -10,6 +10,7 @@ import { version as CLI_VERSION } from '../package.json';
 import { refuseWebMode } from './core/webModeRemoved';
 import { ACCENT } from './ui/colors';
 import { conflictOption, rawConflictFlagsOf, resolveOption } from './sync/conflicts';
+import { answersByProtocol } from './sync/gate';
 
 // Prod talks to api.capy.sc and ~/.capy, full stop. Strip the environment's
 // attempts to move it before anything can read them — see config/prodPins.ts
@@ -99,6 +100,8 @@ program
       force: options.force,
       dryRun: options.dryRun,
       conflictFlags: rawConflictFlagsOf(cmd),
+      // Off a terminal, under --dry-run, or given --resolve nobody can answer the menu: the flags do (CAP-717).
+      protocol: answersByProtocol({ conflictFlags: rawConflictFlagsOf(cmd), dryRun: options.dryRun === true }),
     };
 
     const command = new CapyCommand(cliOptions);
@@ -333,9 +336,8 @@ program
 
 program
   .command('push')
-  // COPY-FLAG: names what a push covers, deletions included.
-  .description('Push your changes to Keep: edited, new and deleted variables')
-  .option('--non-tty', 'treat stdin as not a terminal; a conflict stops the push with the conflict_id (agents/CI)')
+  .description('Push encrypted values to Keep')
+  .option('--non-tty', 'treat stdin as not a terminal; differences from Capy stop the push with the conflict_id (agents/CI)') // COPY-FLAG
   .addOption(resolveOption())
   .addOption(conflictOption())
   .action(async (options, command) => {

@@ -33,6 +33,10 @@
  * repo behind it) for reasons unrelated to the property being tested.
  */
 import { describe, test, expect, mock, spyOn, beforeEach, afterEach } from 'bun:test';
+import { stubbedGate } from '../helpers/gateMock';
+
+// Bare `capy` (a deploy's first step) is tested in tests/sync/gate.test.ts and tests/commands/gateFirst.test.ts.
+mock.module('../../src/sync/gate', () => stubbedGate());
 
 mock.module('../../src/auth/authService', () => ({
   AuthService: class {
@@ -45,8 +49,7 @@ mock.module('../../src/auth/authService', () => ({
   },
   silentAuthFailureMessage: () => 'auth failed',
 }));
-// CAP-717: a deploy compares the values it delivers with Capy's latest before it writes, so the server answers
-// (in agreement with the folder: nothing here is about conflicts).
+// The server answers in agreement with the folder (the keep-only record writes read it).
 mock.module('../../src/service/serviceClient', () => ({
   ServiceClient: class {
     setTokenProvider() {}

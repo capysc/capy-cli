@@ -43,8 +43,6 @@ ISOLATED_FILES=(
   tests/commands/deployDokploySystemStoreToken.test.ts
   tests/commands/deployCiChangeGate.test.ts
   tests/commands/deployCiTargetsRecord.test.ts
-  tests/commands/deployConflicts.test.ts
-  tests/commands/rotateConflicts.test.ts
   tests/commands/deployTargetConflict.test.ts
   tests/commands/deployRevokeWiring.test.ts
   tests/commands/deployDirectModeTiming.test.ts
@@ -65,6 +63,12 @@ ISOLATED_FILES=(
   tests/commands/localOnlyFlow.test.ts
   tests/ui/secretsScreenSearchHashing.test.ts
   tests/commands/rotatePromotesThenRotates.test.ts
+  tests/commands/rotateRefusals.test.ts
+  tests/commands/removeCommand.test.ts
+  tests/commands/connectDokploy.test.ts
+  tests/commands/gateFirst.test.ts
+  tests/commands/bareCapyCommit.test.ts
+  tests/commands/deployGate.test.ts
   tests/system/systemStore.test.ts
   tests/system/systemStoreFreshStore.test.ts
   tests/commands/systemCommand.test.ts

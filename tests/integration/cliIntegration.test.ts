@@ -134,6 +134,56 @@ DEBUG=true`;
   });
 
   describe('Sync Engine Integration', () => {
+    test('should correctly compare local and remote environments', () => {
+      const localEnv = {
+        LOCAL_ONLY: 'local_value',
+        CONFLICT_VAR: 'local_conflict',
+        SAME_VAR: 'same_value'
+      };
+
+      const remoteEnv = {
+        REMOTE_ONLY: 'remote_value',
+        CONFLICT_VAR: 'remote_conflict',
+        SAME_VAR: 'same_value'
+      };
+
+      const changeSet = syncEngine.compareEnvironments(localEnv, remoteEnv);
+
+      expect(changeSet.newLocal).toHaveLength(1);
+      expect(changeSet.newLocal[0].name).toBe('LOCAL_ONLY');
+      
+      expect(changeSet.newRemote).toHaveLength(1);
+      expect(changeSet.newRemote[0].name).toBe('REMOTE_ONLY');
+      
+      expect(changeSet.conflicts).toHaveLength(1);
+      expect(changeSet.conflicts[0].name).toBe('CONFLICT_VAR');
+      
+      expect(changeSet.unchanged).toHaveLength(1);
+      expect(changeSet.unchanged[0].name).toBe('SAME_VAR');
+    });
+
+    test('should apply user decisions correctly', () => {
+      const localEnv = { LOCAL_VAR: 'local' };
+      const remoteEnv = { REMOTE_VAR: 'remote', CONFLICT: 'remote_val' };
+      
+      const decisions = {
+        pushVariables: ['LOCAL_VAR'],
+        pullVariables: ['REMOTE_VAR'],
+        keepLocal: [],
+        keepRemote: ['CONFLICT'],
+        deleteLocal: [],
+      deleteRemote: []
+      };
+
+      const result = syncEngine.applyDecisions(localEnv, remoteEnv, decisions);
+
+      expect(result).toEqual({
+        LOCAL_VAR: 'local',
+        REMOTE_VAR: 'remote',
+        CONFLICT: 'remote_val'
+      });
+    });
+
     test('should merge keep file with pushed variables', () => {
       const originalKeep: KeepFile = {
         version: '3.0',
@@ -159,6 +209,44 @@ DEBUG=true`;
       expect(updatedKeep.variables.EXISTING_VAR[0].resource_id).toBe('res_updated');
     });
 
+    test('should validate user decisions correctly', () => {
+      const changeSet = {
+        newLocal: [{ name: 'LOCAL_VAR', value: 'val', source: 'local' as const, encrypted: false }],
+        newRemote: [{ name: 'REMOTE_VAR', value: 'val', source: 'remote' as const, encrypted: true }],
+        conflicts: [{ name: 'CONFLICT_VAR', localValue: 'local', remoteValue: 'remote' }],
+        unchanged: [],
+        deleted: [],
+        deletedLocal: []
+      };
+
+      // Valid decisions
+      const validDecisions = {
+        pushVariables: ['LOCAL_VAR'],
+        pullVariables: ['REMOTE_VAR'],
+        keepLocal: ['CONFLICT_VAR'],
+        keepRemote: [],
+        deleteLocal: [],
+      deleteRemote: []
+      };
+
+      const validErrors = syncEngine.validateDecisions(validDecisions, changeSet);
+      expect(validErrors).toHaveLength(0);
+
+      // Invalid decisions
+      const invalidDecisions = {
+        pushVariables: ['INVALID_VAR'],
+        pullVariables: ['REMOTE_VAR'],
+        keepLocal: ['CONFLICT_VAR'],
+        keepRemote: ['CONFLICT_VAR'], // Duplicate conflict resolution
+        deleteLocal: [],
+      deleteRemote: []
+      };
+
+      const invalidErrors = syncEngine.validateDecisions(invalidDecisions, changeSet);
+      expect(invalidErrors.length).toBeGreaterThan(0);
+      expect(invalidErrors).toContain('Cannot push INVALID_VAR: not a new local variable, conflict, or deleted variable');
+      expect(invalidErrors).toContain('Duplicate conflict resolutions detected');
+    });
   });
 
   describe('Error Handling Integration', () => {
@@ -183,6 +271,32 @@ DEBUG=true`;
       expect(() => projectManager.readKeepFile()).toThrow(CapyError);
     });
 
+    test('should generate proper error messages for sync failures', () => {
+      const changeSet = {
+        newLocal: [],
+        newRemote: [],
+        conflicts: [],
+        unchanged: [],
+        deleted: [],
+        deletedLocal: []
+      };
+      
+      const decisions = {
+        pushVariables: [],
+        pullVariables: [],
+        keepLocal: [],
+        keepRemote: [],
+        deleteLocal: [],
+      deleteRemote: []
+      };
+      
+      const errors = ['Network timeout', 'Permission denied'];
+      
+      const syncResult = syncEngine.generateSyncResult(changeSet, decisions, errors);
+      
+      expect(syncResult.success).toBe(false);
+      expect(syncResult.errors).toEqual(errors);
+    });
   });
 
   describe('Project Name Generation Integration', () => {

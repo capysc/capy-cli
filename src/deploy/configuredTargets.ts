@@ -17,6 +17,7 @@
 import type { TargetConfig } from './adapter';
 import type { KeepFile, KeepVariableEntry, TargetDelivery } from '../types/index';
 import { readFileAtRef, repoRelPath, resolveDefaultBranch } from './git';
+import { uploadKeepOnly } from '../sync/commit';
 
 /** Where `.capy/deploy.json` sits relative to the project folder (same place `deployConfigPath` points). */
 const DEPLOY_CONFIG_REL = '.capy/deploy.json';
@@ -151,24 +152,10 @@ async function recordBranch(
   targets: readonly TargetConfig[],
   branch: string,
 ): Promise<number> {
-  try {
-    const latest = await input.client.getLatestSecrets(input.projectId, branch);
-    const keep = latest?.keep_file ? parseKeep(latest.keep_file) : undefined;
-    if (!latest || !keep) return 0;
-    const missing = missingTargetRecords(targets, keep, branch);
-    if (missing.length === 0) return 0;
-    await input.client.pushSecrets(input.projectId, JSON.stringify(withPlaceholderRecords(keep, branch, missing)), latest.env_file, branch, undefined, latest.keep_hash);
-    return missing.length;
-  } catch {
-    return 0;
-  }
+  // The shared keep-only upload (sync/commit.ts): the server's own keep and blob, `base_keep_hash`, one retry if stale.
+  const done = await uploadKeepOnly(input.client, input.projectId, branch, (keep) =>
+    withPlaceholderRecords(keep, branch, missingTargetRecords(targets, keep, branch)),
+  );
+  return done.ok && done.pushed ? missingTargetRecords(targets, done.previous, branch).length : 0;
 }
 
-function parseKeep(raw: string): KeepFile | undefined {
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    return isRecord(parsed) && isRecord(parsed.variables) ? (parsed as unknown as KeepFile) : undefined;
-  } catch {
-    return undefined;
-  }
-}

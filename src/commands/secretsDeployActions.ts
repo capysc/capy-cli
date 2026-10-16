@@ -3,12 +3,12 @@
 // (deploy/batchDeploy.ts), so the two cannot drift. Neither ever rejects: a failure comes
 // back as a code.
 //
-// CONFLICTS (CAP-714): on a platform whose live values can be read (Dokploy), `run` first reads every
-// target and compares it with what Capy last delivered. A variable someone changed on the service
-// outside Capy comes back as a conflict, with nothing written; the screen asks mine or theirs for
-// each and runs again with the decisions. A decision is used only where the live value is still the
-// one it was made against, otherwise the conflict comes back. Mine delivers Capy's value; theirs
-// leaves the service's value and records nothing for it.
+// PLATFORM VALUES (docs/conflict-resolution.md): on a platform whose live values can be read (Dokploy), `run`
+// first reads every target and compares it with what Capy last delivered. A variable someone changed on the
+// service outside Capy comes back as a row, with nothing written; the screen asks for each (`local` delivers
+// Capy's value, `remote` leaves the service's value and records nothing for it) and runs again with the
+// answers. An answer is used only where the live value is still the one it was made against, otherwise the row
+// comes back. Values read from Capy are never written back, so there is no folder-side comparison here.
 //
 // DRY RUN (`capy --dry-run secrets`): `loadPlan` only READS (GitHub's default branch and each
 // project's deploy.json). `run` is never reached by the screen, and if it ever were it
@@ -21,6 +21,7 @@ import {
   conflictRefusalFor,
   isConflictRefusal,
   resolveKeyOf,
+  isTargetConflict,
   type ConflictScope,
   type Resolutions,
   type SeenResolutions,
@@ -33,7 +34,7 @@ const codeOf = (err: unknown): string => (err instanceof CapyError ? err.code : 
 type CancelPhase = Parameters<SecretsDeployActions['cancel']>[0];
 
 /**
- * The decider of a run (the batch engine's `decide`): given the conflicts its comparison pass found, the decisions that
+ * The decider of a run (the batch engine's `decide`): given the rows its comparison pass found, the answers that
  * were made for exactly these (each against the live value and the delivered value it holds now), or a
  * `ConflictRefusal` (nothing has been written) listing them. Pure.
  */
@@ -42,16 +43,16 @@ export function decideFrom(decisions: SeenResolutions | undefined): (scopes: rea
     const found = scopes.flatMap((s) => s.conflicts);
     const holds = (c: (typeof found)[number]): boolean => {
       const d = decisions?.[resolveKeyOf(c)];
-      return d !== undefined && d.theirs === c.theirs && d.yours === c.yours;
+      return d !== undefined && d.remote === c.remote && d.local === c.local;
     };
     if (found.some((c) => !holds(c))) throw conflictRefusalFor(ERROR_CODES.SECRETS_CONFLICT, scopes);
     return Object.fromEntries(found.map((c) => [resolveKeyOf(c), (decisions as SeenResolutions)[resolveKeyOf(c)].choice]));
   };
 }
 
-/** The target conflicts of a refusal, in the order it carries them. */
-const targetConflictsOf = (conflicts: readonly { readonly kind: string }[]): readonly TargetConflict[] =>
-  conflicts.filter((c): c is TargetConflict => c.kind === 'target');
+/** The platform rows of a refusal, in the order it carries them. */
+const targetConflictsOf = (conflicts: readonly (TargetConflict | { readonly name: string })[]): readonly TargetConflict[] =>
+  conflicts.filter((c): c is TargetConflict => 'target' in c);
 
 /**
  * The deploy flow's side effects. `cancel(phase)` aborts what is in flight for that phase. The
@@ -101,7 +102,7 @@ export function createDeployActionsWith(
         const decide = env.adapter.readsLiveValues === true ? (scopes: readonly ConflictScope[]) => (stopPushes.aborted ? {} : decideFrom(decisions)(scopes)) : undefined;
         return { ok: true, result: await runBatchDeploy(plan, env, { onProgress, stopPushes, stopPrs: begin('prs'), decide }) };
       } catch (err) {
-        // Nothing has been written: the comparison found conflicts that are undecided, or decided against a value that has moved.
+        // Nothing has been written: the comparison found rows that are unanswered, or answered against a value that has moved.
         if (isConflictRefusal(err)) return { ok: false, code: err.code, conflicts: targetConflictsOf(err.payload.conflicts) };
         return { ok: false, code: codeOf(err) };
       }

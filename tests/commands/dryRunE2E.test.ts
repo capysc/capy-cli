@@ -310,15 +310,16 @@ describe('capy remove NAME --dry-run', () => {
     });
   });
 
-  test('a local-only variable no longer blocks a removal (CAP-712): only the named variable is ever removed, and nothing is changed', async () => {
+  test('a local-only variable is a difference bare capy settles first (docs/conflict-resolution.md): the preview reports it with dry_run, exit 3, and changes nothing', async () => {
     await withWorld(async (h, env) => {
       await seedReal(h, env);
-      // A second variable that exists only locally (unpushed): a removal does not carry it along any more.
+      // A second variable that exists only locally (unpushed): the folder and Capy differ, so nothing is written from this folder.
       await h.run(['edit', 'DRY_OTHER', '--json', '--no-push'], 'x\n', undefined, { ...env, CAPY_NO_REPO_LINK: '1' });
       const before = state(h);
       const pushes = h.pushCount();
       const out = await h.run(['remove', NAME, '--yes', '--json', '--dry-run'], undefined, undefined, env);
-      expect(json(out)).toMatchObject({ removed: [NAME], dry_run: true });
+      expect(out.code).toBe(3);
+      expect(json(out)).toMatchObject({ ok: false, code: 'SECRETS_CONFLICT', dry_run: true, conflicts: [{ name: 'DRY_OTHER', type: 'new' }] });
       expectNothingWritten(h, before, pushes);
     });
   });

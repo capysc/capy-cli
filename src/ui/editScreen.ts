@@ -7,15 +7,16 @@
 // stdin, stdout or the network. `EditScreen.run` is the shell: it owns the raw terminal,
 // feeds actions in, draws what `render` returns and performs the one effect (a save).
 //
-// Rows are compared three ways (pinned, yours, theirs); see `reclassifyRow`. A row both
-// sides changed is a `conflict`: `m` keeps yours (mine), `t` takes the server's (theirs),
-// and nothing is committed while one is undecided.
+// Rows are compared three ways (pinned, local, remote); see `reclassifyRow`. A row both
+// sides changed reads `conflict`. The screen opens after bare `capy` has settled every
+// difference (sync/gate.ts), so it starts in sync; a save that finds Capy moved since the
+// screen read it is refused as stale, the screen closes, and the command runs bare `capy`
+// again and reopens with the edits still typed.
 
 import { EventEmitter } from 'node:events';
 import { formatSnippet, hashValue } from '../commands/statusCommand';
 import { anyTargetBehind } from '../core/deployStatus';
-import { isContested, isSecretsConflict, type Snapshot } from '../sync/commit';
-import type { Resolution, SeenResolution, SeenResolutions } from '../sync/conflicts';
+import { isStaleBase, type Snapshot } from '../sync/commit';
 import { statusBadge, statusLabel } from './statusBadge';
 import { formatRelativeTime } from './relativeTime';
 import { isRevealKey, stepEditBuffer } from './editBuffer';
@@ -69,14 +70,12 @@ export interface EditRow {
   readonly changedAt?: string;
   /**
    * What this folder last agreed with the server (the fingerprint keep.lock pins for the branch; `null`:
-   * not pinned). When present the row is compared three ways: pinned, yours (`localValue`), theirs (the
+   * not pinned). When present the row is compared three ways: pinned, local (`localValue`), remote (the
    * server's latest). Absent: only `localValue` and `remoteValue` are compared.
    */
   readonly pinnedHash?: string | null;
   /** The server's fingerprint when the server's value cannot be read here (`remoteValue` is then absent). */
   readonly remoteHash?: string;
-  /** The decision for a `conflict` row, with the fingerprints it was made against (CAP-714). Valid only while they still match. */
-  readonly resolution?: SeenResolution;
 }
 
 export interface EditState {
@@ -100,8 +99,10 @@ export interface EditState {
    * this key opens straight away (its row was added by {@link withNewEntryRow}).
    */
   readonly entryKey?: string;
-  /** The server read the rows were drawn from: a commit is planned against it, so a decision binds to what was shown. */
+  /** The server read the rows were drawn from: a commit is built on it and names its keep (`base_keep_hash`). */
   readonly seen?: Snapshot;
+  /** Values typed before the screen was closed for bare `capy` and reopened: shown as uncommitted edits. */
+  readonly pending?: Readonly<Record<string, string>>;
 }
 
 /**
@@ -124,12 +125,25 @@ export function focusedOn(state: EditState, name: string): EditState {
   return { ...state, rows: sortedRows([...state.rows, placeholder]), focusKey: name, entryKey: name };
 }
 
-/** What a commit carries (CAP-714). */
+/**
+ * `state` with edits typed earlier shown again (the screen was closed for bare `capy` and reopened): each typed
+ * value is the row's working value, a name no row has gets one, and all of it is still uncommitted.
+ */
+export function withPendingEdits(state: EditState, pending: Readonly<Record<string, string>>): EditState {
+  if (Object.keys(pending).length === 0) return state;
+  const mode = { localMode: state.localMode, remoteAvailable: state.remoteAvailable };
+  const known = new Set(state.rows.map((r) => r.key));
+  const typed = state.rows.map((row) => (Object.hasOwn(pending, row.key) ? classifiedRow({ ...row, localValue: pending[row.key] }, mode) : row));
+  const added = Object.keys(pending)
+    .filter((key) => !known.has(key))
+    .map((key): EditRow => classifiedRow({ key, localValue: pending[key], remoteValue: undefined, status: 'local', updatedLabel: NO_VALUE, pinnedHash: null }, mode));
+  return { ...state, rows: sortedRows([...typed, ...added]), pending };
+}
+
+/** What a commit carries. */
 export interface EditCommitRequest {
-  /** Every value the commit is about: the edits typed this session, and each conflict row decided (its own value, so the decision has something to bind to). */
+  /** The values typed this session and not committed yet: the commit's own change. */
   readonly set: Readonly<Record<string, string>>;
-  /** The decisions of the conflict rows, with the fingerprints they were made against. */
-  readonly decisions: SeenResolutions;
   /** The server read the rows were drawn from. */
   readonly seen: Snapshot | undefined;
 }
@@ -143,41 +157,23 @@ export interface EditLoaded {
 
 export interface EditContext {
   /**
-   * Commit (and in server mode, push) `set`; `bound` carries the decisions and the server read they were
-   * made against. Resolves to the server-assigned changed_at per variable for the active branch, taken
-   * from the push response's keep_file — empty in local mode or when the service didn't return timestamps.
-   * Rejects with `SECRETS_CONFLICT` (nothing uploaded) when the server moved under a change.
+   * Commit (and in server mode, push) `set` on top of Capy's latest, naming the keep of `seen`. Resolves to the
+   * server-assigned changed_at per variable for the active branch, taken from the push response's keep_file —
+   * empty in local mode or when the service didn't return timestamps. Rejects with `SECRETS_STALE_BASE`
+   * (nothing uploaded) when Capy moved since the screen read it.
    */
-  readonly saveLocalEdits: (
-    set: Record<string, string>,
-    bound?: { readonly decisions: SeenResolutions; readonly seen: Snapshot | undefined },
-  ) => Promise<Record<string, string>>;
-  /** Re-reads the folder and the server (after a save, or a conflict). Absent: rows are updated from what the save returned. */
+  readonly saveLocalEdits: (set: Record<string, string>, seen?: Snapshot) => Promise<Record<string, string>>;
+  /** Re-reads the folder and the server (after a save). Absent: rows are updated from what the save returned. */
   readonly reload?: () => Promise<EditLoaded>;
 }
 
-// ── Rows: fingerprints, status, decisions ───────────────────────────────────
+// ── Rows: fingerprints, status ──────────────────────────────────────────────
 
 /** The server's fingerprint for the row (`null`: the server has no such variable). */
-const theirsOf = (row: EditRow): string | null => row.remoteHash ?? (row.remoteValue === undefined ? null : hashValue(row.remoteValue));
+const remoteHashOf = (row: EditRow): string | null => row.remoteHash ?? (row.remoteValue === undefined ? null : hashValue(row.remoteValue));
 
 /** The fingerprint of the row's working value (`null`: none). */
-const yoursOf = (row: EditRow): string | null => (row.localValue === undefined ? null : hashValue(row.localValue));
-
-/** The decision for a conflict row, if it was made against the values the row holds now. */
-export function choiceOf(row: EditRow): Resolution | undefined {
-  const decided = row.resolution;
-  if (row.status !== 'conflict' || decided === undefined) return undefined;
-  return decided.theirs === theirsOf(row) && decided.yours === yoursOf(row) ? decided.choice : undefined;
-}
-
-/** `row` decided: `mine` keeps its working value, `theirs` takes the server's. Bound to the values it holds now. */
-export const resolvedAs = (row: EditRow, choice: Resolution): EditRow => ({
-  ...row,
-  resolution: { choice, theirs: theirsOf(row), yours: yoursOf(row) },
-});
-
-const isUnresolved = (row: EditRow): boolean => row.status === 'conflict' && choiceOf(row) === undefined;
+const localHashOf = (row: EditRow): string | null => (row.localValue === undefined ? null : hashValue(row.localValue));
 
 /**
  * Local-only row classification: committed-vs-working. `working` is the value
@@ -197,7 +193,7 @@ export function classifyLocalRow(
 /**
  * How a row reads. Server mode compares three versions when the row knows its pin (`pinnedHash`):
  * `local` (you changed it), `remote` (the server changed it since your pin), `conflict` (both did,
- * to different values; the same test the commit path applies, `isContested`), `in sync`.
+ * to different values), `in sync`.
  *
  * Pulled out of `EditScreen` so the browser path classifies with this code
  * rather than with a second copy of it. Two implementations of "what changed"
@@ -242,16 +238,14 @@ function twoWayStatus(row: EditRow): EditRow['status'] {
 }
 
 function threeWayStatus(row: EditRow, pinned: string | undefined): EditRow['status'] {
-  const yours = yoursOf(row) ?? undefined;
-  const theirs = theirsOf(row) ?? undefined;
-  if (yours === theirs) return 'in sync';
-  const youChanged = yours !== pinned;
-  const theyChanged = theirs !== pinned;
-  // A value you hold that the server moved under: the commit path's own test. (A variable missing from the folder is not a
-  // change to keep: the server's value is pulled.)
-  const latest = theirs === undefined ? undefined : { plaintext: row.remoteValue, hash: theirs };
-  if (youChanged && theyChanged && row.localValue !== undefined && isContested(pinned, row.localValue, latest)) return 'conflict';
-  return youChanged && !theyChanged ? 'local' : 'remote';
+  const local = localHashOf(row) ?? undefined;
+  const remote = remoteHashOf(row) ?? undefined;
+  if (local === remote) return 'in sync';
+  const localChanged = local !== pinned;
+  const remoteChanged = remote !== pinned;
+  // Both sides changed it, to different values. (A variable missing from the folder is not a change to keep: the server's value is pulled.)
+  if (localChanged && remoteChanged && row.localValue !== undefined) return 'conflict';
+  return localChanged && !remoteChanged ? 'local' : 'remote';
 }
 
 /** The UPDATED column's label, mode-aware. Local mode has no server timestamps, so it keeps the committed/uncommitted wording; otherwise the label says when the value last changed server-side. */
@@ -346,7 +340,7 @@ export function initialModel(state: EditState): EditModel {
         : null,
     status: null,
     scrollOffset: 0,
-    pending: {},
+    pending: state.pending ?? {},
     quitPrompt: false,
     popupOpen: entering,
     popupPan: 0,
@@ -355,10 +349,8 @@ export function initialModel(state: EditState): EditModel {
   };
 }
 
-/** Names with something to commit: edits typed, and conflict rows decided. */
-const dirtyKeys = (model: EditModel): readonly string[] => [
-  ...new Set([...Object.keys(model.pending), ...model.state.rows.filter((r) => choiceOf(r) !== undefined).map((r) => r.key)]),
-];
+/** Names with something to commit: the edits typed. */
+const dirtyKeys = (model: EditModel): readonly string[] => Object.keys(model.pending);
 
 const withRows = (model: EditModel, rows: readonly EditRow[]): EditModel => ({ ...model, state: { ...model.state, rows } });
 
@@ -375,8 +367,8 @@ const modeOf = (model: EditModel): { localMode?: boolean; remoteAvailable: boole
 /** What a save came back with. Never carries a value. */
 export type SaveResult =
   | { readonly kind: 'saved'; readonly changedAt: Readonly<Record<string, string>>; readonly loaded: EditLoaded | undefined }
-  /** The server moved under a change (`SECRETS_CONFLICT`): nothing was uploaded. */
-  | { readonly kind: 'conflict'; readonly message: string; readonly loaded: EditLoaded | undefined }
+  /** Capy moved since the screen read it (`SECRETS_STALE_BASE`): nothing was uploaded. The screen closes so bare `capy` can run. */
+  | { readonly kind: 'stale' }
   | { readonly kind: 'failed'; readonly message: string };
 
 export type EditAction =
@@ -390,7 +382,12 @@ export interface EditOutcome {
   readonly effect?: EditEffect;
   /** The screen is over. */
   readonly done?: true;
+  /** It is over because a save was refused as stale: the edits typed so far are in `model.pending`. */
+  readonly stale?: true;
 }
+
+/** How the screen ended: for good, or because Capy moved under a save (the command runs bare `capy` and reopens it with `pending`). */
+export type EditExit = { readonly kind: 'done' } | { readonly kind: 'stale'; readonly pending: Readonly<Record<string, string>> };
 
 const stay = (model: EditModel): EditOutcome => ({ model });
 const finished = (model: EditModel): EditOutcome => ({ model, done: true });
@@ -449,33 +446,10 @@ function onEditKey(model: EditModel, key: string): EditModel {
   return next !== editing.buffer ? { ...model, editing: { ...editing, buffer: next } } : model;
 }
 
-/** The unresolved conflicts' names, in row order. */
-const unresolvedNames = (model: EditModel): readonly string[] => model.state.rows.filter(isUnresolved).map((r) => r.key);
-
-/**
- * `c`: the commit this screen would make, or why it cannot be made yet. A conflict nobody decided blocks it
- * (nothing is uploaded). Otherwise: the edits, plus each decided conflict row with its value and its decision.
- */
+/** `c`: the commit this screen would make: the edits typed, on top of Capy's latest. */
 function requestCommit(model: EditModel, quit: boolean): EditOutcome {
-  const open = unresolvedNames(model);
-  if (open.length > 0) {
-    return stay({
-      ...model,
-      quitPrompt: false,
-      status: { text: `Choose mine or theirs for ${open.join(', ')}. Nothing was uploaded.`, isError: true }, // COPY-FLAG
-    });
-  }
-  const decided = model.state.rows.filter((r) => choiceOf(r) !== undefined);
-  const set = {
-    ...model.pending,
-    ...Object.fromEntries(decided.flatMap((r) => (r.localValue === undefined ? [] : [[r.key, r.localValue] as const]))),
-  };
-  const request: EditCommitRequest = {
-    set,
-    decisions: Object.fromEntries(decided.flatMap((r) => (r.resolution === undefined ? [] : [[r.key, r.resolution] as const]))),
-    seen: model.state.seen,
-  };
-  const keys = Object.keys(set);
+  const request: EditCommitRequest = { set: model.pending, seen: model.state.seen };
+  const keys = Object.keys(model.pending);
   const verb = model.state.localMode ? 'Committing' : 'Committing & pushing';
   return {
     model: {
@@ -497,13 +471,6 @@ function onQuitPromptKey(model: EditModel, key: string): EditOutcome {
 }
 
 const movedTo = (model: EditModel, cursorIndex: number): EditModel => ({ ...model, cursorIndex, popupPan: 0 });
-
-/** `m` / `t` on a conflict row: the decision, shown on the row until it is committed. */
-function decideRow(model: EditModel, choice: Resolution): EditModel {
-  const row = model.state.rows[model.cursorIndex];
-  if (!row || row.status !== 'conflict') return model;
-  return { ...replaceRow(model, row.key, (r) => resolvedAs(r, choice)), status: null };
-}
 
 function onListKey(model: EditModel, key: string): EditOutcome {
   if (key === 'q' || key === 'Q') {
@@ -548,10 +515,6 @@ function onListKey(model: EditModel, key: string): EditOutcome {
     });
   }
 
-  // m / t — mine or theirs for the conflict under the cursor (no other key on this screen is bound to either).
-  if (key === 'm' || key === 'M') return stay(decideRow(model, 'mine'));
-  if (key === 't' || key === 'T') return stay(decideRow(model, 'theirs'));
-
   if (key === 'c' || key === 'C') return dirtyKeys(model).length > 0 ? requestCommit(model, false) : stay(model);
   return stay(model);
 }
@@ -573,14 +536,13 @@ function onData(model: EditModel, key: string): EditOutcome {
 
 // ── A save coming back ──────────────────────────────────────────────────────
 
-/** `loaded`'s rows, with what this screen holds that the disk and the server cannot know: typed values, and decisions (valid only while the values they were made against stand). */
-function mergedRows(model: EditModel, loaded: EditLoaded, pending: Readonly<Record<string, string>>, keepDecisions: boolean): readonly EditRow[] {
+/** `loaded`'s rows, with what this screen holds that the disk and the server cannot know: the typed values. */
+function mergedRows(model: EditModel, loaded: EditLoaded, pending: Readonly<Record<string, string>>): readonly EditRow[] {
   const mode = { localMode: model.state.localMode, remoteAvailable: loaded.remoteAvailable };
   const known = new Set(loaded.rows.map((r) => r.key));
   const typed = (row: EditRow): EditRow => {
-    const old = model.state.rows.find((r) => r.key === row.key);
     const value = Object.hasOwn(pending, row.key) ? pending[row.key] : row.localValue;
-    return classifiedRow({ ...row, localValue: value, ...(keepDecisions && old?.resolution !== undefined ? { resolution: old.resolution } : {}) }, mode);
+    return classifiedRow({ ...row, localValue: value }, mode);
   };
   // A variable typed here that neither the folder nor the server has yet.
   const added = Object.keys(pending)
@@ -590,8 +552,8 @@ function mergedRows(model: EditModel, loaded: EditLoaded, pending: Readonly<Reco
 }
 
 /** The model showing `loaded`, the cursor kept on the same variable. */
-function withLoaded(model: EditModel, loaded: EditLoaded, pending: Readonly<Record<string, string>>, keepDecisions: boolean): EditModel {
-  const rows = mergedRows(model, loaded, pending, keepDecisions);
+function withLoaded(model: EditModel, loaded: EditLoaded, pending: Readonly<Record<string, string>>): EditModel {
+  const rows = mergedRows(model, loaded, pending);
   const cursorKey = model.state.rows[model.cursorIndex]?.key;
   const at = rows.findIndex((r) => r.key === cursorKey);
   return {
@@ -614,7 +576,6 @@ function committedLocally(model: EditModel, keys: readonly string[], changedAt: 
         remoteValue: row.localValue,
         remoteHash: undefined,
         pinnedHash: hashValue(row.localValue),
-        resolution: undefined,
       };
       return classifiedRow(agreed, modeOf(model));
     }),
@@ -630,22 +591,11 @@ function onSaved(model: EditModel, result: SaveResult): EditOutcome {
     const refreshed =
       result.loaded === undefined
         ? committedLocally({ ...settled, pending: {} }, keys, result.changedAt)
-        : withLoaded({ ...settled, pending: {} }, result.loaded, {}, false);
+        : withLoaded({ ...settled, pending: {} }, result.loaded, {});
     return stay({ ...refreshed, status: { text: `Committed ${keys.length} change(s)`, isError: false } });
   }
-  if (result.kind === 'conflict' && result.loaded !== undefined) {
-    // The server moved between showing and committing: the rows are drawn from the new read, and a decision
-    // stands only where the values it was made against do (never an old decision on a new value).
-    const refreshed = withLoaded(settled, result.loaded, settled.pending, true);
-    const open = unresolvedNames(refreshed);
-    return stay({
-      ...refreshed,
-      status: {
-        text: open.length > 0 ? `${open.join(', ')} changed on the server. Nothing was uploaded.` : 'The server changed. Nothing was uploaded.', // COPY-FLAG
-        isError: true,
-      },
-    });
-  }
+  // Capy moved since the screen read it. Nothing was uploaded; the screen closes (its edits kept) so bare `capy` can show what changed.
+  if (result.kind === 'stale') return { model: settled, done: true, stale: true };
   return stay({ ...settled, status: { text: `Error committing: ${result.message}`, isError: true } });
 }
 
@@ -681,18 +631,14 @@ function maskedSnippet(row: EditRow): string {
   return renderInlineValue(formatSnippet(value));
 }
 
-/** The status cell: the coloured badge, saying which side was chosen once a conflict is decided. */
-function rowBadge(row: EditRow): string {
-  const choice = choiceOf(row);
-  return statusBadge(row.status, choice === undefined ? statusLabel(row.status) : `conflict: ${choice}`); // COPY-FLAG
-}
+/** The status cell: the coloured badge. */
+const rowBadge = (row: EditRow): string => statusBadge(row.status, statusLabel(row.status));
 
 function buildTopCells(model: EditModel): { value: string; action: string }[] {
   const { rows, localMode, remoteAvailable, branch } = model.state;
   const countOf = (statuses: readonly EditRow['status'][]): number => rows.filter((r) => statuses.includes(r.status)).length;
   const drift = countOf(['local', 'remote']);
   const conflicts = countOf(['conflict']);
-  const unresolved = rows.filter(isUnresolved).length;
   const unknown = countOf(['unknown']);
 
   return [
@@ -704,7 +650,7 @@ function buildTopCells(model: EditModel): { value: string; action: string }[] {
     },
     {
       value: `${conflicts} conflicts`,
-      action: unresolved > 0 ? 'need resolution' : conflicts > 0 ? 'all resolved' : 'all clear', // COPY-FLAG (all resolved)
+      action: conflicts > 0 ? 'need resolution' : 'all clear',
     },
   ];
 }
@@ -749,8 +695,6 @@ function valueField(raw: string | undefined, revealed: boolean, width: number, p
   return { text: leftIndicator + value.slice(offset, offset + visibleWidth) + rightIndicator, pan: offset };
 }
 
-const maskedOf = (value: string | undefined): string => (value === undefined || value === '' ? NO_VALUE : renderInlineValue(formatSnippet(value)));
-
 /** Inline popup that splices into the table beneath the cursor row. Returns the pan offset it ended up using. */
 function buildPopup(model: EditModel, width: number): { lines: string[]; pan: number } {
   const row = model.state.rows[model.cursorIndex];
@@ -782,16 +726,11 @@ function buildPopup(model: EditModel, width: number): { lines: string[]; pan: nu
   const fieldVal = (label: string, value: string): string => `${indent}${inner}${DIM}${pad(label, labelW)}${RESET}${value}`;
   const revealed = model.revealed.has(row.key);
   // Value field — always rendered on a single line so mouse-select never captures a wrap-induced newline.
-  const mine = valueField(row.localValue ?? row.remoteValue, revealed, valueContentWidth, model.popupPan, maskedSnippet(row));
-  // A conflict shows both sides: the working value above, the server's under it (masked until revealed, like the first).
-  const theirs =
-    row.status === 'conflict'
-      ? [fieldVal('theirs', valueField(row.remoteValue, revealed, valueContentWidth, mine.pan, maskedOf(row.remoteValue)).text)] // COPY-FLAG
-      : [];
+  const value = valueField(row.localValue ?? row.remoteValue, revealed, valueContentWidth, model.popupPan, maskedSnippet(row));
 
   return {
-    lines: [...head, fieldVal('status', rowBadge(row)), fieldVal('updated', row.updatedLabel), '', fieldVal(row.status === 'conflict' ? 'yours' : 'value', mine.text), ...theirs, '', rule], // COPY-FLAG (yours)
-    pan: mine.pan,
+    lines: [...head, fieldVal('status', rowBadge(row)), fieldVal('updated', row.updatedLabel), '', fieldVal('value', value.text), '', rule],
+    pan: value.pan,
   };
 }
 
@@ -813,9 +752,6 @@ function footerOf(model: EditModel): string {
   const dirty = dirtyKeys(model).length;
   const commitLabel = model.state.localMode ? 'commit' : 'commit & push';
   const dirtyHint = dirty > 0 ? `${DIM} · ${RESET}${BOLD}c${RESET}${DIM} ${commitLabel} (${dirty})${RESET}` : '';
-  // On a conflict row, the two ways to settle it.
-  const onConflict = model.state.rows[model.cursorIndex]?.status === 'conflict';
-  const conflictHint = onConflict ? `${DIM} · ${RESET}${BOLD}m${RESET}${DIM} mine · ${RESET}${BOLD}t${RESET}${DIM} theirs${RESET}` : ''; // COPY-FLAG
 
   if (model.quitPrompt) {
     const n = dirty;
@@ -831,9 +767,9 @@ function footerOf(model: EditModel): string {
     const row = model.state.rows[model.cursorIndex];
     const isRevealed = row ? model.revealed.has(row.key) : false;
     const panHint = isRevealed ? `${DIM} · ${RESET}${BOLD}←/→${RESET}${DIM} pan${RESET}` : '';
-    return `${m}${BOLD}r${RESET}${DIM} ${isRevealed ? 'hide' : 'reveal'} · ${RESET}${BOLD}e${RESET}${DIM} edit${RESET}${conflictHint}${panHint}${dirtyHint}${DIM} · ${RESET}${BOLD}esc${RESET}${DIM} close${RESET}`;
+    return `${m}${BOLD}r${RESET}${DIM} ${isRevealed ? 'hide' : 'reveal'} · ${RESET}${BOLD}e${RESET}${DIM} edit${RESET}${panHint}${dirtyHint}${DIM} · ${RESET}${BOLD}esc${RESET}${DIM} close${RESET}`;
   }
-  return `${m}${DIM}↑↓ navigate · ${RESET}${BOLD}enter${RESET}${DIM} inspect · ${RESET}${BOLD}r${RESET}${DIM} reveal · ${RESET}${BOLD}e${RESET}${DIM} edit${RESET}${conflictHint}${dirtyHint}${DIM} · ${RESET}${BOLD}q${RESET}${DIM} quit${RESET}`;
+  return `${m}${DIM}↑↓ navigate · ${RESET}${BOLD}enter${RESET}${DIM} inspect · ${RESET}${BOLD}r${RESET}${DIM} reveal · ${RESET}${BOLD}e${RESET}${DIM} edit${RESET}${dirtyHint}${DIM} · ${RESET}${BOLD}q${RESET}${DIM} quit${RESET}`;
 }
 
 /** The frame for `termWidth` x `termHeight`, and the model with the scroll and pan this frame settled on. */
@@ -888,17 +824,15 @@ async function reloaded(ctx: EditContext): Promise<EditLoaded | undefined> {
 }
 
 /**
- * Commits `request` through the context. Never rejects: a server that moved under a change is `conflict`
- * (decided by the error's code), with the rows re-read so the screen can show them as conflicts again.
+ * Commits `request` through the context. Never rejects: Capy having moved since the screen read it is `stale`
+ * (decided by the error's code); anything else is `failed`.
  */
 export async function saveOutcome(ctx: EditContext, request: EditCommitRequest): Promise<SaveResult> {
   try {
-    const changedAt = await ctx.saveLocalEdits({ ...request.set }, { decisions: request.decisions, seen: request.seen });
+    const changedAt = await ctx.saveLocalEdits({ ...request.set }, request.seen);
     return { kind: 'saved', changedAt, loaded: await reloaded(ctx) };
   } catch (err) {
-    return isSecretsConflict(err)
-      ? { kind: 'conflict', message: messageOf(err), loaded: await reloaded(ctx) }
-      : { kind: 'failed', message: messageOf(err) };
+    return isStaleBase(err) ? { kind: 'stale' } : { kind: 'failed', message: messageOf(err) };
   }
 }
 
@@ -909,8 +843,8 @@ function drawn(model: EditModel): EditModel {
 }
 
 export class EditScreen {
-  run(state: EditState, ctx: EditContext): Promise<void> {
-    return new Promise<void>((resolve) => {
+  run(state: EditState, ctx: EditContext): Promise<EditExit> {
+    return new Promise<EditExit>((resolve) => {
       // Every input (a key chunk, a resize, a save landing) is one action on one bus. The listener that is
       // attached holds the CURRENT model; handling an action detaches it and attaches one for the next model,
       // so no model is ever reassigned or modified.
@@ -926,7 +860,7 @@ export class EditScreen {
         bus.emit('action', { kind: 'data', data: '\x03' } satisfies EditAction);
       };
 
-      const leave = (): void => {
+      const leave = (exit: EditExit): void => {
         process.stdout.write(DISABLE_BRACKETED_PASTE + SHOW_CURSOR + EXIT_ALT_SCREEN);
         if (process.stdin.isTTY) process.stdin.setRawMode(false);
         process.stdin.pause();
@@ -935,7 +869,7 @@ export class EditScreen {
         process.removeListener('SIGINT', onSignal);
         process.removeListener('SIGTERM', onSignal);
         bus.removeAllListeners();
-        resolve();
+        resolve(exit);
       };
 
       const perform = (effect: EditEffect): void => {
@@ -947,7 +881,7 @@ export class EditScreen {
           bus.removeListener('action', onAction);
           bus.removeListener('redraw', onRedraw);
           const outcome = reduce(model, action);
-          if (outcome.done === true) return leave();
+          if (outcome.done === true) return leave(outcome.stale === true ? { kind: 'stale', pending: outcome.model.pending } : { kind: 'done' });
           attach(drawn(outcome.model));
           if (outcome.effect !== undefined) perform(outcome.effect);
         };

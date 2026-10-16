@@ -1,7 +1,7 @@
 /**
  * The whole `capy secrets` edit with a conflict (CAP-714): real keystrokes through the driver and the reducer, the real
  * edit actions and engine over the fake service. One of the row's two locations was changed by someone else after the
- * row was listed. Nothing is written until it is decided: mine writes it, theirs leaves it alone.
+ * row was listed. Nothing is written until it is decided: local writes it, remote leaves it alone.
  */
 import { describe, test, expect, spyOn } from 'bun:test';
 import { runSecretsScreen } from '../../src/ui/secretsScreenDriver';
@@ -64,14 +64,14 @@ describe('capy secrets edit, with a location someone else changed', () => {
     expect(s.frames).not.toContain('moved-by-someone-else-2222');
   });
 
-  test('mine: both locations are written, and the confirmation says so', async () => {
-    const s = await session(['m', '\r']);
+  test('local: both locations are written, and the confirmation says so', async () => {
+    const s = await session(['l', '\r']);
     expect(s.service.pushSecrets.mock.calls.map((c) => c[0]).toSorted()).toEqual(['pA', 'pC']);
     expect(`${s.logged}\n${s.afterRun}`).toContain(NAME);
   });
 
-  test('theirs: only the other location is written; the confirmation notes the one that kept its value', async () => {
-    const s = await session(['t', '\r']);
+  test('remote: only the other location is written; the confirmation notes the one that kept its value', async () => {
+    const s = await session(['r', '\r']);
     expect(s.service.pushSecrets.mock.calls.map((c) => c[0])).toEqual(['pC']);
     expect(`${s.logged}\n${s.afterRun}`).toContain('Kept the other value in 1 location.');
   });

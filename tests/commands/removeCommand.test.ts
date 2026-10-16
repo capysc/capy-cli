@@ -26,6 +26,12 @@ import { describe, test, expect, beforeEach, afterEach, spyOn, mock } from 'bun:
 import { mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
+import { stubbedGate } from '../helpers/gateMock';
+
+// These tests are about `capy remove`'s own checks. Bare `capy` (its first step) is tested in tests/sync/gate.test.ts and
+// tests/commands/gateFirst.test.ts. `mock.module()` is process-wide: this file runs isolated (tests/run-tests.sh).
+mock.module('../../src/sync/gate', () => stubbedGate());
+
 import {
   deployTargetWarnings,
   confirmationMessage,

@@ -517,7 +517,12 @@ describe('Direction detection — branch-aware keep_hash', () => {
       listProjects: mock(() => Promise.resolve([])),
     };
     mockSyncEngine = {
+      compareEnvironments: mock(() => undefined),
+      formatSyncSummary: mock(() => undefined),
+      validateDecisions: mock(() => []),
+      applyDecisions: mock(() => undefined),
       mergeWithKeep: mock(() => undefined),
+      generateSyncResult: mock(() => undefined),
     };
     mockPromptEngine = {
       promptForProjectName: mock(() => undefined),

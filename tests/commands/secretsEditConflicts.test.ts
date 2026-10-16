@@ -1,11 +1,14 @@
 /**
- * `capy secrets` edit and conflicts (CAP-714), against the real edit actions and engine (`createEditActionsWith` ->
- * `runSecretSet`) over the fake service of tests/helpers/secretsWorld.ts. The properties:
- *   - a location someone else changed since the row was listed is reported, BEFORE any push: nothing is written
- *     until every such location is decided;
- *   - mine writes that location, bound to the value that was seen; theirs skips it and writes the rest;
- *   - a decision made against a value that has since moved is not applied: the conflict comes back, nothing is written;
+ * `capy secrets` edit with no folder (docs/conflict-resolution.md), against the real edit actions and engine
+ * (`createEditActionsWith` -> `runSecretSet`) over the fake service of tests/helpers/secretsWorld.ts. For each
+ * location `compareSecrets` gets pinned (the row's fingerprint), local (the new value) and remote (the location now).
+ * The properties:
+ *   - a location someone else changed since the row was listed is reported as a row, BEFORE any push: nothing is
+ *     written until every such location is answered;
+ *   - local writes that location, bound to the value that was seen; remote leaves it and writes the rest;
+ *   - an answer made against a value that has since moved is not applied: the row comes back, nothing is written;
  *   - a location that moves between the check and its push is refused (SECRETS_CONFLICT), not overwritten;
+ *   - every upload names the keep it was built from (`base_keep_hash`);
  *   - no value ever appears in what is returned.
  */
 import { describe, test, expect, mock } from 'bun:test';
@@ -42,7 +45,7 @@ function rig(movedValue: string | undefined = MOVED) {
   return { service, actions, env };
 }
 
-const decision = (choice: 'mine' | 'theirs', theirs: string, yours: string = hashValue(SENTINEL)) => ({ choice, theirs, yours });
+const decision = (choice: 'local' | 'remote', remote: string, local: string = hashValue(SENTINEL)) => ({ choice, remote, local });
 const pushedProjects = (service: ReturnType<typeof fakeService>): readonly string[] => service.pushSecrets.mock.calls.map((c) => String(c[0]));
 
 describe('the run reads every location first', () => {
@@ -54,14 +57,14 @@ describe('the run reads every location first', () => {
     expect(out.code).toBe(ERROR_CODES.SECRETS_CONFLICT);
     expect(out.conflicts).toHaveLength(1);
     expect(out.conflicts?.[0].location).toEqual(A_STAGING);
-    expect(out.conflicts?.[0].conflict).toMatchObject({
-      kind: 'source',
+    expect(out.conflicts?.[0].conflict).toEqual({
       name: NAME,
       project: PROJECT_NAMES.pA,
       branch: 'staging',
+      type: 'changed',
       pinned: hashValue(OLD_VALUE),
-      yours: hashValue(SENTINEL),
-      theirs: hashValue(MOVED),
+      local: hashValue(SENTINEL),
+      remote: hashValue(MOVED),
     });
     expect(r.service.pushSecrets.mock.calls).toHaveLength(0);
     // Fingerprints and names: no value anywhere.
@@ -83,12 +86,12 @@ describe('the run reads every location first', () => {
   });
 });
 
-describe('mine and theirs', () => {
+describe('local and remote', () => {
   const key = 'pA/staging';
 
-  test('mine: the moved location is written too, with the new value', async () => {
+  test('local: the moved location is written too, with the new value', async () => {
     const r = rig();
-    const out = await r.actions.run(request({ decisions: { [key]: decision('mine', hashValue(MOVED)) } }));
+    const out = await r.actions.run(request({ decisions: { [key]: decision('local', hashValue(MOVED)) } }));
     expect(out.ok).toBe(true);
     if (!out.ok || !('result' in out)) throw new Error('expected a result');
     expect(out.result.updated.map((l) => `${l.project}/${l.branch}`).toSorted()).toEqual([`${PROJECT_NAMES.pA}/staging`, `${PROJECT_NAMES.pC}/development`].toSorted());
@@ -100,9 +103,9 @@ describe('mine and theirs', () => {
     expect(keep.variables[NAME].find((e) => e.branch === 'staging')?.value_hash).toBe(hashValue(SENTINEL));
   });
 
-  test('theirs: the moved location is skipped (never pushed), the other is written', async () => {
+  test('remote: the moved location is skipped (never pushed), the other is written', async () => {
     const r = rig();
-    const out = await r.actions.run(request({ decisions: { [key]: decision('theirs', hashValue(MOVED)) } }));
+    const out = await r.actions.run(request({ decisions: { [key]: decision('remote', hashValue(MOVED)) } }));
     expect(out.ok).toBe(true);
     if (!out.ok || !('result' in out)) throw new Error('expected a result');
     expect(pushedProjects(r.service)).toEqual(['pC']);
@@ -110,18 +113,18 @@ describe('mine and theirs', () => {
     expect(out.result.failed).toEqual([]);
   });
 
-  test('a decision made against another value of the location is NOT applied: the conflict comes back and nothing is pushed', async () => {
+  test('an answer made against another value of the location is NOT applied: the row comes back and nothing is pushed', async () => {
     const r = rig();
-    const out = await r.actions.run(request({ decisions: { [key]: decision('mine', hashValue('the-value-it-had-when-decided')) } }));
+    const out = await r.actions.run(request({ decisions: { [key]: decision('local', hashValue('the-value-it-had-when-answered')) } }));
     expect(out.ok).toBe(false);
     if (out.ok) throw new Error('expected a conflict');
-    expect(out.conflicts?.[0].conflict.theirs).toBe(hashValue(MOVED));
+    expect(out.conflicts?.[0].conflict.remote).toBe(hashValue(MOVED));
     expect(r.service.pushSecrets.mock.calls).toHaveLength(0);
   });
 
-  test('a decision made for another new value is NOT applied either', async () => {
+  test('an answer made for another new value is NOT applied either', async () => {
     const r = rig();
-    const out = await r.actions.run(request({ decisions: { [key]: decision('mine', hashValue(MOVED), hashValue('a-different-new-value')) } }));
+    const out = await r.actions.run(request({ decisions: { [key]: decision('local', hashValue(MOVED), hashValue('a-different-new-value')) } }));
     expect(out.ok).toBe(false);
     expect(r.service.pushSecrets.mock.calls).toHaveLength(0);
   });
@@ -150,6 +153,15 @@ describe('mine and theirs', () => {
   });
 });
 
+describe('the upload names the keep it was built from', () => {
+  test('every push carries base_keep_hash: the keep hash of the branch it read', async () => {
+    const r = rig(OLD_VALUE);
+    const out = await r.actions.run(request());
+    expect(out.ok).toBe(true);
+    r.service.pushSecrets.mock.calls.forEach((c) => expect(String(c[5])).toMatch(/^[0-9a-f]{64}$/));
+  });
+});
+
 describe('settleLocations (pure)', () => {
   const reads = [{ action: 'update' as const, serverKeep: undefined, current: { hash: hashValue(MOVED), serverKeepHash: 'k' } }, { action: 'update' as const, serverKeep: undefined, current: { hash: hashValue(OLD_VALUE), serverKeepHash: 'k' } }];
 
@@ -158,9 +170,23 @@ describe('settleLocations (pure)', () => {
     expect(settled).toMatchObject({ kind: 'ready', locations: [A_STAGING, C_DEV] });
   });
 
-  test('the allowed fingerprints of a location are: the new value, the one listed, and the one that was decided against', () => {
-    const settled = settleLocations(request({ decisions: { 'pA/staging': decision('mine', hashValue(MOVED)) } }), reads);
-    if (settled.kind !== 'ready' || settled.allowed === undefined) throw new Error('expected ready');
-    expect(settled.allowed(A_STAGING)).toEqual([hashValue(SENTINEL), hashValue(OLD_VALUE), hashValue(MOVED)]);
+  test('a moved location without an answer for the state it holds: the rows, and nothing to push', () => {
+    const settled = settleLocations(request(), reads);
+    expect(settled.kind).toBe('conflicts');
+    expect(settled.kind === 'conflicts' && settled.conflicts.map((c) => c.location)).toEqual([A_STAGING]);
+  });
+
+  test('answered for the state it holds: ready, with what the push compares against (the listed fingerprint per location, and the answers)', () => {
+    const answers = { 'pA/staging': decision('local', hashValue(MOVED)) };
+    const settled = settleLocations(request({ decisions: answers }), reads);
+    if (settled.kind !== 'ready') throw new Error('expected ready');
+    expect(settled.locations).toEqual([A_STAGING, C_DEV]);
+    expect(settled.shown).toEqual({ 'pA/staging': hashValue(OLD_VALUE), 'pC/development': hashValue(OLD_VALUE) });
+    expect(settled.answers).toEqual(answers);
+  });
+
+  test('remote leaves the moved location out of the push', () => {
+    const settled = settleLocations(request({ decisions: { 'pA/staging': decision('remote', hashValue(MOVED)) } }), reads);
+    expect(settled).toMatchObject({ kind: 'ready', locations: [C_DEV] });
   });
 });

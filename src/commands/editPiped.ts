@@ -22,7 +22,7 @@ import { isLocalOnly } from '../config/profileConfig';
 import { MAX_PIPED_BYTES, readPipedValue, refuseInvalidName, refusePiped } from './pipedValue';
 import { isValidVarName, runPipedWrite } from './pipedWrite';
 import type { PrFlags } from './keepLockPr';
-import type { ConflictFlags } from '../sync/conflicts';
+import type { GateOptions } from '../sync/gate';
 
 export type EditMode = 'tui' | 'piped' | 'refuse';
 
@@ -57,8 +57,8 @@ export interface EditPipedOpts {
   readonly pr?: PrFlags;
   /** `--dry-run`: say what would happen; change nothing. */
   readonly dryRun?: boolean;
-  /** `--resolve` / `--conflict`, already validated. */
-  readonly conflicts?: ConflictFlags;
+  /** What bare `capy` runs with as this write's first step: `--resolve` / `--conflict` (already validated) and the flags. */
+  readonly gate: GateOptions;
 }
 
 /** `<cmd> | capy edit NAME`: read stdin, set the variable, report. Never prompts. */

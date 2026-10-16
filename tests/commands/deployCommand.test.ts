@@ -11,6 +11,8 @@ import { mkdirSync, writeFileSync, rmSync, existsSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { spawnSync } from 'child_process';
+import { withHarness, ORG_ID, PROJECT_ID, type Harness } from '../helpers/pipedHarness';
+import { hashValue } from '../../src/sync/compareSecrets';
 
 // Tests that run a full deploy through preflight need wrangler on PATH —
 // adapter preflight terminates with "wrangler not found" otherwise. Gate
@@ -70,6 +72,18 @@ function writeWranglerToml(dir: string, name: string): void {
   );
 }
 
+/**
+ * A project in `h` that bare `capy` (the first step of every `capy deploy`) finds in sync: `keep.lock` pins the hash of
+ * every value in `values` for `branch`, and `.env` holds them. What `deploy` does with it is what these tests are about.
+ */
+function syncedProject(h: Harness, values: Record<string, string> = {}, branch: string = 'production'): void {
+  const variables = Object.fromEntries(
+    Object.entries(values).map(([name, value]) => [name, [{ resource_id: `rid-${name}`, branch, value_hash: hashValue(value) }]]),
+  );
+  writeFileSync(join(h.project, 'keep.lock'), JSON.stringify({ version: '3.0', org_id: ORG_ID, project_id: PROJECT_ID, project_name: 'test', variables }, null, 2));
+  writeFileSync(join(h.project, '.env'), Object.entries(values).map(([name, value]) => `${name}=${value}\n`).join(''));
+}
+
 function writeDeployConfig(cwd: string, targets: any[]): void {
   mkdirSync(join(cwd, '.capy'), { recursive: true });
   const obj: any = { version: '1', targets: {} };
@@ -86,19 +100,23 @@ describe('capy deploy — refusals', () => {
     expect(r.stderr).toContain('keep.lock');
   });
 
-  test('unknown adapter id → lists known ones', () => {
-    writeKeep(ROOT);
-    const r = capy(['deploy', '--target=does-not-exist', '--yes']);
-    expect(r.code).toBe(1);
-    expect(r.stderr).toContain('Unknown adapter');
-    expect(r.stderr).toContain('cf-worker');
+  test('unknown adapter id → lists known ones', async () => {
+    await withHarness(async (h) => {
+      syncedProject(h);
+      const r = await h.run(['deploy', '--target=does-not-exist', '--yes']);
+      expect(r.code).toBe(1);
+      expect(r.stderr).toContain('Unknown adapter');
+      expect(r.stderr).toContain('cf-worker');
+    });
   });
 
-  test('named target that does not exist → exit 1', () => {
-    writeKeep(ROOT);
-    const r = capy(['deploy', 'missing-target']);
-    expect(r.code).toBe(1);
-    expect(r.stderr).toContain('No target named');
+  test('named target that does not exist → exit 1', async () => {
+    await withHarness(async (h) => {
+      syncedProject(h);
+      const r = await h.run(['deploy', 'missing-target', '--yes']);
+      expect(r.code).toBe(1);
+      expect(r.stderr).toContain('No target named');
+    });
   });
 });
 
@@ -155,55 +173,54 @@ describe('capy deploy list / remove', () => {
 // ── --dry-run, plaintext .env (no decrypt path) ────────────────────────────
 
 describe('capy deploy --dry-run', () => {
-  test.if(HAS_WRANGLER)('plaintext .env + dry-run: preflight + plan, no side effects', () => {
-    writeKeep(ROOT);
-    writeWranglerToml(join(ROOT, 'worker'), 'my-worker');
-    writeFileSync(
-      join(ROOT, '.env'),
-      'SUPABASE_URL=https://x.supabase.co\nSTRIPE_SECRET_KEY=sk_test\n',
-    );
-    writeDeployConfig(ROOT, [
-      {
-        name: 'worker-prod',
-        kind: 'cf-worker',
-        branch: 'production',
-        vars: ['SUPABASE_URL', 'STRIPE_SECRET_KEY'],
-        options: { workerName: 'my-worker', workerDir: 'worker' },
-      },
-    ]);
+  test.if(HAS_WRANGLER)('plaintext .env + dry-run: preflight + plan, no side effects', async () => {
+    await withHarness(async (h) => {
+      syncedProject(h, { SUPABASE_URL: 'https://x.supabase.co', STRIPE_SECRET_KEY: 'sk_test' });
+      writeWranglerToml(join(h.project, 'worker'), 'my-worker');
+      writeDeployConfig(h.project, [
+        {
+          name: 'worker-prod',
+          kind: 'cf-worker',
+          branch: 'production',
+          vars: ['SUPABASE_URL', 'STRIPE_SECRET_KEY'],
+          options: { workerName: 'my-worker', workerDir: 'worker' },
+        },
+      ]);
 
-    const r = capy(['deploy', 'worker-prod', '--dry-run', '--yes']);
-    if (r.code !== 0) {
-      console.error('STDOUT:', r.stdout);
-      console.error('STDERR:', r.stderr);
-    }
-    expect(r.code).toBe(0);
-    expect(r.stdout).toContain('worker-prod');
-    expect(r.stdout).toContain('cf-worker'.length > 0 ? 'Cloudflare Workers' : 'cf-worker');
-    expect(r.stdout).toContain('dry-run');
-    expect(r.stdout).toContain('filter vars');
+      const r = await h.run(['deploy', 'worker-prod', '--dry-run', '--yes']);
+      if (r.code !== 0) {
+        console.error('STDOUT:', r.stdout);
+        console.error('STDERR:', r.stderr);
+      }
+      expect(r.code).toBe(0);
+      expect(r.stdout).toContain('worker-prod');
+      expect(r.stdout).toContain('cf-worker'.length > 0 ? 'Cloudflare Workers' : 'cf-worker');
+      expect(r.stdout).toContain('dry-run');
+      expect(r.stdout).toContain('filter vars');
+    });
   });
 
-  test.if(HAS_WRANGLER)('dry-run accepts mixed vars (the picker is the gate, not preflight)', () => {
+  test.if(HAS_WRANGLER)('dry-run accepts mixed vars (the picker is the gate, not preflight)', async () => {
     // Once a target is saved, capy trusts the user's earlier picker choice.
     // No silent var filtering, no preflight refusal — the picker pre-selects
     // what's likely relevant and surfaces what's not, but lets the user
     // toggle anything in or out.
-    writeKeep(ROOT);
-    writeWranglerToml(join(ROOT, 'worker'), 'my-worker');
-    writeFileSync(join(ROOT, '.env'), 'SUPABASE_URL=x\nVITE_API_URL=y\n');
-    writeDeployConfig(ROOT, [
-      {
-        name: 'mixed',
-        kind: 'cf-worker',
-        branch: 'production',
-        vars: ['SUPABASE_URL', 'VITE_API_URL'],
-        options: { workerName: 'my-worker', workerDir: 'worker' },
-      },
-    ]);
-    const r = capy(['deploy', 'mixed', '--dry-run', '--yes']);
-    expect(r.code).toBe(0);
-    expect(r.stdout).toContain('VITE_API_URL');
+    await withHarness(async (h) => {
+      syncedProject(h, { SUPABASE_URL: 'x', VITE_API_URL: 'y' });
+      writeWranglerToml(join(h.project, 'worker'), 'my-worker');
+      writeDeployConfig(h.project, [
+        {
+          name: 'mixed',
+          kind: 'cf-worker',
+          branch: 'production',
+          vars: ['SUPABASE_URL', 'VITE_API_URL'],
+          options: { workerName: 'my-worker', workerDir: 'worker' },
+        },
+      ]);
+      const r = await h.run(['deploy', 'mixed', '--dry-run', '--yes']);
+      expect(r.code).toBe(0);
+      expect(r.stdout).toContain('VITE_API_URL');
+    });
   });
 });
 

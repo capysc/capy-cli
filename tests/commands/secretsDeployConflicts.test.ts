@@ -7,7 +7,7 @@
  * outside Capy. The properties:
  *   - before anything is written every target is looked at (reading only); a conflict stops the whole run:
  *     exit 3, the payload on stdout, no push, no record, no PR, no value in the output;
- *   - a rerun with `--resolve API_KEY@api=mine|theirs --conflict <id>` delivers, or skips that variable and
+ *   - a rerun with `--resolve API_KEY@api=local|remote --conflict <id>` delivers, or skips that variable and
  *     records nothing for it; a moved state is STALE; a partial answer gets the names still open;
  *   - only the PICKED variables are delivered, and the adapter is told to leave every other managed line alone.
  */
@@ -64,23 +64,23 @@ async function capture(fn: () => Promise<number>): Promise<Captured> {
 
 /** What the service holds for `api`'s API_KEY now (fingerprint only), by the script: someone edited it outside Capy. */
 const LIVE = 'deadbeefdeadbeef';
-const conflictFor = (theirs: string = LIVE) => ({ kind: 'target' as const, name: NAME, target: 'api', pinned: null, yours: hashOf(NAME), theirs });
+const conflictFor = (remote: string = LIVE) => ({ name: NAME, target: 'api', pinned: null, local: hashOf(NAME), remote });
 
 /**
  * A Dokploy adapter that compares live values: `api`'s API_KEY is in conflict until an answer is given, and an answer
  * counts only for the live value (and delivered value) it was made against, as `planTargetDelivery` does.
- * `liveAtWrite`: what the service holds when the delivery pass reads it (the comparison pass sees `theirs`).
+ * `liveAtWrite`: what the service holds when the delivery pass reads it (the comparison pass sees `remote`).
  */
-function liveAdapter(theirs: string = LIVE, liveAtWrite: string = theirs) {
+function liveAdapter(remote: string = LIVE, liveAtWrite: string = remote) {
   const base = fakeAdapter({
     deploy: (config: TargetConfig, ctx: DeployContext): DeployResult => {
       if (config.name !== 'api' || ctx.targetCheck === undefined) return { ok: true, steps: [{ label: 'application.saveEnvironment', status: 'ok' }] };
-      const now = ctx.dryRun ? theirs : liveAtWrite;
+      const now = ctx.dryRun ? remote : liveAtWrite;
       const seen = ctx.targetCheck.resolutions[NAME];
-      const answer = seen !== undefined && seen.theirs === now && seen.yours === hashOf(NAME) ? seen.choice : undefined;
+      const answer = seen !== undefined && seen.remote === now && seen.local === hashOf(NAME) ? seen.choice : undefined;
       if (ctx.dryRun) return { ok: true, steps: [], conflicts: [conflictFor(now)] };
       if (answer === undefined) return { ok: false, steps: [{ label: 'application.saveEnvironment', status: 'fail', code: 'SECRETS_CONFLICT' }], conflicts: [conflictFor(now)] };
-      return answer === 'theirs'
+      return answer === 'remote'
         ? { ok: true, steps: [{ label: 'application.saveEnvironment', status: 'ok' }], skipped: [NAME] }
         : { ok: true, steps: [{ label: 'application.saveEnvironment', status: 'ok' }] };
     },
@@ -145,22 +145,22 @@ describe('capy secrets deploy: target conflicts', () => {
     Object.values(VALUES).forEach((v) => expect(`${out.stdout}${out.stderr}`).not.toContain(v));
   });
 
-  test('mine: every target is delivered, with the answer handed to the adapter by bare name', async () => {
+  test('local: every target is delivered, with the answer handed to the adapter by bare name', async () => {
     const r = rig();
     const { planId, conflictId } = await preview(r);
-    const out = await run(r, { confirm: planId, conflictFlags: { resolve: [`${NAME}@api=mine`], conflict: conflictId } });
+    const out = await run(r, { confirm: planId, conflictFlags: { resolve: [`${NAME}@api=local`], conflict: conflictId } });
     expect(out.exitCode).toBeUndefined();
     expect(json(out).ok).toBe(true);
     const api = r.adapter.deploy.mock.calls.find(([c, ctx]) => c.name === 'api' && !ctx.dryRun);
-    expect(api?.[1].targetCheck?.resolutions).toEqual({ [NAME]: { choice: 'mine', theirs: LIVE, yours: hashOf(NAME) } });
+    expect(api?.[1].targetCheck?.resolutions).toEqual({ [NAME]: { choice: 'local', remote: LIVE, local: hashOf(NAME) } });
     expect(r.service.pushSecrets.mock.calls.length).toBeGreaterThan(0);
     expect(r.github.createPull.mock.calls).toHaveLength(3);
   });
 
-  test('theirs: the variable is skipped, not recorded as delivered, and the target reports KEPT_ON_PLATFORM (no PR for it)', async () => {
+  test('remote: the variable is skipped, not recorded as delivered, and the target reports KEPT_ON_PLATFORM (no PR for it)', async () => {
     const r = rig();
     const { planId, conflictId } = await preview(r);
-    const out = await run(r, { confirm: planId, conflictFlags: { resolve: [`${NAME}@api=theirs`], conflict: conflictId } });
+    const out = await run(r, { confirm: planId, conflictFlags: { resolve: [`${NAME}@api=remote`], conflict: conflictId } });
     expect(json(out).ok).toBe(true);
     expect(json(out).skipped).toContainEqual(expect.objectContaining({ target: 'api', code: SKIP_CODES.KEPT_ON_PLATFORM }));
     expect(json(out).delivered.map((d: { target: string }) => d.target).toSorted()).toEqual(['site', 'worker']);
@@ -173,7 +173,7 @@ describe('capy secrets deploy: target conflicts', () => {
     const first = rig();
     const { planId, conflictId } = await preview(first);
     const second = rig(liveAdapter('cafecafecafecafe'));
-    const out = await run(second, { confirm: planId, conflictFlags: { resolve: [`${NAME}@api=mine`], conflict: conflictId } });
+    const out = await run(second, { confirm: planId, conflictFlags: { resolve: [`${NAME}@api=local`], conflict: conflictId } });
     expect(out.exitCode).toBe(3);
     expect(json(out)).toMatchObject({ ok: false, code: 'SECRETS_CONFLICT_STALE' });
     expect(json(out).conflict_id).not.toBe(conflictId);
@@ -184,7 +184,7 @@ describe('capy secrets deploy: target conflicts', () => {
   test('the service moved between the comparison pass and the delivery pass: the answer does not apply, api fails with SECRETS_CONFLICT and nothing is recorded for it', async () => {
     const r = rig(liveAdapter(LIVE, 'cafecafecafecafe'));
     const { planId, conflictId } = await preview(r);
-    const out = await run(r, { confirm: planId, conflictFlags: { resolve: [`${NAME}@api=mine`], conflict: conflictId } });
+    const out = await run(r, { confirm: planId, conflictFlags: { resolve: [`${NAME}@api=local`], conflict: conflictId } });
     const body = json(out);
     expect(body.failed).toContainEqual(expect.objectContaining({ target: 'api', code: 'SECRETS_CONFLICT' }));
     expect(body.delivered.map((d: { target: string }) => d.target)).not.toContain('api');
@@ -195,7 +195,7 @@ describe('capy secrets deploy: target conflicts', () => {
   test('a conflict id without an answer for the name is a partial answer: the names still open, under the same id', async () => {
     const r = rig();
     const { planId, conflictId } = await preview(r);
-    const out = await run(r, { confirm: planId, conflictFlags: { resolve: [`OTHER@api=mine`], conflict: conflictId } });
+    const out = await run(r, { confirm: planId, conflictFlags: { resolve: [`OTHER@api=local`], conflict: conflictId } });
     expect(out.exitCode).toBe(3);
     expect(json(out)).toMatchObject({ ok: false, code: 'SECRETS_CONFLICT', conflict_id: conflictId });
     expect(json(out).conflicts).toEqual([conflictFor()]);

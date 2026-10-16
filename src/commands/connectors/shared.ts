@@ -2,8 +2,8 @@ import { ProjectManager } from '../../core/projectManager';
 import { FileManager } from '../../files/fileManager';
 import { AuthService, silentAuthFailureMessage } from '../../auth/authService';
 import { ServiceClient } from '../../service/serviceClient';
-import { commitFolder, readLocalPlaintext, type Resolutions } from '../../sync/commit';
-import { protocolDecider, type ConflictDecider, type ConflictFlags } from '../../sync/conflicts';
+import { readLocalPlaintext } from '../../sync/commit';
+import { commitGated, type GateOptions } from '../../sync/gate';
 import { KeepFile, ConnectorMetadata, CapyError, ERROR_CODES, AuthResult } from '../../types/index';
 import type { ImportOutcome } from './registry';
 import { reportRepoLinkForCommand, type RepoLinkWarning } from '../../core/repoLinkReporter';
@@ -25,11 +25,10 @@ export interface ResolvedContext {
   /** CAP-697: warnings from reporting this project's repo link (empty unless the keep.lock looks copied). */
   repoLinkWarnings?: readonly RepoLinkWarning[];
   /**
-   * How a write settles a conflict (CAP-717): set by a command that follows the non-TTY protocol, so
-   * every save through this context refuses with the payload (or applies `--resolve`). Absent:
-   * a conflict is a plain `SECRETS_CONFLICT`.
+   * How bare `capy` is run again if an upload is refused as stale (someone saved in between): the same options the
+   * command's first-step gate ran with (sync/gate.ts). Absent: a terminal, no flags.
    */
-  decide?: ConflictDecider;
+  gate?: GateOptions;
 }
 
 /**
@@ -74,8 +73,8 @@ export async function resolveContext(
     json?: boolean;
     /** The caller is a dry run: the repo link is not reported. */
     dryRun?: boolean;
-    /** The caller follows the conflict protocol (off a terminal, or given `--resolve`): its flags decide every conflict. */
-    conflicts?: ConflictFlags;
+    /** The options the command's first-step gate ran with: kept on the context for a stale-upload retry. */
+    gate?: GateOptions;
   } = {},
 ): Promise<ResolvedContext> {
   const refuse = opts.refuse ?? exitWithMessage;
@@ -145,7 +144,7 @@ export async function resolveContext(
     keep,
     localPlaintext: readLocalPlaintext(fileManager, projectKey),
     repoLinkWarnings: repoLink.warnings,
-    ...(opts.conflicts === undefined ? {} : { decide: protocolDecider(opts.conflicts) }),
+    ...(opts.gate === undefined ? {} : { gate: opts.gate }),
   };
 }
 
@@ -194,10 +193,10 @@ async function resolveProjectKeyOrRefuse(args: {
  * is the caller that passes a value, because replacing a credential is what
  * rotate is for.
  *
- * The save is `commitFolder` (sync/commit.ts): it changes ONLY `varName` (plus the
- * connector entries) on top of the server's latest, so nothing else in this folder's
- * `.env` or keep.lock can revert anyone else's value. If the server changed `varName`
- * since this folder's pin, it throws `SECRETS_CONFLICT` and uploads nothing.
+ * The save is `commitGated` (sync/gate.ts): it changes ONLY `varName` (plus the connector
+ * entries) on top of the server's latest, with `base_keep_hash`. The command ran bare `capy` before
+ * anything else, so the folder agreed with Capy when it started; if someone saved in between, the
+ * upload is refused as stale, bare `capy` runs again and the save is tried once more.
  *
  * If `connector` is provided, the metadata is attached to the keep.lock entry for
  * `varName` on the active branch.
@@ -215,8 +214,6 @@ export async function writeAndSync(
     connector?: ConnectorMetadata;
     /** Additional (varName, connector) pairs to mark managed in the same write. */
     alsoConnect?: ReadonlyArray<{ varName: string; entry: ConnectorMetadata }>;
-    /** Decisions already made for names the server changed (e.g. settled before a rotation issued its key). */
-    resolutions?: Resolutions;
   },
 ): Promise<void> {
   const { fileManager, branch, projectKey, keep, localPlaintext } = ctx;
@@ -233,16 +230,15 @@ export async function writeAndSync(
     return;
   }
 
-  await commitFolder(ctx, { set: value === undefined ? {} : { [varName]: value }, remove: [] }, { transformKeep: attach, resolutions: opts.resolutions });
+  await commitGated(ctx, { set: value === undefined ? {} : { [varName]: value }, remove: [] }, { transformKeep: attach });
 }
 
 /**
  * `capy remove NAME...` — drop `names` from the active branch. Only those names
- * move: everything else on the server, and every local edit in `.env`, is left
- * alone. A name the server changed since this folder's pin is a `SECRETS_CONFLICT`.
+ * move: everything else on the server is left alone.
  */
 export async function removeAndSync(ctx: ResolvedContext, names: readonly string[]): Promise<void> {
-  await commitFolder(ctx, { set: {}, remove: names });
+  await commitGated(ctx, { set: {}, remove: names });
 }
 
 /**
@@ -290,7 +286,7 @@ export async function writeImportedAndSync(
     return;
   }
 
-  await commitFolder(ctx, { set, remove: clear }, { transformKeep: attachAll });
+  await commitGated(ctx, { set, remove: clear }, { transformKeep: attachAll });
 }
 
 /**

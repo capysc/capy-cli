@@ -4,7 +4,7 @@
  * outside Capy (`liveAdapter`, the same script tests/commands/secretsDeployConflicts.test.ts uses for the CLI).
  *
  *   - the conflict is found BEFORE anything is delivered and nothing is written until it is decided;
- *   - mine delivers Capy's value, theirs delivers nothing for that variable and records nothing for it;
+ *   - local delivers Capy's value, remote delivers nothing for that variable and records nothing for it;
  *   - a decision made against a live value that has since changed is not applied: the conflict comes back;
  *   - cancelling the conflicts step leaves everything as it was.
  */
@@ -28,25 +28,25 @@ const [row] = indexRows();
 const LIVE = 'deadbeefdeadbeef';
 const MOVED_AGAIN = 'cafecafecafecafe';
 
-const conflictFor = (theirs: string = LIVE): TargetConflict => ({ kind: 'target', name: NAME, target: 'api', pinned: null, yours: hashOf(NAME), theirs });
-const decision = (choice: 'mine' | 'theirs', theirs: string = LIVE) => ({ 'API_KEY@api': { choice, theirs, yours: hashOf(NAME) } });
+const conflictFor = (remote: string = LIVE): TargetConflict => ({ name: NAME, target: 'api', pinned: null, local: hashOf(NAME), remote });
+const decision = (choice: 'local' | 'remote', remote: string = LIVE) => ({ 'API_KEY@api': { choice, remote, local: hashOf(NAME) } });
 
 /** What a Dokploy service that compares live values does: `api`'s API_KEY is in conflict until answered, and an answer counts only for the live value it was made against. */
 const liveScript =
-  (theirs: string, liveAtWrite: string = theirs) =>
+  (remote: string, liveAtWrite: string = remote) =>
   (config: TargetConfig, ctx: DeployContext): DeployResult => {
     if (config.name !== 'api' || ctx.targetCheck === undefined) return { ok: true, steps: [{ label: 'application.saveEnvironment', status: 'ok' }] };
-    const now = ctx.dryRun ? theirs : liveAtWrite;
+    const now = ctx.dryRun ? remote : liveAtWrite;
     const seen = ctx.targetCheck.resolutions[NAME];
-    const answer = seen !== undefined && seen.theirs === now && seen.yours === hashOf(NAME) ? seen.choice : undefined;
+    const answer = seen !== undefined && seen.remote === now && seen.local === hashOf(NAME) ? seen.choice : undefined;
     if (ctx.dryRun) return { ok: true, steps: [], conflicts: [conflictFor(now)] };
     if (answer === undefined) return { ok: false, steps: [{ label: 'application.saveEnvironment', status: 'fail', code: 'SECRETS_CONFLICT' }], conflicts: [conflictFor(now)] };
-    return answer === 'theirs'
+    return answer === 'remote'
       ? { ok: true, steps: [{ label: 'application.saveEnvironment', status: 'ok' }], skipped: [NAME] }
       : { ok: true, steps: [{ label: 'application.saveEnvironment', status: 'ok' }] };
   };
 
-const liveAdapter = (theirs: string = LIVE, liveAtWrite: string = theirs) => Object.assign(fakeAdapter({ deploy: liveScript(theirs, liveAtWrite) }), { readsLiveValues: true });
+const liveAdapter = (remote: string = LIVE, liveAtWrite: string = remote) => Object.assign(fakeAdapter({ deploy: liveScript(remote, liveAtWrite) }), { readsLiveValues: true });
 
 /** A service whose `api` value is LIVE for the first comparison and MOVED_AGAIN from the second on: someone changed it while the person was deciding. */
 function movingAdapter() {
@@ -95,18 +95,18 @@ describe('the real actions: found before anything is delivered', () => {
     Object.values(VALUES).forEach((v) => expect(JSON.stringify(finished)).not.toContain(v));
   });
 
-  test('mine: every target is delivered, the answer handed to the adapter bound to the live value it was made against', async () => {
+  test('local: every target is delivered, the answer handed to the adapter bound to the live value it was made against', async () => {
     const r = rig();
-    const finished = await r.actions.run(await planned(r), undefined, decision('mine'));
+    const finished = await r.actions.run(await planned(r), undefined, decision('local'));
     expect(finished.ok).toBe(true);
     const api = r.adapter.deploy.mock.calls.find(([c, ctx]) => c.name === 'api' && !ctx.dryRun);
-    expect(api?.[1].targetCheck?.resolutions).toEqual({ [NAME]: { choice: 'mine', theirs: LIVE, yours: hashOf(NAME) } });
+    expect(api?.[1].targetCheck?.resolutions).toEqual({ [NAME]: { choice: 'local', remote: LIVE, local: hashOf(NAME) } });
     expect(r.github.createPull.mock.calls).toHaveLength(3);
   });
 
-  test('theirs: that variable is not delivered and not recorded for api (the target reports it kept on the platform)', async () => {
+  test('remote: that variable is not delivered and not recorded for api (the target reports it kept on the platform)', async () => {
     const r = rig();
-    const finished = await r.actions.run(await planned(r), undefined, decision('theirs'));
+    const finished = await r.actions.run(await planned(r), undefined, decision('remote'));
     if (!finished.ok) throw new Error('expected a result');
     expect(finished.result.targets.find((t) => t.kind === 'skipped')).toMatchObject({ kind: 'skipped', code: SKIP_CODES.KEPT_ON_PLATFORM, target: { target: 'api' } });
     expect(finished.result.targets.filter((t) => t.kind === 'delivered').map((t) => t.target.target).toSorted()).toEqual(['site', 'worker']);
@@ -116,14 +116,14 @@ describe('the real actions: found before anything is delivered', () => {
 
   test('the live value changed after the decision: the decision is NOT applied, the new conflict comes back, nothing is delivered', async () => {
     const r = rig(liveAdapter(MOVED_AGAIN));
-    const finished = await r.actions.run(await planned(r), undefined, decision('mine', LIVE));
+    const finished = await r.actions.run(await planned(r), undefined, decision('local', LIVE));
     expect(finished).toEqual({ ok: false, code: ERROR_CODES.SECRETS_CONFLICT, conflicts: [conflictFor(MOVED_AGAIN)] });
     nothingWritten(r);
   });
 
   test('a decision for another delivered value is not applied either', async () => {
     const r = rig();
-    const finished = await r.actions.run(await planned(r), undefined, { 'API_KEY@api': { choice: 'mine', theirs: LIVE, yours: 'someotherhash0000' } });
+    const finished = await r.actions.run(await planned(r), undefined, { 'API_KEY@api': { choice: 'local', remote: LIVE, local: 'someotherhash0000' } });
     expect(finished.ok).toBe(false);
     nothingWritten(r);
   });
@@ -140,13 +140,13 @@ describe('decideFrom (pure)', () => {
   const scope = { project: 'mono-backend', branch: 'production', serverKeepHash: 'k', conflicts: [conflictFor()] };
 
   test('every conflict decided against what it holds now: the decisions, by NAME@TARGET', () => {
-    expect(decideFrom(decision('theirs'))([scope])).toEqual({ 'API_KEY@api': 'theirs' });
+    expect(decideFrom(decision('remote'))([scope])).toEqual({ 'API_KEY@api': 'remote' });
   });
   test('an undecided or moved conflict is a refusal (nothing written) listing them', () => {
     expect(() => decideFrom(undefined)([scope])).toThrow();
     const thrown = (() => {
       try {
-        decideFrom(decision('mine', 'old'))([scope]);
+        decideFrom(decision('local', 'old'))([scope]);
         return undefined;
       } catch (e) {
         return e;
@@ -170,37 +170,37 @@ describe('the flow step', () => {
     expect(view(flow)).toContain('API_KEY');
     expect(view(flow)).toContain('api · API_KEY · changed outside Capy');
     expect(view(flow)).not.toContain(LIVE);
-    expect(strip(renderDeploy(flow, 120).footer)).toContain('m mine');
-    expect(strip(renderDeploy(flow, 120).footer)).toContain('t theirs');
+    expect(strip(renderDeploy(flow, 120).footer)).toContain('l local');
+    expect(strip(renderDeploy(flow, 120).footer)).toContain('r remote');
   });
 
   test('Enter does nothing until decided; then it runs again with the decision bound to the fingerprints', () => {
     const flow = atConflicts();
     expect(stepDeploy(flow, '\r').effect).toBeNull();
     expect(strip(renderDeploy(flow, 120).footer)).not.toContain('enter continue');
-    const decided = stepDeploy(flow, 'm').flow as DeployFlow;
+    const decided = stepDeploy(flow, 'l').flow as DeployFlow;
     expect(strip(renderDeploy(decided, 120).footer)).toContain('enter continue');
     const again = stepDeploy(decided, '\r');
     expect(again.flow?.step).toBe('running');
-    expect(again.effect).toMatchObject({ type: 'runDeploy', decisions: decision('mine') });
+    expect(again.effect).toMatchObject({ type: 'runDeploy', decisions: decision('local') });
   });
 
   test('Esc leaves with nothing written: no effect, the cancelled note', () => {
-    const left = stepDeploy(stepDeploy(atConflicts(), 'm').flow as DeployFlow, ESC);
+    const left = stepDeploy(stepDeploy(atConflicts(), 'l').flow as DeployFlow, ESC);
     expect(left.flow).toBeNull();
     expect(left.effect).toBeNull();
     expect(left.note).toBe(CANCELLED_NOTHING);
   });
 
   test('coming back with the live value moved again drops that decision', () => {
-    const decided = stepDeploy(stepDeploy(atConflicts(), 'm').flow as DeployFlow, '\r').flow as DeployFlow;
+    const decided = stepDeploy(stepDeploy(atConflicts(), 'l').flow as DeployFlow, '\r').flow as DeployFlow;
     const back = applyDeployFinished(decided, { ok: false, code: ERROR_CODES.SECRETS_CONFLICT, conflicts: [conflictFor(MOVED_AGAIN)] }) as Extract<DeployFlow, { step: 'conflicts' }>;
     expect(back.step).toBe('conflicts');
     expect(back.choices).toEqual({});
     expect(stepDeploy(back, '\r').effect).toBeNull();
     // Unmoved: the decision stands.
     const same = applyDeployFinished(decided, { ok: false, code: ERROR_CODES.SECRETS_CONFLICT, conflicts: [conflictFor()] }) as Extract<DeployFlow, { step: 'conflicts' }>;
-    expect(same.choices).toEqual({ 'API_KEY@api': 'mine' });
+    expect(same.choices).toEqual({ 'API_KEY@api': 'local' });
   });
 
   test('a plain failure is still the failure line', () => {
@@ -248,21 +248,21 @@ describe('the whole TUI: Ctrl+D, Enter, then the conflict', () => {
     nothingWritten(s.r);
   });
 
-  test('mine, Enter: delivered', async () => {
-    const s = await session(['m', '\r']);
+  test('local, Enter: delivered', async () => {
+    const s = await session(['l', '\r']);
     expect(s.r.github.createPull.mock.calls).toHaveLength(3);
     expect(s.r.adapter.deploy.mock.calls.some(([c, ctx]) => c.name === 'api' && !ctx.dryRun)).toBe(true);
     expect(everythingSentTo(s.r.github.createPull)).not.toContain(VALUES.API_KEY);
   });
 
-  test('theirs, Enter: api is skipped (kept on the platform), the others are delivered', async () => {
-    const s = await session(['t', '\r']);
+  test('remote, Enter: api is skipped (kept on the platform), the others are delivered', async () => {
+    const s = await session(['r', '\r']);
     expect(s.r.github.createPull.mock.calls).toHaveLength(2);
     expect(`${s.logged}\n${s.afterwards}`).toContain(SKIP_CODES.KEPT_ON_PLATFORM);
   });
 
   test('the live value moves after the decision: the conflict is shown again and nothing is delivered', async () => {
-    const s = await session(['m', '\r'], movingAdapter());
+    const s = await session(['l', '\r'], movingAdapter());
     expect(s.afterwards).toContain('changed outside Capy in 1 place');
     // It was compared twice (before the decision and after it), and the second time it had moved.
     expect(s.r.adapter.deploy.mock.calls.filter(([c, x]) => c.name === 'api' && x.dryRun === true)).toHaveLength(2);

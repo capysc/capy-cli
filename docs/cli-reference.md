@@ -2,7 +2,7 @@
 
 # capy CLI reference
 
-Version `0.9.11`. Generated from `capy help --json`.
+Version `0.9.12`. Generated from `capy help --json`.
 
 ## Commands
 
@@ -48,7 +48,7 @@ capy edit [name] [options]
 | `--pr` | create a PR with the keep.lock change (answers the prompt) |  |
 | `--no-pr` | do not create a PR with the keep.lock change |  |
 | `--pr-base <branch>` | base branch for the PR (answers the prompt) |  |
-| `--resolve <NAME=mine|theirs>` | decide a conflict: keep your value (mine) or theirs; NAME@TARGET=... for a deploy target (repeatable, needs --conflict) | `[]` |
+| `--resolve <NAME=pinned|local|remote|delete>` | answer a difference from Capy: pinned, local, remote or delete (secrets set: local or remote); NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict) | `[]` |
 | `--conflict <conflict_id>` | the conflict_id a conflict returned: binds --resolve to what was seen |  |
 
 JSON support: yes (`--json`)
@@ -89,7 +89,7 @@ JSON support: yes (`--json`)
 
 ## `capy push`
 
-Push your changes to Keep: edited, new and deleted variables
+Push encrypted values to Keep
 
 ```
 capy push [options]
@@ -97,8 +97,8 @@ capy push [options]
 
 | Option | Description | Default |
 |---|---|---|
-| `--non-tty` | treat stdin as not a terminal; a conflict stops the push with the conflict_id (agents/CI) |  |
-| `--resolve <NAME=mine|theirs>` | decide a conflict: keep your value (mine) or theirs; NAME@TARGET=... for a deploy target (repeatable, needs --conflict) | `[]` |
+| `--non-tty` | treat stdin as not a terminal; differences from Capy stop the push with the conflict_id (agents/CI) |  |
+| `--resolve <NAME=pinned|local|remote|delete>` | answer a difference from Capy: pinned, local, remote or delete (secrets set: local or remote); NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict) | `[]` |
 | `--conflict <conflict_id>` | the conflict_id a conflict returned: binds --resolve to what was seen |  |
 
 JSON support: no
@@ -129,7 +129,7 @@ capy deploy [target] [options]
 | `--plan <file>` | dokploy --discover: the plan file to check (see schemas.deploy_dokploy_plan in `capy help --json`) |  |
 | `--confirm <plan_id>` | dokploy --discover: write the plan that --dry-run printed (one PR per repo) |  |
 | `--base-url <url>` | dokploy --discover: the Dokploy dashboard URL (else the org system variable _CONNECTOR_DOKPLOY_BASE_URL) |  |
-| `--resolve <NAME=mine|theirs>` | decide a conflict: keep your value (mine) or theirs; NAME@TARGET=... for a deploy target (repeatable, needs --conflict) | `[]` |
+| `--resolve <NAME=pinned|local|remote|delete>` | answer a difference from Capy: pinned, local, remote or delete (secrets set: local or remote); NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict) | `[]` |
 | `--conflict <conflict_id>` | the conflict_id a conflict returned: binds --resolve to what was seen |  |
 
 JSON support: yes (`--json`)
@@ -559,7 +559,7 @@ capy secrets set <name> [options]
 | `--no-pr-for <owner/name>` | do not open a PR in this repo (repeatable) | `[]` |
 | `--no-pr` | do not open any PR |  |
 | `--confirm <plan_id>` | run the plan that --dry-run printed (required for a real run) |  |
-| `--resolve <NAME=mine|theirs>` | decide a conflict: keep your value (mine) or theirs; NAME@TARGET=... for a deploy target (repeatable, needs --conflict) | `[]` |
+| `--resolve <NAME=pinned|local|remote|delete>` | answer a difference from Capy: pinned, local, remote or delete (secrets set: local or remote); NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict) | `[]` |
 | `--conflict <conflict_id>` | the conflict_id a conflict returned: binds --resolve to what was seen |  |
 
 JSON support: yes (`--json`)
@@ -581,7 +581,7 @@ capy secrets deploy <names...> [options]
 | `--all-rows` | deploy every row of those names |  |
 | `--exclude <project:branch>` | leave this location out (repeatable) | `[]` |
 | `--confirm <plan_id>` | run the plan that --dry-run printed (required for a real run) |  |
-| `--resolve <NAME=mine|theirs>` | decide a conflict: keep your value (mine) or theirs; NAME@TARGET=... for a deploy target (repeatable, needs --conflict) | `[]` |
+| `--resolve <NAME=pinned|local|remote|delete>` | answer a difference from Capy: pinned, local, remote or delete (secrets set: local or remote); NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict) | `[]` |
 | `--conflict <conflict_id>` | the conflict_id a conflict returned: binds --resolve to what was seen |  |
 
 JSON support: yes (`--json`)
@@ -665,7 +665,7 @@ capy add <vars...> [options]
 | `--pr` | create a PR with the keep.lock change (answers the prompt) |  |
 | `--no-pr` | do not create a PR with the keep.lock change |  |
 | `--pr-base <branch>` | base branch for the PR (answers the prompt) |  |
-| `--resolve <NAME=mine|theirs>` | decide a conflict: keep your value (mine) or theirs; NAME@TARGET=... for a deploy target (repeatable, needs --conflict) | `[]` |
+| `--resolve <NAME=pinned|local|remote|delete>` | answer a difference from Capy: pinned, local, remote or delete (secrets set: local or remote); NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict) | `[]` |
 | `--conflict <conflict_id>` | the conflict_id a conflict returned: binds --resolve to what was seen |  |
 
 JSON support: yes (`--json`)
@@ -688,7 +688,7 @@ capy remove <vars...> [options]
 | `--pr` | create a PR with the keep.lock change (answers the prompt) |  |
 | `--no-pr` | do not create a PR with the keep.lock change |  |
 | `--pr-base <branch>` | base branch for the PR (answers the prompt) |  |
-| `--resolve <NAME=mine|theirs>` | decide a conflict: keep your value (mine) or theirs; NAME@TARGET=... for a deploy target (repeatable, needs --conflict) | `[]` |
+| `--resolve <NAME=pinned|local|remote|delete>` | answer a difference from Capy: pinned, local, remote or delete (secrets set: local or remote); NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict) | `[]` |
 | `--conflict <conflict_id>` | the conflict_id a conflict returned: binds --resolve to what was seen |  |
 
 JSON support: yes (`--json`)
@@ -721,7 +721,7 @@ capy connect [provider] [options]
 | `-y, --yes` | dokploy import/discover: skip the confirmation prompt (import: --overwrite's clear/replace/import ask) — discover never prompts and needs --yes to write |  |
 | `--overwrite` | dokploy import: set the branch's vars to EXACTLY Dokploy's set — clear names not in Dokploy, replace differing values, import new ones |  |
 | `--environment <names>` | dokploy discover: restrict the plan to these Dokploy environment names, comma-separated (e.g. staging,preview) |  |
-| `--resolve <NAME=mine|theirs>` | decide a conflict: keep your value (mine) or theirs; NAME@TARGET=... for a deploy target (repeatable, needs --conflict) | `[]` |
+| `--resolve <NAME=pinned|local|remote|delete>` | answer a difference from Capy: pinned, local, remote or delete (secrets set: local or remote); NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict) | `[]` |
 | `--conflict <conflict_id>` | the conflict_id a conflict returned: binds --resolve to what was seen |  |
 
 JSON support: yes (`--json`)
@@ -744,7 +744,7 @@ capy rotate [var] [options]
 | `--skip-prompts` | alias for --yes |  |
 | `--non-tty` | never prompt; resolve choices from flags or fail fast (agents/CI) |  |
 | `--provider <name>` | integration to promote an unmanaged var through (non-interactive) |  |
-| `--resolve <NAME=mine|theirs>` | decide a conflict: keep your value (mine) or theirs; NAME@TARGET=... for a deploy target (repeatable, needs --conflict) | `[]` |
+| `--resolve <NAME=pinned|local|remote|delete>` | answer a difference from Capy: pinned, local, remote or delete (secrets set: local or remote); NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict) | `[]` |
 | `--conflict <conflict_id>` | the conflict_id a conflict returned: binds --resolve to what was seen |  |
 
 JSON support: no
@@ -902,7 +902,6 @@ Every refusal carries a stable `code` — branch on it, never on message text.
 - `SECRETS_STALE_BASE`
 - `SECRETS_CONFLICT`
 - `SECRETS_CONFLICT_STALE`
-- `DEPLOY_UNSAVED_CHANGES`
 - `SECRETS_RESOLVE_INVALID`
 - `SECRETS_RESOLVE_NEEDS_CONFLICT`
 - `REMOVE_LOCAL_DRIFT`
@@ -957,4 +956,4 @@ Every refusal carries a stable `code` — branch on it, never on message text.
 
 - **JSON**: Pass --json on any command whose supportsJson is true and parse stdout as JSON; prose (progress, prompts, errors) goes to stderr so stdout stays pure JSON.
 - **Codes**: Branch only on the machine-readable `code` field (from --json output or a CapyError), never on human-readable message text — messages may be reworded without notice.
-- **Conflicts**: A write that would replace a value someone else changed stops: nothing is written, the exit code is 3, and stdout is {ok:false, code:"SECRETS_CONFLICT", conflict_id, conflicts:[...]} (fingerprints only, never values). Ask the person, then rerun the same command with --resolve NAME=mine|theirs for every conflicting name (NAME@TARGET=... for a deploy target) and --conflict <conflict_id>. A state that moved since is SECRETS_CONFLICT_STALE with the fresh conflicts. There is no resolve-all. `capy deploy` never delivers a value Capy does not hold and never saves one unasked: off a terminal, folder edits Capy lacks stop it with exit 3 and stdout {ok:false, code:"DEPLOY_UNSAVED_CHANGES", names:[...]} (names only, never values; source conflicts are reported first). Save them with `capy push`, then rerun.
+- **Conflicts**: Every command that writes from a folder (edit, add, remove, connect, rotate, push, deploy) runs bare `capy` first. Off a terminal, if the folder and Capy differ on any variable, nothing is written, the exit code is 3, and stdout is {ok:false, code:"SECRETS_CONFLICT", conflict_id, conflicts:[{name, project, branch, type, pinned, local, remote}]} (fingerprints only, never values; a Dokploy value has {name, target, pinned, local, remote}). Ask the person, then rerun the same command with --resolve NAME=pinned|local|remote|delete for every row (NAME@TARGET=local|remote for a Dokploy value) and --conflict <conflict_id>. A state that moved since is SECRETS_CONFLICT_STALE with the fresh rows. There is no resolve-all.

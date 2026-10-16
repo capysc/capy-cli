@@ -225,6 +225,9 @@ async function startMockService(requestLog: string, failFlag: string, root: stri
       const spliced = SyncEngine.spliceKeepBranch(before.keep ?? null, keep, parsed.branch);
       const hash = SyncEngine.computeKeepHash(spliced, parsed.branch);
       writeFileSync(join(root, 'store.json'), JSON.stringify({ keep: spliced, blobs: { ...before.blobs, [hash]: parsed.env_blob ?? '' } }));
+      // The push is now the server's latest for the branch: a fixture a test set earlier no longer describes it.
+      const project = path.slice('/secrets/'.length).split('?')[0];
+      rmSync(join(root, `branch-${project}-${parsed.branch}.json`), { force: true });
       return send(200, { keep_hash: SyncEngine.computeKeepHash(keep, parsed.branch) });
     }
     return send(404, { error: 'unexpected request' });
@@ -313,4 +316,18 @@ export async function createHarness(): Promise<Harness> {
 /** sha256 of a string, for asserting "this file did not change" without printing contents. */
 export function digest(value: string): string {
   return createHash('sha256').update(value).digest('hex');
+}
+
+/**
+ * A world of its own for a test that leaves the folder different from Capy (`--no-push` writes `.env` only): the next
+ * command that writes meets bare `capy` first (docs/conflict-resolution.md) and would stop on that difference, so such a
+ * test must not share its world with the ones after it.
+ */
+export async function withHarness<T>(fn: (harness: Harness) => Promise<T>): Promise<T> {
+  const harness = await createHarness();
+  try {
+    return await fn(harness);
+  } finally {
+    await harness.dispose();
+  }
 }

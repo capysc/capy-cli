@@ -2,8 +2,8 @@ import { resolveContext, writeAndSync, writeImportOutcome, ResolvedContext } fro
 import { listProviders, loadProvider, ConnectOpts, ConnectorModule } from './connectors/registry';
 import { EXIT_NEEDS_INPUT, isInteractive } from '../ui/interactive';
 import { resolveOrgContext } from '../core/orgContext';
-import { isSecretsConflict } from '../sync/commit';
-import { conflictFlagsOrExit, exitOnConflictRefusal, hasConflictFlags } from '../sync/conflicts';
+import { conflictFlagsOrExit } from '../sync/conflicts';
+import { gateFirst, type GateOptions } from '../sync/gate';
 import type { DiscoveryContext } from './connectors/dokployDiscovery';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
@@ -79,6 +79,19 @@ export class ConnectCommand {
 
     const mod = await this.resolveProvider(provider);
 
+    // A bad --resolve / --conflict is refused before anything is read.
+    conflictFlagsOrExit(effective.conflictFlags ?? {}, effective.json === true);
+    const gate: GateOptions = {
+      devMode: this.devMode,
+      json: effective.json === true,
+      nonTty: effective.nonTty,
+      conflictFlags: effective.conflictFlags,
+      dryRun: effective.dryRun === true,
+    };
+    // Bare `capy` runs before anything else: the folder and Capy must agree before this writes (docs/conflict-resolution.md).
+    // Discovery is the one exception: it writes other checkouts than this folder, and applies its own plan there.
+    if (!(effective.discover && mod.discover)) await gateFirst(gate);
+
     if (mod.precheck) mod.precheck();
 
     // Discovery mode (CAP-657 follow-up, `dokploy` only): finds every
@@ -100,10 +113,7 @@ export class ConnectCommand {
       return await this.executeDiscovery(mod, provider, discoveryCtx, discoveryOpts);
     }
 
-    // Off a terminal (or given --resolve), a conflict follows the protocol: nothing is written, exit 3, the payload on stdout.
-    const flags = conflictFlagsOrExit(effective.conflictFlags ?? {}, effective.json === true);
-    const protocol = effective.json === true || !isInteractive(effective.nonTty) || hasConflictFlags(flags);
-    const ctx = await resolveContext({ devMode: this.devMode, dryRun: effective.dryRun === true, ...(protocol ? { conflicts: flags } : {}) });
+    const ctx = await resolveContext({ devMode: this.devMode, dryRun: effective.dryRun === true, gate });
 
     // Import-kind connectors (CAP-662: `dokploy`) pull MANY variables in one
     // run rather than linking one existing one, so they skip the var-picking
@@ -220,24 +230,7 @@ export class ConnectCommand {
     // `writeImportOutcome` never auto-commits keep.lock and never prints
     // anything itself, so there is nothing left for a `quiet` flag to
     // suppress here.
-    // A name someone else changed on the server since this folder's pin is a refusal naming it (nothing was uploaded).
-    const written = await writeImportOutcome(ctx, outcome, { push: !opts.noPush, dryRun }).then(
-      (result) => ({ conflict: undefined, wrote: result.wrote }),
-      (err: unknown) => {
-        exitOnConflictRefusal(err);
-        return isSecretsConflict(err) ? { conflict: err, wrote: false } : Promise.reject(err);
-      },
-    );
-    if (written.conflict) {
-      if (opts.json) {
-        console.log(JSON.stringify({ ok: false, code: written.conflict.code, message: written.conflict.message, names: written.conflict.details?.names }));
-      } else {
-        console.error(`\n  ${written.conflict.message}\n`);
-      }
-      process.exitCode = 1;
-      return { linked: false };
-    }
-    const { wrote } = written;
+    const { wrote } = await writeImportOutcome(ctx, outcome, { push: !opts.noPush, dryRun });
     const pushed = !opts.noPush && wrote;
     const cleared = outcome.cleared ?? [];
     const hasChange = outcome.imported.length > 0 || cleared.length > 0;

@@ -18,11 +18,12 @@
 //   repos      the repos to open a PR in, with the approved prompt, all selected.
 //   running    keys are ignored: a push in flight is never abandoned halfway. Before any push, every
 //              location is read; one whose value someone else changed since the row was listed comes
-//              back as a conflict and the flow goes to `conflicts` (nothing has been written).
-//   conflicts  one line per such location. m keeps your value there (mine), t leaves theirs (that
-//              location is skipped); Enter runs once every one is decided, Esc cancels with nothing
-//              written. A decision holds only for the value it was made against: if the location
-//              moved again, the run comes back here with it.
+//              back as a row (`compareSecrets`: pinned = the listed value, local = the new one,
+//              remote = what is there now) and the flow goes to `conflicts` (nothing has been written).
+//   conflicts  one line per such location, answered with bare `capy`'s choices as far as setting a value
+//              allows: l writes the new value there (local), r leaves the location (remote). Enter runs
+//              once every one is answered, Esc cancels with nothing written. An answer holds only for the
+//              value it was made against: if the location moved again, the run comes back here with it.
 //   done       the confirmation; only Esc leaves it. `c` copies the PR links to the clipboard (and the
 //              screen stays), so they can also be selected and copied by hand first.
 
@@ -34,7 +35,8 @@ import { sanitizePastedText } from './editScreen';
 import { CONFIRM_MESSAGE } from '../commands/keepLockPr';
 import { CANCELLED_NOTHING, STOPPING_AGAIN, STOPPING_NOW, stoppingAfter, DryRunView, renderDryRunPlan, renderSecretSetConfirmation, TERMINAL_STYLE } from '../commands/secretsSetText';
 import { LocationConflict, RepoTarget, RunProgress, SecretSetResult, SetLocation, locationKeyOf, planRepos, repoKey, repoLabel } from '../commands/secretsSet';
-import { seenResolutions, type Resolution, type SeenResolution } from '../sync/conflicts';
+import { bindAnswer, holdsFor, type BoundAnswer } from '../sync/noFolder';
+import type { Resolution } from '../sync/conflicts';
 import { formatRelativeTime } from './relativeTime';
 import { TableColumn, clipLine, pickerTableLines } from './pickerTable';
 import { COPY_HINT_PAIR, CopyEffect, CopyOutcome, copiedLine, copyEffectFor, isCopyKey, uniqueUrls } from './copyPrLinks';
@@ -121,7 +123,7 @@ export type EditFlow =
       readonly step: 'conflicts';
       readonly request: RunRequest;
       readonly conflicts: readonly LocationConflict[];
-      /** The decision at each conflicting location, by `locationKeyOf`. */
+      /** The answer at each moved location, by `locationKeyOf`: `local` or `remote`. */
       readonly choices: Readonly<Record<string, Resolution>>;
       readonly cursor: number;
     } & Carried)
@@ -148,8 +150,8 @@ export interface RunRequest {
    * the new value) was changed by someone else since (CAP-714). Absent: locations are not compared.
    */
   readonly seen?: string;
-  /** The decisions made for conflicting locations, by `locationKeyOf`, with the fingerprints they were made against. */
-  readonly decisions?: Readonly<Record<string, SeenResolution>>;
+  /** The answers for moved locations, by `locationKeyOf`, with the fingerprints they were made against. */
+  readonly decisions?: Readonly<Record<string, BoundAnswer>>;
 }
 
 export type EditEffect =
@@ -400,15 +402,14 @@ const choiceAt = (flow: Extract<EditFlow, { step: 'conflicts' }>, c: LocationCon
 /** Whether every conflicting location has been decided. */
 export const allDecided = (flow: Extract<EditFlow, { step: 'conflicts' }>): boolean => flow.conflicts.every((c) => choiceAt(flow, c) !== undefined);
 
-/** The run again, with each decision bound to the fingerprints it was made against (`seenResolutions`). */
+/** The run again, with each answer bound to the fingerprints it was made against. */
 function withDecisions(flow: Extract<EditFlow, { step: 'conflicts' }>): RunRequest {
   return {
     ...flow.request,
     decisions: Object.fromEntries(
       flow.conflicts.flatMap((c) => {
         const choice = choiceAt(flow, c);
-        const bound = choice === undefined ? undefined : seenResolutions({ [c.conflict.name]: choice }, [c.conflict])[c.conflict.name];
-        return bound === undefined ? [] : [[locationKeyOf(c.location), bound] as const];
+        return choice === undefined ? [] : [[locationKeyOf(c.location), bindAnswer(choice, c.conflict)] as const];
       }),
     ),
   };
@@ -422,11 +423,11 @@ function stepConflicts(flow: Extract<EditFlow, { step: 'conflicts' }>, key: stri
     const at = flow.conflicts[flow.cursor];
     return at === undefined ? stay(flow) : stay({ ...flow, choices: { ...flow.choices, [locationKeyOf(at.location)]: choice } });
   };
-  if (key === 'm' || key === 'M') return decide('mine');
-  if (key === 't' || key === 'T') return decide('theirs');
+  if (key === 'l' || key === 'L') return decide('local');
+  if (key === 'r' || key === 'R') return decide('remote');
   if (key !== '\r' || !allDecided(flow)) return stay(flow);
   const request = withDecisions(flow);
-  const kept = flow.conflicts.filter((c) => choiceAt(flow, c) === 'theirs').length;
+  const kept = flow.conflicts.filter((c) => choiceAt(flow, c) === 'remote').length;
   return {
     flow: {
       step: 'running',
@@ -503,17 +504,15 @@ function finishedText(name: string, finished: RunFinished): string {
   return 'plan' in finished ? renderDryRunPlan(finished.plan) : renderSecretSetConfirmation(finished.result, TERMINAL_STYLE);
 }
 
-/** Locations where the person kept the other value (theirs): said under the result, since nothing else mentions them. */
+/** Locations where the person left the other value (remote): said under the result, since nothing else mentions them. */
 const keptNote = (kept: number): string => (kept === 0 ? '' : `\nKept the other value in ${kept} location${kept === 1 ? '' : 's'}.`); // COPY-FLAG
 
-/** The conflicts screen for what a run found. A decision made earlier stays only where the value it was made against is still the one there. */
+/** The conflicts screen for what a run found. An answer made earlier stays only where the value it was made against is still the one there. */
 function conflictsStep(flow: Extract<EditFlow, { step: 'running' }>, conflicts: readonly LocationConflict[]): EditFlow {
   const choices = Object.fromEntries(
     conflicts.flatMap((c) => {
       const earlier = flow.request.decisions?.[locationKeyOf(c.location)];
-      return earlier !== undefined && earlier.theirs === c.conflict.theirs && earlier.yours === c.conflict.yours
-        ? [[locationKeyOf(c.location), earlier.choice] as const]
-        : [];
+      return holdsFor(earlier, c.conflict) ? [[locationKeyOf(c.location), earlier.choice] as const] : [];
     }),
   );
   return {
@@ -533,7 +532,7 @@ function conflictsStep(flow: Extract<EditFlow, { step: 'running' }>, conflicts: 
 export function applyRunFinished(flow: EditFlow | null, finished: RunFinished): EditFlow | null {
   if (flow === null || flow.step !== 'running') return flow;
   if (!finished.ok && finished.conflicts !== undefined && finished.conflicts.length > 0) return conflictsStep(flow, finished.conflicts);
-  const kept = Object.values(flow.request.decisions ?? {}).filter((d) => d.choice === 'theirs').length;
+  const kept = Object.values(flow.request.decisions ?? {}).filter((d) => d.choice === 'remote').length;
   const text = finishedText(flow.name, finished);
   return { step: 'done', text: finished.ok && 'result' in finished ? text + keptNote(kept) : text, prUrls: prUrlsOf(finished) };
 }
@@ -587,7 +586,7 @@ function renderConflicts(flow: Extract<EditFlow, { step: 'conflicts' }>, maxWidt
   const n = flow.conflicts.length;
   const row = (c: LocationConflict, i: number): string => {
     const choice = choiceAt(flow, c);
-    const when = c.conflict.theirs_changed_at === undefined ? '' : ` · changed ${formatRelativeTime(c.conflict.theirs_changed_at)}`; // COPY-FLAG
+    const when = c.changedAt === undefined ? '' : ` · changed ${formatRelativeTime(c.changedAt)}`; // COPY-FLAG
     const line = `${i === flow.cursor ? '▶' : ' '} ${c.location.project_name} ${c.location.branch}${when}  ${choice === undefined ? '—' : choice}`; // COPY-FLAG
     return i === flow.cursor ? `${BOLD}${clipLine(line, maxWidth)}${RESET}` : clipLine(line, maxWidth);
   };
@@ -597,7 +596,7 @@ function renderConflicts(flow: Extract<EditFlow, { step: 'conflicts' }>, maxWidt
       '',
       ...flow.conflicts.map(row),
     ],
-    footer: hint(['m', 'mine'], ['t', 'theirs'], ...(allDecided(flow) ? ([['enter', 'continue']] as const) : []), ['esc', 'cancel']), // COPY-FLAG
+    footer: hint(['l', 'local'], ['r', 'remote'], ...(allDecided(flow) ? ([['enter', 'continue']] as const) : []), ['esc', 'cancel']), // COPY-FLAG
   };
 }
 

@@ -13,6 +13,11 @@
  * `mock.module()` and does not have to run in `run-tests.sh`'s isolated list.
  */
 import { describe, test, expect, spyOn, mock, beforeEach, afterEach } from 'bun:test';
+import { stubbedGate } from '../helpers/gateMock';
+
+// Bare `capy` (the first step of `capy rotate` / `capy connect`) is tested in tests/sync/gate.test.ts and
+// tests/commands/gateFirst.test.ts. `mock.module()` is process-wide: this file runs isolated (tests/run-tests.sh).
+mock.module('../../src/sync/gate', () => stubbedGate());
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';

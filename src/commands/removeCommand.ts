@@ -19,8 +19,8 @@ import { isInteractive, EXIT_NEEDS_INPUT } from '../ui/interactive';
 import { DRY_RUN_UNSUPPORTED_MESSAGES } from './pipedValue';
 import { listTargets } from '../deploy/config';
 import { CapyError, ERROR_CODES } from '../types/index';
-import { checkFolder, isSecretsConflict } from '../sync/commit';
-import { conflictFlagsOrExit, exitOnConflictRefusal, hasConflictFlags, previewDecider, type RawConflictFlags } from '../sync/conflicts';
+import { conflictFlagsOrExit, type RawConflictFlags } from '../sync/conflicts';
+import { gateFirst, type GateOptions } from '../sync/gate';
 import {
   previewKeepLockPrStep,
   recordsForRemoval,
@@ -39,7 +39,7 @@ export interface RemoveOpts {
   pr?: PrFlags;
   /** The global `--dry-run`: say what would be removed; change nothing. The confirmation prompt refuses (`DRY_RUN_UNSUPPORTED`). */
   dryRun?: boolean;
-  /** `--resolve` / `--conflict` as typed (CAP-717): they decide a conflict on a name being removed. */
+  /** `--resolve` / `--conflict` as typed (CAP-717): they answer the differences bare `capy` finds first. */
   conflictFlags?: RawConflictFlags;
 }
 
@@ -107,11 +107,6 @@ export async function proceedWithRemoval(
   const warnings = deployTargetWarnings(opts.cwd, names);
 
   if (opts.dryRun === true) {
-    // A name someone else changed since this folder's pin is reported with its conflict_id; nothing is written either way.
-    await checkFolder(ctx, { set: {}, remove: names }, { decide: previewDecider }).catch((err: unknown) => {
-      exitOnConflictRefusal(err);
-      return Promise.reject(err);
-    });
     // Everything above only read. Nothing below this line runs: no removal, no push, no PR.
     const preview = await previewKeepLockPrStep({ changed: true, cwd: opts.cwd, flags: opts.pr ?? {} });
     if (opts.json) {
@@ -137,12 +132,8 @@ export async function proceedWithRemoval(
     return;
   }
 
-  // A name someone else changed on the server since this folder's pin is a refusal, not a silent overwrite:
-  // the protocol's payload when the command follows it (exit 3), the plain refusal otherwise.
-  await removeAndSync(ctx, names).catch((err: unknown) => {
-    exitOnConflictRefusal(err);
-    return isSecretsConflict(err) ? refuse(opts.json, err) : Promise.reject(err);
-  });
+  // Only these names move, on top of Capy's latest (bare `capy` already made the folder and Capy agree).
+  await removeAndSync(ctx, names);
 
   // The removal is done whatever the PR step reports (it never throws).
   const outcome = await runKeepLockPrStep({
@@ -190,7 +181,7 @@ export class RemoveCommand {
     const json = opts.json === true;
     // Contradictory PR flags are refused before anything is changed.
     refuseBadPrFlags(opts.pr ?? {}, json);
-    const flags = conflictFlagsOrExit(opts.conflictFlags ?? {}, json);
+    conflictFlagsOrExit(opts.conflictFlags ?? {}, json);
     // The confirmation prompt would really remove: a dry run never runs for real. Before anything else.
     if (opts.dryRun === true && opts.yes !== true && !json && isInteractive(opts.nonTty)) {
       refuse(json, new CapyError(DRY_RUN_UNSUPPORTED_MESSAGES.remove, ERROR_CODES.DRY_RUN_UNSUPPORTED));
@@ -199,6 +190,11 @@ export class RemoveCommand {
     if (names.length === 0) {
       refuse(json, new CapyError('No variable name given.', ERROR_CODES.INVALID_FORMAT));
     }
+
+    // Bare `capy` runs before anything else, the confirmation included: the folder and Capy must agree before this
+    // can write (docs/conflict-resolution.md). What is on the branch is read after it, because it may have moved keep.lock.
+    const gate: GateOptions = { devMode: this.devMode, json, nonTty: opts.nonTty, conflictFlags: opts.conflictFlags, dryRun: opts.dryRun === true };
+    await gateFirst(gate);
 
     const pm = new ProjectManager();
     const keep = pm.readKeepFile();
@@ -245,11 +241,8 @@ export class RemoveCommand {
       }
     }
 
-    // Everything above is local-only — no auth, no network. Only now do we
-    // authenticate and decrypt `.env`, which the push needs.
-    // Off a terminal (or given --resolve), a conflict follows the protocol: nothing is removed, exit 3, the payload on stdout.
-    const protocol = json || !isInteractive(opts.nonTty) || hasConflictFlags(flags);
-    const ctx = await resolveContext({ devMode: this.devMode, json, dryRun: opts.dryRun === true, ...(protocol ? { conflicts: flags } : {}) });
+    // Only now do we authenticate and decrypt `.env`, which the push needs.
+    const ctx = await resolveContext({ devMode: this.devMode, json, dryRun: opts.dryRun === true, gate });
     await proceedWithRemoval(ctx, names, { json, cwd: process.cwd(), pr: opts.pr, nonTty: opts.nonTty, dryRun: opts.dryRun === true });
   }
 }

@@ -21,17 +21,17 @@
 //   running   Ctrl+C / Esc stop: no further target is started, every one in flight finishes. Before
 //             anything is delivered every Dokploy target is read and compared with what Capy last
 //             delivered; a variable someone changed on the service outside Capy comes back as a
-//             conflict and the flow goes to `conflicts` (nothing has been written).
-//   conflicts one line per variable and target. m delivers Capy's value (mine), t leaves the
-//             service's (theirs: that variable is not delivered or recorded); Enter runs once every
-//             one is decided, Esc cancels with nothing written. A decision holds only for the live
+//             row and the flow goes to `conflicts` (nothing has been written).
+//   conflicts one line per variable and target. l delivers Capy's value (local), r leaves the
+//             service's (remote: that variable is not delivered or recorded); Enter runs once every
+//             one is answered, Esc cancels with nothing written. An answer holds only for the live
 //             value it was made against: if the service changed again, the run comes back here.
 //   done      the result; only Esc leaves it. `c` copies the PR links to the clipboard (and the screen
 //             stays), so they can also be selected and copied by hand first.
 
 import type { SecretIndexRow } from '../service/serviceClient';
 import { BatchPhase, BatchPlan, BatchProgress, BatchResult, restrictPlan, targetKeyOf } from '../deploy/batchDeploy';
-import { resolveKeyOf, seenResolutions, type Resolution, type SeenResolutions, type TargetConflict } from '../sync/conflicts';
+import { resolveKeyOf, seenResolutions, type SeenResolutions, type TargetConflict, type TargetResolution } from '../sync/conflicts';
 import {
   DRY_RUN_DEPLOY_NOTE,
   PLAN_HEADINGS,
@@ -90,8 +90,8 @@ export type DeployFlow =
       readonly row: SecretIndexRow;
       readonly plan: BatchPlan;
       readonly conflicts: readonly TargetConflict[];
-      /** The decision for each conflict, by `NAME@TARGET`. */
-      readonly choices: Readonly<Record<string, Resolution>>;
+      /** The answer for each row, by `NAME@TARGET`. */
+      readonly choices: Readonly<Record<string, TargetResolution>>;
       readonly cursor: number;
     }
   | {
@@ -182,15 +182,15 @@ function stepRunning(flow: Extract<DeployFlow, { step: 'running' }>, key: string
 
 // ── Conflicts: variables someone changed on the service outside Capy ───────
 
-const choiceAt = (flow: Extract<DeployFlow, { step: 'conflicts' }>, c: TargetConflict): Resolution | undefined => flow.choices[resolveKeyOf(c)];
+const choiceAt = (flow: Extract<DeployFlow, { step: 'conflicts' }>, c: TargetConflict): TargetResolution | undefined => flow.choices[resolveKeyOf(c)];
 
-/** Whether every conflict has been decided. */
+/** Whether every row has been answered. */
 export const allDecided = (flow: Extract<DeployFlow, { step: 'conflicts' }>): boolean => flow.conflicts.every((c) => choiceAt(flow, c) !== undefined);
 
-/** The decisions made, each bound to the fingerprints it was made against (`seenResolutions`). */
+/** The answers given, each bound to the fingerprints it was made against (`seenResolutions`). */
 const decisionsOf = (flow: Extract<DeployFlow, { step: 'conflicts' }>): SeenResolutions =>
   seenResolutions(
-    Object.fromEntries(flow.conflicts.flatMap((c) => (choiceAt(flow, c) === undefined ? [] : [[resolveKeyOf(c), choiceAt(flow, c) as Resolution] as const]))),
+    Object.fromEntries(flow.conflicts.flatMap((c) => (choiceAt(flow, c) === undefined ? [] : [[resolveKeyOf(c), choiceAt(flow, c) as TargetResolution] as const]))),
     flow.conflicts,
   );
 
@@ -198,12 +198,12 @@ function stepConflicts(flow: Extract<DeployFlow, { step: 'conflicts' }>, key: st
   if (isEsc(key)) return { flow: null, effect: null, note: CANCELLED_NOTHING };
   if (key === `${ESC}[A`) return stay({ ...flow, cursor: Math.max(0, flow.cursor - 1) });
   if (key === `${ESC}[B`) return stay({ ...flow, cursor: Math.min(flow.conflicts.length - 1, flow.cursor + 1) });
-  const decide = (choice: Resolution): DeployStep => {
+  const decide = (choice: TargetResolution): DeployStep => {
     const at = flow.conflicts[flow.cursor];
     return at === undefined ? stay(flow) : stay({ ...flow, choices: { ...flow.choices, [resolveKeyOf(at)]: choice } });
   };
-  if (key === 'm' || key === 'M') return decide('mine');
-  if (key === 't' || key === 'T') return decide('theirs');
+  if (key === 'l' || key === 'L') return decide('local');
+  if (key === 'r' || key === 'R') return decide('remote');
   if (key !== '\r' || !allDecided(flow)) return stay(flow);
   const decisions = decisionsOf(flow);
   return { flow: { step: 'running', row: flow.row, plan: flow.plan, decisions }, effect: { type: 'runDeploy', plan: flow.plan, decisions } };
@@ -280,18 +280,18 @@ export const prUrlsOf = (result: BatchResult): readonly string[] =>
 
 export type DeployFinished =
   | { readonly ok: true; readonly result: BatchResult }
-  /** `conflicts`: nothing was delivered, because these variables were changed on the service outside Capy (CAP-714). */
+  /** `conflicts`: nothing was delivered, because these variables were changed on the service outside Capy. */
   | { readonly ok: false; readonly code: string; readonly conflicts?: readonly TargetConflict[] };
 
 /** The run finished. Dropped unless the flow is still running. */
 export function applyDeployFinished(flow: DeployFlow | null, finished: DeployFinished): DeployFlow | null {
   if (flow === null || flow.step !== 'running') return flow;
   if (!finished.ok && finished.conflicts !== undefined && finished.conflicts.length > 0) {
-    // A decision made earlier stays only where the live value it was made against is still the one on the service.
+    // An answer given earlier stays only where the live value it was made against is still the one on the service.
     const choices = Object.fromEntries(
       finished.conflicts.flatMap((c) => {
         const earlier = flow.decisions?.[resolveKeyOf(c)];
-        return earlier !== undefined && earlier.theirs === c.theirs && earlier.yours === c.yours ? [[resolveKeyOf(c), earlier.choice] as const] : [];
+        return earlier !== undefined && earlier.remote === c.remote && earlier.local === c.local ? [[resolveKeyOf(c), earlier.choice] as const] : [];
       }),
     );
     return { step: 'conflicts', row: flow.row, plan: flow.plan, conflicts: finished.conflicts, choices, cursor: 0 };
@@ -387,7 +387,7 @@ function renderConflicts(flow: Extract<DeployFlow, { step: 'conflicts' }>, width
   };
   return {
     lines: [`${BOLD}${flow.row.name}${RESET} ${DIM}· changed outside Capy in ${n} place${n === 1 ? '' : 's'}${RESET}`, '', ...flow.conflicts.map(row)], // COPY-FLAG
-    footer: hint(['m', 'mine'], ['t', 'theirs'], ...(allDecided(flow) ? ([['enter', 'continue']] as const) : []), ['esc', 'cancel']), // COPY-FLAG
+    footer: hint(['l', 'local'], ['r', 'remote'], ...(allDecided(flow) ? ([['enter', 'continue']] as const) : []), ['esc', 'cancel']), // COPY-FLAG
   };
 }
 

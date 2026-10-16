@@ -11,7 +11,7 @@
  */
 import { parse as parseDotenv } from 'dotenv';
 import { hashValue } from '../sync/compareSecrets';
-import type { Resolution, SeenResolutions, TargetConflict } from '../sync/conflicts';
+import type { SeenResolutions, TargetConflict, TargetResolution } from '../sync/conflicts';
 import { ERROR_CODES } from '../types/index';
 
 /**
@@ -1392,7 +1392,7 @@ export interface ManagedMergeOptions {
    * Names, other than the delivered ones, whose lines in the Capy block stay exactly as they are (byte for byte,
    * in place) instead of being dropped, and whose commented-out outside lines stay commented. Absent: the block
    * holds exactly the delivered values (the delivery of a whole target). CAP-717 uses it for a variable skipped
-   * because the platform's value was kept (`theirs`), and for a batch deploy that sends only the picked names.
+   * because the platform's value was kept (`remote`), and for a batch deploy that sends only the picked names.
    */
   readonly keep?: (name: string) => boolean;
 }
@@ -1509,19 +1509,19 @@ export interface LiveConflict {
   readonly name: string;
   /** What Capy last delivered (`undefined` on a first delivery). */
   readonly pinned: string | undefined;
-  /** What Capy is about to deliver. */
-  readonly yours: string;
-  /** What the service would see now. */
-  readonly theirs: string;
+  /** What Capy is about to deliver (`local`). */
+  readonly local: string;
+  /** What the service would see now (`remote`). */
+  readonly remote: string;
 }
 
 /**
  * The delivered names whose live value on the platform was changed outside Capy. For each name:
- *   - theirs = the value the service would read: `dotenv.parse` of the WHOLE current env (inside Capy's block,
+ *   - remote = the value the service would read: `dotenv.parse` of the WHOLE current env (inside Capy's block,
  *     or an active line outside it), the same parse `mismatchedDeliveredValues` verifies a write with;
  *   - pinned = the `deployed_value_hash` Capy recorded when it last delivered the name here (absent on a first delivery);
- *   - yours = the value about to be delivered.
- * A conflict is a live value that exists and differs from BOTH pinned and yours. A name the service does not
+ *   - local = the value about to be delivered.
+ * A conflict is a live value that exists and differs from BOTH pinned and local. A name the service does not
  * have, one already at Capy's value, and one still at what Capy last put there are not conflicts. Pure; never
  * returns or logs a value.
  */
@@ -1533,9 +1533,9 @@ export function dokployTargetConflicts(
   const live = parseDotenv(env ?? '');
   return values.flatMap(({ name, value }) => {
     if (!Object.hasOwn(live, name)) return [];
-    const theirs = hashValue(live[name]);
-    const yours = hashValue(value);
-    return theirs === yours || theirs === pinned[name] ? [] : [{ name, pinned: pinned[name], yours, theirs }];
+    const remote = hashValue(live[name]);
+    const local = hashValue(value);
+    return remote === local || remote === pinned[name] ? [] : [{ name, pinned: pinned[name], local, remote }];
   });
 }
 
@@ -1544,9 +1544,9 @@ export interface TargetCheck {
   /** `deployed_value_hash` by name for this target. */
   readonly pinned: Readonly<Record<string, string>>;
   /**
-   * Decisions already made, by bare NAME, each bound to the `theirs` / `yours` fingerprints it was made against:
-   * a decision applies only to that exact state. If the service's value (or the value being delivered) is no longer
-   * the one the caller saw, the decision does not count and the conflict is open again.
+   * Answers already given, by bare NAME, each bound to the `local` / `remote` fingerprints it was made against:
+   * an answer applies only to that exact state. If the service's value (or the value being delivered) is no longer
+   * the one the caller saw, the answer does not count and the row is open again.
    */
   readonly resolutions: SeenResolutions;
 }
@@ -1554,9 +1554,9 @@ export interface TargetCheck {
 export type TargetPlan =
   | {
       readonly kind: 'clear';
-      /** The values to write: all of them minus the names kept as `theirs`. */
+      /** The values to write: all of them minus the names kept as `remote`. */
       readonly deliver: ReadonlyArray<{ name: string; value: string }>;
-      /** Names whose platform value is kept (`theirs`): not written, not recorded. */
+      /** Names whose platform value is kept (`remote`): not written, not recorded. */
       readonly skipped: readonly string[];
       /** Every conflict found, decided or not (for the command layer's id). */
       readonly found: readonly LiveConflict[];
@@ -1571,19 +1571,19 @@ export function planTargetDelivery(
 ): TargetPlan {
   if (check === undefined) return { kind: 'clear', deliver: values, skipped: [], found: [] };
   const found = dokployTargetConflicts(env, values, check.pinned);
-  const choiceFor = (c: LiveConflict): Resolution | undefined => {
+  const choiceFor = (c: LiveConflict): TargetResolution | undefined => {
     const seen = check.resolutions[c.name];
-    return seen !== undefined && seen.theirs === c.theirs && seen.yours === c.yours ? seen.choice : undefined;
+    return seen !== undefined && seen.remote === c.remote && seen.local === c.local ? seen.choice : undefined;
   };
   const open = found.filter((c) => choiceFor(c) === undefined);
   if (open.length > 0) return { kind: 'conflict', found, open };
-  const skipped = found.filter((c) => choiceFor(c) === 'theirs').map((c) => c.name);
+  const skipped = found.filter((c) => choiceFor(c) === 'remote').map((c) => c.name);
   return { kind: 'clear', deliver: values.filter((v) => !skipped.includes(v.name)), skipped, found };
 }
 
 /** The protocol's rows for `found` on `target`. */
 export const targetConflictsOf = (target: string, found: readonly LiveConflict[]): readonly TargetConflict[] =>
-  found.map((c) => ({ kind: 'target', name: c.name, target, pinned: c.pinned ?? null, yours: c.yours, theirs: c.theirs }));
+  found.map((c) => ({ name: c.name, target, pinned: c.pinned ?? null, local: c.local, remote: c.remote }));
 
 /**
  * CAP-679: a Compose service with `createEnvFile: false` never gets an

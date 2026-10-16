@@ -67,8 +67,10 @@ import {
   repoLabel,
   resolveBases,
   runSecretSet,
-  secretLocationConflict,
+  locationKeyOf,
+  movedLocations,
 } from './secretsSet';
+import { actionFor, bindAnswer, type BoundAnswer } from '../sync/noFolder';
 import { renderSecretSetConfirmation, stoppingAfter, TERMINAL_STYLE } from './secretsSetText';
 import { PoolItem, runPool } from '../utils/pool';
 
@@ -155,13 +157,23 @@ export function exitWithConflicts(refusal: ConflictRefusal, extra: object = {}):
   return process.exit(EXIT_NEEDS_INPUT);
 }
 
-/** The decisions for `scopes` (the flags', when they cover them), or the command ends with the payload. */
+/** The answers for `scopes` (the flags', when they cover them), or the command ends with the payload. */
 export function decideOrExit(scopes: readonly ConflictScope[], flags: ConflictFlags): Resolutions {
   try {
     return gateConflicts(flags, scopes);
   } catch (err) {
     if (err instanceof ConflictRefusal) return exitWithConflicts(err);
     throw err;
+  }
+}
+
+/** The refusal for an answer that setting a value cannot honour (`pinned`, `delete`), or `undefined` when it can. */
+function unusableAnswer(choice: Parameters<typeof actionFor>[0]): { readonly code: string; readonly message: string } | undefined {
+  try {
+    actionFor(choice);
+    return undefined;
+  } catch (err) {
+    return describe(err);
   }
 }
 
@@ -175,7 +187,7 @@ export function describe(err: unknown): { readonly code: string; readonly messag
 
 interface Located extends SetLocation {
   readonly row_id: string;
-  /** The fingerprint the row listed for this location: what the caller saw (the pin of the conflict check). */
+  /** The fingerprint the row listed for this location: what the caller was shown (`pinned`). */
   readonly seen: string;
 }
 
@@ -191,11 +203,15 @@ const withRowId = (row: SecretIndexRow): readonly Located[] => {
   }));
 };
 
-// ── Conflicts (CAP-717) ─────────────────────────────────────────────────────
+// ── Moved locations (CAP-717) ───────────────────────────────────────────────
+
+/** The fingerprint each row listed, by location: the `pinned` of the comparison. */
+const shownOf = (located: readonly Located[]): Readonly<Record<string, string>> => Object.fromEntries(located.map((l) => [locationKeyOf(l), l.seen]));
 
 /**
- * The locations where the value is no longer the one the row listed AND is not the value being set: someone
- * else changed it since the caller looked. One scope per location (each is its own project and branch).
+ * The locations whose value is no longer the one the row listed AND is not the value being set: someone else
+ * changed it since the caller was shown it. `compareSecrets` over (listed, new, now), one scope per location (each is
+ * its own project and branch, with the server's keep hash at that read).
  */
 export function secretConflictScopes(
   name: string,
@@ -203,13 +219,9 @@ export function secretConflictScopes(
   located: readonly Located[],
   previews: readonly LocationPreview[],
 ): readonly ConflictScope[] {
-  const yours = hashValue(value);
-  return located.flatMap((l, i): ConflictScope[] => {
-    const conflict = secretLocationConflict(name, yours, l.seen, l, previews[i]);
-    const current = previews[i]?.current;
-    return conflict === undefined || current === undefined
-      ? []
-      : [{ project: l.project_name, branch: l.branch, serverKeepHash: current.serverKeepHash, conflicts: [conflict] }];
+  return movedLocations(name, value, located, shownOf(located), previews).flatMap((c): ConflictScope[] => {
+    const current = previews[located.findIndex((l) => locationKeyOf(l) === locationKeyOf(c.location))]?.current;
+    return current === undefined ? [] : [{ project: c.location.project_name, branch: c.location.branch, serverKeepHash: current.serverKeepHash, conflicts: [c.conflict] }];
   });
 }
 
@@ -470,7 +482,7 @@ export async function runSecretsSet(name: string, opts: SecretsSetOpts, io: Secr
   if (opts.dryRun === true) {
     const previewValue = await optionalValue(io);
     // With a value to compare, a location someone else changed since its row was listed is reported with the
-    // conflict_id (exit 3), the plan alongside; without one there is nothing to conflict with yet.
+    // conflict_id (exit 3), the plan alongside; without one there is nothing to compare yet.
     const read = previewValue === undefined || located.length === 0 ? undefined : await previewLocations(io.env, located, name, previewValue);
     const plan = await describePlan(sel, io, previewValue, read);
     const scopes = previewValue === undefined || read === undefined ? [] : secretConflictScopes(name, previewValue, located, read);
@@ -503,18 +515,23 @@ export async function runSecretsSet(name: string, opts: SecretsSetOpts, io: Secr
   }
 
   const value = await requireValue(io, json);
-  // Before anything is pushed: a location someone else changed since its row was listed needs a decision.
+  // Before anything is pushed: a location someone else changed since its row was listed needs an answer
+  // (`--resolve NAME=local|remote`, exit 3 with the rows and a conflict_id otherwise). An answer is for a NAME and
+  // covers every moved location of it; nothing is written until every row has one.
   const keys = io.env.openKeys();
   const reads = await previewLocations(io.env, located, name, value, keys);
   const scopes = secretConflictScopes(name, value, located, reads);
   const decided = await decideOrExit(scopes, flags);
-  const yours = hashValue(value);
-  const pushTo = located.filter((l) => decided[name] !== 'theirs' || !scopes.some((sc) => sc.project === l.project_name && sc.branch === l.branch));
-  const allowed = (loc: SetLocation): readonly string[] => {
-    const at = located.findIndex((l) => l.project_id === loc.project_id && l.branch === loc.branch);
-    return [yours, located[at]?.seen ?? '', reads[at]?.current?.hash ?? ''];
-  };
-  const result = await runSecretSet({ name, value, locations: pushTo, repos: targets, bases, allowed, keys }, io.env, {
+  const moved = movedLocations(name, value, located, shownOf(located), reads);
+  const choice = decided[name];
+  const unusable = choice === undefined || moved.length === 0 ? undefined : unusableAnswer(choice);
+  if (unusable !== undefined) return refuse(json, unusable.code, unusable.message);
+  const answers: Readonly<Record<string, BoundAnswer>> = Object.fromEntries(
+    choice === undefined ? [] : moved.map((c) => [locationKeyOf(c.location), bindAnswer(choice, c.conflict)] as const),
+  );
+  const leftAlone = new Set(moved.filter(() => choice === 'remote').map((c) => locationKeyOf(c.location)));
+  const pushTo = located.filter((l) => !leftAlone.has(locationKeyOf(l)));
+  const result = await runSecretSet({ name, value, locations: pushTo, repos: targets, bases, shown: shownOf(located), answers, keys }, io.env, {
     stopPushes: io.control?.pushes,
     stopPrs: io.control?.prs,
     // Said once per phase when a stop is noticed with items still running; silent when nothing is in progress.

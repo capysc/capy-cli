@@ -385,8 +385,17 @@ export interface CliOptions {
   verbose?: boolean;
   force?: boolean;
   dryRun?: boolean;
-  /** `--resolve` / `--conflict` as typed (CAP-717): off a terminal they decide the names both sides changed. */
+  /** `--resolve` / `--conflict` as typed (CAP-717): off a terminal they answer the differences between the folder and Capy. */
   conflictFlags?: { readonly resolve?: readonly string[]; readonly conflict?: string };
+  /**
+   * Nobody can answer the menu (off a terminal, `--json`, or given `--resolve`): the differences are reported with a
+   * `conflict_id` and `conflictFlags` answer them. Prose goes to stderr. Absent: the menu, as at a terminal.
+   */
+  protocol?: boolean;
+  /** Say nothing while the folder and Capy agree (spinners, "Everything is up to date!"): stdout and stderr belong to the command that ran this first. */
+  quiet?: boolean;
+  /** Never the browser sign-in: a command that runs the sync as its first step and has no one to sign in is told why instead. */
+  silentAuthOnly?: boolean;
 }
 
 export interface ProjectInitResult {
@@ -636,27 +645,21 @@ export const ERROR_CODES = {
    */
   SECRETS_STALE_BASE: 'SECRETS_STALE_BASE',
   /**
-   * A save would overwrite a value someone else changed on the server since this
-   * folder last synced. Nothing was uploaded. `details.names` lists the
-   * variables (names only, never values); never auto-resolved.
+   * The folder and Capy differ on a variable (or a Dokploy value was changed outside Capy) and nobody can answer:
+   * off a terminal, bare `capy` reports the rows with a `conflict_id` and exits 3. Nothing was written.
+   * `details.names` lists the variables (names only, never values); never auto-resolved.
    */
   SECRETS_CONFLICT: 'SECRETS_CONFLICT',
   // --- Conflicts everywhere: the non-TTY protocol (CAP-717, docs/conflict-resolution.md) ---
   /**
-   * A rerun with `--conflict <id>` whose state moved since the id was issued: the old decision
-   * no longer applies. Nothing was written; the fresh conflicts (with a new id) come back
+   * A rerun with `--conflict <id>` whose state moved since the id was issued: the old answers
+   * no longer apply. Nothing was written; the fresh rows (with a new id) come back
    * with it. Exit 3.
    */
   SECRETS_CONFLICT_STALE: 'SECRETS_CONFLICT_STALE',
-  /**
-   * `capy deploy` found values in the folder that Capy does not hold (edited since the folder's pin, Capy's latest unchanged)
-   * and no person at a terminal to ask whether to save them. Nothing was saved or delivered. `names` lists the variables
-   * (names only, never values); save them with `capy push`, then rerun. Exit 3.
-   */
-  DEPLOY_UNSAVED_CHANGES: 'DEPLOY_UNSAVED_CHANGES',
-  /** `--resolve` is not `NAME=mine|theirs` (or `NAME@TARGET=mine|theirs`), or `--conflict` is not a conflict id. Exit 1. */
+  /** `--resolve` is not `NAME=pinned|local|remote|delete` (or `NAME@TARGET=local|remote`), or `--conflict` is not a conflict id. Exit 1. */
   SECRETS_RESOLVE_INVALID: 'SECRETS_RESOLVE_INVALID',
-  /** `--resolve` was given without `--conflict <id>`: a decision is only valid for the conflicts it was made against. Exit 1. */
+  /** `--resolve` was given without `--conflict <id>`: an answer is only valid for the rows it was made against. Exit 1. */
   SECRETS_RESOLVE_NEEDS_CONFLICT: 'SECRETS_RESOLVE_NEEDS_CONFLICT',
   /**
    * `capy remove` used to refuse when other variables had unpushed local edits.

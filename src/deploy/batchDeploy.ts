@@ -535,7 +535,7 @@ type TargetPass = { readonly kind: 'check' } | { readonly kind: 'deliver'; reado
  * Only the picked variables are delivered and recorded; every other managed line in the service's Capy block
  * stays exactly as it is (CAP-715). On Dokploy the live value of each is first compared with what Capy last
  * delivered (CAP-717): the `check` pass reads and reports, the `deliver` pass writes with the decisions made
- * (`NAME@TARGET`): `theirs` leaves that variable on the service as it is and records nothing for it.
+ * (`NAME@TARGET`): `remote` leaves that variable on the service as it is and records nothing for it.
  */
 export async function pushTarget(
   env: BatchEnv,
@@ -644,7 +644,7 @@ async function passOverTarget(
     const stepCode = delivered.value.steps.find((s) => s.status === 'fail' && s.code !== undefined)?.code;
     return failedPush(item, stepCode ?? ERROR_CODES.DEPLOY_PUSH_FAILED, 'push', read.rate);
   }
-  // A name whose service value was kept (`theirs`) was not written: it is not recorded as delivered either.
+  // A name whose service value was kept (`remote`) was not written: it is not recorded as delivered either.
   const kept = delivered.value.skipped ?? [];
   const landed = present.filter((v) => !kept.includes(v));
   if (landed.length === 0) return withRate<PushOutcome>({ kind: 'skipped', item, code: SKIP_CODES.KEPT_ON_PLATFORM }, read.rate);

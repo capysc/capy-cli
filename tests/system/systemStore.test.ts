@@ -302,21 +302,23 @@ describe('systemStore', () => {
     expect(reopened.get('_CONNECTOR_THEIRS_KEY')).toBe('theirs');
   });
 
-  it('CAP-712: an entry another admin changed since this handle opened is a SECRETS_CONFLICT, and nothing is pushed', async () => {
+  it('the store has no folder to compare with: a set lands on top of the latest, changing only its own name (the shared upload, with base_keep_hash)', async () => {
     const seed = await openSystemStore({ orgId: ORG_A, devMode: true });
     await seed.set('_CONNECTOR_SHARED_KEY', 'v0');
+    await seed.set('_CONNECTOR_OTHER_KEY', 'o0');
     const mine = await openSystemStore({ orgId: ORG_A, devMode: true });
     const theirs = await openSystemStore({ orgId: ORG_A, devMode: true });
     // The other admin is on another machine: this machine's copy of the store never sees their save.
     const gc = await import('../../src/config/globalConfig');
     const mineOnDisk = gc.readSystemKeepFile(ORG_A)!;
-    await theirs.set('_CONNECTOR_SHARED_KEY', 'v-theirs');
+    await theirs.set('_CONNECTOR_OTHER_KEY', 'o-theirs');
     gc.saveSystemKeepFile(ORG_A, mineOnDisk);
-    const pushesBefore = serverFor(ORG_A).pushCount;
 
-    await expect(mine.set('_CONNECTOR_SHARED_KEY', 'v-mine')).rejects.toMatchObject({ code: ERROR_CODES.SECRETS_CONFLICT, details: { names: ['_CONNECTOR_SHARED_KEY'] } });
-    expect(serverFor(ORG_A).pushCount).toBe(pushesBefore);
-    expect((await openSystemStore({ orgId: ORG_A, devMode: true })).get('_CONNECTOR_SHARED_KEY')).toBe('v-theirs');
+    await mine.set('_CONNECTOR_SHARED_KEY', 'v-mine');
+    const after = await openSystemStore({ orgId: ORG_A, devMode: true });
+    expect(after.get('_CONNECTOR_SHARED_KEY')).toBe('v-mine');
+    // The other admin's save, which this handle never saw, is not reverted by it.
+    expect(after.get('_CONNECTOR_OTHER_KEY')).toBe('o-theirs');
   });
 
   it('rejects a bad name before any network call (Proof: SYSTEM_STORE_BAD_NAME)', () => {

@@ -1,213 +1,203 @@
 /**
- * The shared conflict module (CAP-717, src/sync/conflicts.ts): the id that binds a decision to what was seen,
- * the flags, and the "apply the resolutions or refuse" step every write command goes through. Pure: no server,
- * no folder. Each test asserts the PROPERTY a caller relies on.
+ * The non-TTY protocol's pure half (src/sync/conflicts.ts; docs/conflict-resolution.md): the rows are bare `capy`'s
+ * `compareSecrets` rows, the id binds the answers to exactly those rows, `--resolve` / `--conflict` are validated with
+ * codes, and `gateConflicts` either returns an answer for every row or refuses with the payload. Fingerprints only.
  */
-import { describe, test, expect } from 'bun:test';
+import { describe, test, expect, spyOn } from 'bun:test';
+import { compareSecrets } from '../../src/sync/compareSecrets';
 import {
   CONFLICT_ID_FORMAT,
   ConflictRefusal,
   conflictIdOf,
   conflictRefusalFor,
+  exitOnConflictRefusal,
   gateConflicts,
   parseConflictFlags,
-  protocolDecider,
-  resolveKeyOf,
+  printConflictRefusal,
   seenResolutions,
-  sourceResolutions,
+  sourceRowsOf,
   targetResolutions,
-  type Conflict,
   type ConflictScope,
+  type SourceConflict,
+  type TargetConflict,
 } from '../../src/sync/conflicts';
 import { CapyError, ERROR_CODES } from '../../src/types/index';
 
-const source = (name: string, theirs: string, over: Partial<Extract<Conflict, { kind: 'source' }>> = {}): Conflict => ({
-  kind: 'source',
-  name,
-  project: 'demo',
-  branch: 'production',
-  pinned: '1111111111111111',
-  yours: '2222222222222222',
-  theirs,
-  ...over,
-});
+const view = { project: 'swot-analysis-generator-server', branch: 'production', serverKeepHash: 'a'.repeat(64) };
 
-const target = (name: string, over: Partial<Extract<Conflict, { kind: 'target' }>> = {}): Conflict => ({
-  kind: 'target',
-  name,
-  target: 'dokploy-production',
-  pinned: '1111111111111111',
-  yours: '2222222222222222',
-  theirs: '3333333333333333',
-  ...over,
-});
+/** Rows exactly as bare `capy` computes them: `compareSecrets` over (pinned, local, remote) fingerprints. */
+const rows = (
+  pinned: Record<string, string>,
+  local: Record<string, string>,
+  remote: Record<string, string>,
+  at = view,
+): readonly SourceConflict[] => sourceRowsOf(compareSecrets(pinned, local, remote).diffs, at);
 
-const scope = (conflicts: readonly Conflict[], over: Partial<ConflictScope> = {}): ConflictScope => ({
-  project: 'demo',
-  branch: 'production',
-  serverKeepHash: 'abcdabcdabcdabcd',
-  conflicts,
-  ...over,
-});
+const gemini = rows({ GEMINI_TIMEOUT_SECONDS: '2abaca4911e68fa9' }, { GEMINI_TIMEOUT_SECONDS: '2abaca4911e68fa9' }, { GEMINI_TIMEOUT_SECONDS: '7b69759630f869f2' });
+const scope = (conflicts: readonly (SourceConflict | TargetConflict)[], at = view): ConflictScope => ({ ...at, conflicts });
 
-const refusalOf = (run: () => unknown): ConflictRefusal => {
-  try {
-    run();
-  } catch (err) {
-    if (err instanceof ConflictRefusal) return err;
-    throw err;
-  }
-  throw new Error('expected a ConflictRefusal');
-};
+describe('the rows', () => {
+  test('are compareSecrets rows: name, project, branch, type, pinned, local, remote (fingerprints, null where there is no value)', () => {
+    expect(gemini).toEqual([
+      {
+        name: 'GEMINI_TIMEOUT_SECONDS',
+        project: 'swot-analysis-generator-server',
+        branch: 'production',
+        type: 'changed',
+        pinned: '2abaca4911e68fa9',
+        local: '2abaca4911e68fa9',
+        remote: '7b69759630f869f2',
+      },
+    ]);
+    expect(rows({}, {}, { NEW: 'aaaa' })).toMatchObject([{ name: 'NEW', type: 'new', pinned: null, local: null, remote: 'aaaa' }]);
+    expect(rows({ GONE: 'bbbb' }, {}, { OTHER: 'cccc' }).find((r) => r.name === 'GONE')).toMatchObject({ pinned: 'bbbb', local: null, remote: null });
+  });
+});
 
 describe('conflictIdOf', () => {
-  const base = [scope([source('A', 'aaaaaaaaaaaaaaaa'), source('B', 'bbbbbbbbbbbbbbbb')])];
-
-  test('is c_ + 12 hex, and does not depend on the order the conflicts were found in', () => {
-    const id = conflictIdOf(base);
+  test('is c_ + 12 hex, the same for the same project, branch, server keep hash and rows (in any order)', () => {
+    const two = rows({ A: 'a1', B: 'b1' }, { A: 'a2', B: 'b1' }, { A: 'a1', B: 'b2' });
+    const id = conflictIdOf([scope(two)]);
     expect(id).toMatch(CONFLICT_ID_FORMAT);
-    expect(conflictIdOf([scope([source('B', 'bbbbbbbbbbbbbbbb'), source('A', 'aaaaaaaaaaaaaaaa')])])).toBe(id);
+    expect(conflictIdOf([scope([...two].reverse())])).toBe(id);
   });
 
-  test('changes when anything it binds changes: a fingerprint, the server keep hash, the branch, the project, a name, a kind', () => {
-    const id = conflictIdOf(base);
-    const others = [
-      conflictIdOf([scope([source('A', 'cccccccccccccccc'), source('B', 'bbbbbbbbbbbbbbbb')])]), // theirs moved again
-      conflictIdOf([scope([source('A', 'aaaaaaaaaaaaaaaa', { yours: '9999999999999999' }), source('B', 'bbbbbbbbbbbbbbbb')])]), // yours
-      conflictIdOf([scope([source('A', 'aaaaaaaaaaaaaaaa', { pinned: null }), source('B', 'bbbbbbbbbbbbbbbb')])]), // pinned
-      conflictIdOf([scope(base[0].conflicts, { serverKeepHash: 'ffffffffffffffff' })]),
-      conflictIdOf([scope(base[0].conflicts, { branch: 'staging' })]),
-      conflictIdOf([scope(base[0].conflicts, { project: 'other' })]),
-      conflictIdOf([scope([source('A', 'aaaaaaaaaaaaaaaa')])]), // a name fewer
-      conflictIdOf([scope([target('A'), source('B', 'bbbbbbbbbbbbbbbb')])]), // a kind
-    ];
-    expect(new Set([id, ...others]).size).toBe(others.length + 1);
+  test('changes when anything it binds moves: a fingerprint, the server keep hash, the branch, the project, a row', () => {
+    const base = conflictIdOf([scope(gemini)]);
+    const moved = rows({ GEMINI_TIMEOUT_SECONDS: '2abaca4911e68fa9' }, { GEMINI_TIMEOUT_SECONDS: '2abaca4911e68fa9' }, { GEMINI_TIMEOUT_SECONDS: 'ffffffffffffffff' });
+    expect(conflictIdOf([scope(moved)])).not.toBe(base);
+    expect(conflictIdOf([scope(gemini, { ...view, serverKeepHash: 'b'.repeat(64) })])).not.toBe(base);
+    expect(conflictIdOf([scope(rows({ GEMINI_TIMEOUT_SECONDS: '2abaca4911e68fa9' }, { GEMINI_TIMEOUT_SECONDS: '2abaca4911e68fa9' }, { GEMINI_TIMEOUT_SECONDS: '7b69759630f869f2' }, { ...view, branch: 'staging' }), { ...view, branch: 'staging' })])).not.toBe(base);
+    expect(conflictIdOf([scope([...gemini, ...rows({}, { EXTRA: 'e1' }, { OTHER: 'o1' })])])).not.toBe(base);
   });
 
-  test('theirs_changed_at is not part of it (the spec binds fingerprints only)', () => {
-    const a = conflictIdOf([scope([source('A', 'aaaaaaaaaaaaaaaa')])]);
-    const b = conflictIdOf([scope([source('A', 'aaaaaaaaaaaaaaaa', { theirs_changed_at: '2026-10-01T21:44:18Z' })])]);
-    expect(b).toBe(a);
+  test('a platform row is bound too, with its target', () => {
+    const platform: TargetConflict = { name: 'STRIPE_KEY', target: 'dokploy-production', pinned: null, local: 'l1', remote: 'r1' };
+    const other: TargetConflict = { ...platform, target: 'dokploy-staging' };
+    expect(conflictIdOf([scope([platform])])).not.toBe(conflictIdOf([scope([other])]));
   });
 });
 
 describe('parseConflictFlags', () => {
-  const ID = 'c_9f2e41a07b3d';
+  const id = 'c_9f2e41a07b3d';
 
-  test('NAME=mine|theirs, and NAME@TARGET=... for a target, repeatable', () => {
-    const flags = parseConflictFlags({ resolve: ['A=mine', 'B=theirs', 'C@dokploy-production=mine'], conflict: ID });
-    expect(flags).toEqual({ resolutions: { A: 'mine', B: 'theirs', 'C@dokploy-production': 'mine' }, conflictId: ID });
+  test('the four choices for a variable, local|remote for a platform value', () => {
+    expect(
+      parseConflictFlags({ resolve: ['A=pinned', 'B=local', 'C=remote', 'D=delete', 'E@prod=local', 'F@prod=remote'], conflict: id }),
+    ).toEqual({ resolutions: { A: 'pinned', B: 'local', C: 'remote', D: 'delete', 'E@prod': 'local', 'F@prod': 'remote' }, conflictId: id });
   });
 
-  test('a bad form is SECRETS_RESOLVE_INVALID (code, not prose)', () => {
-    ['A', 'A=', 'A=ours', '=mine', 'A=mine=theirs', '1A=mine', 'A@=mine'].forEach((bad) => {
-      const err = (() => {
-        try {
-          parseConflictFlags({ resolve: [bad], conflict: ID });
-          return undefined;
-        } catch (e) {
-          return e as CapyError;
-        }
-      })();
-      expect(err?.code).toBe(ERROR_CODES.SECRETS_RESOLVE_INVALID);
-    });
+  test('anything else is SECRETS_RESOLVE_INVALID: mine/theirs (retired), a platform value pinned or deleted, a malformed form or id, two answers for one key', () => {
+    const codeOf = (raw: Parameters<typeof parseConflictFlags>[0]): string | undefined => {
+      try {
+        parseConflictFlags(raw);
+        return undefined;
+      } catch (err) {
+        return err instanceof CapyError ? err.code : 'not-coded';
+      }
+    };
+    expect(codeOf({ resolve: ['A=mine'], conflict: id })).toBe(ERROR_CODES.SECRETS_RESOLVE_INVALID);
+    expect(codeOf({ resolve: ['A=theirs'], conflict: id })).toBe(ERROR_CODES.SECRETS_RESOLVE_INVALID);
+    expect(codeOf({ resolve: ['A@prod=pinned'], conflict: id })).toBe(ERROR_CODES.SECRETS_RESOLVE_INVALID);
+    expect(codeOf({ resolve: ['A@prod=delete'], conflict: id })).toBe(ERROR_CODES.SECRETS_RESOLVE_INVALID);
+    expect(codeOf({ resolve: ['A:local'], conflict: id })).toBe(ERROR_CODES.SECRETS_RESOLVE_INVALID);
+    expect(codeOf({ resolve: ['A=local'], conflict: 'c_nothex' })).toBe(ERROR_CODES.SECRETS_RESOLVE_INVALID);
+    expect(codeOf({ resolve: ['A=local', 'A=remote'], conflict: id })).toBe(ERROR_CODES.SECRETS_RESOLVE_INVALID);
   });
 
-  test('--resolve without --conflict is SECRETS_RESOLVE_NEEDS_CONFLICT; a malformed id is SECRETS_RESOLVE_INVALID', () => {
-    expect(() => parseConflictFlags({ resolve: ['A=mine'] })).toThrow(expect.objectContaining({ code: ERROR_CODES.SECRETS_RESOLVE_NEEDS_CONFLICT }));
-    expect(() => parseConflictFlags({ resolve: ['A=mine'], conflict: 'c_nothex' })).toThrow(expect.objectContaining({ code: ERROR_CODES.SECRETS_RESOLVE_INVALID }));
-    expect(() => parseConflictFlags({ conflict: 'whatever' })).toThrow(expect.objectContaining({ code: ERROR_CODES.SECRETS_RESOLVE_INVALID }));
-  });
-
-  test('one name decided two ways is refused; the same answer twice is fine; there is no resolve-all', () => {
-    expect(() => parseConflictFlags({ resolve: ['A=mine', 'A=theirs'], conflict: ID })).toThrow(expect.objectContaining({ code: ERROR_CODES.SECRETS_RESOLVE_INVALID }));
-    expect(parseConflictFlags({ resolve: ['A=mine', 'A=mine'], conflict: ID }).resolutions).toEqual({ A: 'mine' });
-    // (A variable may be NAMED `all`; the point is that no spelling means "every conflict".)
-    ['*=mine', '--all', 'ALL', '=mine'].forEach((x) => expect(() => parseConflictFlags({ resolve: [x], conflict: ID })).toThrow());
-  });
-
-  test('no flags is no decisions', () => {
-    expect(parseConflictFlags({})).toEqual({ resolutions: {}, conflictId: undefined });
-    expect(parseConflictFlags({ resolve: [] })).toEqual({ resolutions: {}, conflictId: undefined });
+  test('--resolve without --conflict is SECRETS_RESOLVE_NEEDS_CONFLICT; --conflict alone is fine', () => {
+    expect(() => parseConflictFlags({ resolve: ['A=local'] })).toThrow(expect.objectContaining({ code: ERROR_CODES.SECRETS_RESOLVE_NEEDS_CONFLICT }));
+    expect(parseConflictFlags({ conflict: id })).toEqual({ resolutions: {}, conflictId: id });
   });
 });
 
 describe('gateConflicts', () => {
-  const scopes = [scope([source('A', 'aaaaaaaaaaaaaaaa'), source('B', 'bbbbbbbbbbbbbbbb'), target('A')])];
+  const scopes = [scope(gemini)];
   const id = conflictIdOf(scopes);
-  const flags = (resolve: readonly string[], conflict: string | undefined = id) => parseConflictFlags({ resolve, conflict });
+  const refusalOf = (run: () => unknown): ConflictRefusal => {
+    try {
+      run();
+    } catch (err) {
+      if (err instanceof ConflictRefusal) return err;
+      throw err;
+    }
+    throw new Error('expected a refusal');
+  };
 
-  test('nothing in conflict decides nothing', () => {
-    expect(gateConflicts(flags([]), [scope([])])).toEqual({});
+  test('no rows: nothing to answer', () => {
+    expect(gateConflicts({ resolutions: {}, conflictId: undefined }, [scope([])])).toEqual({});
   });
 
-  test('without --conflict every conflict is reported, with the id: SECRETS_CONFLICT', () => {
-    const refusal = refusalOf(() => gateConflicts(flags([], undefined), scopes));
-    expect(refusal.code).toBe(ERROR_CODES.SECRETS_CONFLICT);
-    expect(refusal.payload).toMatchObject({ ok: false, code: 'SECRETS_CONFLICT', conflict_id: id });
-    expect(refusal.payload.conflicts).toHaveLength(3);
+  test('without --conflict: SECRETS_CONFLICT with every row and the id (exit 3 is the caller\'s)', () => {
+    const refusal = refusalOf(() => gateConflicts({ resolutions: {}, conflictId: undefined }, scopes));
+    expect(refusal.payload).toEqual({ ok: false, code: 'SECRETS_CONFLICT', conflict_id: id, conflicts: gemini });
   });
 
-  test('a --conflict that is not the id of exactly these is stale: the FRESH conflicts and a NEW id come back', () => {
-    const refusal = refusalOf(() => gateConflicts(flags(['A=mine'], 'c_000000000000'), scopes));
-    expect(refusal.code).toBe(ERROR_CODES.SECRETS_CONFLICT_STALE);
-    expect(refusal.payload.conflict_id).toBe(id);
-    expect(refusal.payload.conflicts).toHaveLength(3);
+  test('every row answered against the right id: the answers', () => {
+    expect(gateConflicts({ resolutions: { GEMINI_TIMEOUT_SECONDS: 'local' }, conflictId: id }, scopes)).toEqual({ GEMINI_TIMEOUT_SECONDS: 'local' });
   });
 
-  test('the id matches but a conflicting name has no answer: the REMAINING ones come back (the id of the whole set, so a rerun keeps it)', () => {
-    const refusal = refusalOf(() => gateConflicts(flags(['A=mine', 'B=theirs']), scopes));
-    expect(refusal.code).toBe(ERROR_CODES.SECRETS_CONFLICT);
-    expect(refusal.payload.conflict_id).toBe(id);
-    expect(refusal.payload.conflicts.map(resolveKeyOf)).toEqual(['A@dokploy-production']);
+  test('a partial set of answers: the rows still open, under the id of the WHOLE set', () => {
+    const two = [scope(rows({ A: 'a1', B: 'b1' }, { A: 'a2', B: 'b2' }, { A: 'a1', B: 'b1' }))];
+    const refusal = refusalOf(() => gateConflicts({ resolutions: { A: 'local' }, conflictId: conflictIdOf(two) }, two));
+    expect(refusal.payload.code).toBe('SECRETS_CONFLICT');
+    expect(refusal.payload.conflict_id).toBe(conflictIdOf(two));
+    expect(refusal.payload.conflicts.map((c) => c.name)).toEqual(['B']);
   });
 
-  test('every conflict answered: the decisions, source and target apart', () => {
-    const decided = gateConflicts(flags(['A=mine', 'B=theirs', 'A@dokploy-production=theirs']), scopes);
-    expect(decided).toEqual({ A: 'mine', B: 'theirs', 'A@dokploy-production': 'theirs' });
-    expect(sourceResolutions(decided)).toEqual({ A: 'mine', B: 'theirs' });
-    expect(targetResolutions(decided, 'dokploy-production')).toEqual({ A: 'theirs' });
-    expect(targetResolutions(decided, 'elsewhere')).toEqual({});
+  test('an id that is not the id of exactly these rows: SECRETS_CONFLICT_STALE with the fresh rows and the fresh id', () => {
+    const refusal = refusalOf(() => gateConflicts({ resolutions: { GEMINI_TIMEOUT_SECONDS: 'local' }, conflictId: 'c_000000000000' }, scopes));
+    expect(refusal.payload).toMatchObject({ ok: false, code: 'SECRETS_CONFLICT_STALE', conflict_id: id });
+    expect(refusal.payload.conflicts).toEqual(gemini);
   });
 
-  test('seenResolutions binds each decision to the fingerprints of the conflict it answered, and drops answers to nothing', () => {
-    const decided = gateConflicts(flags(['A=mine', 'B=theirs', 'A@dokploy-production=theirs']), scopes);
-    const seen = seenResolutions({ ...decided, 'ZZZ@dokploy-production': 'mine' }, scopes.flatMap((s) => s.conflicts));
-    const target = scopes.flatMap((s) => s.conflicts).find((c) => c.kind === 'target')!;
-    expect(seen['A@dokploy-production']).toEqual({ choice: 'theirs', theirs: target.theirs, yours: target.yours });
-    expect(Object.keys(seen).toSorted()).toEqual(['A', 'A@dokploy-production', 'B']);
-    expect(targetResolutions(seen, 'dokploy-production')).toEqual({ A: seen['A@dokploy-production'] });
+  test('--dry-run reports the rows with dry_run and never applies, even with the right answers', () => {
+    const refusal = refusalOf(() => gateConflicts({ resolutions: { GEMINI_TIMEOUT_SECONDS: 'local' }, conflictId: id }, scopes, { dryRun: true }));
+    expect(refusal.payload).toEqual({ ok: false, code: 'SECRETS_CONFLICT', conflict_id: id, conflicts: gemini, dry_run: true });
   });
 
-  test('answers for names that are not in the conflict are ignored, never applied', () => {
-    expect(gateConflicts(flags(['A=mine', 'B=mine', 'A@dokploy-production=mine', 'ZZZ=theirs']), scopes)).toEqual({
-      A: 'mine',
-      B: 'mine',
-      'A@dokploy-production': 'mine',
-    });
+  test('a platform row is answered as NAME@TARGET, and bound to the fingerprints it was answered against', () => {
+    const platform: TargetConflict = { name: 'STRIPE_KEY', target: 'dokploy-production', pinned: null, local: 'l1', remote: 'r1' };
+    const platformScopes = [scope([platform])];
+    const answers = gateConflicts({ resolutions: { 'STRIPE_KEY@dokploy-production': 'remote' }, conflictId: conflictIdOf(platformScopes) }, platformScopes);
+    expect(answers).toEqual({ 'STRIPE_KEY@dokploy-production': 'remote' });
+    const bound = seenResolutions(answers, [platform]);
+    expect(bound).toEqual({ 'STRIPE_KEY@dokploy-production': { choice: 'remote', local: 'l1', remote: 'r1' } });
+    expect(targetResolutions(bound, 'dokploy-production')).toEqual({ STRIPE_KEY: { choice: 'remote', local: 'l1', remote: 'r1' } });
+  });
+});
+
+describe('what is printed', () => {
+  test('stdout: the payload as JSON, nothing else. stderr: prose with the names and no value or fingerprint', () => {
+    const log = spyOn(console, 'log').mockImplementation(() => {});
+    const err = spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      printConflictRefusal(conflictRefusalFor(ERROR_CODES.SECRETS_CONFLICT, [scope(gemini)]));
+      expect(log.mock.calls).toHaveLength(1);
+      expect(JSON.parse(String(log.mock.calls[0][0]))).toMatchObject({ ok: false, code: 'SECRETS_CONFLICT', conflicts: gemini });
+      const prose = err.mock.calls.map((c) => c.map(String).join(' ')).join('\n');
+      expect(prose).toContain('GEMINI_TIMEOUT_SECONDS');
+      expect(prose).toContain('--resolve');
+      expect(prose).not.toContain('7b69759630f869f2');
+    } finally {
+      log.mockRestore();
+      err.mockRestore();
+    }
   });
 
-  test('several places bind one id, and moving any one of them makes the answer stale', () => {
-    const two = [scope([source('A', 'aaaaaaaaaaaaaaaa')]), scope([source('A', 'aaaaaaaaaaaaaaaa', { branch: 'staging' })], { branch: 'staging' })];
-    const both = conflictIdOf(two);
-    expect(gateConflicts(parseConflictFlags({ resolve: ['A=mine'], conflict: both }), two)).toEqual({ A: 'mine' });
-    const moved = [two[0], scope([source('A', 'dddddddddddddddd', { branch: 'staging' })], { branch: 'staging' })];
-    expect(refusalOf(() => gateConflicts(parseConflictFlags({ resolve: ['A=mine'], conflict: both }), moved)).code).toBe(ERROR_CODES.SECRETS_CONFLICT_STALE);
-  });
-
-  test('a payload names fingerprints and the code, never anything else: exactly ok, code, conflict_id, conflicts (dry_run on a preview)', () => {
-    const refusal = refusalOf(() => gateConflicts(flags([], undefined), scopes));
-    expect(Object.keys(refusal.payload).toSorted()).toEqual(['code', 'conflict_id', 'conflicts', 'ok']);
-    const preview = conflictRefusalFor(ERROR_CODES.SECRETS_CONFLICT, scopes, undefined, { dryRun: true });
-    expect(Object.keys(preview.payload).toSorted()).toEqual(['code', 'conflict_id', 'conflicts', 'dry_run', 'ok']);
-    expect(preview.payload.conflict_id).toBe(id);
-  });
-
-  test('protocolDecider asks the same gate for one scope', () => {
-    const found = [source('A', 'aaaaaaaaaaaaaaaa') as Extract<Conflict, { kind: 'source' }>];
-    const view = { project: 'demo', branch: 'production', serverKeepHash: 'abcdabcdabcdabcd' };
-    const here = conflictIdOf([scope(found)]);
-    expect(protocolDecider(parseConflictFlags({ resolve: ['A=theirs'], conflict: here }))(found, view)).toEqual({ A: 'theirs' });
-    expect(() => protocolDecider(parseConflictFlags({}))(found, view)).toThrow(ConflictRefusal);
+  test('exitOnConflictRefusal exits 3 for a refusal and leaves any other error to the caller', () => {
+    const exit = spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+    const log = spyOn(console, 'log').mockImplementation(() => {});
+    const err = spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      exitOnConflictRefusal(new Error('something else'));
+      expect(exit).not.toHaveBeenCalled();
+      exitOnConflictRefusal(conflictRefusalFor(ERROR_CODES.SECRETS_CONFLICT, [scope(gemini)]));
+      expect(exit).toHaveBeenCalledWith(3);
+    } finally {
+      exit.mockRestore();
+      log.mockRestore();
+      err.mockRestore();
+    }
   });
 });

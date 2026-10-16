@@ -59,7 +59,9 @@ import {
   VarDelivery,
 } from '../deploy/targetsGate';
 import { KeepFile, ERROR_CODES, AuthResult, ErrorCode } from '../types/index';
-import { adoptedKeepFor, commitToServer } from '../sync/commit';
+import { uploadKeepOnly } from '../sync/commit';
+import { gateFirst } from '../sync/gate';
+import { SyncEngine } from '../sync/syncEngine';
 import type { AuthService } from '../auth/authService';
 import type { ServiceClient } from '../service/serviceClient';
 import { ProjectManager } from '../core/projectManager';
@@ -95,7 +97,7 @@ import {
   printConflictRefusal,
   type RawConflictFlags,
 } from '../sync/conflicts';
-import { isUnsavedChangesRefusal, printUnsavedChangesRefusal, reconcileDeployConflicts } from './deployConflicts';
+import { reconcileDeployConflicts } from './deployConflicts';
 import { EXIT_NEEDS_INPUT } from '../ui/interactive';
 import type { DeployPlanConfirmStop } from '../ui/screens/contract';
 import { CHECKBOX_INSTRUCTIONS, CHECKBOX_THEME, LIST_THEME } from '../ui/promptStyle';
@@ -416,7 +418,7 @@ async function loadDeploySecrets(
  * Transform keep.lock on the Capy SERVER and push it, for a pure `KeepFile → KeepFile` change that isn't a
  * value edit (targets recording/stripping). Mirrors `deployTokenCommand`'s keep-only writes.
  *
- * The write is the one commit path (sync/commit.ts): `commitToServer` reads the server's latest for `branch`,
+ * The write is the shared keep-only upload (sync/commit.ts `uploadKeepOnly`): it reads the server's latest for `branch`,
  * applies `transform` to THAT keep, and uploads it with the branch's blob exactly as the server holds it
  * (every ciphertext line verbatim) and the keep it was built from (`base_keep_hash`), re-reading and rebuilding
  * once if someone saved in between. Nothing in this folder's `.env` or its keep.lock beyond `transform` reaches
@@ -424,7 +426,7 @@ async function loadDeploySecrets(
  * move a secret's value under an unchanged hash).
  *
  * Writes only the untracked working copy (`writeKeepFile`), and only the branch's slice of the server's keep
- * (`adoptedKeepFor`): it never auto-commits the tracked keep.lock onto whatever branch the caller happens to be
+ * (spliced into the local keep): it never auto-commits the tracked keep.lock onto whatever branch the caller happens to be
  * on. Only `capy deploy`'s own explicit, isolated commit steps (direct mode's own-branch commit, CI mode's
  * worktree PR) ever touch the tracked file.
  *
@@ -467,22 +469,16 @@ async function pushKeepTransform(
     const fresh = await resolveFreshSnapshot(cwd, branch, devMode, `${label} in keep.lock`, opts.warnCode);
     if (!fresh) return { ok: false };
 
-    const { resolveProjectKey } = await import('../crypto/keyResolver');
-    const projectKey = await resolveProjectKey(fresh.orgId, fresh.projectId, fresh.userId, {
-      coDecrypt: (o, c) => fresh.serviceClient.coDecrypt(o, c).then((r) => r.plaintext),
-      wrapOuterLayer: (o, p) => fresh.serviceClient.wrapOuterLayer(o, p).then((r) => r.ciphertext),
-    });
-    const committed = await commitToServer({
-      client: fresh.serviceClient,
-      projectId: fresh.projectId,
-      branch,
-      projectKey,
-      startKeep: keep,
-      changes: { set: {}, remove: [] },
-      transformKeep: transform,
-    });
+    // The shared keep-only upload (sync/commit.ts): the server's latest keep and blob, `base_keep_hash`, one retry if stale.
+    const done = await uploadKeepOnly(fresh.serviceClient, fresh.projectId, branch, transform);
+    if (!done.ok) {
+      console.error(`  ${YELLOW('!')} could not ${label} in keep.lock: ${codePrefix}${done.code}`);
+      return { ok: false };
+    }
 
-    if (writeLocal) new FileManager(cwd).writeKeepFile(adoptedKeepFor(keep, committed, branch));
+    if (writeLocal) {
+      new FileManager(cwd).writeKeepFile(SyncEngine.spliceKeepBranch(keep, SyncEngine.adoptServerKeep(done.serverKeepFile, done.keep, branch), branch));
+    }
     return { ok: true };
   } catch (err: any) {
     console.error(`  ${YELLOW('!')} could not ${label} in keep.lock: ${codePrefix}${err?.message ?? err}`);
@@ -519,9 +515,7 @@ async function resolveFreshSnapshot(
 ): Promise<{
   keep: KeepFile;
   latest: { env_file: string; keep_hash: string; keep_file?: string };
-  orgId: string;
   projectId: string;
-  userId: string;
   serviceClient: ServiceClient;
 } | null> {
   const codePrefix = warnCode ? `${warnCode}: ` : '';
@@ -565,7 +559,7 @@ async function resolveFreshSnapshot(
       );
       return null;
     }
-    return { keep, latest, orgId: projectState.organizationId, projectId: projectState.projectId, userId: authResult.user_id, serviceClient };
+    return { keep, latest, projectId: projectState.projectId, serviceClient };
   } catch (err: any) {
     console.error(`  ${YELLOW('!')} could not ${label}: ${codePrefix}${err?.message ?? err}`);
     return null;
@@ -2475,6 +2469,17 @@ export async function deployCommand(
   // A bad --resolve / --conflict is refused before anything is read.
   const conflictFlags = conflictFlagsOrExit(options.conflictFlags ?? {}, false);
 
+  // Bare `capy` runs before anything else: before the picker, the plan, the preflight, the confirm screen, a mint
+  // or a decrypt. The folder and Capy must agree before this delivers or records anything (docs/conflict-resolution.md);
+  // what is delivered is then the folder's values, which are Capy's. `--yes` and `--dry-run` runs are asked nothing,
+  // so a difference ends them with its payload alone on stdout.
+  await gateFirst({
+    devMode: options.devMode,
+    nonTty: options.yes === true,
+    conflictFlags: options.conflictFlags,
+    dryRun: options.dryRun === true,
+  });
+
   const keep = readKeep(cwd);
   if (!keep) {
     console.error(
@@ -2603,10 +2608,10 @@ export async function deployCommand(
   const msg = `chore(deploy): ${target.name} → ${target.branch} (${target.kind})`;
   const baseBranch = target.gitBaseBranch ?? 'main';
 
-  // ── Conflicts (CAP-717) — before the gate, a mint, a decrypt or any write. The values about to be delivered
-  //    are compared with Capy's latest (source) and, on Dokploy, with the service's live env (target); every
-  //    conflict is answered (a question per variable in a terminal, --resolve off one) and the folder takes the
-  //    values that will be delivered. Nothing is written until then.
+  // ── Platform values (CAP-717) — before the CI gate, a mint, a decrypt or any write. The folder and Capy already
+  //    agree (bare `capy` ran first); on Dokploy the values about to be delivered are compared with the service's
+  //    live env, and every difference is answered (a question per variable in a terminal, --resolve off one).
+  //    Nothing is written until then.
   const settled = await (async (): Promise<Awaited<ReturnType<typeof reconcileDeployConflicts>>> => {
     try {
       return await reconcileDeployConflicts({
@@ -2625,10 +2630,6 @@ export async function deployCommand(
         printConflictRefusal(err);
         return { ok: false, code: EXIT_NEEDS_INPUT };
       }
-      if (isUnsavedChangesRefusal(err)) {
-        printUnsavedChangesRefusal(err);
-        return { ok: false, code: EXIT_NEEDS_INPUT };
-      }
       // A preview that could not compare says nothing; a real deploy that could not compare does not deliver.
       if (options.dryRun) return { ok: true, skipped: [] };
       console.error(`${RED('✗')} could not compare with Capy: ${err?.message ?? err}`); // COPY-FLAG
@@ -2640,7 +2641,7 @@ export async function deployCommand(
     renderPlan(target, adapter);
     showPreflightWarnings();
   }
-  // What this delivery records: the target without the variables whose platform value was kept (`theirs`).
+  // What this delivery records: the target without the variables whose platform value was kept (`remote`).
   const recorded: TargetConfig =
     settled.skipped.length === 0 ? target : { ...target, vars: target.vars.filter((v) => !settled.skipped.includes(v)) };
   if (recorded.vars.length === 0) {

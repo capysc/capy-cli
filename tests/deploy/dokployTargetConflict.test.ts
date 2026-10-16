@@ -1,9 +1,9 @@
 /**
- * Target conflicts (CAP-717): before a Dokploy delivery writes the service's env it compares each delivered
- * name's LIVE value with what Capy last delivered (keep.lock's `deployed_value_hash`) and with what it is about
- * to deliver. A value changed on the platform outside Capy is a conflict that needs an answer:
- *   mine   → Capy's value is delivered (the outside line is commented out as `# capy:off`, as always);
- *   theirs → the variable is skipped: not written, its outside line not commented, no delivery recorded for it.
+ * Platform values (CAP-717): before a Dokploy delivery writes the service's env it compares each delivered
+ * name's LIVE value (remote) with what Capy last delivered (keep.lock's `deployed_value_hash`, pinned) and with
+ * what it is about to deliver (local). A value changed on the platform outside Capy needs an answer:
+ *   local  → Capy's value is delivered (the outside line is commented out as `# capy:off`, as always);
+ *   remote → the variable is skipped: not written, its outside line not commented, no delivery recorded for it.
  *
  * The pure half (`dokployTargetConflicts`, `mergeManagedValuesBlock`'s `keep`) is tested as functions; the adapter
  * half against a scripted Dokploy that fails on any request the test did not expect, so "nothing was written" is
@@ -29,12 +29,12 @@ describe('dokployTargetConflicts (pure)', () => {
 
   test('a live value that is neither what Capy last delivered nor what it is about to deliver is a conflict (fingerprints only)', () => {
     const found = dokployTargetConflicts('STRIPE_KEY=edited-outside\n', values, { STRIPE_KEY: h('old-delivered') });
-    expect(found).toEqual([{ name: 'STRIPE_KEY', pinned: h('old-delivered'), yours: h('new-capy'), theirs: h('edited-outside') }]);
+    expect(found).toEqual([{ name: 'STRIPE_KEY', pinned: h('old-delivered'), local: h('new-capy'), remote: h('edited-outside') }]);
   });
 
   test('first delivery (nothing recorded) onto a different existing value is a conflict, with no pinned', () => {
     expect(dokployTargetConflicts('STRIPE_KEY=already-there', values, {})).toEqual([
-      { name: 'STRIPE_KEY', pinned: undefined, yours: h('new-capy'), theirs: h('already-there') },
+      { name: 'STRIPE_KEY', pinned: undefined, local: h('new-capy'), remote: h('already-there') },
     ]);
   });
 
@@ -45,9 +45,9 @@ describe('dokployTargetConflicts (pure)', () => {
     expect(dokployTargetConflicts(null, values, {})).toEqual([]);
   });
 
-  test('theirs is what the service would READ: the whole env through dotenv, inside Capy\'s block or an active line outside it', () => {
+  test('remote is what the service would READ: the whole env through dotenv, inside Capy\'s block or an active line outside it', () => {
     const inBlock = `NODE_ENV=production\n${MANAGED_BEGIN}\nSTRIPE_KEY='edited in the block'\n${MANAGED_END}`;
-    expect(dokployTargetConflicts(inBlock, values, { STRIPE_KEY: h('old-delivered') })[0]?.theirs).toBe(h('edited in the block'));
+    expect(dokployTargetConflicts(inBlock, values, { STRIPE_KEY: h('old-delivered') })[0]?.remote).toBe(h('edited in the block'));
     // A line Capy commented out is a comment: the service does not see it.
     const commented = `${CAPY_OFF_MARKER}STRIPE_KEY=hidden\nNODE_ENV=production`;
     expect(dokployTargetConflicts(commented, values, {})).toEqual([]);
@@ -59,19 +59,19 @@ describe('dokployTargetConflicts (pure)', () => {
     const check = { pinned: { STRIPE_KEY: h('old-delivered') }, resolutions: {} };
     const open = planTargetDelivery(env, both, check);
     expect(open.kind).toBe('conflict');
-    const seen = (choice: 'mine' | 'theirs') => ({ STRIPE_KEY: { choice, theirs: h('edited-outside'), yours: h('new-capy') } });
-    const mine = planTargetDelivery(env, both, { ...check, resolutions: seen('mine') });
-    expect(mine).toMatchObject({ kind: 'clear', skipped: [] });
-    expect(mine.kind === 'clear' && mine.deliver.map((v) => v.name)).toEqual(['STRIPE_KEY', 'PORT']);
-    const theirs = planTargetDelivery(env, both, { ...check, resolutions: seen('theirs') });
-    expect(theirs).toMatchObject({ kind: 'clear', skipped: ['STRIPE_KEY'] });
-    expect(theirs.kind === 'clear' && theirs.deliver.map((v) => v.name)).toEqual(['PORT']);
+    const seen = (choice: 'local' | 'remote') => ({ STRIPE_KEY: { choice, remote: h('edited-outside'), local: h('new-capy') } });
+    const local = planTargetDelivery(env, both, { ...check, resolutions: seen('local') });
+    expect(local).toMatchObject({ kind: 'clear', skipped: [] });
+    expect(local.kind === 'clear' && local.deliver.map((v) => v.name)).toEqual(['STRIPE_KEY', 'PORT']);
+    const remote = planTargetDelivery(env, both, { ...check, resolutions: seen('remote') });
+    expect(remote).toMatchObject({ kind: 'clear', skipped: ['STRIPE_KEY'] });
+    expect(remote.kind === 'clear' && remote.deliver.map((v) => v.name)).toEqual(['PORT']);
     // A decision applies only to the state it was made against: the live value moved, or the value being delivered did.
-    const moved = planTargetDelivery('STRIPE_KEY=moved-after-the-answer\n', both, { ...check, resolutions: seen('mine') });
+    const moved = planTargetDelivery('STRIPE_KEY=moved-after-the-answer\n', both, { ...check, resolutions: seen('local') });
     expect(moved.kind).toBe('conflict');
-    expect(moved.kind === 'conflict' && moved.open.map((c) => c.theirs)).toEqual([h('moved-after-the-answer')]);
-    const otherYours = planTargetDelivery(env, [{ name: 'STRIPE_KEY', value: 'another-capy-value' }], { ...check, resolutions: seen('theirs') });
-    expect(otherYours.kind).toBe('conflict');
+    expect(moved.kind === 'conflict' && moved.open.map((c) => c.remote)).toEqual([h('moved-after-the-answer')]);
+    const otherLocal = planTargetDelivery(env, [{ name: 'STRIPE_KEY', value: 'another-capy-value' }], { ...check, resolutions: seen('remote') });
+    expect(otherLocal.kind).toBe('conflict');
     // No check at all: the delivery is as it always was.
     expect(planTargetDelivery(env, both, undefined)).toMatchObject({ kind: 'clear', skipped: [], found: [] });
   });
@@ -177,9 +177,9 @@ const adapterWith = (fetch: FetchLike) => createDokployAdapter({ fetch, log: () 
 
 const OUTSIDE = 'NODE_ENV=production\nSTRIPE_KEY=already-there\n';
 /** A target check whose decisions were made against the conflict OUTSIDE shows (live 'already-there', delivering 'new-capy'). */
-const check = (resolutions: Record<string, 'mine' | 'theirs'> = {}, pinned: Record<string, string> = {}) => ({
+const check = (resolutions: Record<string, 'local' | 'remote'> = {}, pinned: Record<string, string> = {}) => ({
   pinned,
-  resolutions: Object.fromEntries(Object.entries(resolutions).map(([name, choice]) => [name, { choice, theirs: h('already-there'), yours: h('new-capy') }])),
+  resolutions: Object.fromEntries(Object.entries(resolutions).map(([name, choice]) => [name, { choice, remote: h('already-there'), local: h('new-capy') }])),
 });
 
 describe('the Dokploy adapter and target conflicts', () => {
@@ -189,7 +189,7 @@ describe('the Dokploy adapter and target conflicts', () => {
     expect(result.ok).toBe(false);
     expect(result.steps.at(-1)?.code).toBe('SECRETS_CONFLICT');
     expect(result.conflicts).toEqual([
-      { kind: 'target', name: 'STRIPE_KEY', target: 'dokploy-production', pinned: null, yours: h('new-capy'), theirs: h('already-there') },
+      { name: 'STRIPE_KEY', target: 'dokploy-production', pinned: null, local: h('new-capy'), remote: h('already-there') },
     ]);
     expect(script.done()).toBe(true);
   });
@@ -199,63 +199,63 @@ describe('the Dokploy adapter and target conflicts', () => {
     const script = scripted([read(env)]);
     const result = await adapterWith(script.fetch).deploy(target(), ctx({ targetCheck: check({}, { STRIPE_KEY: h('old-delivered') }) }));
     expect(result.ok).toBe(false);
-    expect(result.conflicts?.[0]).toMatchObject({ pinned: h('old-delivered'), yours: h('new-capy'), theirs: h('hand-edited') });
+    expect(result.conflicts?.[0]).toMatchObject({ pinned: h('old-delivered'), local: h('new-capy'), remote: h('hand-edited') });
     expect(script.done()).toBe(true);
   });
 
-  test('mine delivers Capy\'s value and comments the outside line out as `# capy:off`, as it always did', async () => {
+  test('local delivers Capy\'s value and comments the outside line out as `# capy:off`, as it always did', async () => {
     const merged = mergeManagedValuesBlock(OUTSIDE, [{ name: 'STRIPE_KEY', value: 'new-capy' }]);
     if (!merged.ok) throw new Error('fixture');
     expect(merged.env).toContain(`${CAPY_OFF_MARKER}STRIPE_KEY=already-there`);
     const script = scripted([read(OUTSIDE), save(merged.env), read(merged.env)]);
-    const result = await adapterWith(script.fetch).deploy(target(), ctx({ targetCheck: check({ STRIPE_KEY: 'mine' }) }));
+    const result = await adapterWith(script.fetch).deploy(target(), ctx({ targetCheck: check({ STRIPE_KEY: 'local' }) }));
     expect(result.ok).toBe(true);
     expect(result.skipped).toBeUndefined();
     expect(script.done()).toBe(true);
   });
 
-  test('a decision made against one live value does not apply once the service holds another: conflict again, nothing written (mine and theirs alike)', async () => {
+  test('a decision made against one live value does not apply once the service holds another: conflict again, nothing written (local and remote alike)', async () => {
     const MOVED = 'NODE_ENV=production\nSTRIPE_KEY=moved-after-the-answer\n';
     // `check` binds its decisions to the live value OUTSIDE shows; the service now holds something else. No save step is scripted.
-    const answeredMine = scripted([read(MOVED)]);
-    const mine = await adapterWith(answeredMine.fetch).deploy(target(), ctx({ targetCheck: check({ STRIPE_KEY: 'mine' }) }));
-    expect(mine.ok).toBe(false);
-    expect(mine.steps.at(-1)?.code).toBe('SECRETS_CONFLICT');
-    expect(mine.conflicts).toEqual([
-      { kind: 'target', name: 'STRIPE_KEY', target: 'dokploy-production', pinned: null, yours: h('new-capy'), theirs: h('moved-after-the-answer') },
+    const answeredLocal = scripted([read(MOVED)]);
+    const local = await adapterWith(answeredLocal.fetch).deploy(target(), ctx({ targetCheck: check({ STRIPE_KEY: 'local' }) }));
+    expect(local.ok).toBe(false);
+    expect(local.steps.at(-1)?.code).toBe('SECRETS_CONFLICT');
+    expect(local.conflicts).toEqual([
+      { name: 'STRIPE_KEY', target: 'dokploy-production', pinned: null, local: h('new-capy'), remote: h('moved-after-the-answer') },
     ]);
-    expect(answeredMine.done()).toBe(true);
+    expect(answeredLocal.done()).toBe(true);
 
-    const answeredTheirs = scripted([read(MOVED)]);
-    const theirs = await adapterWith(answeredTheirs.fetch).deploy(target(), ctx({ targetCheck: check({ STRIPE_KEY: 'theirs' }) }));
-    expect(theirs.ok).toBe(false);
-    expect(theirs.skipped).toBeUndefined();
-    expect(answeredTheirs.done()).toBe(true);
+    const answeredRemote = scripted([read(MOVED)]);
+    const remote = await adapterWith(answeredRemote.fetch).deploy(target(), ctx({ targetCheck: check({ STRIPE_KEY: 'remote' }) }));
+    expect(remote.ok).toBe(false);
+    expect(remote.skipped).toBeUndefined();
+    expect(answeredRemote.done()).toBe(true);
 
     // The value being delivered moved after the answer (the decision saw 'new-capy'): the same.
-    const changedYours = scripted([read(OUTSIDE)]);
-    const other = await adapterWith(changedYours.fetch).deploy(target(), ctx({ env: { STRIPE_KEY: 'newer-capy', PORT: '3000' }, targetCheck: check({ STRIPE_KEY: 'mine' }) }));
+    const changedLocal = scripted([read(OUTSIDE)]);
+    const other = await adapterWith(changedLocal.fetch).deploy(target(), ctx({ env: { STRIPE_KEY: 'newer-capy', PORT: '3000' }, targetCheck: check({ STRIPE_KEY: 'local' }) }));
     expect(other.ok).toBe(false);
-    expect(other.conflicts?.[0]).toMatchObject({ yours: h('newer-capy'), theirs: h('already-there') });
-    expect(changedYours.done()).toBe(true);
+    expect(other.conflicts?.[0]).toMatchObject({ local: h('newer-capy'), remote: h('already-there') });
+    expect(changedLocal.done()).toBe(true);
   });
 
-  test('theirs skips the variable: the service\'s env is not written at all when it was the only one, and nothing is recorded for it', async () => {
+  test('remote skips the variable: the service\'s env is not written at all when it was the only one, and nothing is recorded for it', async () => {
     const script = scripted([read(OUTSIDE)]);
-    const result = await adapterWith(script.fetch).deploy(target(), ctx({ targetCheck: check({ STRIPE_KEY: 'theirs' }) }));
+    const result = await adapterWith(script.fetch).deploy(target(), ctx({ targetCheck: check({ STRIPE_KEY: 'remote' }) }));
     expect(result.ok).toBe(true);
     expect(result.skipped).toEqual(['STRIPE_KEY']);
     expect(script.done()).toBe(true); // read only: byte-identical by construction
   });
 
-  test('theirs for one variable still delivers the others, and the kept one stays exactly as it was (outside line active, not commented)', async () => {
+  test('remote for one variable still delivers the others, and the kept one stays exactly as it was (outside line active, not commented)', async () => {
     const env = OUTSIDE; // PORT is not on the service yet
     const merged = mergeManagedValuesBlock(env, [{ name: 'PORT', value: '3000' }], { keep: (n) => n === 'STRIPE_KEY' });
     if (!merged.ok) throw new Error('fixture');
     expect(merged.env).toContain('STRIPE_KEY=already-there');
     expect(merged.env).not.toContain(`${CAPY_OFF_MARKER}STRIPE_KEY`);
     const script = scripted([read(env), save(merged.env), read(merged.env)]);
-    const result = await adapterWith(script.fetch).deploy(target(['STRIPE_KEY', 'PORT']), ctx({ targetCheck: check({ STRIPE_KEY: 'theirs' }) }));
+    const result = await adapterWith(script.fetch).deploy(target(['STRIPE_KEY', 'PORT']), ctx({ targetCheck: check({ STRIPE_KEY: 'remote' }) }));
     expect(result.ok).toBe(true);
     expect(result.skipped).toEqual(['STRIPE_KEY']);
     expect(script.done()).toBe(true);
@@ -318,7 +318,7 @@ describe('the Dokploy adapter, Compose services', () => {
     json: true,
   });
 
-  test('an unanswered conflict writes nothing; mine writes; theirs keeps the service\'s value', async () => {
+  test('an unanswered conflict writes nothing; local writes; remote keeps the service\'s value', async () => {
     const refused = scripted([readCompose(OUTSIDE)]);
     const open = await adapterWith(refused.fetch).deploy(composeTarget(), ctx({ targetCheck: check() }));
     expect(open.ok).toBe(false);
@@ -327,13 +327,13 @@ describe('the Dokploy adapter, Compose services', () => {
 
     const merged = mergeManagedValuesBlock(OUTSIDE, [{ name: 'STRIPE_KEY', value: 'new-capy' }]);
     if (!merged.ok) throw new Error('fixture');
-    const mine = scripted([readCompose(OUTSIDE), saveCompose(merged.env), readCompose(merged.env)]);
-    expect((await adapterWith(mine.fetch).deploy(composeTarget(), ctx({ targetCheck: check({ STRIPE_KEY: 'mine' }) }))).ok).toBe(true);
-    expect(mine.done()).toBe(true);
+    const delivered = scripted([readCompose(OUTSIDE), saveCompose(merged.env), readCompose(merged.env)]);
+    expect((await adapterWith(delivered.fetch).deploy(composeTarget(), ctx({ targetCheck: check({ STRIPE_KEY: 'local' }) }))).ok).toBe(true);
+    expect(delivered.done()).toBe(true);
 
-    const theirs = scripted([readCompose(OUTSIDE)]);
-    const kept = await adapterWith(theirs.fetch).deploy(composeTarget(), ctx({ targetCheck: check({ STRIPE_KEY: 'theirs' }) }));
+    const remote = scripted([readCompose(OUTSIDE)]);
+    const kept = await adapterWith(remote.fetch).deploy(composeTarget(), ctx({ targetCheck: check({ STRIPE_KEY: 'remote' }) }));
     expect(kept).toMatchObject({ ok: true, skipped: ['STRIPE_KEY'] });
-    expect(theirs.done()).toBe(true);
+    expect(remote.done()).toBe(true);
   });
 });

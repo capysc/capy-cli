@@ -19,6 +19,8 @@ import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { spawnSync } from 'child_process';
+import { withHarness, ORG_ID, PROJECT_ID, type Harness } from '../helpers/pipedHarness';
+import { hashValue } from '../../src/sync/compareSecrets';
 
 const CLI = join(__dirname, '../../dist/index.js');
 const ROOT = join(tmpdir(), `capy-deploy-branch-${process.pid}-${Date.now()}`);
@@ -112,38 +114,53 @@ const dokployTarget = (branch: string) => ({
   options: { baseUrl: 'https://dokploy.example.com', applicationId: 'app_1', tokenEnv: 'DOKPLOY_API_KEY' },
 });
 
+/**
+ * A project in `h` that bare `capy` (the first step of every `capy deploy`) finds in sync: `keep.lock` pins the hash of
+ * every value, and `.env` holds those values. The branch checks below are `deploy`'s own, behind that first step.
+ */
+function syncedProject(h: Harness, opts: { header?: string; branches?: string[]; branchFile?: string | null }): void {
+  const branches = opts.branches ?? ['development', 'production'];
+  const variables = {
+    DATABASE_URL: branches.map((b) => ({ resource_id: 'rid' + b[0], branch: b, value_hash: hashValue('x') })),
+  };
+  writeFileSync(join(h.project, 'keep.lock'), JSON.stringify({ version: '3.0', org_id: ORG_ID, project_id: PROJECT_ID, project_name: 'test', variables }, null, 2));
+  writeDeployConfig(h.project, [dokployTarget('production')]);
+  writeFileSync(join(h.project, '.env'), `${opts.header === undefined ? '' : `${opts.header}\n`}DATABASE_URL=x\n`);
+  if (opts.branchFile === null) rmSync(join(h.project, '.capy', 'branch'), { force: true });
+  else if (opts.branchFile !== undefined) writeFileSync(join(h.project, '.capy', 'branch'), opts.branchFile);
+}
+
 describe('capy deploy — branch check (CAP-679)', () => {
-  test('active branch (.env header) differs from target.branch → refused with the coded reason', () => {
-    writeKeep(ROOT);
-    writeDeployConfig(ROOT, [dokployTarget('production')]);
-    writeFileSync(join(ROOT, '.env'), '# capy:branch=development\nDATABASE_URL=x\n');
-
-    const r = capy(['deploy', 'dokploy-target', '--yes']);
-    expect(r.code).toBe(1);
-    expect(r.stderr).toContain('DEPLOY_BRANCH_MISMATCH');
-    expect(r.stderr).toContain('development');
-    expect(r.stderr).toContain('production');
+  test('active branch (.env header) differs from target.branch → refused with the coded reason', async () => {
+    await withHarness(async (h) => {
+      syncedProject(h, { header: '# capy:branch=development', branchFile: 'development' });
+      const r = await h.run(['deploy', 'dokploy-target', '--yes']);
+      expect(r.code).toBe(1);
+      expect(r.stderr).toContain('DEPLOY_BRANCH_MISMATCH');
+      expect(r.stderr).toContain('development');
+      expect(r.stderr).toContain('production');
+    });
   });
 
-  test('active branch matches target.branch → passes the check (fails later, at Dokploy auth)', () => {
-    writeKeep(ROOT);
-    writeDeployConfig(ROOT, [dokployTarget('production')]);
-    writeFileSync(join(ROOT, '.env'), '# capy:branch=production\nDATABASE_URL=x\n');
-
-    const r = capy(['deploy', 'dokploy-target', '--yes']);
-    expect(r.stderr).not.toContain('DEPLOY_BRANCH_MISMATCH');
-    // Reaches preflight instead — no Dokploy token configured in this env.
-    expect(r.stderr).toContain('preflight');
+  test('active branch matches target.branch → passes the check (fails later, at Dokploy auth)', async () => {
+    await withHarness(async (h) => {
+      syncedProject(h, { header: '# capy:branch=production', branchFile: 'production' });
+      const r = await h.run(['deploy', 'dokploy-target', '--yes'], undefined, undefined, { DOKPLOY_API_KEY: '' });
+      expect(r.stderr).not.toContain('DEPLOY_BRANCH_MISMATCH');
+      // Reaches preflight instead — no Dokploy token configured in this env.
+      expect(r.stderr).toContain('preflight');
+    });
   });
 
-  test('no active-branch signal (plaintext .env, several keep.lock branches) never refuses on this check', () => {
-    writeKeep(ROOT); // two branches — deriveActiveBranch cannot pick one
-    writeDeployConfig(ROOT, [dokployTarget('production')]);
-    writeFileSync(ROOT + '/.env', 'DATABASE_URL=x\n'); // no header, no .capy/branch
-
-    const r = capy(['deploy', 'dokploy-target', '--yes']);
-    expect(r.stderr).not.toContain('DEPLOY_BRANCH_MISMATCH');
-    expect(r.stderr).toContain('preflight');
+  test('no active-branch signal at all: bare capy, which runs first, cannot pick a branch, so the deploy never reaches its own check', async () => {
+    await withHarness(async (h) => {
+      // two branches — nothing to pick one by: no header, no .capy/branch (and the mock service lists no branches)
+      syncedProject(h, { branchFile: null });
+      const r = await h.run(['deploy', 'dokploy-target', '--yes'], undefined, undefined, { DOKPLOY_API_KEY: '' });
+      expect(r.code).toBe(1);
+      expect(r.stderr).not.toContain('DEPLOY_BRANCH_MISMATCH');
+      expect(r.stderr).not.toContain('preflight');
+    });
   });
 });
 

@@ -50,7 +50,9 @@ export function formatSnippet(value: string): string {
   return `${value.slice(0, 3)}...${value.slice(-3)}`;
 }
 
-export { hashValue };
+// Where they have always been imported from (the comparison itself lives in sync/compareSecrets.ts).
+export { compareSecrets, hashValue };
+export type { DiffResult };
 
 export class StatusCommand {
   private projectManager: ProjectManager;

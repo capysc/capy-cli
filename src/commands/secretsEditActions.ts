@@ -8,12 +8,12 @@
 // (the branches, GitHub's default branch and keep.lock) to say what would
 // happen, and writes nothing: no push, no cache, no GitHub write.
 //
-// CONFLICTS (CAP-714): before any push, `run` reads every location. One whose value is neither
-// the new value nor the one the row listed was changed by someone else since the person looked:
-// `run` returns those as conflicts and writes nothing. The screen asks mine or theirs for each and
-// runs again with the decisions; a decision holds only for the fingerprints it was made against,
-// so a location that moved again comes back as a conflict. Mine writes the location bound to the
-// value seen (`allowed`); theirs skips it.
+// MOVED LOCATIONS (docs/conflict-resolution.md, "Commands with no folder"): before any push, `run` reads every
+// location and compares the three fingerprints with `compareSecrets` (the row's, the new value's, the location's).
+// One that moved since the person looked, to something other than the new value, comes back as a row and nothing is
+// written. The screen asks for each (`local` writes the new value, `remote` leaves the location) and runs again with
+// the answers; an answer holds only for the fingerprints it was made against, so a location that moved again comes
+// back as a row.
 
 import type { ServiceClient } from '../service/serviceClient';
 import type { SecretsEditActions } from '../ui/secretsScreenDriver';
@@ -25,13 +25,13 @@ import {
   SetLocation,
   createSetEnv,
   locationKeyOf,
+  movedLocations,
   previewLocations,
   repoLabel,
   resolveBases,
   runSecretSet,
-  secretLocationConflict,
 } from './secretsSet';
-import { hashValue } from '../deploy/keepGate';
+import { holdsFor, type BoundAnswer } from '../sync/noFolder';
 import { describePlanBody, type SetPlanBody } from './secretsSetCommand';
 import type { DryRunView } from './secretsSetText';
 import { CapyError, ERROR_CODES } from '../types/index';
@@ -65,44 +65,36 @@ async function planOnly(env: SetEnv, request: RunRequest): Promise<DryRunView> {
   return dryRunView(body, request);
 }
 
-/** What the locations that were read allow: the run goes on with these, or it stops for decisions. */
+/** What the locations that were read allow: the run goes on with these, or it stops for answers. */
 export type SettledLocations =
   | {
       readonly kind: 'ready';
       readonly locations: readonly SetLocation[];
-      /** The fingerprints a location may hold for its push to go on: what was seen and decided against. Absent: not compared. */
-      readonly allowed?: (location: SetLocation) => readonly string[];
+      /** The fingerprint each location's row listed, by `locationKeyOf`, and the answers for the ones that moved. Absent: not compared. */
+      readonly shown?: Readonly<Record<string, string>>;
+      readonly answers?: Readonly<Record<string, BoundAnswer>>;
     }
   | { readonly kind: 'conflicts'; readonly conflicts: readonly LocationConflict[] };
 
 /**
- * Pure. `reads` are the previews of `request.locations`, in order. A location holding neither the new value nor the one
- * the row listed is a conflict. All decided, each against the fingerprints it holds now: the locations to push (theirs
- * is skipped) and the binding for the push. Any undecided, or decided against a value that has moved since: the
- * conflicts, and nothing is pushed.
+ * Pure. `reads` are the previews of `request.locations`, in order. A location that moved since the row was listed (to
+ * something other than the new value) is a row (`compareSecrets`). All answered, each against the fingerprints the
+ * location holds now: the locations to push (`remote` leaves a location alone) and the binding for the push. Any
+ * unanswered, or answered against a value that has moved since: the rows, and nothing is pushed.
  */
 export function settleLocations(request: RunRequest, reads: readonly LocationPreview[]): SettledLocations {
   const seen = request.seen;
   if (seen === undefined) return { kind: 'ready', locations: request.locations };
-  const yours = hashValue(request.value);
-  const conflicts = request.locations.flatMap((location, i): LocationConflict[] => {
-    const conflict = secretLocationConflict(request.name, yours, seen, location, reads[i]);
-    return conflict === undefined ? [] : [{ location, conflict }];
-  });
-  const decisionFor = (c: LocationConflict) => request.decisions?.[locationKeyOf(c.location)];
-  const holds = (c: LocationConflict): boolean => {
-    const d = decisionFor(c);
-    return d !== undefined && d.theirs === c.conflict.theirs && d.yours === c.conflict.yours;
-  };
-  if (conflicts.some((c) => !holds(c))) return { kind: 'conflicts', conflicts };
-  const kept = new Set(conflicts.filter((c) => decisionFor(c)?.choice === 'theirs').map((c) => locationKeyOf(c.location)));
+  const shown = Object.fromEntries(request.locations.map((l) => [locationKeyOf(l), seen]));
+  const moved = movedLocations(request.name, request.value, request.locations, shown, reads);
+  const answerFor = (c: LocationConflict): BoundAnswer | undefined => request.decisions?.[locationKeyOf(c.location)];
+  if (moved.some((c) => !holdsFor(answerFor(c), c.conflict))) return { kind: 'conflicts', conflicts: moved };
+  const left = new Set(moved.filter((c) => answerFor(c)?.choice === 'remote').map((c) => locationKeyOf(c.location)));
   return {
     kind: 'ready',
-    locations: request.locations.filter((l) => !kept.has(locationKeyOf(l))),
-    allowed: (loc) => {
-      const at = request.locations.findIndex((l) => locationKeyOf(l) === locationKeyOf(loc));
-      return [yours, seen, reads[at]?.current?.hash ?? ''];
-    },
+    locations: request.locations.filter((l) => !left.has(locationKeyOf(l))),
+    shown,
+    answers: request.decisions,
   };
 }
 
@@ -152,7 +144,7 @@ export function createEditActionsWith(
         const reads = keys === undefined ? [] : await previewLocations(env, request.locations, request.name, request.value, keys);
         const settled: SettledLocations = stopPushes.aborted ? { kind: 'ready', locations: request.locations } : settleLocations(request, reads);
         if (settled.kind === 'conflicts') return { ok: false, code: ERROR_CODES.SECRETS_CONFLICT, conflicts: settled.conflicts };
-        const result = await runSecretSet({ ...request, locations: settled.locations, allowed: settled.allowed, keys }, env, { onProgress, stopPushes, stopPrs });
+        const result = await runSecretSet({ ...request, locations: settled.locations, shown: settled.shown, answers: settled.answers, keys }, env, { onProgress, stopPushes, stopPrs });
         return { ok: true, result };
       } catch (err) {
         return { ok: false, code: codeOf(err) };

@@ -7,12 +7,13 @@ import { readSecretsLocal, LOCAL_USER_ID } from '../config/globalConfig';
 import { isLocalOnly } from '../config/profileConfig';
 import { resolveLocalProjectKey } from '../core/localUnlock';
 import { hashValue } from './statusCommand';
-import { EditScreen, EditRow, EditState, EditLoaded, classifiedRow, focusedOn } from '../ui/editScreen';
+import { EditScreen, EditRow, EditState, EditLoaded, classifiedRow, focusedOn, withPendingEdits } from '../ui/editScreen';
 import { deployedHashesFor } from '../core/deployStatus';
 import { readDefaultBranchTargets } from '../deploy/configuredTargets';
 import { KeepFile } from '../types/index';
 import { commitFolder, pinnedHashes, readLocalPlaintext, readSnapshot, type FolderContext, type Snapshot } from '../sync/commit';
-import { conflictFlagsOrExit, type RawConflictFlags, type Resolutions, type SeenResolutions } from '../sync/conflicts';
+import { conflictFlagsOrExit, type RawConflictFlags } from '../sync/conflicts';
+import { gateFirst, type GateOptions } from '../sync/gate';
 import { reportKeepLockHuman, refuseBadPrFlags, runKeepLockPrStep, type PrFlags } from './keepLockPr';
 import { startSaveLog } from './sessionSaveLog';
 import { decideEditMode, editPipedCommand, refuseEditNeedsTty } from './editPiped';
@@ -22,9 +23,11 @@ import { printRepoLinkWarnings, reportRepoLink } from '../core/repoLinkReporter'
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
+const has = (record: object, name: string): boolean => Object.hasOwn(record, name);
+
 /**
  * What the rows are compared against: the other side's value (and fingerprint) per variable. Server mode: the
- * server's LATEST for the branch, the very read the commit path plans against (`seen`), never the folder's pinned
+ * server's LATEST for the branch, the very read a save is built on (`seen`), never the folder's pinned
  * snapshot. Local-only mode: the committed copy in the local cache, with no server.
  */
 export interface Baseline {
@@ -92,7 +95,7 @@ function loadLocalBaseline(args: {
 
 /**
  * The rows: every variable known to the folder's pin, its `.env` or the other side, compared three ways (pinned,
- * yours, theirs) in server mode, committed-vs-working in local mode. Pure.
+ * local, remote) in server mode, committed-vs-working in local mode. Pure.
  */
 export function buildEditRows(input: {
   readonly localMode: boolean;
@@ -165,41 +168,21 @@ export function editLoader(args: {
   };
 }
 
-const has = (record: object, name: string): boolean => Object.hasOwn(record, name);
-
 /**
- * The decisions that still hold: each is kept only if the fingerprints it was made against are the ones in this read of
- * the server (`seen`) and in the value about to be written. With no read to bind to, none holds.
- */
-export function boundResolutions(
-  decisions: SeenResolutions,
-  seen: Snapshot | undefined,
-  set: Readonly<Record<string, string>>,
-): Resolutions {
-  if (seen === undefined) return {};
-  return Object.fromEntries(
-    Object.entries(decisions)
-      .filter(([name, d]) => d.theirs === (seen.entries[name]?.hash ?? null) && d.yours === (has(set, name) ? hashValue(set[name]) : null))
-      .map(([name, d]) => [name, d.choice] as const),
-  );
-}
-
-/**
- * One save from the edit screen (`c`, or commit on quit). The one commit path (sync/commit.ts):
- * only the edited rows (and the conflict rows the person decided) change, on top of the server's
- * latest. A decision applies only to the values it was made against (`boundResolutions`); a name
- * someone else changed since the screen read it is a `SECRETS_CONFLICT` (nothing uploaded), which
- * the screen answers by reading again and showing it as a conflict. The folder is read afresh for
- * every save, because an earlier save in the same session moved keep.lock and `.env`. Resolves to the server-assigned `changed_at` of every variable on
- * the branch, for the screen's UPDATED column.
+ * One save from the edit screen (`c`, or commit on quit). The shared upload (sync/commit.ts): only the
+ * edited rows change, on top of the server's latest, and the upload names the keep the screen read (`seen`,
+ * `base_keep_hash`). If Capy moved since, the server refuses it as stale (`SECRETS_STALE_BASE`, nothing
+ * uploaded): the screen closes, the command runs bare `capy` and reopens it. The folder is read afresh for
+ * every save, because an earlier save in the same session moved keep.lock and `.env`. Resolves to the
+ * server-assigned `changed_at` of every variable on the branch, for the screen's UPDATED column.
  */
 export async function saveEdits(
   folder: Omit<FolderContext, 'keep' | 'localPlaintext'>,
   startKeep: KeepFile,
   edits: Readonly<Record<string, string>>,
   saveLog: Pick<ReturnType<typeof startSaveLog>, 'record'>,
-  /** The decisions made on the screen, with the server read they were made against (CAP-714). */
-  bound?: { readonly decisions: SeenResolutions; readonly seen: Snapshot | undefined },
+  /** The server read the screen's rows were drawn from. */
+  seen?: Snapshot,
 ): Promise<Record<string, string>> {
   const { branch } = folder;
   const committed = await commitFolder(
@@ -209,7 +192,7 @@ export async function saveEdits(
       localPlaintext: readLocalPlaintext(folder.fileManager, folder.projectKey),
     },
     { set: edits, remove: [] },
-    { resolutions: boundResolutions(bound?.decisions ?? {}, bound?.seen, edits), seen: bound?.seen },
+    { seen },
   );
   const adoptedKeep = committed.keep;
 
@@ -250,7 +233,7 @@ export interface EditOpts {
   pr?: PrFlags;
   /** The global `--dry-run`: piped mode previews; the TUI refuses (`DRY_RUN_UNSUPPORTED`). */
   dryRun?: boolean;
-  /** `--resolve` / `--conflict` as typed (CAP-717): they decide a conflict of a piped value. The TUI shows conflicts on its own screen (CAP-714). */
+  /** `--resolve` / `--conflict` as typed (CAP-717): they answer the differences bare `capy` finds first. */
   conflictFlags?: RawConflictFlags;
 }
 
@@ -327,6 +310,9 @@ export class EditCommand {
       return refuseDryRunUnsupported(opts.json === true, DRY_RUN_UNSUPPORTED_MESSAGES.edit);
     }
     if (opts.name !== undefined && !isValidVarName(opts.name)) return refuseInvalidName(opts.json === true);
+    // A bad flag is refused here, before stdin is read or anything is authenticated.
+    conflictFlagsOrExit(opts.conflictFlags ?? {}, opts.json === true);
+    const gate: GateOptions = { devMode: this.devMode, json: opts.json === true, nonTty: opts.nonTty, conflictFlags: opts.conflictFlags, dryRun: opts.dryRun === true };
     if (mode === 'piped' && opts.name !== undefined) {
       return editPipedCommand(opts.name, {
         json: opts.json === true,
@@ -334,10 +320,12 @@ export class EditCommand {
         devMode: this.devMode,
         pr: opts.pr,
         dryRun: opts.dryRun === true,
-        // A bad flag is refused here, before stdin is read or anything is authenticated.
-        conflicts: conflictFlagsOrExit(opts.conflictFlags ?? {}, opts.json === true),
+        gate,
       });
     }
+
+    // Bare `capy` runs before the screen opens: the folder and Capy must agree before anything here can write.
+    await gateFirst(gate);
 
     const pm = new ProjectManager();
     const projectState = await pm.detectProjectState();
@@ -403,8 +391,8 @@ export class EditCommand {
     const saveLog = startSaveLog();
 
     const editContext = {
-      saveLocalEdits: (edits: Record<string, string>, bound?: Parameters<typeof saveEdits>[4]) =>
-        saveEdits({ pm, fileManager, serviceClient, orgId, projectId, branch, userId, projectKey }, keep, edits, saveLog, bound),
+      saveLocalEdits: (edits: Record<string, string>, seen?: Snapshot) =>
+        saveEdits({ pm, fileManager, serviceClient, orgId, projectId, branch, userId, projectKey }, keep, edits, saveLog, seen),
       reload: load,
     };
 
@@ -413,7 +401,16 @@ export class EditCommand {
       ? reportRepoLink({ cwd: process.cwd(), orgId, projectId, projectName: keep.project_name, client: serviceClient })
       : undefined;
 
-    await screen.run(state, editContext);
+    // A save refused as stale (Capy moved since the screen read it) closes the screen with nothing uploaded: bare `capy`
+    // runs again (it shows what changed) and the screen reopens with the edits still typed.
+    const session = async (shown: EditState): Promise<void> => {
+      const exit = await screen.run(shown, editContext);
+      if (exit.kind === 'done') return;
+      await gateFirst(gate);
+      const fresh = await load();
+      return session(withPendingEdits({ ...baseState, rows: fresh.rows, remoteAvailable: fresh.remoteAvailable, seen: fresh.seen }, exit.pending));
+    };
+    await session(state);
     if (repoLinkPending) printRepoLinkWarnings(await repoLinkPending);
     // The TUI has already released stdin (raw mode off, its key listener
     // removed) by the time `run` resolves, so the prompts in keepLockPr.ts start

@@ -139,7 +139,7 @@ export interface DeployResult {
    * dry run with a `targetCheck` they are the preview. Fingerprints only.
    */
   conflicts?: readonly TargetConflict[];
-  /** Names the delivery left alone because the platform's value was kept (`theirs`): not written, not to be recorded as delivered. */
+  /** Names the delivery left alone because the platform's value was kept (`remote`): not written, not to be recorded as delivered. */
   skipped?: readonly string[];
 }
 

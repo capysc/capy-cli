@@ -1,15 +1,20 @@
 /**
  * A REAL `deployCommand()` run against a Dokploy CI-mode target whose live env holds a value changed outside Capy
- * (CAP-717). Same vehicle as deployDokploySystemStoreToken.test.ts: scripted Dokploy over `fetch`, mocked auth and
- * Capy server (in agreement with the folder, so the only conflict here is the TARGET one).
+ * (CAP-717, docs/conflict-resolution.md "Platform values"). Same vehicle as deployDokploySystemStoreToken.test.ts:
+ * scripted Dokploy over `fetch`, mocked auth and Capy server; bare `capy` (a deploy's first step) is stubbed in
+ * agreement, so the only difference here is the PLATFORM one.
  *
  * The properties: off a terminal the deploy stops BEFORE anything is written (exit 3, the payload alone on
- * stdout, Dokploy saw only reads); a rerun with `--resolve NAME@TARGET=mine --conflict <id>` delivers and
- * comments the outside line out; `theirs` writes nothing and records no delivery; a moved service is STALE.
+ * stdout, Dokploy saw only reads); a rerun with `--resolve NAME@TARGET=local --conflict <id>` delivers Capy's value
+ * and comments the outside line out; `remote` keeps the platform's value: nothing written and no delivery
+ * recorded; a moved service is STALE.
  *
  * mock.module is process-wide: this file runs isolated (tests/run-tests.sh).
  */
 import { describe, test, expect, mock, spyOn, afterEach } from 'bun:test';
+import { stubbedGate } from '../helpers/gateMock';
+
+mock.module('../../src/sync/gate', () => stubbedGate());
 
 mock.module('../../src/auth/authService', () => ({
   AuthService: class {
@@ -151,7 +156,7 @@ describe('capy deploy: a Dokploy value changed outside Capy', () => {
     expect(payload).toMatchObject({ ok: false, code: 'SECRETS_CONFLICT' });
     expect(payload.conflict_id).toMatch(/^c_[0-9a-f]{12}$/);
     expect(payload.conflicts).toEqual([
-      { kind: 'target', name: 'STRIPE_KEY', target: 'dokploy-ci', pinned: null, yours: hashValue(DELIVERED), theirs: hashValue(OUTSIDE) },
+      { name: 'STRIPE_KEY', target: 'dokploy-ci', pinned: null, local: hashValue(DELIVERED), remote: hashValue(OUTSIDE) },
     ]);
     expect(`${out.stdout}${out.stderr}`).not.toContain(OUTSIDE);
     expect(`${out.stdout}${out.stderr}`).not.toContain(DELIVERED);
@@ -160,23 +165,23 @@ describe('capy deploy: a Dokploy value changed outside Capy', () => {
     rmSync(ROOT, { recursive: true, force: true });
   }, 30_000);
 
-  test('mine: delivered, the outside line commented out as `# capy:off`', async () => {
+  test('local: delivered, the outside line commented out as `# capy:off`', async () => {
     setUp();
     const first = JSON.parse((await run(dokployFetch([RAW_ENV, RAW_ENV]))).stdout) as { conflict_id: string };
     // preflight, the comparison, deploy's fresh read, the read-back.
     const f = dokployFetch([RAW_ENV, RAW_ENV, RAW_ENV, MERGED]);
-    const out = await run(f, { yes: true, conflictFlags: { resolve: ['STRIPE_KEY@dokploy-ci=mine'], conflict: first.conflict_id } });
+    const out = await run(f, { yes: true, conflictFlags: { resolve: ['STRIPE_KEY@dokploy-ci=local'], conflict: first.conflict_id } });
     expect(out.code).toBe(0);
     expect(writes(f)).toHaveLength(1);
     expect(JSON.parse(String(writes(f)[0][1].body)).env).toContain(`${CAPY_OFF_MARKER}STRIPE_KEY=${OUTSIDE}`);
     rmSync(ROOT, { recursive: true, force: true });
   }, 30_000);
 
-  test('theirs: nothing is written to the service and no delivery is recorded', async () => {
+  test('remote: nothing is written to the service and no delivery is recorded', async () => {
     setUp();
     const first = JSON.parse((await run(dokployFetch([RAW_ENV, RAW_ENV]))).stdout) as { conflict_id: string };
     const f = dokployFetch([RAW_ENV, RAW_ENV]); // the variable was the only one: the run ends after the comparison
-    const out = await run(f, { yes: true, conflictFlags: { resolve: ['STRIPE_KEY@dokploy-ci=theirs'], conflict: first.conflict_id } });
+    const out = await run(f, { yes: true, conflictFlags: { resolve: ['STRIPE_KEY@dokploy-ci=remote'], conflict: first.conflict_id } });
     expect(out.code).toBe(0);
     expect(writes(f)).toHaveLength(0);
     expect(pushSecretsMock).not.toHaveBeenCalled();
@@ -188,7 +193,7 @@ describe('capy deploy: a Dokploy value changed outside Capy', () => {
     const first = JSON.parse((await run(dokployFetch([RAW_ENV, RAW_ENV]))).stdout) as { conflict_id: string };
     const moved = `NODE_ENV=production\nSTRIPE_KEY=edited-again\n`;
     const f = dokployFetch([moved, moved]);
-    const out = await run(f, { yes: true, conflictFlags: { resolve: ['STRIPE_KEY@dokploy-ci=mine'], conflict: first.conflict_id } });
+    const out = await run(f, { yes: true, conflictFlags: { resolve: ['STRIPE_KEY@dokploy-ci=local'], conflict: first.conflict_id } });
     expect(out.code).toBe(3);
     const payload = JSON.parse(out.stdout) as { code: string; conflict_id: string };
     expect(payload.code).toBe('SECRETS_CONFLICT_STALE');

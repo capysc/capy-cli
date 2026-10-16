@@ -7,7 +7,7 @@
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { createHarness, BRANCH, type Harness } from '../helpers/pipedHarness';
+import { createHarness, withHarness, BRANCH, type Harness } from '../helpers/pipedHarness';
 
 const PEM = readFileSync(join(__dirname, '../fixtures/rsa_test_key.pem'), 'utf8').trimEnd();
 
@@ -98,8 +98,11 @@ describe('capy add NAME < value (piped)', () => {
     expect(parseJson(over.stdout).code).toBe('STDIN_TOO_LARGE');
     expect(h().envValue('ADD_BIG')).toBeUndefined();
 
-    const at = await h().run(['add', 'ADD_AT_CAP', '--json', '--no-push'], 'a'.repeat(1024 * 1024));
-    expect(at.code).toBe(0);
+    // --no-push leaves .env different from Capy, which the next write would stop on: its own world.
+    await withHarness(async (own) => {
+      const at = await own.run(['add', 'ADD_AT_CAP', '--json', '--no-push'], 'a'.repeat(1024 * 1024));
+      expect(at.code).toBe(0);
+    });
   });
 
   test('a PEM key with inner newlines round-trips byte for byte; one trailing newline is stripped, nothing else', async () => {
@@ -117,11 +120,12 @@ describe('capy add NAME < value (piped)', () => {
   });
 
   test('--no-push writes .env only: no push call, result says so', async () => {
-    const pushes = h().pushCount();
-    const r = await h().run(['add', 'ADD_LOCAL', '--no-push', '--json'], 'local\n');
-    expect(parseJson(r.stdout)).toEqual({ ok: true, name: 'ADD_LOCAL', branch: BRANCH, action: 'created', pushed: false, keep_lock: { changed: false } });
-    expect(h().envValue('ADD_LOCAL')).toBe('local');
-    expect(h().pushCount()).toBe(pushes);
+    await withHarness(async (own) => {
+      const r = await own.run(['add', 'ADD_LOCAL', '--no-push', '--json'], 'local\n');
+      expect(parseJson(r.stdout)).toEqual({ ok: true, name: 'ADD_LOCAL', branch: BRANCH, action: 'created', pushed: false, keep_lock: { changed: false } });
+      expect(own.envValue('ADD_LOCAL')).toBe('local');
+      expect(own.pushCount()).toBe(0);
+    });
   });
 
   test('a bad name is INVALID_FORMAT and the argument is not echoed', async () => {
