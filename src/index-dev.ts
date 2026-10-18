@@ -336,7 +336,7 @@ const deploy = program
   .command('deploy [target]')
   .description('Set up secret delivery — token + docs (existing) or connector deploy')
   .option('--target <id>', 'adapter id; requires --yes (CI mode)')
-  .option('--yes', 'skip all prompts (CI)')
+  .option('--yes', 'skip all prompts (CI); any difference between the folder and Capy stops the deploy with exit 3') // COPY-FLAG
   .option('--dry-run', 'preflight + show plan, push nothing (connector mode)')
   .option('--edit', 're-enter the picker for an existing connector target')
   .option('--connect', 'force connector mode (skip the token+docs path)')

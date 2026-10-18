@@ -117,7 +117,7 @@ capy deploy [target] [options]
 | Option | Description | Default |
 |---|---|---|
 | `--target <id>` | adapter id; requires --yes (CI mode) |  |
-| `--yes` | skip all prompts (CI) |  |
+| `--yes` | skip all prompts (CI); any difference between the folder and Capy stops the deploy with exit 3 |  |
 | `--dry-run` | preflight + show plan, push nothing (target mode) |  |
 | `--force` | redeploy even when keep.lock is unchanged — bumps keep.lock to trigger CI |  |
 | `--edit` | re-enter the picker for an existing target |  |

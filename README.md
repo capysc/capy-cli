@@ -145,7 +145,7 @@ Good when you want to see drift across the whole branch, edit one variable witho
 | [`capy run -- <cmd>`](https://docs.capy.sc/cli/run) | Run a command with decrypted secrets injected. |
 | [`capy edit`](https://docs.capy.sc/cli/edit) | Inspect and edit secrets in an interactive TUI. |
 | [`capy status`](https://docs.capy.sc/cli/status) | Show drift between local, pinned, and remote. |
-| [`capy push`](https://docs.capy.sc/cli/push) | Push local changes without pulling. |
+| [`capy push`](https://docs.capy.sc/cli/push) | Push local changes. Runs the same sync as `capy`, so any difference is settled first. |
 | [`capy lock`](https://docs.capy.sc/cli/lock) | Lock the local key so the passphrase is required next time. |
 | [`capy deploy`](https://docs.capy.sc/cli/deploy) | Generate a deploy token and walk through platform setup. |
 | [`capy connect <provider>`](https://docs.capy.sc/cli/connect) | Pull a credential from a provider into `.env`. |
@@ -177,6 +177,21 @@ Good when you want to see drift across the whole branch, edit one variable witho
 
 `capy` is a three-way diff between your local `.env`, the last pinned snapshot in `keep.lock`, and the latest on the service. Conflicts open an interactive resolver. See [docs.capy.sc/using/syncing-secrets](https://docs.capy.sc/using/syncing-secrets).
 
+### Conflicts and agents
+
+No command overwrites a value someone else changed since you last saw it. Every command that writes from a folder (`capy edit`, `add`, `remove`, `connect`, `rotate`, `push`, `deploy`, `org`, and `checkout` of an existing branch) runs a plain `capy` first. It repeats until your folder and Capy agree on every variable. If you cancel, nothing is written. Only then does the command apply its own change on top of Capy's latest. Every difference blocks the write, including ones unrelated to the variable you are changing. Exceptions: `capy checkout -b`, `capy decrypt` (and checkout while recovering from a seed phrase), new projects, and the org system store.
+
+For each difference you choose one of four: `pinned` (the folder's `keep.lock`), `local` (your `.env`), `remote` (Capy's latest), or `delete`.
+
+Off a terminal (`--non-tty`, `--json`, an agent, CI) nobody can be asked. The command writes nothing, exits **3**, and prints JSON on stdout with `"code": "SECRETS_CONFLICT"`, a `conflict_id`, and one row per difference (name, project, branch, and fingerprints of the pinned, local and remote values, never the values). Ask the person, then rerun the same command once with `--resolve NAME=pinned|local|remote|delete` for every row and `--conflict <conflict_id>`. A Dokploy platform value is answered as `NAME@TARGET=local|remote`. If anything moved in between, the command exits 3 again with `SECRETS_CONFLICT_STALE` and the fresh rows. There is no resolve-all, and an answer naming a source that has no value for that row is refused (only `delete` deletes).
+
+```bash
+capy push --non-tty                                        # exit 3: SECRETS_CONFLICT, conflict_id c_...
+capy push --non-tty --resolve API_KEY=local --conflict c_9f2e41a07b3d
+```
+
+The `capy secrets` edit screens and `capy secrets set` do the same check against the value you were shown. Uploads also carry the version they started from, and the server refuses a stale one. The CLI syncs again and retries once.
+
 ## Running your app
 
 `capy run -- <cmd>` decrypts `.env` in memory and spawns your command with the values set as environment variables. Works in any runtime that reads env vars. See [docs.capy.sc/using/running-your-app](https://docs.capy.sc/using/running-your-app).
@@ -184,6 +199,8 @@ Good when you want to see drift across the whole branch, edit one variable witho
 ## Deploying
 
 `capy deploy` walks through Vercel, Cloudflare, Docker, Fly, Railway, Render, Heroku, GitHub Actions, and AWS Lambda. See [docs.capy.sc/using/deploying](https://docs.capy.sc/using/deploying).
+
+`capy deploy` runs a plain `capy` first, so it only ships values your folder and Capy agree on. For Dokploy, if a service's live value was changed outside Capy since the last delivery, you choose `local` (deliver Capy's value) or `remote` (keep the platform's value and skip it). Batch deploy from `capy secrets` delivers only the variables you picked.
 
 ## Team
 
@@ -264,7 +281,7 @@ Not currently. The service component is closed. If self-hosting matters for your
 <details>
 <summary><strong>Does it work in CI?</strong></summary>
 
-Yes. `capy deploy` generates `SECRETS_BLOB` and `PROJECT_KEY` to set as CI env vars; `capy run` in your build/test step does the rest. See the GitHub Actions guide at [docs.capy.sc/using/deploying/github-actions](https://docs.capy.sc/using/deploying/github-actions).
+Yes. `capy deploy` generates `SECRETS_BLOB` and `PROJECT_KEY` to set as CI env vars; `capy run` in your build/test step does the rest. `capy deploy --yes` in CI exits 3 instead of proceeding if the folder and Capy differ on any variable; see [Conflicts and agents](#conflicts-and-agents). See the GitHub Actions guide at [docs.capy.sc/using/deploying/github-actions](https://docs.capy.sc/using/deploying/github-actions).
 </details>
 
 ## Supply chain

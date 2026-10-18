@@ -370,7 +370,7 @@ const deploy = program
   .command('deploy [target]')
   .description('Set up secret delivery — token + docs (existing) or target deploy')
   .option('--target <id>', 'adapter id; requires --yes (CI mode)')
-  .option('--yes', 'skip all prompts (CI)')
+  .option('--yes', 'skip all prompts (CI); any difference between the folder and Capy stops the deploy with exit 3') // COPY-FLAG
   .option('--dry-run', 'preflight + show plan, push nothing (target mode)')
   .option('--force', 'redeploy even when keep.lock is unchanged — bumps keep.lock to trigger CI')
   .option('--edit', 're-enter the picker for an existing target')
