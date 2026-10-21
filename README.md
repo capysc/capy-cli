@@ -316,6 +316,12 @@ You can fork this repo and create pull requests:
 
 ### Publishing from a remote agent
 
+Publish npm releases only from a verified commit on `origin/main`, after the
+release PR has been merged and full CI for that exact commit has passed. Build
+and pack from that commit; a detached worktree keeps `main` unchanged. Confirm
+the product changes against the previous release before tagging or publishing.
+Never publish a tarball built from a feature or release branch.
+
 Maintainers can approve npm authentication on another device without a callback
 to the publishing machine. Use npm 11.9 or newer with a supported Node version:
 
