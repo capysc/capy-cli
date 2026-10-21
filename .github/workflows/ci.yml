@@ -30,6 +30,9 @@ jobs:
       - name: Test
         run: bun run test
 
+      - name: Release authentication tests
+        run: bun run test:release
+
       # Embedded browser screens: dependency freeze + no external URLs +
       # __CAPY_DATA__ placeholders intact.
       - name: Screen checks
