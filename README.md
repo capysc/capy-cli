@@ -314,6 +314,28 @@ You can fork this repo and create pull requests:
 
 [github.com/capysc/capy-cli](https://github.com/capysc/capy-cli) - [bugs](https://github.com/capysc/capy-cli/issues) and [discussions](https://github.com/capysc/capy-cli/discussions)
 
+### Publishing from a remote agent
+
+Maintainers can approve npm authentication on another device without a callback
+to the publishing machine. Use npm 11.9 or newer with a supported Node version:
+
+```sh
+npm run release:login
+npm run release:publish -- /absolute/path/to/reviewed-package.tgz
+```
+
+The login command prints npm's browser link and waits for npm's registry to
+confirm approval. Publishing accepts a previously built and reviewed `npm pack`
+artifact. If npm asks for another security-key approval, the helper prints its
+link, polls the registry, and retries that same artifact once. It does not launch
+a local browser or require an inbound callback. Complete approval within five
+minutes; expired approvals require a fresh command.
+
+Add `--json` to either command for newline-delimited status and approval events.
+Only the browser approval link is emitted; registry polling URLs and one-time
+tokens stay within the publishing process. Login credentials are saved by npm
+in its normal user configuration.
+
 ## License
 
 AGPL-3.0-only. Copyright © Incentv Technologies Inc.
