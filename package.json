@@ -1,6 +1,6 @@
 {
   "name": "@capysc/cli",
-  "version": "0.9.12",
+  "version": "0.9.13",
   "description": "Capy CLI - SecretOps for the AI age",
   "main": "dist/index.js",
   "bin": {
@@ -36,6 +36,9 @@
     "preuninstall": "capy cleanup 2>/dev/null || true",
     "prepublishOnly": "npm pkg delete bin.capy-dev bin.capy-staging",
     "test": "bash tests/run-tests.sh",
+    "test:release": "node --test tests/scripts/npmRemoteAuth.test.mjs",
+    "release:login": "node scripts/npm-remote.mjs login",
+    "release:publish": "node scripts/npm-remote.mjs publish",
     "typecheck": "tsc --noEmit",
     "test:e2e": "bun test tests/e2e/",
     "test:plugins": "bash tests/plugins/run-plugin-tests.sh",
