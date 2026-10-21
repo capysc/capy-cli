@@ -2,6 +2,8 @@ import { CapyError, ERROR_CODES } from '../types';
 import { resolveContext, writeAndSync, type ResolvedContext } from './connectors/shared';
 import { DRY_RUN_UNSUPPORTED_MESSAGES, MAX_PIPED_BYTES, readPipedValue, refuseDryRunUnsupported, refuseInvalidName, refusePiped } from './pipedValue';
 import { runPipedWrite, variableExists } from './pipedWrite';
+import { conflictFlagsOrExit, type RawConflictFlags } from '../sync/conflicts';
+import { gateFirst, type GateOptions } from '../sync/gate';
 import {
   recordsForWrite,
   refuseBadPrFlags,
@@ -26,9 +28,16 @@ export interface AddOpts {
   pr?: PrFlags;
   /** The global `--dry-run`: a piped add previews; an interactive add refuses (`DRY_RUN_UNSUPPORTED`). */
   dryRun?: boolean;
+  /** `--resolve` / `--conflict` as typed (CAP-717): they answer the differences bare `capy` finds first. */
+  conflictFlags?: RawConflictFlags;
 }
 
 const VAR_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/** What bare `capy` needs to run as this command's first step. */
+function gateOptionsOf(opts: AddOpts, devMode: boolean): GateOptions {
+  return { devMode, json: opts.json === true, nonTty: opts.nonTty, conflictFlags: opts.conflictFlags, dryRun: opts.dryRun === true };
+}
 
 /**
  * Piped mode is "a value arrives on stdin". It is decided by stdin alone.
@@ -89,7 +98,12 @@ export class AddCommand {
       }
     }
 
-    const ctx = await resolveContext({ devMode: this.devMode });
+    // Bare `capy` runs before anything else: the folder and Capy must agree before this writes (docs/conflict-resolution.md).
+    const gate = gateOptionsOf(opts, this.devMode);
+    conflictFlagsOrExit(opts.conflictFlags ?? {}, opts.json === true);
+    await gateFirst(gate);
+
+    const ctx = await resolveContext({ devMode: this.devMode, gate });
     const push = opts.noPush !== true;
 
     const existing = names.filter((n) => n in ctx.localPlaintext);
@@ -137,6 +151,8 @@ export class AddCommand {
     const [name] = names;
     // The argument is not echoed: a `NAME=value` typed by mistake must not be printed back.
     if (!VAR_RE.test(name)) return refuseInvalidName(json);
+    // A bad flag is refused before stdin is read or anything is authenticated.
+    conflictFlagsOrExit(opts.conflictFlags ?? {}, json);
 
     const piped = await readPipedValue(process.stdin, MAX_PIPED_BYTES);
     if (!piped.ok) return refusePiped(json, piped.code, piped.error);
@@ -148,7 +164,8 @@ export class AddCommand {
       command: 'add',
       pr: opts.pr,
       dryRun: opts.dryRun === true,
-      gate: (ctx) =>
+      gate: gateOptionsOf(opts, this.devMode),
+      refuseWhen: (ctx) =>
         variableExists(ctx, name) && opts.force !== true
           ? {
               code: ERROR_CODES.ADD_VAR_EXISTS,

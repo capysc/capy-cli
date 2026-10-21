@@ -7,6 +7,8 @@
  * target has a discovery; any other target is refused with a code.
  */
 import { ERROR_CODES } from '../../types/index';
+import { conflictFlagsOrExit, type RawConflictFlags } from '../../sync/conflicts';
+import { gateFirst } from '../../sync/gate';
 
 export interface DeployDiscoverFlags {
   readonly discover?: boolean;
@@ -26,6 +28,7 @@ export async function routeDeployDiscover(
   flags: DeployDiscoverFlags,
   dryRun: boolean,
   devMode: boolean,
+  conflictFlags: RawConflictFlags = {},
 ): Promise<number | undefined> {
   const discovering = flags.discover === true;
   const discoverOnly = flags.plan !== undefined || flags.confirm !== undefined || flags.baseUrl !== undefined;
@@ -36,6 +39,12 @@ export async function routeDeployDiscover(
   if (target !== 'dokploy') {
     return printRefusal(ERROR_CODES.DISCOVER_UNSUPPORTED_TARGET, '--discover is only available for the dokploy target: capy deploy dokploy --discover.'); // COPY-FLAG
   }
+  // Bare `capy` runs first, before anything is discovered, planned or written (docs/conflict-resolution.md). This run
+  // writes no env: its only writes are `.capy/deploy.json` PRs into the discovered repos, through the GitHub API, so no
+  // per-repo sync is needed beyond this one in the working directory. It never prompts, so a difference is reported
+  // (exit 3, the payload alone on stdout) and answered by a rerun with `--resolve` + `--conflict`.
+  conflictFlagsOrExit(conflictFlags, true);
+  await gateFirst({ devMode, json: true, nonTty: true, conflictFlags, dryRun });
   const { deployDokployDiscoverCommand } = await import('./index');
   return deployDokployDiscoverCommand(
     { dryRun, plan: flags.plan, confirm: flags.confirm, baseUrl: flags.baseUrl },

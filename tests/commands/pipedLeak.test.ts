@@ -15,7 +15,7 @@
 import { describe, test, expect } from 'bun:test';
 import { readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { createHarness, type CliResult, type Harness } from '../helpers/pipedHarness';
+import { createHarness, withHarness, type CliResult, type Harness } from '../helpers/pipedHarness';
 
 const SENTINEL = 'SENTINEL_5d41402abc4b2a76b9719d911017c592_ZZ';
 const SENTINEL_FORMS: readonly (string | Buffer)[] = [
@@ -79,8 +79,8 @@ describe('leak test: the value never appears in output, errors, requests or file
           ['update --json', ['edit', 'LEAK_A', '--json', VERBOSE], `${SENTINEL}-two\n`],
           ['create human', ['edit', 'LEAK_B', VERBOSE], `${SENTINEL}\n`],
           ['update human', ['edit', 'LEAK_B', VERBOSE], `${SENTINEL}-two\n`],
+          // --no-push leaves .env different from Capy: the next write would stop on it, so it goes last.
           ['no-push --json', ['edit', 'LEAK_C', '--json', '--no-push', VERBOSE], `${SENTINEL}\n`],
-          ['no-push human', ['edit', 'LEAK_D', '--no-push', VERBOSE], `${SENTINEL}\n`],
         ];
         // Sequential on purpose: each run builds on the state the one before left.
         await runs.reduce(async (previous, [label, args, stdin]) => {
@@ -92,6 +92,11 @@ describe('leak test: the value never appears in output, errors, requests or file
       } finally {
         await harness.dispose();
       }
+      await withHarness(async (own) => {
+        const result = await own.run(['edit', 'LEAK_D', '--no-push', VERBOSE], `${SENTINEL}\n`);
+        expect({ label: 'no-push human', code: result.code }).toEqual({ label: 'no-push human', code: 0 });
+        expectNoLeak('no-push human', result, own);
+      });
     }, 60000);
 
     test('every refusal: bad name carrying the value, NUL, invalid UTF-8, too large, empty, no keep.lock', async () => {
@@ -181,8 +186,9 @@ describe('leak test: the value never appears in output, errors, requests or file
           ['add --force --json', ['add', 'LEAK_ADD', '--force', '--json', VERBOSE], `${SENTINEL}-2\n`, 0],
           ['add multiple names', ['add', 'LEAK_X', 'LEAK_Y', '--json', VERBOSE], `${SENTINEL}\n`, 3],
           ['add multiple names human', ['add', 'LEAK_X', 'LEAK_Y', VERBOSE], `${SENTINEL}\n`, 3],
-          ['add no-push', ['add', 'LEAK_LOCAL', '--no-push', '--json', VERBOSE], `${SENTINEL}\n`, 0],
           ['add human', ['add', 'LEAK_HUMAN', VERBOSE], `${SENTINEL}\n`, 0],
+          // --no-push leaves .env different from Capy: the next write would stop on it, so it goes last.
+          ['add no-push', ['add', 'LEAK_LOCAL', '--no-push', '--json', VERBOSE], `${SENTINEL}\n`, 0],
         ];
         await runs.reduce(async (previous, [label, args, stdin, code]) => {
           await previous;

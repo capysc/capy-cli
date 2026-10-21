@@ -84,7 +84,12 @@ export interface SecretsDeployActions {
   /** The Dokploy targets of this row, from GitHub (reads only: nothing is unlocked or written). Never rejects. */
   readonly loadPlan: (row: SecretIndexRow) => Promise<DeployPlanLoaded>;
   /** Pushes the values, records the deliveries and opens the PRs, reporting progress as items complete. Never rejects. */
-  readonly run: (plan: BatchPlan, onProgress?: (progress: BatchProgress) => void) => Promise<DeployFinished>;
+  readonly run: (
+    plan: BatchPlan,
+    onProgress?: (progress: BatchProgress) => void,
+    /** The decisions made for conflicts found by an earlier run, with the fingerprints they were made against (CAP-714). */
+    decisions?: Extract<DeployEffect, { type: 'runDeploy' }>['decisions'],
+  ) => Promise<DeployFinished>;
   /** Stops what is in flight: `planning` kills the GitHub reads; `pushing` / `prs` start nothing new and wait for every item in flight. */
   readonly cancel: (phase: Extract<DeployEffect, { type: 'cancelDeploy' }>['phase']) => void;
 }
@@ -206,7 +211,7 @@ function perform(
   }
   if (effect.type === 'runDeploy') {
     const ran = deploy
-      ? deploy.run(effect.plan, (progress) => bus.emit('action', { kind: 'deployProgress', progress }))
+      ? deploy.run(effect.plan, (progress) => bus.emit('action', { kind: 'deployProgress', progress }), effect.decisions)
       : Promise.resolve<DeployFinished>({ ok: false, code: 'UNAVAILABLE' });
     void ran.then((finished) => bus.emit('action', { kind: 'deployRan', finished }));
     return;

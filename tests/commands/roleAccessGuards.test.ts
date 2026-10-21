@@ -56,6 +56,12 @@ mock.module('../../src/ui/errorScreen', () => ({
   }),
 }));
 
+// These tests are about checkout's OWN guards (403 safety, torn branch state). `capy checkout <branch>` runs bare
+// `capy` first (docs/conflict-resolution.md); that is tested in tests/commands/gateFirst.test.ts, so here the gate
+// reports the folder in sync and the command's own behaviour is what runs.
+import { stubbedGate, gateRan } from '../helpers/gateMock';
+mock.module('../../src/sync/gate', () => stubbedGate());
+
 afterAll(() => { mock.restore(); });
 
 // ---------------------------------------------------------------------------
@@ -313,5 +319,7 @@ describe('CheckoutCommand — torn branch state (CAP-215)', () => {
 
     expect(stderr).not.toContain('uncommitted changes');
     expect(exitSpy).not.toHaveBeenCalled();
+    // Switching to an existing branch ran bare `capy` first.
+    expect(gateRan).toHaveBeenCalled();
   });
 });

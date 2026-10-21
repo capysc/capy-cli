@@ -14,6 +14,8 @@ import { CapyError, ConnectorMetadata, ERROR_CODES, KeepFile } from '../types/in
 import { TargetConfig } from '../deploy/adapter';
 import { staleTargets } from '../deploy/targetsGate';
 import { isInteractive, refuseNonInteractive } from '../ui/interactive';
+import { conflictFlagsOrExit } from '../sync/conflicts';
+import { gateFirst, type GateOptions } from '../sync/gate';
 import type { RotatePlanStop } from '../ui/screens/contract';
 import { writeSync } from 'fs';
 
@@ -150,10 +152,20 @@ export class RotateCommand {
     this.devMode = devMode;
   }
 
+  /** What bare `capy` runs with: as the first step of `rotate`, and again if an upload is refused as stale. */
+  private gateFor(opts: RotateOpts): GateOptions {
+    return { devMode: this.devMode, nonTty: opts.nonTty, conflictFlags: opts.conflictFlags };
+  }
+
   async execute(
     varName: string | undefined,
     opts: RotateOpts & { all?: boolean; skipPrompts?: boolean; provider?: string },
   ): Promise<void> {
+    // A bad --resolve / --conflict is refused before anything is read or asked.
+    conflictFlagsOrExit(opts.conflictFlags ?? {}, false);
+    // Bare `capy` runs before anything else, a new key being minted included: the folder and Capy must agree
+    // first (docs/conflict-resolution.md). What is on the branch is read after it, because it may have moved keep.lock.
+    await gateFirst(this.gateFor(opts));
     const pm = new ProjectManager();
     const keep = pm.readKeepFile();
     const branch = pm.deriveActiveBranch();
@@ -464,7 +476,7 @@ export class RotateCommand {
       return [];
     }
 
-    const ctx = await resolveContext({ devMode: this.devMode });
+    const ctx = await resolveContext({ devMode: this.devMode, gate: this.gateFor(opts) });
 
     const result = await this.rotateSequentially(toRotate, ctx, opts, { succeeded: [], failed: [] });
 
@@ -569,7 +581,7 @@ export class RotateCommand {
         noPush: opts.noPush,
       });
 
-      const freshCtx = await resolveContext({ devMode: this.devMode });
+      const freshCtx = await resolveContext({ devMode: this.devMode, gate: this.gateFor(opts) });
       await writeAndSync(freshCtx, name, value, { push: !opts.noPush, connector: updated });
 
       const succeededState: RotateLoopState = {

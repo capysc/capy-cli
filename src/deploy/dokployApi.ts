@@ -10,6 +10,8 @@
  * literal.
  */
 import { parse as parseDotenv } from 'dotenv';
+import { hashValue } from '../sync/compareSecrets';
+import type { SeenResolutions, TargetConflict, TargetResolution } from '../sync/conflicts';
 import { ERROR_CODES } from '../types/index';
 
 /**
@@ -1359,6 +1361,64 @@ export type DokployPlainMergeProblem =
   // `describeDokployPlainMergeProblem`, which groups them back out).
   | { code: 'value_problem'; problems: readonly DotenvValueNameProblem[] };
 
+/** One entry of the existing Capy block, with the physical lines it occupies. */
+interface BlockEntry {
+  readonly name: string;
+  /** The entry's raw lines, byte for byte, each with its own line ending. */
+  readonly raw: string;
+}
+
+/**
+ * The entries of the Capy block `split` found in `env` (a multi-line quoted value is one entry). Comments and
+ * blank lines inside the block are not entries. No block: none.
+ */
+function blockEntriesOf(env: string | null, split: EnvSplit): readonly BlockEntry[] {
+  if (!split.hadBlock) return [];
+  const text = env ?? '';
+  const block = text.slice(split.before.length, text.length - split.after.length);
+  const inner = splitPreservingEol(block).slice(1, -1);
+  return findEntrySpans(inner).map((span) => ({
+    name: span.name,
+    raw: inner
+      .slice(span.lineStart, span.lineEnd + 1)
+      .map((l) => l.content + l.eol)
+      .join(''),
+  }));
+}
+
+/** What `mergeManagedValuesBlock` may be asked beyond delivering `values`. */
+export interface ManagedMergeOptions {
+  /**
+   * Names, other than the delivered ones, whose lines in the Capy block stay exactly as they are (byte for byte,
+   * in place) instead of being dropped, and whose commented-out outside lines stay commented. Absent: the block
+   * holds exactly the delivered values (the delivery of a whole target). CAP-717 uses it for a variable skipped
+   * because the platform's value was kept (`remote`), and for a batch deploy that sends only the picked names.
+   */
+  readonly keep?: (name: string) => boolean;
+}
+
+/**
+ * The Capy block when some of its existing lines are kept: the existing entries in their order (a delivered one
+ * rewritten where it stands, a kept one byte for byte, any other dropped), then the delivered names that were
+ * not in the block.
+ */
+function retainingBlock(
+  existing: readonly BlockEntry[],
+  values: ReadonlyArray<{ name: string; value: string }>,
+  renderedLines: readonly string[],
+  keep: (name: string) => boolean,
+  eol: '\n' | '\r\n',
+): string {
+  const lineOf = Object.fromEntries(values.map((v, i) => [v.name, renderedLines[i]] as const));
+  const delivered = (name: string): boolean => Object.hasOwn(lineOf, name);
+  const inPlace = existing.flatMap((e, i) => {
+    if (delivered(e.name)) return existing.findIndex((x) => x.name === e.name) === i ? [lineOf[e.name] + eol] : [];
+    return keep(e.name) ? [e.raw] : [];
+  });
+  const appended = values.filter((v) => !existing.some((e) => e.name === v.name)).map((v) => lineOf[v.name] + eol);
+  return [MANAGED_BEGIN + eol, ...inPlace, ...appended, MANAGED_END].join('');
+}
+
 /**
  * Whole-env write for CAP-682's plaintext delivery: comments out every
  * pre-existing active line outside the block for a delivered name (see
@@ -1368,6 +1428,10 @@ export type DokployPlainMergeProblem =
  * placement rule `mergeManagedBlock` uses (reuses its own `blockEol`/
  * `dominantEol` choice, so a redeploy's block framing never drifts).
  *
+ * `options.keep` names entries of the existing block that are carried over untouched (see
+ * `ManagedMergeOptions`): a delivered name that already has a line is rewritten in place, a new one is
+ * appended, a kept one is left exactly as it is, any other is dropped.
+ *
  * All-or-nothing on an unrepresentable value: nothing is written (not even
  * the comment/uncomment half) — a partial write would leave the platform's
  * env in a state no single `capy deploy` run produced.
@@ -1375,6 +1439,7 @@ export type DokployPlainMergeProblem =
 export function mergeManagedValuesBlock(
   env: string | null,
   values: ReadonlyArray<{ name: string; value: string }>,
+  options: ManagedMergeOptions = {},
 ): { ok: true; env: string } | { ok: false; problem: DokployPlainMergeProblem } {
   const split = splitManagedBlock(env);
   if ('code' in split) return { ok: false, problem: { code: 'malformed_block' } };
@@ -1382,11 +1447,18 @@ export function mergeManagedValuesBlock(
   if (!rendered.ok) {
     return { ok: false, problem: { code: 'value_problem', problems: rendered.problems } };
   }
-  const deliveredNames = new Set(values.map((v) => v.name));
+  const keep = options.keep;
+  const existing = keep === undefined ? [] : blockEntriesOf(env, split);
+  const valueNames = new Set(values.map((v) => v.name));
+  const keptNames = keep === undefined ? [] : existing.filter((e) => !valueNames.has(e.name) && keep(e.name)).map((e) => e.name);
+  const deliveredNames = new Set([...valueNames, ...keptNames]);
   const nextBefore = syncCommentedLines(split.before, deliveredNames);
   const nextAfter = syncCommentedLines(split.after, deliveredNames);
   const eol = split.hadBlock ? (split.blockEol ?? '\n') : dominantEol(nextBefore);
-  const block = [MANAGED_BEGIN, ...rendered.lines, MANAGED_END].join(eol);
+  const block =
+    keep === undefined
+      ? [MANAGED_BEGIN, ...rendered.lines, MANAGED_END].join(eol)
+      : retainingBlock(existing, values, rendered.lines, keep, eol);
   const withBlock = split.hadBlock
     ? nextBefore + block
     : nextBefore.length > 0
@@ -1429,6 +1501,89 @@ export function mismatchedDeliveredValues(
   const parsed = parseDotenv(env);
   return values.filter((v) => parsed[v.name] !== v.value).map((v) => v.name);
 }
+
+// ── Target conflicts (CAP-717) ──────────────────────────────────────────────
+
+/** A delivered name whose live value on Dokploy was changed outside Capy. Fingerprints only. */
+export interface LiveConflict {
+  readonly name: string;
+  /** What Capy last delivered (`undefined` on a first delivery). */
+  readonly pinned: string | undefined;
+  /** What Capy is about to deliver (`local`). */
+  readonly local: string;
+  /** What the service would see now (`remote`). */
+  readonly remote: string;
+}
+
+/**
+ * The delivered names whose live value on the platform was changed outside Capy. For each name:
+ *   - remote = the value the service would read: `dotenv.parse` of the WHOLE current env (inside Capy's block,
+ *     or an active line outside it), the same parse `mismatchedDeliveredValues` verifies a write with;
+ *   - pinned = the `deployed_value_hash` Capy recorded when it last delivered the name here (absent on a first delivery);
+ *   - local = the value about to be delivered.
+ * A conflict is a live value that exists and differs from BOTH pinned and local. A name the service does not
+ * have, one already at Capy's value, and one still at what Capy last put there are not conflicts. Pure; never
+ * returns or logs a value.
+ */
+export function dokployTargetConflicts(
+  env: string | null,
+  values: ReadonlyArray<{ name: string; value: string }>,
+  pinned: Readonly<Record<string, string>>,
+): readonly LiveConflict[] {
+  const live = parseDotenv(env ?? '');
+  return values.flatMap(({ name, value }) => {
+    if (!Object.hasOwn(live, name)) return [];
+    const remote = hashValue(live[name]);
+    const local = hashValue(value);
+    return remote === local || remote === pinned[name] ? [] : [{ name, pinned: pinned[name], local, remote }];
+  });
+}
+
+/** How a Dokploy delivery treats its target conflicts: what was already decided, and what Capy last delivered. */
+export interface TargetCheck {
+  /** `deployed_value_hash` by name for this target. */
+  readonly pinned: Readonly<Record<string, string>>;
+  /**
+   * Answers already given, by bare NAME, each bound to the `local` / `remote` fingerprints it was made against:
+   * an answer applies only to that exact state. If the service's value (or the value being delivered) is no longer
+   * the one the caller saw, the answer does not count and the row is open again.
+   */
+  readonly resolutions: SeenResolutions;
+}
+
+export type TargetPlan =
+  | {
+      readonly kind: 'clear';
+      /** The values to write: all of them minus the names kept as `remote`. */
+      readonly deliver: ReadonlyArray<{ name: string; value: string }>;
+      /** Names whose platform value is kept (`remote`): not written, not recorded. */
+      readonly skipped: readonly string[];
+      /** Every conflict found, decided or not (for the command layer's id). */
+      readonly found: readonly LiveConflict[];
+    }
+  | { readonly kind: 'conflict'; readonly found: readonly LiveConflict[]; readonly open: readonly LiveConflict[] };
+
+/** `dokployTargetConflicts` and the decisions applied: either a clear write plan, or the conflicts that still need an answer. */
+export function planTargetDelivery(
+  env: string | null,
+  values: ReadonlyArray<{ name: string; value: string }>,
+  check: TargetCheck | undefined,
+): TargetPlan {
+  if (check === undefined) return { kind: 'clear', deliver: values, skipped: [], found: [] };
+  const found = dokployTargetConflicts(env, values, check.pinned);
+  const choiceFor = (c: LiveConflict): TargetResolution | undefined => {
+    const seen = check.resolutions[c.name];
+    return seen !== undefined && seen.remote === c.remote && seen.local === c.local ? seen.choice : undefined;
+  };
+  const open = found.filter((c) => choiceFor(c) === undefined);
+  if (open.length > 0) return { kind: 'conflict', found, open };
+  const skipped = found.filter((c) => choiceFor(c) === 'remote').map((c) => c.name);
+  return { kind: 'clear', deliver: values.filter((v) => !skipped.includes(v.name)), skipped, found };
+}
+
+/** The protocol's rows for `found` on `target`. */
+export const targetConflictsOf = (target: string, found: readonly LiveConflict[]): readonly TargetConflict[] =>
+  found.map((c) => ({ name: c.name, target, pinned: c.pinned ?? null, local: c.local, remote: c.remote }));
 
 /**
  * CAP-679: a Compose service with `createEnvFile: false` never gets an

@@ -16,6 +16,7 @@
 import { CapyError, ERROR_CODES } from '../types/index';
 import { hashValue } from './statusCommand';
 import { resolveContext, writeAndSync, type ResolvedContext } from './connectors/shared';
+import { gateFirst, type GateOptions } from '../sync/gate';
 import { refusePiped, reportPipedDryRun, reportPipedSuccess, type PipedAction } from './pipedValue';
 import { repoLinkWarningsField } from '../core/repoLinkReporter';
 import {
@@ -73,7 +74,13 @@ export interface PipedWriteOpts {
    * a refusal `{ code, error }` to stop (e.g. `capy add` without `--force` on an
    * existing name); `undefined` to go on.
    */
-  readonly gate?: (ctx: ResolvedContext) => { readonly code: string; readonly error: string } | undefined;
+  readonly refuseWhen?: (ctx: ResolvedContext) => { readonly code: string; readonly error: string } | undefined;
+  /**
+   * What bare `capy` runs with as this write's first step (docs/conflict-resolution.md). A piped write is never at a
+   * terminal, so a difference between the folder and Capy stops it (exit 3, the rows and a `conflict_id`) unless
+   * `--resolve` + `--conflict` answer it.
+   */
+  readonly gate: GateOptions;
 }
 
 /** Turns anything thrown into a code and a sentence that cannot contain the value. */
@@ -103,16 +110,27 @@ function warningsExtra(ctx: ResolvedContext): object {
 
 /** Sets `name` to `value` and reports the outcome (JSON or one stderr line). Exits on any refusal. */
 export async function runPipedWrite(name: string, value: string, opts: PipedWriteOpts): Promise<void> {
+  // Bare `capy` runs before anything else: the folder and Capy must agree before this writes.
+  // A coded failure of the sync itself (no session: `AUTH_FAILED`) is this command's coded refusal, not a stack.
+  await gateFirst({
+    ...opts.gate,
+    refuse: (err) => {
+      const failure = describeFailure(err);
+      return refusePiped(opts.json, failure.code, failure.error);
+    },
+  });
+
   const ctx = await resolveContext({
     devMode: opts.devMode,
     // Never the browser sign-in: a piped run has no one to sign in.
     interactive: false,
     json: opts.json,
     dryRun: opts.dryRun === true,
+    gate: opts.gate,
     refuse: (code, message) => refusePiped(opts.json, code, message),
   });
 
-  const refused = opts.gate?.(ctx);
+  const refused = opts.refuseWhen?.(ctx);
   if (refused) refusePiped(opts.json, refused.code, refused.error);
 
   const action = classifyPipedWrite(ctx, name, value);

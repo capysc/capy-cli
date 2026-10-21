@@ -385,6 +385,26 @@ export interface CliOptions {
   verbose?: boolean;
   force?: boolean;
   dryRun?: boolean;
+  /** `--resolve` / `--conflict` as typed (CAP-717): off a terminal they answer the differences between the folder and Capy. */
+  conflictFlags?: { readonly resolve?: readonly string[]; readonly conflict?: string };
+  /**
+   * Nobody can answer the menu (off a terminal, `--json`, or given `--resolve`): the differences are reported with a
+   * `conflict_id` and `conflictFlags` answer them. Prose goes to stderr. Absent: the menu, as at a terminal.
+   */
+  protocol?: boolean;
+  /** Say nothing while the folder and Capy agree (spinners, "Everything is up to date!"): stdout and stderr belong to the command that ran this first. */
+  quiet?: boolean;
+  /** Never the browser sign-in: a command that runs the sync as its first step and has no one to sign in is told why instead. */
+  silentAuthOnly?: boolean;
+  /**
+   * Bare `capy` as a command's first step (sync/gate.ts), not typed by a person: what to do when `.capy/branch` and the
+   * `.env` header name different, real branches (an interrupted checkout). Absent (a person ran `capy`): stop with the
+   * recovery message, exit 1. `follow-env-header`: the header outranks `.capy/branch`, so compare against the header's
+   * branch and leave `.capy/branch` for the command to settle (this is what lets `capy checkout <branch>` recover).
+   * `throw`: a coded `BRANCH_STATE_INCONSISTENT` error, for a folder other than the working directory, so one folder's
+   * state ends only that folder's sync.
+   */
+  onBranchMismatch?: 'follow-env-header' | 'throw';
 }
 
 export interface ProjectInitResult {
@@ -443,6 +463,8 @@ export const ERROR_CODES = {
   BRANCH_NOT_FOUND: 'BRANCH_NOT_FOUND',
   // No .env header, no .capy/branch, and no unambiguous local fallback.
   NO_ACTIVE_BRANCH: 'NO_ACTIVE_BRANCH',
+  // .capy/branch and the .env header name different, real branches (an interrupted checkout) and the run cannot follow either.
+  BRANCH_STATE_INCONSISTENT: 'BRANCH_STATE_INCONSISTENT',
   SNAPSHOT_NOT_FOUND: 'SNAPSHOT_NOT_FOUND',
   NO_SECRETS: 'NO_SECRETS',
   DEPLOY_TOKEN_NOT_FOUND: 'DEPLOY_TOKEN_NOT_FOUND',
@@ -624,16 +646,38 @@ export const ERROR_CODES = {
   // --- capy remove (CAP-686) ---
   /** `capy remove NAME...`: one or more names given are not on the active branch. */
   VAR_NOT_FOUND: 'VAR_NOT_FOUND',
-  /**
-   * `capy remove` refused: the working `.env` has unpushed differences (new,
-   * changed, or locally-missing values) for variables OTHER than the ones
-   * being removed. Removing would push that full remaining set — including
-   * those unrelated edits — as a side effect, so it's refused instead of
-   * carrying someone else's in-progress change along for the ride.
-   */
-  REMOVE_LOCAL_DRIFT: 'REMOVE_LOCAL_DRIFT',
   /** `capy remove` needs a human (confirmation) and there is no TTY, and `--yes` wasn't passed. */
   REMOVE_NEEDS_TTY: 'REMOVE_NEEDS_TTY',
+  // --- One commit path (CAP-712) ---
+  /**
+   * The server refused a push because the keep it was built from is no longer
+   * the server's latest (HTTP 409). Mirrors the server's `code`. The commit
+   * path re-reads and re-plans once; it is only seen when that fails too.
+   */
+  SECRETS_STALE_BASE: 'SECRETS_STALE_BASE',
+  /**
+   * The folder and Capy differ on a variable (or a Dokploy value was changed outside Capy) and nobody can answer:
+   * off a terminal, bare `capy` reports the rows with a `conflict_id` and exits 3. Nothing was written.
+   * `details.names` lists the variables (names only, never values); never auto-resolved.
+   */
+  SECRETS_CONFLICT: 'SECRETS_CONFLICT',
+  // --- Conflicts everywhere: the non-TTY protocol (CAP-717, docs/conflict-resolution.md) ---
+  /**
+   * A rerun with `--conflict <id>` whose state moved since the id was issued: the old answers
+   * no longer apply. Nothing was written; the fresh rows (with a new id) come back
+   * with it. Exit 3.
+   */
+  SECRETS_CONFLICT_STALE: 'SECRETS_CONFLICT_STALE',
+  /** `--resolve` is not `NAME=pinned|local|remote|delete` (or `NAME@TARGET=local|remote`), or `--conflict` is not a conflict id. Exit 1. */
+  SECRETS_RESOLVE_INVALID: 'SECRETS_RESOLVE_INVALID',
+  /** `--resolve` was given without `--conflict <id>`: an answer is only valid for the rows it was made against. Exit 1. */
+  SECRETS_RESOLVE_NEEDS_CONFLICT: 'SECRETS_RESOLVE_NEEDS_CONFLICT',
+  /**
+   * `capy remove` used to refuse when other variables had unpushed local edits.
+   * @deprecated Retired by CAP-712: `capy remove` only checks the names it removes. Kept defined
+   * so existing callers keep compiling; nothing raises it.
+   */
+  REMOVE_LOCAL_DRIFT: 'REMOVE_LOCAL_DRIFT',
   // --- keep.lock PR step (capy add / edit / remove, CAP-699) ---
   // Reported as `keep_lock.error.code`: the secret change itself still succeeded.
   /** keep.lock PR step: the working directory is not inside a git repository. */

@@ -1,20 +1,19 @@
-import { createHash } from 'crypto';
 import { ProjectManager } from '../core/projectManager';
 import { FileManager } from '../files/fileManager';
 import { AuthService } from '../auth/authService';
 import { ServiceClient } from '../service/serviceClient';
 import { SyncEngine } from '../sync/syncEngine';
-import { fetchSecretsWithCache, readKeepCache, writeKeepCache, readSecretsLocal, LOCAL_USER_ID } from '../config/globalConfig';
+import { readSecretsLocal, LOCAL_USER_ID } from '../config/globalConfig';
 import { isLocalOnly } from '../config/profileConfig';
 import { resolveLocalProjectKey } from '../core/localUnlock';
 import { hashValue } from './statusCommand';
-import { EditScreen, EditRow, EditState, classifyLocalRow, focusedOn, withDeployStatus } from '../ui/editScreen';
+import { EditScreen, EditRow, EditState, EditLoaded, classifiedRow, focusedOn, withPendingEdits } from '../ui/editScreen';
 import { deployedHashesFor } from '../core/deployStatus';
 import { readDefaultBranchTargets } from '../deploy/configuredTargets';
-import { formatRelativeTime } from '../ui/relativeTime';
-import { Encryptor } from '../crypto/encryptor';
-import { deriveResourceId } from '../crypto/resourceId';
-import { setSyncKeepHash, KeepFile } from '../types/index';
+import { KeepFile } from '../types/index';
+import { commitFolder, pinnedHashes, readLocalPlaintext, readSnapshot, type FolderContext, type Snapshot } from '../sync/commit';
+import { conflictFlagsOrExit, type RawConflictFlags } from '../sync/conflicts';
+import { gateFirst, type GateOptions } from '../sync/gate';
 import { reportKeepLockHuman, refuseBadPrFlags, runKeepLockPrStep, type PrFlags } from './keepLockPr';
 import { startSaveLog } from './sessionSaveLog';
 import { decideEditMode, editPipedCommand, refuseEditNeedsTty } from './editPiped';
@@ -24,128 +23,197 @@ import { printRepoLinkWarnings, reportRepoLink } from '../core/repoLinkReporter'
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
-type RowStatus = EditRow['status'];
-
-function classifyStatus(
-  pinned: string | undefined,
-  local: string | undefined,
-  remote: string | undefined,
-  remoteAvailable: boolean,
-): RowStatus {
-  if (!remoteAvailable) return 'unknown';
-  if (pinned === local && pinned === remote) return 'in sync';
-  const localDiffers = local !== pinned;
-  const remoteDiffers = remote !== pinned;
-  if (localDiffers && remoteDiffers && local !== remote) return 'conflict';
-  if (localDiffers) return 'local';
-  if (remoteDiffers) return 'remote';
-  return 'in sync';
-}
+const has = (record: object, name: string): boolean => Object.hasOwn(record, name);
 
 /**
- * Decrypts `.env`. A value this profile holds no key for is skipped;
- * plaintext values pass through.
+ * What the rows are compared against: the other side's value (and fingerprint) per variable. Server mode: the
+ * server's LATEST for the branch, the very read a save is built on (`seen`), never the folder's pinned
+ * snapshot. Local-only mode: the committed copy in the local cache, with no server.
  */
-function decryptLocalEnv(
-  fileManager: FileManager,
-  projectKey: string,
-): { localPlaintext: Record<string, string> } {
-  const decrypted = Object.entries(fileManager.readEnvFile()).map(([key, value]) => {
-    if (!value.startsWith('capy:')) return { key, plain: value as string | undefined };
-    try {
-      return { key, plain: fileManager.decryptValue(value, projectKey) as string | undefined };
-    } catch {
-      return { key, plain: undefined }; // Skip values we can't decrypt
-    }
-  });
-  return {
-    localPlaintext: Object.fromEntries(
-      decrypted.flatMap(({ key, plain }) => (plain === undefined ? [] : [[key, plain] as const])),
-    ),
-  };
+export interface Baseline {
+  readonly entries: Readonly<Record<string, { readonly plaintext: string | undefined; readonly hash: string | undefined }>>;
+  /** The keep the UPDATED column and the deploy status read: the server's. */
+  readonly keep: KeepFile | undefined;
+  readonly available: boolean;
+  /** The server read, handed to the commit. */
+  readonly seen: Snapshot | undefined;
 }
 
-interface Baseline {
-  remotePlaintext: Record<string, string>;
-  remoteAvailable: boolean;
-}
+/** The server could not be read (or there is none): nothing to compare against, rows read `unknown`. */
+const BASELINE_UNAVAILABLE: Baseline = { entries: {}, keep: undefined, available: false, seen: undefined };
 
-/** Remote fetch failed (server mode), or nothing to compare against: fall back to pinned-only. */
-const BASELINE_UNAVAILABLE: Baseline = { remotePlaintext: {}, remoteAvailable: false };
-
-async function loadBaseline(args: {
-  localMode: boolean;
-  serviceClient: ServiceClient | undefined;
-  fileManager: FileManager;
-  projectKey: string;
-  keep: KeepFile;
-  branch: string;
-  orgId: string;
-  projectId: string;
+/** The server's latest for the branch: one read, the one the commit path uses. */
+async function loadServerBaseline(args: {
+  readonly serviceClient: Pick<ServiceClient, 'getDecryptData' | 'pushSecrets'>;
+  readonly projectId: string;
+  readonly branch: string;
+  readonly projectKey: string;
 }): Promise<Baseline> {
-  const { localMode, serviceClient, fileManager, projectKey, keep, branch, orgId, projectId } = args;
-  const keepHash = SyncEngine.computeKeepHash(keep, branch);
-  if (cacheProbeThrew(localMode, orgId, projectId, keepHash)) return BASELINE_UNAVAILABLE;
   try {
-    const blob = localMode
-      ? readSecretsLocal(orgId, projectId, keepHash)
-      : await fetchSecretsWithCache(serviceClient!, orgId, projectId, keepHash);
+    const snapshot = await readSnapshot(args.serviceClient, args.projectId, args.branch, args.projectKey);
+    return {
+      entries: Object.fromEntries(Object.entries(snapshot.entries).map(([name, e]) => [name, { plaintext: e.plaintext, hash: e.hash }])),
+      keep: snapshot.keep,
+      available: true,
+      seen: snapshot,
+    };
+  } catch {
+    return BASELINE_UNAVAILABLE;
+  }
+}
+
+/** Local-only mode: the committed copy in the local cache, for the committed-vs-working comparison. */
+function loadLocalBaseline(args: {
+  readonly fileManager: Pick<FileManager, 'parseEnvContent' | 'decryptValue'>;
+  readonly projectKey: string;
+  readonly keep: KeepFile;
+  readonly branch: string;
+  readonly orgId: string;
+  readonly projectId: string;
+}): Baseline {
+  const { fileManager, projectKey, keep, branch, orgId, projectId } = args;
+  try {
+    const blob = readSecretsLocal(orgId, projectId, SyncEngine.computeKeepHash(keep, branch));
     if (!blob?.env_file) return BASELINE_UNAVAILABLE;
     const encrypted = fileManager.parseEnvContent(blob.env_file);
-    const remotePlaintext = Object.fromEntries(
+    const entries = Object.fromEntries(
       Object.entries(encrypted).flatMap(([key, value]) => {
         try {
-          return [[key, fileManager.decryptValue(value, projectKey)] as const];
+          const plaintext = fileManager.decryptValue(value, projectKey);
+          return [[key, { plaintext, hash: hashValue(plaintext) }] as const];
         } catch {
           return []; // Skip values we can't decrypt
         }
       }),
     );
-    // Remote column only applies to server mode; local mode uses the
-    // committed baseline with local-mode wording instead.
-    return { remotePlaintext, remoteAvailable: !localMode };
+    // The remote column only applies to server mode; local mode uses the committed copy with local-mode wording instead.
+    return { entries, keep: undefined, available: false, seen: undefined };
   } catch {
     return BASELINE_UNAVAILABLE;
   }
 }
 
 /**
- * CAP-702: the keep file whose deploy-target records `not deployed` is read
- * from. The server's copy is the record (CI-mode deploys record targets
- * there, not in the local keep.lock until their PR merges); the local
- * keep.lock is the fallback when the server can't be read, and the only
- * source in local mode.
+ * The rows: every variable known to the folder's pin, its `.env` or the other side, compared three ways (pinned,
+ * local, remote) in server mode, committed-vs-working in local mode. Pure.
  */
-async function loadDeployKeep(args: {
-  localMode: boolean;
-  serviceClient: ServiceClient | undefined;
-  projectId: string;
-  branch: string;
-  localKeep: KeepFile;
-}): Promise<KeepFile> {
-  const { localMode, serviceClient, projectId, branch, localKeep } = args;
-  if (localMode || !serviceClient) return localKeep;
-  try {
-    const latest = await serviceClient.getLatestSecrets(projectId, branch);
-    const parsed: unknown = latest?.keep_file ? JSON.parse(latest.keep_file) : undefined;
-    return isKeepWithVariables(parsed) ? parsed : localKeep;
-  } catch {
-    return localKeep;
-  }
+export function buildEditRows(input: {
+  readonly localMode: boolean;
+  readonly branch: string;
+  /** The folder's keep.lock now. */
+  readonly keep: KeepFile;
+  readonly localPlaintext: Readonly<Record<string, string>>;
+  readonly baseline: Baseline;
+  readonly configuredTargets: ReturnType<typeof readDefaultBranchTargets>;
+}): readonly EditRow[] {
+  const { localMode, branch, keep, localPlaintext, baseline, configuredTargets } = input;
+  const pinned = pinnedHashes(keep, branch);
+  const stampKeep = baseline.keep ?? keep;
+  const names = [...new Set([...Object.keys(pinned), ...Object.keys(localPlaintext), ...Object.keys(baseline.entries)])];
+  const mode = { localMode, remoteAvailable: baseline.available };
+  // A name only the pin remembers, that neither the folder nor the server holds any more, is not a variable.
+  const present = names.filter((key) => localMode || !baseline.available || has(localPlaintext, key) || has(baseline.entries, key));
+  // Sorting a copy that was built by the filter above is construction, not mutation.
+  return present.sort().map((key) => {
+    const entry = has(baseline.entries, key) ? baseline.entries[key] : undefined;
+    const base: EditRow = {
+      key,
+      localValue: has(localPlaintext, key) ? localPlaintext[key] : undefined,
+      remoteValue: entry?.plaintext,
+      ...(entry !== undefined && entry.plaintext === undefined && entry.hash !== undefined ? { remoteHash: entry.hash } : {}),
+      // Server mode: the pin, so the row is compared three ways. Local mode: committed-vs-working needs none.
+      ...(localMode ? {} : { pinnedHash: pinned[key] ?? null }),
+      status: 'unknown',
+      updatedLabel: '—',
+      // Server-assigned changed_at for this branch — drives the UPDATED column's recency label ("5 hours ago"). Absent in
+      // local mode and for entries that predate rotation tracking.
+      changedAt: stampKeep.variables[key]?.find((e) => e.branch === branch)?.changed_at,
+      deployedHashes: deployedHashesFor(stampKeep, key, branch, configuredTargets),
+    };
+    return classifiedRow(base, mode);
+  });
 }
 
-function isKeepWithVariables(value: unknown): value is KeepFile {
-  return typeof value === 'object' && value !== null && typeof (value as { variables?: unknown }).variables === 'object';
+/**
+ * The rows, from the folder as it is now and the other side as it is now: the server's LATEST (the read a commit
+ * plans against), or in local-only mode the committed copy. Called for the first screen, and again after every save
+ * and whenever the server moved under one.
+ */
+export function editLoader(args: {
+  readonly pm: Pick<ProjectManager, 'readKeepFile'>;
+  readonly fileManager: Pick<FileManager, 'readEnvFile' | 'decryptValue' | 'parseEnvContent'>;
+  /** Absent in local-only mode. */
+  readonly serviceClient: Pick<ServiceClient, 'getDecryptData' | 'pushSecrets'> | undefined;
+  readonly localMode: boolean;
+  /** The keep.lock the command started with: used if the folder's cannot be read again. */
+  readonly keep: KeepFile;
+  readonly branch: string;
+  readonly orgId: string;
+  readonly projectId: string;
+  readonly projectKey: string;
+  readonly configuredTargets: ReturnType<typeof readDefaultBranchTargets>;
+}): () => Promise<EditLoaded> {
+  const { pm, fileManager, serviceClient, localMode, branch, orgId, projectId, projectKey, configuredTargets } = args;
+  return async () => {
+    const folderKeep = pm.readKeepFile() ?? args.keep;
+    const baseline = serviceClient
+      ? await loadServerBaseline({ serviceClient, projectId, branch, projectKey })
+      : loadLocalBaseline({ fileManager, projectKey, keep: folderKeep, branch, orgId, projectId });
+    return {
+      // Decrypt local .env values. Local ciphertext this profile does not hold the key for is skipped.
+      rows: buildEditRows({ localMode, branch, keep: folderKeep, localPlaintext: readLocalPlaintext(fileManager, projectKey), baseline, configuredTargets }),
+      remoteAvailable: baseline.available,
+      seen: baseline.seen,
+    };
+  };
 }
 
-/** Whether probing the keep cache for this keep hash threw (the baseline is then unavailable). */
-function cacheProbeThrew(localMode: boolean, orgId: string, projectId: string, keepHash: string): boolean {
-  try {
-    if (!localMode) readKeepCache(orgId, projectId, keepHash);
-    return false;
-  } catch {
-    return true;
-  }
+/**
+ * One save from the edit screen (`c`, or commit on quit). The shared upload (sync/commit.ts): only the
+ * edited rows change, on top of the server's latest, and the upload names the keep the screen read (`seen`,
+ * `base_keep_hash`). If Capy moved since, the server refuses it as stale (`SECRETS_STALE_BASE`, nothing
+ * uploaded): the screen closes, the command runs bare `capy` and reopens it. The folder is read afresh for
+ * every save, because an earlier save in the same session moved keep.lock and `.env`. Resolves to the
+ * server-assigned `changed_at` of every variable on the branch, for the screen's UPDATED column.
+ */
+export async function saveEdits(
+  folder: Omit<FolderContext, 'keep' | 'localPlaintext'>,
+  startKeep: KeepFile,
+  edits: Readonly<Record<string, string>>,
+  saveLog: Pick<ReturnType<typeof startSaveLog>, 'record'>,
+  /** The server read the screen's rows were drawn from. */
+  seen?: Snapshot,
+): Promise<Record<string, string>> {
+  const { branch } = folder;
+  const committed = await commitFolder(
+    {
+      ...folder,
+      keep: folder.pm.readKeepFile() ?? startKeep,
+      localPlaintext: readLocalPlaintext(folder.fileManager, folder.projectKey),
+    },
+    { set: edits, remove: [] },
+    { seen },
+  );
+  const adoptedKeep = committed.keep;
+
+  // Record this save for the exit-time PR: the resulting (or deleted)
+  // entry, for THIS branch only, of every variable this save touched.
+  saveLog.record({
+    branch,
+    entries: Object.keys(edits).map((variable) => ({
+      variable,
+      entry: adoptedKeep.variables[variable]?.find((e) => e.branch === branch) ?? null,
+    })),
+  });
+
+  // Hand the server-assigned changed_at back to the TUI so the UPDATED
+  // column reflects the authoritative stamp for this commit, not a
+  // client-side guess.
+  return Object.fromEntries(
+    Object.entries(adoptedKeep.variables)
+      .map(([varName, entries]) => [varName, entries.find((e) => e.branch === branch)?.changed_at] as const)
+      .filter((pair): pair is [string, string] => pair[1] !== undefined),
+  );
 }
 
 export interface EditOpts {
@@ -165,6 +233,8 @@ export interface EditOpts {
   pr?: PrFlags;
   /** The global `--dry-run`: piped mode previews; the TUI refuses (`DRY_RUN_UNSUPPORTED`). */
   dryRun?: boolean;
+  /** `--resolve` / `--conflict` as typed (CAP-717): they answer the differences bare `capy` finds first. */
+  conflictFlags?: RawConflictFlags;
 }
 
 export class EditCommand {
@@ -240,6 +310,9 @@ export class EditCommand {
       return refuseDryRunUnsupported(opts.json === true, DRY_RUN_UNSUPPORTED_MESSAGES.edit);
     }
     if (opts.name !== undefined && !isValidVarName(opts.name)) return refuseInvalidName(opts.json === true);
+    // A bad flag is refused here, before stdin is read or anything is authenticated.
+    conflictFlagsOrExit(opts.conflictFlags ?? {}, opts.json === true);
+    const gate: GateOptions = { devMode: this.devMode, json: opts.json === true, nonTty: opts.nonTty, conflictFlags: opts.conflictFlags, dryRun: opts.dryRun === true };
     if (mode === 'piped' && opts.name !== undefined) {
       return editPipedCommand(opts.name, {
         json: opts.json === true,
@@ -247,8 +320,12 @@ export class EditCommand {
         devMode: this.devMode,
         pr: opts.pr,
         dryRun: opts.dryRun === true,
+        gate,
       });
     }
+
+    // Bare `capy` runs before the screen opens: the folder and Capy must agree before anything here can write.
+    await gateFirst(gate);
 
     const pm = new ProjectManager();
     const projectState = await pm.detectProjectState();
@@ -273,14 +350,6 @@ export class EditCommand {
     }
     const fileManager = new FileManager();
 
-    // Pinned hashes for the active branch
-    const pinned: Record<string, string> = Object.fromEntries(
-      Object.entries(keep.variables).flatMap(([varName, entries]) => {
-        const entry = entries.find((e) => e.branch === branch);
-        return entry ? [[varName, entry.value_hash] as const] : [];
-      }),
-    );
-
     // Local-only mode: no auth, no server. Identity is synthetic; the key is
     // unwrapped from the passphrase session. No AuthService/ServiceClient is
     // constructed (avoids the dev-mode "[dev] AuthService → …" log and any
@@ -294,69 +363,18 @@ export class EditCommand {
     const projectKey = await this.resolveKey({ localMode, orgId, projectId, userId, serviceClient, keep, branch });
     if (projectKey === undefined) return;
 
-    // Decrypt local .env values. Local ciphertext this profile does not hold
-    // the key for is skipped.
-    const { localPlaintext } = decryptLocalEnv(fileManager, projectKey);
-
-    // Baseline the working copy is compared against:
-    //  - remote mode: the latest committed blob fetched from the server.
-    //  - local mode:  the committed blob from the local keep cache (no server).
-    // In both cases it lands in `remotePlaintext` so the TUI's reclassify can
-    // compare working-vs-baseline.
-    const { remotePlaintext, remoteAvailable } = await loadBaseline({
-      localMode,
-      serviceClient,
-      fileManager,
-      projectKey,
-      keep,
-      branch,
-      orgId,
-      projectId,
-    });
-
-    const deployKeep = await loadDeployKeep({ localMode, serviceClient, projectId, branch, localKeep: keep });
     const configuredTargets = readDefaultBranchTargets(process.cwd());
 
-    // Build rows for every variable known to any source
-    const allKeys = new Set<string>([
-      ...Object.keys(pinned),
-      ...Object.keys(localPlaintext),
-      ...Object.keys(remotePlaintext),
-    ]);
-
-    // Sorting a copy that was built one line above is construction, not mutation.
-    const rows: EditRow[] = [...allKeys].sort().map((key) => {
-      const localVal = localPlaintext[key];
-      const remoteVal = remotePlaintext[key];
-      const pinnedHash = pinned[key];
-      const localHash = localVal !== undefined ? hashValue(localVal) : undefined;
-      const remoteHash = remoteVal !== undefined ? hashValue(remoteVal) : undefined;
-
-      // Server-assigned changed_at for this branch — drives the UPDATED
-      // column's recency label ("5 hours ago"). Absent in local mode and for
-      // entries that predate rotation tracking.
-      const changedAt = keep.variables[key]?.find((e) => e.branch === branch)?.changed_at;
-      // Local mode: committed-vs-working, via the shared classifier so the
-      // initial build and the in-TUI reclassify can't drift. `remoteVal` holds
-      // the committed value from the local keep cache.
-      const { status, updatedLabel } = localMode
-        ? classifyLocalRow(localVal, remoteVal)
-        : {
-            status: classifyStatus(pinnedHash, localHash, remoteHash, remoteAvailable),
-            updatedLabel: changedAt ? formatRelativeTime(changedAt) : '—',
-          };
-      const deployedHashes = deployedHashesFor(deployKeep, key, branch, configuredTargets);
-      const base: EditRow = { key, localValue: localVal, remoteValue: remoteVal, status, updatedLabel, changedAt, deployedHashes };
-
-      return { ...base, status: withDeployStatus(base, status) };
-    });
+    const load = editLoader({ pm, fileManager, serviceClient, localMode, keep, branch, orgId, projectId, projectKey, configuredTargets });
+    const loaded = await load();
 
     const baseState: EditState = {
       projectName: keep.project_name,
       branch,
-      rows,
-      remoteAvailable,
+      rows: loaded.rows,
+      remoteAvailable: loaded.remoteAvailable,
       localMode,
+      seen: loaded.seen,
     };
     // `capy edit NAME` on a terminal: the cursor starts on NAME (a new name opens
     // its value entry).
@@ -373,98 +391,9 @@ export class EditCommand {
     const saveLog = startSaveLog();
 
     const editContext = {
-      saveLocalEdits: async (edits: Record<string, string>) => {
-        // Same flow as the conflict-resolution "commit local" action and
-        // PushCommand: encrypt the merged local state, mergeWithKeep, push
-        // to the server, then cache + write keep.lock + .env + sync state.
-        const finalEnv: Record<string, string> = { ...localPlaintext, ...edits };
-
-        const encrypted = Object.fromEntries(
-          Object.entries(finalEnv).map(([key, value]) => {
-            const resourceId = deriveResourceId(branch, key);
-            const enc = Encryptor.encrypt(value, projectKey);
-            return [key, `capy:${resourceId}:${enc}`];
-          }),
-        );
-        const envBlob = Object.entries(encrypted)
-          .map(([k, v]) => `${k}=${v}`)
-          .join('\n');
-
-        const pushedVars = Object.fromEntries(
-          Object.entries(finalEnv).map(([key, value]) => [
-            key,
-            {
-              resource_id: deriveResourceId(branch, key),
-              value_hash: createHash('sha256').update(value).digest('hex').slice(0, 16),
-            },
-          ]),
-        );
-
-        const syncEngine = new SyncEngine();
-        const mergedKeep = syncEngine.mergeWithKeep(keep, pushedVars, branch);
-
-        // Drop branch entries for variables no longer in finalEnv — built as
-        // a new object rather than mutated in place (was a `for` loop doing
-        // `finalKeep.variables[varName] = entries` / `delete
-        // finalKeep.variables[varName]` on the value mergeWithKeep returned).
-        const finalKeep: KeepFile = {
-          ...mergedKeep,
-          variables: Object.fromEntries(
-            Object.entries(mergedKeep.variables).flatMap(([varName, entries]) => {
-              if (varName in finalEnv) return [[varName, entries]];
-              const kept = entries.filter((e) => e.branch !== branch);
-              return kept.length > 0 ? [[varName, kept]] : [];
-            }),
-          ),
-        };
-
-        // keep_hash is computed locally; the server returns the same value on
-        // push. In local-only mode there is no push — the local writes below
-        // ARE the commit.
-        const localKeepHash = SyncEngine.computeKeepHash(finalKeep, branch);
-        const pushResult = localMode
-          ? null
-          : await serviceClient!.pushSecrets(
-              projectId,
-              JSON.stringify(finalKeep),
-              envBlob,
-              branch,
-            );
-        const keepHashForCache = pushResult ? pushResult.keep_hash : localKeepHash;
-
-        writeKeepCache(orgId, projectId, keepHashForCache, envBlob);
-        // Prefer the server's copy — it carries server-assigned changed_at
-        const adoptedKeep = SyncEngine.adoptServerKeep(pushResult?.keep_file, finalKeep, branch);
-        fileManager.writeKeepFile(adoptedKeep);
-        fileManager.writeEncryptedEnvFile(finalEnv, projectKey, undefined, finalKeep, branch);
-
-        const existingSyncState = pm.readSyncState();
-        fileManager.writeSyncState({
-          ...existingSyncState,
-          last_sync: new Date().toISOString(),
-          synced_variables: Object.keys(finalEnv),
-          user_id: userId,
-          keep_hash: setSyncKeepHash(existingSyncState, branch, localKeepHash),
-        });
-
-        // Record this save for the exit-time PR: the resulting (or deleted)
-        // entry, for THIS branch only, of every variable this save touched.
-        const touchedEntries = Object.keys(edits).map((variable) => ({
-          variable,
-          entry: adoptedKeep.variables[variable]?.find((e) => e.branch === branch) ?? null,
-        }));
-        saveLog.record({ branch, entries: touchedEntries });
-
-        // Hand the server-assigned changed_at back to the TUI so the UPDATED
-        // column reflects the authoritative stamp for this commit, not a
-        // client-side guess.
-        const changedAtByKey = Object.fromEntries(
-          Object.entries(adoptedKeep.variables)
-            .map(([varName, entries]) => [varName, entries.find((e) => e.branch === branch)?.changed_at] as const)
-            .filter((pair): pair is [string, string] => pair[1] !== undefined),
-        );
-        return changedAtByKey;
-      },
+      saveLocalEdits: (edits: Record<string, string>, seen?: Snapshot) =>
+        saveEdits({ pm, fileManager, serviceClient, orgId, projectId, branch, userId, projectKey }, keep, edits, saveLog, seen),
+      reload: load,
     };
 
     // CAP-697: started now, collected after the TUI closes (it has long since finished by then).
@@ -472,7 +401,16 @@ export class EditCommand {
       ? reportRepoLink({ cwd: process.cwd(), orgId, projectId, projectName: keep.project_name, client: serviceClient })
       : undefined;
 
-    await screen.run(state, editContext);
+    // A save refused as stale (Capy moved since the screen read it) closes the screen with nothing uploaded: bare `capy`
+    // runs again (it shows what changed) and the screen reopens with the edits still typed.
+    const session = async (shown: EditState): Promise<void> => {
+      const exit = await screen.run(shown, editContext);
+      if (exit.kind === 'done') return;
+      await gateFirst(gate);
+      const fresh = await load();
+      return session(withPendingEdits({ ...baseState, rows: fresh.rows, remoteAvailable: fresh.remoteAvailable, seen: fresh.seen }, exit.pending));
+    };
+    await session(state);
     if (repoLinkPending) printRepoLinkWarnings(await repoLinkPending);
     // The TUI has already released stdin (raw mode off, its key listener
     // removed) by the time `run` resolves, so the prompts in keepLockPr.ts start

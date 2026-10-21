@@ -13,8 +13,8 @@
  * local state lives entirely under `~/.capy/orgs/<orgId>/system/` (see
  * `src/config/globalConfig.ts`'s "Org system store" section).
  *
- * WHAT THIS REUSES, NOT COPIES: `Encryptor`, `deriveResourceId`, `SyncEngine`
- * (mergeWithKeep / computeKeepHash / adoptServerKeep), `resolveProjectKey`,
+ * WHAT THIS REUSES, NOT COPIES: `Encryptor`, `SyncEngine`, the one commit path
+ * (`sync/commit.ts`), `resolveProjectKey`,
  * and the existing `ServiceClient` secrets routes (`pushSecrets`,
  * `getDecryptData`) plus `writeKeepCache`. The only new service call is
  * `getOrCreateSystemStore` — the create-or-get endpoint. Everything else goes
@@ -22,7 +22,6 @@
  * admin-only restriction is enforced by the server on those same routes, not
  * by anything special about how this module calls them.
  */
-import { createHash } from 'crypto';
 import inquirer from 'inquirer';
 import { AuthService } from '../auth/authService';
 import { ServiceClient } from '../service/serviceClient';
@@ -30,8 +29,8 @@ import { ProjectManager } from '../core/projectManager';
 import { resolveOrgContext } from '../core/orgContext';
 import { resolveProjectKey } from '../crypto/keyResolver';
 import { Encryptor } from '../crypto/encryptor';
-import { deriveResourceId } from '../crypto/resourceId';
 import { SyncEngine } from '../sync/syncEngine';
+import { adoptedKeepFor, envBlobOf, uploadChangesRereading, type Changes } from '../sync/commit';
 import {
   writeKeepCache,
   readSystemKeepFile,
@@ -206,64 +205,41 @@ function decryptStoredValue(raw: string, projectKey: string): string | null {
   return Encryptor.decrypt(cipher, projectKey);
 }
 
-/** Encrypts `env` into the `KEY=capy:{resourceId}:{cipher}` blob this module writes. */
-function buildEnvBlob(env: Readonly<Record<string, string>>, branch: string, projectKey: string): string {
-  return Object.entries(env)
-    .map(([k, v]) => `${k}=capy:${deriveResourceId(branch, k)}:${Encryptor.encrypt(v, projectKey)}`)
-    .join('\n');
-}
-
 /**
- * Drops any keep.lock entry (on `branch`) for a name no longer in `keptNames`
- * — the immutable equivalent of the delete-stale-entries loop in
- * `connectors/shared.ts`'s `writeAndSync`. Names in `keptNames` are left
- * exactly as `mergeWithKeep` produced them.
+ * Commit `changes` to the system store's `ctx.branch` through the shared upload (sync/commit.ts) and
+ * self-heal the local cache. Only the changed names move: another admin's entries are never re-sent from
+ * this (possibly older) snapshot, and the upload names the keep it was built from (`base_keep_hash`), read
+ * again once if another admin saved in between.
  */
-function pruneRemovedVariables(keep: KeepFile, branch: string, keptNames: ReadonlySet<string>): KeepFile {
-  const variables = Object.fromEntries(
-    Object.entries(keep.variables)
-      .map(([name, entries]): [string, KeepVariableEntry[]] => [
-        name,
-        keptNames.has(name) ? entries : entries.filter((e) => e.branch !== branch),
-      ])
-      .filter(([, entries]) => entries.length > 0),
-  );
-  return { ...keep, variables };
-}
-
-/** Push `newEnv` as the system store's complete env for `ctx.branch`, and self-heal the local cache. */
-async function pushSystemEnv(ctx: SystemStoreContext, newEnv: Readonly<Record<string, string>>): Promise<void> {
-  const envBlob = buildEnvBlob(newEnv, ctx.branch, ctx.projectKey);
-
-  const pushedVars = Object.fromEntries(
-    Object.entries(newEnv).map(([k, v]) => [
-      k,
-      { resource_id: deriveResourceId(ctx.branch, k), value_hash: createHash('sha256').update(v).digest('hex').slice(0, 16) },
-    ]),
+async function commitSystemStore(ctx: SystemStoreContext, changes: Changes): Promise<void> {
+  const startKeep = readSystemKeepFile(ctx.orgId) ?? ctx.keep;
+  const committed = await withAdminOnlyTranslation(() =>
+    uploadChangesRereading({
+      client: ctx.serviceClient,
+      projectId: ctx.projectId,
+      branch: ctx.branch,
+      projectKey: ctx.projectKey,
+      startKeep,
+      changes,
+    }),
   );
 
-  const syncEngine = new SyncEngine();
-  const merged = syncEngine.mergeWithKeep(ctx.keep, pushedVars, ctx.branch);
-  const pruned = pruneRemovedVariables(merged, ctx.branch, new Set(Object.keys(newEnv)));
-
-  const result = await withAdminOnlyTranslation(() =>
-    ctx.serviceClient.pushSecrets(ctx.projectId, JSON.stringify(pruned), envBlob, ctx.branch),
-  );
-
-  writeKeepCache(ctx.orgId, ctx.projectId, result.keep_hash, envBlob);
-  const adopted = SyncEngine.adoptServerKeep(result.keep_file, pruned, ctx.branch);
+  const adopted = adoptedKeepFor(startKeep, committed, ctx.branch);
+  writeKeepCache(ctx.orgId, ctx.projectId, committed.result?.keep_hash ?? SyncEngine.computeKeepHash(committed.keep, ctx.branch), envBlobOf(committed.lines));
   saveSystemKeepFile(ctx.orgId, adopted);
 
   const existingSyncState = readSystemSyncState(ctx.orgId);
   const nextSyncState: SyncState = {
     ...(existingSyncState ?? { last_sync: '', synced_variables: [] }),
     last_sync: new Date().toISOString(),
-    synced_variables: Object.keys(newEnv),
+    synced_variables: Object.keys(committed.env),
     user_id: ctx.userId,
-    keep_hash: setSyncKeepHash(existingSyncState, ctx.branch, SyncEngine.computeKeepHash(pruned, ctx.branch)),
+    keep_hash: setSyncKeepHash(existingSyncState, ctx.branch, SyncEngine.computeKeepHash(adopted, ctx.branch)),
   };
   saveSystemSyncState(ctx.orgId, nextSyncState);
 }
+
+const setting = (name: string, value: string): Changes => ({ set: { [name]: value }, remove: [] });
 
 /** Silent-then-interactive auth, pinned to `orgId`. Throws `AUTH_FAILED` rather than exiting — this is a library, not a command. */
 async function authenticateOrThrow(authService: AuthService, orgId: string): Promise<string> {
@@ -412,12 +388,11 @@ export async function openSystemStore(opts: OpenSystemStoreOptions = {}): Promis
     get: (name: string) => getFrom(ctx, name),
     set: async (name: string, value: string) => {
       assertValidConnectorName(name);
-      await pushSystemEnv(ctx, { ...ctx.plaintextEnv, [name]: value });
+      await commitSystemStore(ctx, setting(name, value));
     },
     remove: async (name: string) => {
       assertValidConnectorName(name);
-      const { [name]: _removed, ...rest } = ctx.plaintextEnv;
-      await pushSystemEnv(ctx, rest);
+      await commitSystemStore(ctx, { set: {}, remove: [name] });
     },
   };
 }
@@ -458,7 +433,7 @@ export async function getConnectorSecret(name: string, opts: GetConnectorSecretO
   const trimmed = typeof value === 'string' ? value.trim() : '';
   if (!trimmed) return null;
 
-  await pushSystemEnv(ctx, { ...ctx.plaintextEnv, [name]: trimmed });
+  await commitSystemStore(ctx, setting(name, trimmed));
   return trimmed;
 }
 
@@ -557,7 +532,7 @@ export async function getDirectionalConnectorSecret(
           { primaryName, fallbackName },
         );
       }
-      await pushSystemEnv(ctx, { ...ctx.plaintextEnv, [primaryName]: makeReferenceValue(fallbackName) });
+      await commitSystemStore(ctx, setting(primaryName, makeReferenceValue(fallbackName)));
       return fallbackValue;
     }
     // else "add new" — fall through to the same prompt case 2 uses.
@@ -574,6 +549,6 @@ export async function getDirectionalConnectorSecret(
   const trimmed = typeof value === 'string' ? value.trim() : '';
   if (!trimmed) return null;
 
-  await pushSystemEnv(ctx, { ...ctx.plaintextEnv, [primaryName]: trimmed });
+  await commitSystemStore(ctx, setting(primaryName, trimmed));
   return trimmed;
 }

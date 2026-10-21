@@ -33,9 +33,11 @@
  *   - a successful CI delivery calls `pushSecrets` exactly once, with a
  *     keep file whose entries carry the target's delivery record, and the
  *     env blob is the server's OWN blob passed through unchanged;
- *   - an unpushed local `.env` edit, and a variable that was never synced at
- *     all, NEVER appear in what gets pushed — in CI mode AND direct mode
- *     (the drift bug lived in the SHARED `pushKeepTransform`);
+ *   - a variable that was never synced at all NEVER appears in what gets pushed, in
+ *     CI mode AND direct mode (the drift bug lived in the SHARED `pushKeepTransform`).
+ *     (An unpushed local `.env` edit is a difference bare `capy` settles BEFORE a deploy
+ *     starts: tests/sync/gate.test.ts and tests/commands/gateFirst.test.ts. The keep-only
+ *     record itself never rebuilds the blob from `.env`.);
  *   - the user's local keep.lock / `.env` / git tree are BYTE-IDENTICAL
  *     before and after a CI-mode run (asserted directly, not inferred from
  *     an absence of git-status noise);
@@ -45,12 +47,13 @@
  *     reports the deploy as succeeded (the delivery already happened) — and
  *     the PR still opens (CI mode).
  *
- * No crypto mocking needed: `pushKeepTransform` no longer touches
- * `resolveProjectKey`/`Encryptor`/`deriveResourceId` at all (it never
- * decrypts or re-encrypts anything — see its own doc), and this fixture's
- * `.env` is plain (unencrypted), so `decryptCurrentBranch` (the ADAPTER's
- * own read, delivering to Dokploy — unrelated to the bug fixed here) never
- * needs them either.
+ * Crypto: the record now goes through the one commit path (CAP-717/712), which
+ * needs the project key to read the server's lines, so `resolveProjectKey` is
+ * mocked to a fixed key. It still never encrypts or decrypts a value of its own:
+ * the server's blob in this fixture is an opaque line nobody holds the key for,
+ * kept verbatim, and this fixture's `.env` is plain (unencrypted), so
+ * `decryptCurrentBranch` (the ADAPTER's own read, delivering to Dokploy) never
+ * needs the key either.
  *
  * The mocked `ServiceClient#getLatestSecrets` fakes "the server's current
  * snapshot" by reading a small JSON file this test writes per branch
@@ -68,6 +71,11 @@ import { mkdirSync, writeFileSync, rmSync, readFileSync, existsSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { SyncEngine } from '../../src/sync/syncEngine';
+import { agreeingDecryptData, fixedKeyResolver } from '../helpers/deployServer';
+import { stubbedGate } from '../helpers/gateMock';
+
+// Bare `capy` (a deploy's first step) is tested in tests/sync/gate.test.ts and tests/commands/gateFirst.test.ts.
+mock.module('../../src/sync/gate', () => stubbedGate());
 
 // Declared before the mocks below (which close over them) — every binding
 // here is fully initialized before any test() callback runs, so the mocked
@@ -97,12 +105,26 @@ mock.module('../../src/service/serviceClient', () => ({
   ServiceClient: class {
     setTokenProvider() {}
     async pushSecrets(projectId: string, keepFileJson: string, envBlob: string, branch: string) {
-      return pushSecretsMock(projectId, keepFileJson, envBlob, branch);
+      const pushed = await pushSecretsMock(projectId, keepFileJson, envBlob, branch);
+      // The server keeps what it accepted: the next read (a later push's base) is the pushed state.
+      const existing = existsSync(SERVER_SNAPSHOTS_PATH)
+        ? (JSON.parse(readFileSync(SERVER_SNAPSHOTS_PATH, 'utf-8')) as Record<string, { keepFile: string; envFile: string }>)
+        : {};
+      writeFileSync(SERVER_SNAPSHOTS_PATH, JSON.stringify({ ...existing, [branch]: { keepFile: keepFileJson, envFile: envBlob } }));
+      return pushed;
     }
     // Fakes "the server's current snapshot for this branch" — reads the
     // per-branch fixture `writeServerSnapshot` (below) wrote, NEVER the
     // repo's own `.env`. Returns null (→ pushKeepTransform's coded "no
     // snapshot yet" warning) when nothing was written for this branch.
+    // The same snapshot as `getDecryptData`, for the commit path (which reads the server's latest before it writes).
+    async getDecryptData(_projectId: string, branch: string) {
+      const snap = existsSync(SERVER_SNAPSHOTS_PATH)
+        ? (JSON.parse(readFileSync(SERVER_SNAPSHOTS_PATH, 'utf-8')) as Record<string, { keepFile: string; envFile: string }>)[branch]
+        : undefined;
+      if (!snap) throw new Error('no server snapshot written for this branch');
+      return agreeingDecryptData(JSON.parse(snap.keepFile), branch, snap.envFile);
+    }
     async getLatestSecrets(_projectId: string, branch: string) {
       if (!existsSync(SERVER_SNAPSHOTS_PATH)) return null;
       const snapshots = JSON.parse(readFileSync(SERVER_SNAPSHOTS_PATH, 'utf-8')) as Record<
@@ -119,6 +141,7 @@ mock.module('../../src/service/serviceClient', () => ({
     }
   },
 }));
+mock.module('../../src/crypto/keyResolver', () => fixedKeyResolver());
 // `gh` unavailable → `createPr` takes its manual-instructions path (ok:
 // true, no real GitHub call needed) — deterministic on any machine.
 mock.module('../../src/utils/gh', () => ({
@@ -282,7 +305,8 @@ function dokployFetchMock(opts: { failWrite?: boolean; stripeKeyValue?: string }
   const value = opts.stripeKeyValue ?? STRIPE_KEY_VALUE;
   const merged = mergeManagedValuesBlock(RAW_APP_ENV, [{ name: 'STRIPE_KEY', value }]);
   if (!merged.ok) throw new Error('unexpected merge problem in test fixture');
-  const reads = [RAW_APP_ENV, RAW_APP_ENV, merged.env][Symbol.iterator]();
+  // preflight, the conflict check before anything is written (CAP-717), deploy's fresh read, the post-write verify.
+  const reads = [RAW_APP_ENV, RAW_APP_ENV, RAW_APP_ENV, merged.env][Symbol.iterator]();
   return mock(async (url: string, init: { method: string; body?: string }) => {
     const u = new URL(url);
     if (u.pathname.endsWith('application.one')) {
@@ -359,9 +383,10 @@ describe('capy deploy — server-side target recording (CAP-687)', () => {
     fetchMock: ReturnType<typeof mock>,
     options: Parameters<typeof deployCommand>[1],
     errorMock: ReturnType<typeof mock> = mock((..._a: unknown[]) => {}),
+    logMock: ReturnType<typeof mock> = mock((..._a: unknown[]) => {}),
   ): Promise<number> {
     const fetchSpy = spyOn(globalThis, 'fetch').mockImplementation(fetchMock as never);
-    const logSpy = spyOn(console, 'log').mockImplementation((() => {}) as never);
+    const logSpy = spyOn(console, 'log').mockImplementation(logMock as never);
     const errSpy = spyOn(console, 'error').mockImplementation(errorMock as never);
     try {
       return await withTestEnv(() => deployCommand(targetName, options, REPO));
@@ -419,78 +444,29 @@ describe('capy deploy — server-side target recording (CAP-687)', () => {
     expect(after.stash).toBe('');
   }, 30_000);
 
-  test('CI mode: an unpushed local `.env` edit and a never-synced variable never leak into the server push', async () => {
-    setUpRepo();
-    process.chdir(REPO);
-    // Drift: the server's stored blob/keep still agree with local keep.lock
-    // (same hash — nobody has pushed since), but local `.env` has moved on:
-    // an EDITED value for the tracked var, plus a variable that was never
-    // synced (and never will be — it's not in `target.vars`/keep.lock).
-    writeServerSnapshot('main'); // server truth == local keep.lock, untouched blob
-    writeFileSync(join(REPO, '.env'), 'STRIPE_KEY=new-unpushed-value\nUNPUSHED_OTHER=stray\n');
-
-    // Dokploy itself legitimately receives the CURRENT (unpushed) value —
-    // that delivery is correct and not what this test is about.
-    const code = await runScriptedDeploy(
-      'dokploy-ci',
-      dokployFetchMock({ stripeKeyValue: 'new-unpushed-value' }),
-      { yes: true },
-    );
-
-    expect(code).toBe(0);
-    expect(pushSecretsMock).toHaveBeenCalledTimes(1);
-    const [, keepFileJson, envBlob] = pushSecretsMock.mock.calls[0];
-
-    // The property: the push to CAPY's OWN server carries the SERVER's
-    // already-stored blob, byte-identical — never the edited value, and
-    // never the never-synced variable.
-    expect(envBlob).toBe(SERVER_ENV_FILE);
-    expect(envBlob).not.toContain('new-unpushed-value');
-    expect(envBlob).not.toContain('UNPUSHED_OTHER');
-    expect(envBlob).not.toContain('stray');
-
-    // The keep entry's own pin is untouched too — still the OLD synced
-    // value's hash, not the unpushed edit's.
-    const pushedKeep = JSON.parse(keepFileJson);
-    expect(pushedKeep.variables.STRIPE_KEY[0].value_hash).toBe(hashValue(STRIPE_KEY_VALUE));
-    // The delivery record itself is honest about what Dokploy actually
-    // received (the unpushed value) — that's target metadata, not a value
-    // push, and recording it accurately is correct, not a drift.
-    expect(pushedKeep.variables.STRIPE_KEY[0].targets[0].deployed_value_hash).toBe(hashValue('new-unpushed-value'));
-  }, 30_000);
-
-  test('direct mode: an unpushed local `.env` edit and a never-synced variable never leak into the server push', async () => {
+  // The properties the old drift tests also held, now with a folder that agrees with Capy (the lazy fixture fixed:
+  // the pin is the hash of the `.env` value): a variable that was never synced is never pushed, in CI mode AND
+  // direct mode, and the record is the only push (the server's own blob re-sent unchanged).
+  test.each([
+    ['dokploy-ci', { yes: true }],
+    ['dokploy-direct', { yes: true, noDeploy: true }],
+  ] as const)('%s: a variable that was never synced is never pushed or delivered; the delivery is recorded against the pin with the server\'s own blob', async (targetName, options) => {
     setUpRepo();
     process.chdir(REPO);
     writeServerSnapshot('main');
-    writeFileSync(join(REPO, '.env'), 'STRIPE_KEY=new-unpushed-value\nUNPUSHED_OTHER=stray\n');
+    writeFileSync(join(REPO, '.env'), `STRIPE_KEY=${STRIPE_KEY_VALUE}\nUNPUSHED_OTHER=stray\n`);
 
-    // `--no-deploy`: writes the config (recordDeployTargets still runs) but
-    // skips the trigger+poll steps, same shape as
-    // `deployRevokeWiring.test.ts`'s own `--no-deploy` test.
-    const code = await runScriptedDeploy(
-      'dokploy-direct',
-      dokployFetchMock({ stripeKeyValue: 'new-unpushed-value' }),
-      { yes: true, noDeploy: true },
-    );
+    const code = await runScriptedDeploy(targetName, dokployFetchMock(), options);
 
     expect(code).toBe(0);
     expect(pushSecretsMock).toHaveBeenCalledTimes(1);
     const [, keepFileJson, envBlob] = pushSecretsMock.mock.calls[0];
-
+    const recorded = JSON.parse(keepFileJson);
+    expect(recorded.variables.STRIPE_KEY[0].value_hash).toBe(hashValue(STRIPE_KEY_VALUE));
+    expect(recorded.variables.STRIPE_KEY[0].targets[0]).toMatchObject({ target: targetName, deployed_value_hash: hashValue(STRIPE_KEY_VALUE) });
     expect(envBlob).toBe(SERVER_ENV_FILE);
-    expect(envBlob).not.toContain('new-unpushed-value');
-    expect(envBlob).not.toContain('UNPUSHED_OTHER');
+    expect(keepFileJson).not.toContain('UNPUSHED_OTHER');
     expect(envBlob).not.toContain('stray');
-
-    const pushedKeep = JSON.parse(keepFileJson);
-    expect(pushedKeep.variables.STRIPE_KEY[0].value_hash).toBe(hashValue(STRIPE_KEY_VALUE));
-    expect(pushedKeep.variables.STRIPE_KEY[0].targets[0]).toMatchObject({
-      provider: 'dokploy',
-      target: 'dokploy-direct',
-      deployed: false, // --no-deploy
-      deployed_value_hash: hashValue('new-unpushed-value'),
-    });
   }, 30_000);
 
   test('a second CI deploy no longer erases another target\'s record: the pushed keep is built from the SERVER\'s keep, not the local keep.lock (CAP-704)', async () => {

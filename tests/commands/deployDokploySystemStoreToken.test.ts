@@ -34,11 +34,17 @@ mock.module('../../src/auth/authService', () => ({
   },
   silentAuthFailureMessage: () => 'auth failed',
 }));
+// CAP-717: a deploy compares the values it delivers with Capy's latest before it writes, so the server answers
+// (in agreement with the folder: nothing here is about conflicts).
 mock.module('../../src/service/serviceClient', () => ({
   ServiceClient: class {
     setTokenProvider() {}
+    async getDecryptData() {
+      return agreeingDecryptData(JSON.parse(readFileSync(join(ROOT, 'keep.lock'), 'utf-8')), 'production');
+    }
   },
 }));
+mock.module('../../src/crypto/keyResolver', () => fixedKeyResolver());
 const mintDeployTokenMock = mock(async () => ({
   secretsBlob: 'BLOB_VALUE',
   projectKey: 'KEY_VALUE',
@@ -53,17 +59,23 @@ afterEach(() => {
   mintDeployTokenMock.mockClear();
 });
 
-import { mkdirSync, writeFileSync, rmSync } from 'fs';
+import { mkdirSync, writeFileSync, rmSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
+import { agreeingDecryptData, fixedKeyResolver } from '../helpers/deployServer';
 import { deployCommand, deployRemove } from '../../src/commands/deployCommand';
 import { mergeManagedValuesBlock } from '../../src/deploy/dokployApi';
+import { hashValue } from '../../src/sync/compareSecrets';
 
 const ROOT = join(tmpdir(), `capy-deploy-dokploy-store-token-${process.pid}-${Date.now()}`);
 const ROOT_NO_KEEP = join(tmpdir(), `capy-deploy-dokploy-store-token-no-keep-${process.pid}-${Date.now()}`);
 const APP_ID = 'app_test';
-/** An active line for STRIPE_KEY already outside the block — gets COMMENTED, not deleted, once Capy delivers it. */
-const RAW_ENV = 'STRIPE_KEY=stale\n';
+/**
+ * The service's env before the deploy. (It used to hold a different active `STRIPE_KEY` outside the block, which the
+ * deploy silently commented out; CAP-717 makes that a conflict that needs an answer, which is not what this file is
+ * about. The comment-out itself is covered in tests/deploy/dokploy.test.ts and tests/deploy/dokployTargetConflict.test.ts.)
+ */
+const RAW_ENV = 'NODE_ENV=production\n';
 /** `.env`'s own plaintext value for STRIPE_KEY (see `setUp`) — a fake, non-secret test value. */
 const DECRYPTED_STRIPE_KEY = 'whatever';
 
@@ -85,7 +97,8 @@ function setUp(targetOptions: Record<string, unknown>): void {
       org_id: 'org_1',
       project_id: 'proj_1',
       project_name: 'demo',
-      variables: { STRIPE_KEY: [{ resource_id: 'r-1', branch: 'production', value_hash: 'h' }] },
+      // The pin is the real fingerprint of `.env`'s value: the folder agrees with Capy, so the deploy commits nothing (an edit would be committed first).
+      variables: { STRIPE_KEY: [{ resource_id: 'r-1', branch: 'production', value_hash: hashValue('whatever') }] },
     }),
   );
   writeFileSync(join(ROOT, '.env'), 'STRIPE_KEY=whatever\n');
@@ -214,9 +227,10 @@ function fakeSystemStore(entry: string | null) {
 }
 
 /**
- * `application.one` is read exactly 3 times in a SUCCESSFUL CI-mode deploy
- * (preflight, deploy's fresh read, deploy's post-write verify) — RAW_ENV for
- * the first two, the merged env once the write has landed. A fixed-sequence
+ * `application.one` is read exactly 4 times in a SUCCESSFUL CI-mode deploy
+ * (preflight, the conflict check before anything is written (CAP-717), deploy's
+ * fresh read, deploy's post-write verify) — RAW_ENV for the first three, the
+ * merged env once the write has landed. A fixed-sequence
  * iterator (same idea `tests/deploy/dokploy.test.ts`'s own `scripted()`
  * helper and `deployDokployWarningOnce.test.ts` use) hands back each read in
  * order — no mutable variable of our own, only the iterator's own built-in
@@ -225,7 +239,7 @@ function fakeSystemStore(entry: string | null) {
  * own call count instead.
  */
 function dokployFetchMock() {
-  const reads = [RAW_ENV, RAW_ENV, EXPECTED_MERGED_ENV][Symbol.iterator]();
+  const reads = [RAW_ENV, RAW_ENV, RAW_ENV, EXPECTED_MERGED_ENV][Symbol.iterator]();
   return mock(async (url: string, init: { method: string; headers: Record<string, string>; body?: string }) => {
     const u = new URL(url);
     if (u.pathname.endsWith('application.saveEnvironment')) {

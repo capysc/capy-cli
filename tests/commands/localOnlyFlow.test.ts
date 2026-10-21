@@ -1,4 +1,4 @@
-import { mock, describe, it, expect, beforeAll, afterAll } from 'bun:test';
+import { mock, describe, it, expect, beforeAll, afterAll, spyOn } from 'bun:test';
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync, existsSync, readdirSync } from 'fs';
 import { join } from 'path';
 
@@ -6,7 +6,8 @@ import { join } from 'path';
 const tempHome = mkdtempSync(join(require('os').tmpdir(), 'capy-localflow-home-'));
 mock.module('os', () => {
   const actual = require('os');
-  return { ...actual, homedir: () => tempHome };
+  // `default` too: modules loaded later (bare capy, which every `capy push` runs first, loads inquirer) import `os` by default.
+  return { ...actual, default: { ...actual, homedir: () => tempHome }, homedir: () => tempHome };
 });
 
 // Network tripwire: any fetch in local-only mode is a leak.
@@ -59,9 +60,32 @@ afterAll(() => {
 });
 
 describe('local-only end-to-end (offline, no leakage)', () => {
-  it('capy push commits locally with zero network calls', async () => {
+  it('capy push commits locally with zero network calls (off a terminal bare capy reports the new variable first; --resolve local commits it)', async () => {
     const { PushCommand } = await import('../../src/commands/pushCommand');
-    await new PushCommand().execute();
+    // stdin is not a terminal here, so nobody can answer bare capy's menu: the difference comes back as a row.
+    const exit = spyOn(process, 'exit').mockImplementation(((code?: number) => {
+      throw new Error(`__exit_${code}__`);
+    }) as never);
+    const log = spyOn(console, 'log').mockImplementation(() => {});
+    const err = spyOn(console, 'error').mockImplementation(() => {});
+    const first = await new PushCommand()
+      .execute()
+      .then(() => 'returned')
+      .catch((e: Error) => e.message);
+    const payload = JSON.parse(String(log.mock.calls[0]?.[0] ?? '{}')) as { code?: string; conflict_id?: string; conflicts?: Array<{ name: string; type: string; remote: string | null }> };
+    log.mockRestore();
+    err.mockRestore();
+    expect(first).toBe('__exit_3__');
+    expect(payload.code).toBe('SECRETS_CONFLICT');
+    expect(payload.conflicts).toMatchObject([{ name: 'MY_SECRET', type: 'new', remote: null }]);
+    expect(fetchCalled).toBe(false);
+
+    const quiet = spyOn(console, 'log').mockImplementation(() => {});
+    const quietErr = spyOn(console, 'error').mockImplementation(() => {});
+    await new PushCommand().execute({ conflictFlags: { resolve: ['MY_SECRET=local'], conflict: payload.conflict_id } });
+    quiet.mockRestore();
+    quietErr.mockRestore();
+    exit.mockRestore();
 
     expect(fetchCalled).toBe(false);
 

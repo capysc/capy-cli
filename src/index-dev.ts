@@ -10,6 +10,8 @@ import { Command, Option } from 'commander';
 import { CapyCommand } from './commands/capyCommand';
 import { CliOptions } from './types/index';
 import { version as CLI_VERSION } from '../package.json';
+import { conflictOption, rawConflictFlagsOf, resolveOption } from './sync/conflicts';
+import { answersByProtocol } from './sync/gate';
 import { refuseWebMode } from './core/webModeRemoved';
 import { ACCENT } from './ui/colors';
 
@@ -86,6 +88,8 @@ program
   .option('-v, --verbose', 'enable detailed logging')
   .option('-f, --force', 're-encrypt existing variables')
   .option('-d, --dry-run', 'preview changes without applying')
+  .addOption(resolveOption())
+  .addOption(conflictOption())
   // Hidden: `--web` was removed. It still parses so the hook below can refuse it (WEB_MODE_REMOVED).
   .addOption(new Option('--web').hideHelp())
   // Root help only (Commander scopes addHelpText to the command it's called
@@ -100,26 +104,8 @@ program
   })
   .action(async (options, cmd) => {
     if (cmd.args.length > 0) {
-      console.log(`\n  Unknown command: ${cmd.args[0]}\n`);
-      console.log('  Available commands:\n');
-      console.log(`    ${B('capy-dev')}                        \x1b[90mSync secrets\x1b[0m`);
-      console.log(`    ${B('capy-dev')} edit                   \x1b[90mInspect and edit secrets in a TUI\x1b[0m`);
-      console.log(`    ${B('capy-dev')} branch                 \x1b[90mList secret branches\x1b[0m`);
-      console.log(`    ${B('capy-dev')} checkout -b <branch>   \x1b[90mSwitch to a secret branch\x1b[0m`);
-      console.log(`    ${B('capy-dev')} invite <email>         \x1b[90mInvite a teammate\x1b[0m`);
-      console.log(`    ${B('capy-dev')} redeem <code>          \x1b[90mRedeem an invite code\x1b[0m`);
-      console.log(`    ${B('capy-dev')} transport              \x1b[90mMove your account to another machine\x1b[0m`);
-      console.log(`    ${B('capy-dev')} kick <email>           \x1b[90mRemove a teammate\x1b[0m`);
-      console.log(`    ${B('capy-dev')} users                  \x1b[90mList organization members\x1b[0m`);
-      console.log(`    ${B('capy-dev')} deploy                 \x1b[90mGenerate a deployment\x1b[0m`);
-      console.log(`    ${B('capy-dev')} decrypt                \x1b[90mDecrypt secrets offline (owner only)\x1b[0m`);
-      console.log(`    ${B('capy-dev')} end-recover            \x1b[90mEnd recovery session\x1b[0m`);
-      console.log(`    ${B('capy-dev')} recover                \x1b[90mReconstruct master key from recovery phrase\x1b[0m`);
-      console.log(`    ${B('capy-dev')} auth-decrypt           \x1b[90mDecrypt using auth (dev only)\x1b[0m`);
-      console.log(`    ${B('capy-dev')} byoc [url]             \x1b[90mConnect to a self-hosted Capy (BYOC) instance\x1b[0m`);
-      console.log(`    ${B('capy-dev')} use <profile>          \x1b[90mSwitch to a different profile\x1b[0m`);
-      console.log(`    ${B('capy-dev')} profile list           \x1b[90mList configured profiles\x1b[0m`);
-      console.log('');
+      const { unknownCommandText } = await import('./core/availableCommands');
+      console.log(unknownCommandText(program, cmd.args[0]));
       process.exit(1);
     }
 
@@ -127,7 +113,10 @@ program
       envPath: options.envPath,
       verbose: options.verbose,
       force: options.force,
-      dryRun: options.dryRun
+      dryRun: options.dryRun,
+      conflictFlags: rawConflictFlagsOf(cmd),
+      // Off a terminal, under --dry-run, or given --resolve nobody can answer the menu: the flags do (CAP-717).
+      protocol: answersByProtocol({ conflictFlags: rawConflictFlagsOf(cmd), dryRun: options.dryRun === true }),
     };
 
     const command = new CapyCommand(cliOptions, true);
@@ -273,22 +262,30 @@ program
   .description('Switch to a secret branch')
   .option('-b, --create', 'Create the branch if it does not exist')
   .option('--protected', 'Mark as a protected branch (invite-only)')
+  .option('--non-tty', 'treat stdin as not a terminal; differences from Capy stop the checkout with the conflict_id (agents/CI)') // COPY-FLAG
+  .addOption(resolveOption())
+  .addOption(conflictOption())
   .action(async (branch, options, command) => {
     const { CheckoutCommand } = await import('./commands/checkoutCommand');
     const cmd = new CheckoutCommand(true);
     await cmd.execute(branch, {
       create: options.create,
       protected: options.protected,
+      nonTty: options.nonTty === true,
+      conflictFlags: rawConflictFlagsOf(command),
     });
   });
 
 program
   .command('push')
   .description('Push encrypted values to Keep')
-  .action(async () => {
+  .option('--non-tty', 'treat stdin as not a terminal; differences from Capy stop the push with the conflict_id (agents/CI)') // COPY-FLAG
+  .addOption(resolveOption())
+  .addOption(conflictOption())
+  .action(async (options, command) => {
     const { PushCommand } = await import('./commands/pushCommand');
     const cmd = new PushCommand(true);
-    await cmd.execute();
+    await cmd.execute({ nonTty: options.nonTty, conflictFlags: rawConflictFlagsOf(command) });
   });
 
 program
@@ -318,6 +315,8 @@ program
       'With a name and a piped value, sets that one variable. The value is read from stdin only:\n' +
       '  <cmd> | capy-dev edit NAME --json\n',
   )
+  .addOption(resolveOption())
+  .addOption(conflictOption())
   .action(async (name, options, command) => {
     const { EditCommand } = await import('./commands/editCommand');
     const { prFlagsFromCommand } = await import('./commands/keepLockPr');
@@ -337,7 +336,7 @@ const deploy = program
   .command('deploy [target]')
   .description('Set up secret delivery — token + docs (existing) or connector deploy')
   .option('--target <id>', 'adapter id; requires --yes (CI mode)')
-  .option('--yes', 'skip all prompts (CI)')
+  .option('--yes', 'skip all prompts (CI); any difference between the folder and Capy stops the deploy with exit 3') // COPY-FLAG
   .option('--dry-run', 'preflight + show plan, push nothing (connector mode)')
   .option('--edit', 're-enter the picker for an existing connector target')
   .option('--connect', 'force connector mode (skip the token+docs path)')
@@ -350,12 +349,14 @@ const deploy = program
   .option('--plan <file>', 'dokploy --discover: the plan file to check (see schemas.deploy_dokploy_plan in `capy help --json`)')
   .option('--confirm <plan_id>', 'dokploy --discover: write the plan that --dry-run printed (one PR per repo)')
   .option('--base-url <url>', 'dokploy --discover: the Dokploy dashboard URL (else the org system variable _CONNECTOR_DOKPLOY_BASE_URL)')
+  .addOption(resolveOption())
+  .addOption(conflictOption())
   .action(async (target: string | undefined, options: any, cmd: any) => {
     const merged = cmd.optsWithGlobals ? cmd.optsWithGlobals() : options;
 
     // `capy-dev deploy dokploy --discover` (CAP-703): always JSON, never prompts.
     const { routeDeployDiscover } = await import('./commands/deployDiscover/route');
-    const discoverCode = await routeDeployDiscover(target, options, (options.dryRun ?? merged.dryRun) === true, true);
+    const discoverCode = await routeDeployDiscover(target, options, (options.dryRun ?? merged.dryRun) === true, true, rawConflictFlagsOf(cmd));
     if (discoverCode !== undefined) process.exit(discoverCode);
 
     // CI/explicit connector path — go straight to the adapter flow (devMode).
@@ -367,6 +368,7 @@ const deploy = program
         dryRun: options.dryRun ?? merged.dryRun,
         edit: options.edit,
         devMode: true,
+        conflictFlags: rawConflictFlagsOf(cmd),
       });
       process.exit(code);
     }
@@ -380,6 +382,9 @@ const deploy = program
       scope: options.scope,
       envName: options.envName,
       yes: !!options.yes,
+      json: !!options.json,
+      dryRun: (options.dryRun ?? merged.dryRun) === true,
+      conflictFlags: rawConflictFlagsOf(cmd),
     });
     await c.execute();
   });
@@ -387,10 +392,13 @@ const deploy = program
 deploy
   .command('revoke <deployId>')
   .description('Revoke a deploy token')
-  .action(async (deployId: string, _options: unknown, command: any) => {
+  .option('--non-tty', 'treat stdin as not a terminal; differences from Capy stop the revoke with the conflict_id (agents/CI)') // COPY-FLAG
+  .addOption(resolveOption())
+  .addOption(conflictOption())
+  .action(async (deployId: string, options: any, command: any) => {
     const { DeployRevokeCommand } = await import('./commands/deployTokenCommand');
     const cmd = new DeployRevokeCommand(process.env.CAPY_API_URL, true);
-    await cmd.execute(deployId);
+    await cmd.execute(deployId, { nonTty: options.nonTty, conflictFlags: rawConflictFlagsOf(command) });
   });
 
 deploy
@@ -419,10 +427,13 @@ deploy
 deploy
   .command('targets-remove <name>')
   .description('Remove a configured connector target')
-  .action(async (name: string, _options, command) => {
+  .option('--non-tty', 'treat stdin as not a terminal; differences from Capy stop the removal with the conflict_id (agents/CI)') // COPY-FLAG
+  .addOption(resolveOption())
+  .addOption(conflictOption())
+  .action(async (name: string, options: any, command) => {
     const { deployRemove } = await import('./commands/deployCommand');
     process.exit(
-      await deployRemove(name, process.cwd(), { devMode: true }),
+      await deployRemove(name, process.cwd(), { devMode: true, nonTty: options.nonTty, conflictFlags: rawConflictFlagsOf(command) }),
     );
   });
 
@@ -725,10 +736,13 @@ program
 program
   .command('org')
   .description('Switch organization')
-  .action(async (_options, command) => {
+  .option('--non-tty', 'treat stdin as not a terminal; differences from Capy stop the switch with the conflict_id (agents/CI)') // COPY-FLAG
+  .addOption(resolveOption())
+  .addOption(conflictOption())
+  .action(async (options, command) => {
     const { OrgCommand } = await import('./commands/orgCommand');
     const cmd = new OrgCommand(process.env.CAPY_API_URL, true);
-    await cmd.execute();
+    await cmd.execute({ nonTty: options.nonTty === true, conflictFlags: rawConflictFlagsOf(command) });
   });
 
 program
@@ -805,6 +819,8 @@ secretsCmd
       '  <cmd> | capy secrets set NAME --row <row_id> --dry-run --json\n' +
       '  <cmd> | capy secrets set NAME --row <row_id> --confirm <plan_id> --json\n',
   )
+  .addOption(resolveOption())
+  .addOption(conflictOption())
   .action(async (name: string, options: any, command: any) => {
     // `--json` is also a `capy secrets` option, which Commander lets the parent claim;
     // `--dry-run` is the program-level flag. Read both from the merged options.
@@ -821,6 +837,7 @@ secretsCmd
         exclude: options.exclude,
         noPrFor: options.prFor,
         noPr: options.pr === false,
+        conflictFlags: rawConflictFlagsOf(command),
       },
       true,
     );
@@ -846,6 +863,8 @@ secretsCmd
       '  capy secrets deploy NAME --row <row_id> --dry-run --json\n' +
       '  capy secrets deploy NAME --row <row_id> --confirm <plan_id> --json\n',
   )
+  .addOption(resolveOption())
+  .addOption(conflictOption())
   .action(async (names: string[], options: any, command: any) => {
     // `--json` is also a `capy secrets` option, which Commander lets the parent claim;
     // `--dry-run` is the program-level flag. Read both from the merged options.
@@ -860,6 +879,7 @@ secretsCmd
         row: options.row,
         allRows: options.allRows === true,
         exclude: options.exclude,
+        conflictFlags: rawConflictFlagsOf(command),
       },
       true,
     );
@@ -1035,6 +1055,8 @@ program
       'With a value piped in and one name, adds that variable (an existing one needs --force):\n' +
       '  <cmd> | capy-dev add NAME --json\n',
   )
+  .addOption(resolveOption())
+  .addOption(conflictOption())
   .action(async (varNames, options, command) => {
     const { AddCommand } = await import('./commands/addCommand');
     const { prFlagsFromCommand } = await import('./commands/keepLockPr');
@@ -1047,6 +1069,7 @@ program
       json: options.json,
       pr: prFlagsFromCommand(command, options.prBase),
       dryRun: merged.dryRun === true,
+      conflictFlags: rawConflictFlagsOf(command),
     });
   });
 
@@ -1059,6 +1082,8 @@ program
   .option('--pr', 'create a PR with the keep.lock change (answers the prompt)') // COPY-FLAG
   .option('--no-pr', 'do not create a PR with the keep.lock change') // COPY-FLAG
   .option('--pr-base <branch>', 'base branch for the PR (answers the prompt)') // COPY-FLAG
+  .addOption(resolveOption())
+  .addOption(conflictOption())
   .action(async (varNames, options, command) => {
     const { RemoveCommand } = await import('./commands/removeCommand');
     const { prFlagsFromCommand } = await import('./commands/keepLockPr');
@@ -1069,6 +1094,7 @@ program
       nonTty: options.nonTty,
       pr: prFlagsFromCommand(command, options.prBase),
       dryRun: command.optsWithGlobals().dryRun === true,
+      conflictFlags: rawConflictFlagsOf(command),
     });
   });
 
@@ -1107,6 +1133,8 @@ program
     '--environment <names>',
     'dokploy discover: restrict the plan to these Dokploy environment names, comma-separated (e.g. staging,preview)',
   )
+  .addOption(resolveOption())
+  .addOption(conflictOption())
   .action(async (provider, options, command) => {
     const { ConnectCommand } = await import('./commands/connectCommand');
     const cmd = new ConnectCommand(true); // devMode: hard-blocks live
@@ -1132,6 +1160,7 @@ program
       yes: options.yes === true,
       overwrite: options.overwrite === true,
       environment: options.environment,
+      conflictFlags: rawConflictFlagsOf(command),
     });
   });
 
@@ -1144,6 +1173,8 @@ program
   .option('--skip-prompts', 'alias for --yes')
   .option('--non-tty', 'never prompt; resolve choices from flags or fail fast (agents/CI)')
   .option('--provider <name>', 'integration to promote an unmanaged var through (non-interactive)')
+  .addOption(resolveOption())
+  .addOption(conflictOption())
   .action(async (varName, options, command) => {
     const { RotateCommand } = await import('./commands/rotateCommand');
     const cmd = new RotateCommand(true); // devMode: skips live entries
@@ -1153,6 +1184,7 @@ program
       skipPrompts: !!(options.yes || options.skipPrompts),
       nonTty: options.nonTty,
       provider: options.provider,
+      conflictFlags: rawConflictFlagsOf(command),
     });
   });
 

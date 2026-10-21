@@ -33,6 +33,10 @@
  * repo behind it) for reasons unrelated to the property being tested.
  */
 import { describe, test, expect, mock, spyOn, beforeEach, afterEach } from 'bun:test';
+import { stubbedGate } from '../helpers/gateMock';
+
+// Bare `capy` (a deploy's first step) is tested in tests/sync/gate.test.ts and tests/commands/gateFirst.test.ts.
+mock.module('../../src/sync/gate', () => stubbedGate());
 
 mock.module('../../src/auth/authService', () => ({
   AuthService: class {
@@ -45,11 +49,16 @@ mock.module('../../src/auth/authService', () => ({
   },
   silentAuthFailureMessage: () => 'auth failed',
 }));
+// The server answers in agreement with the folder (the keep-only record writes read it).
 mock.module('../../src/service/serviceClient', () => ({
   ServiceClient: class {
     setTokenProvider() {}
+    async getDecryptData() {
+      return agreeingDecryptData(JSON.parse(readFileSync(join(REPO, 'keep.lock'), 'utf-8')), 'main');
+    }
   },
 }));
+mock.module('../../src/crypto/keyResolver', () => fixedKeyResolver());
 
 /** CAP-682: mocked purely to prove it is NEVER called — Dokploy mints no deploy token at all. */
 const mintDeployTokenMock = mock(async () => ({
@@ -70,6 +79,7 @@ import { mkdirSync, writeFileSync, rmSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { spawnSync } from 'child_process';
+import { agreeingDecryptData, fixedKeyResolver } from '../helpers/deployServer';
 import { deployCommand } from '../../src/commands/deployCommand';
 import { hashValue } from '../../src/deploy/keepGate';
 import { serializeKeep } from '../../src/files/fileManager';
@@ -140,7 +150,8 @@ function dokployFetchMock(opts: { allowWrite?: boolean; stripeKeyValue?: string 
   const value = opts.stripeKeyValue ?? 'same-value';
   const merged = mergeManagedValuesBlock(RAW_APP_ENV, [{ name: 'STRIPE_KEY', value }]);
   if (!merged.ok) throw new Error('unexpected merge problem in test fixture');
-  const reads = [RAW_APP_ENV, RAW_APP_ENV, merged.env][Symbol.iterator]();
+  // preflight, the conflict check before anything is written (CAP-717), deploy's fresh read, the post-write verify.
+  const reads = [RAW_APP_ENV, RAW_APP_ENV, RAW_APP_ENV, merged.env][Symbol.iterator]();
   return mock(async (url: string, init: { method: string; body?: string }) => {
     const u = new URL(url);
     if (u.pathname.endsWith('application.one')) {
@@ -256,11 +267,10 @@ describe('capy deploy — CI mode change gate (validator fix-first: no CI churn)
 
     // No token minted at all.
     expect(mintDeployTokenMock).not.toHaveBeenCalled();
-    // Dokploy saw ONLY the preflight read — never a write (the scripted fetch
-    // throws on anything else, so a nonzero call count with no throw means
-    // every call was the one scripted `application.one` read).
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect((fetchMock.mock.calls[0][0] as string)).toContain('application.one');
+    // Dokploy saw ONLY reads — the preflight and the conflict check before anything is written (CAP-717) —
+    // never a write (the scripted fetch throws on anything else).
+    expect(fetchMock.mock.calls.length).toBeGreaterThan(0);
+    expect(fetchMock.mock.calls.every((c) => (c[0] as string).includes('application.one'))).toBe(true);
 
     // No PR branch pushed to origin.
     const branches = git(['ls-remote', '--heads', ORIGIN], REPO).stdout;

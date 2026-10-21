@@ -1,13 +1,10 @@
-import { createHash } from 'crypto';
 import { ProjectManager } from '../../core/projectManager';
 import { FileManager } from '../../files/fileManager';
 import { AuthService, silentAuthFailureMessage } from '../../auth/authService';
 import { ServiceClient } from '../../service/serviceClient';
-import { SyncEngine } from '../../sync/syncEngine';
-import { Encryptor } from '../../crypto/encryptor';
-import { deriveResourceId } from '../../crypto/resourceId';
-import { writeKeepCache } from '../../config/globalConfig';
-import { setSyncKeepHash, KeepFile, ConnectorMetadata, CapyError, ERROR_CODES, AuthResult } from '../../types/index';
+import { readLocalPlaintext } from '../../sync/commit';
+import { commitGated, type GateOptions } from '../../sync/gate';
+import { KeepFile, ConnectorMetadata, CapyError, ERROR_CODES, AuthResult } from '../../types/index';
 import type { ImportOutcome } from './registry';
 import { reportRepoLinkForCommand, type RepoLinkWarning } from '../../core/repoLinkReporter';
 
@@ -27,6 +24,11 @@ export interface ResolvedContext {
   localPlaintext: Record<string, string>;
   /** CAP-697: warnings from reporting this project's repo link (empty unless the keep.lock looks copied). */
   repoLinkWarnings?: readonly RepoLinkWarning[];
+  /**
+   * How bare `capy` is run again if an upload is refused as stale (someone saved in between): the same options the
+   * command's first-step gate ran with (sync/gate.ts). Absent: a terminal, no flags.
+   */
+  gate?: GateOptions;
 }
 
 /**
@@ -54,20 +56,6 @@ async function authenticateForOrg(authService: AuthService, orgId: string, inter
   return authService.authenticate(orgId);
 }
 
-/** Decrypts `.env` (values the profile holds the key for; the rest are skipped). */
-function decryptLocalEnv(fileManager: FileManager, projectKey: string): Record<string, string> {
-  return Object.fromEntries(
-    Object.entries(fileManager.readEnvFile()).flatMap(([k, v]) => {
-      if (!v.startsWith('capy:')) return [[k, v] as const];
-      try {
-        return [[k, fileManager.decryptValue(v, projectKey)] as const];
-      } catch {
-        return []; // skip undecryptable
-      }
-    }),
-  );
-}
-
 /**
  * Run the standard "I'm an interactive command that needs to encrypt + push"
  * setup. Mirrors the front half of editCommand.ts. Exits the process on
@@ -85,6 +73,8 @@ export async function resolveContext(
     json?: boolean;
     /** The caller is a dry run: the repo link is not reported. */
     dryRun?: boolean;
+    /** The options the command's first-step gate ran with: kept on the context for a stale-upload retry. */
+    gate?: GateOptions;
   } = {},
 ): Promise<ResolvedContext> {
   const refuse = opts.refuse ?? exitWithMessage;
@@ -152,8 +142,9 @@ export async function resolveContext(
     userId,
     projectKey,
     keep,
-    localPlaintext: decryptLocalEnv(fileManager, projectKey),
+    localPlaintext: readLocalPlaintext(fileManager, projectKey),
     repoLinkWarnings: repoLink.warnings,
+    ...(opts.gate === undefined ? {} : { gate: opts.gate }),
   };
 }
 
@@ -195,100 +186,25 @@ async function resolveProjectKeyOrRefuse(args: {
 }
 
 /**
- * Set `varName=value` in `.env`, encrypt + push to Keep, and update
- * keep.lock + sync state. Mirrors the editCommand `saveLocalEdits` flow.
+ * Write a variable (when there is one to write), attach its connector, sync.
  *
- * If `connector` is provided, the metadata is attached to the keep.lock entry
- * for `varName` on the active branch. Survives future syncs because
- * `mergeWithKeep` preserves extra fields on existing entries.
+ * `value === undefined` is the METADATA-ONLY mode, and it is what `connect`
+ * uses: no value changes and only keep.lock's connector entry moves. `rotate`
+ * is the caller that passes a value, because replacing a credential is what
+ * rotate is for.
+ *
+ * The save is `commitGated` (sync/gate.ts): it changes ONLY `varName` (plus the connector
+ * entries) on top of the server's latest, with `base_keep_hash`. The command ran bare `capy` before
+ * anything else, so the folder agreed with Capy when it started; if someone saved in between, the
+ * upload is refused as stale, bare `capy` runs again and the save is tried once more.
+ *
+ * If `connector` is provided, the metadata is attached to the keep.lock entry for
+ * `varName` on the active branch.
  *
  * If `push` is false, writes the encrypted snippet locally only — the next
  * `capy push` / `capy` will pick it up. Local-only mode skips the merge so
  * the connector field doesn't get attached until a real push.
  */
-/**
- * Write a variable (when there is one to write), attach its connector, sync.
- *
- * `value === undefined` is the METADATA-ONLY mode, and it is what `connect`
- * uses: the env map goes to the service unchanged and only keep.lock's
- * connector entry moves. Everything downstream — the keep merge, the push,
- * the cache, the sync state — is identical either way, which is why this is
- * one function and not two. `rotate` is the caller that passes a value,
- * because replacing a credential is what rotate is for.
- */
-/**
- * Shared tail of `writeAndSync`/`removeAndSync`: encrypt the full desired
- * `finalEnv`, merge it into keep.lock for `branch` (dropping any entry for a
- * name no longer in `finalEnv`), push, cache the pushed blob, adopt the
- * server's copy, and write `.env` + sync state. Writes only the untracked
- * working copy (`writeKeepFile`); it never auto-commits the tracked
- * keep.lock onto whatever branch the caller happens to be on.
- *
- * `keepMutator` runs on the post-merge, post-drop `KeepFile` right before the
- * push — `writeAndSync` uses it to attach connector metadata; a plain remove
- * passes the identity function through.
- */
-async function commitFinalEnv(
-  ctx: ResolvedContext,
-  finalEnv: Record<string, string>,
-  keepMutator: (merged: KeepFile) => KeepFile,
-): Promise<void> {
-  const { pm, fileManager, serviceClient, orgId, projectId, branch, userId, projectKey, keep } = ctx;
-
-  const encrypted = Object.fromEntries(
-    Object.entries(finalEnv).map(([k, v]) => [
-      k,
-      `capy:${deriveResourceId(branch, k)}:${Encryptor.encrypt(v, projectKey)}`,
-    ]),
-  );
-  const envBlob = Object.entries(encrypted)
-    .map(([k, v]) => `${k}=${v}`)
-    .join('\n');
-
-  const pushedVars = Object.fromEntries(
-    Object.entries(finalEnv).map(([k, v]) => [
-      k,
-      {
-        resource_id: deriveResourceId(branch, k),
-        value_hash: createHash('sha256').update(v).digest('hex').slice(0, 16),
-      },
-    ]),
-  );
-
-  const syncEngine = new SyncEngine();
-  const merged = syncEngine.mergeWithKeep(keep, pushedVars, branch);
-  // Drop entries for names no longer in `finalEnv` — a plain filter/flatMap
-  // over the merged map rather than a mutate-in-place loop, so `merged`
-  // itself is never touched after `mergeWithKeep` hands it back.
-  const dropped: KeepFile = {
-    ...merged,
-    variables: Object.fromEntries(
-      Object.entries(merged.variables).flatMap(([name, entries]) => {
-        if (name in finalEnv) return [[name, entries]] as const;
-        const kept = entries.filter((e) => e.branch !== branch);
-        return kept.length > 0 ? ([[name, kept]] as const) : [];
-      }),
-    ),
-  };
-  const finalKeep = keepMutator(dropped);
-
-  const result = await serviceClient.pushSecrets(projectId, JSON.stringify(finalKeep), envBlob, branch);
-
-  writeKeepCache(orgId, projectId, result.keep_hash, envBlob);
-  // Prefer the server's copy — it carries server-assigned changed_at
-  fileManager.writeKeepFile(SyncEngine.adoptServerKeep(result.keep_file, finalKeep, branch));
-  fileManager.writeEncryptedEnvFile(finalEnv, projectKey, undefined, finalKeep, branch);
-
-  const existingSyncState = pm.readSyncState();
-  fileManager.writeSyncState({
-    ...existingSyncState,
-    last_sync: new Date().toISOString(),
-    synced_variables: Object.keys(finalEnv),
-    user_id: userId,
-    keep_hash: setSyncKeepHash(existingSyncState, branch, SyncEngine.computeKeepHash(finalKeep, branch)),
-  });
-}
-
 export async function writeAndSync(
   ctx: ResolvedContext,
   varName: string,
@@ -301,53 +217,37 @@ export async function writeAndSync(
   },
 ): Promise<void> {
   const { fileManager, branch, projectKey, keep, localPlaintext } = ctx;
-
-  const finalEnv: Record<string, string> =
-    value === undefined ? { ...localPlaintext } : { ...localPlaintext, [varName]: value };
+  const attach = (k: KeepFile): KeepFile => applyConnectors(k, branch, varName, opts.connector, opts.alsoConnect);
 
   if (!opts.push) {
     // Local-only path. Even though we're not hitting the service, we still
     // need to attach the connector marker to keep.lock so a follow-up `capy
     // push` (which will round-trip through mergeWithKeep) preserves it.
-    const merged = applyConnectors(keep, branch, varName, opts.connector, opts.alsoConnect);
+    const finalEnv = value === undefined ? { ...localPlaintext } : { ...localPlaintext, [varName]: value };
+    const merged = attach(keep);
     if (merged !== keep) fileManager.writeKeepFile(merged);
     fileManager.writeEncryptedEnvFile(finalEnv, projectKey, undefined, merged, branch);
     return;
   }
 
-  await commitFinalEnv(ctx, finalEnv, (merged) => applyConnectors(merged, branch, varName, opts.connector, opts.alsoConnect));
+  await commitGated(ctx, { set: value === undefined ? {} : { [varName]: value }, remove: [] }, { transformKeep: attach });
 }
 
 /**
- * `capy remove NAME...` — drop `names` from the active branch and push the
- * remaining set through the exact same mechanics `writeAndSync` uses (encrypt
- * full set, `mergeWithKeep`, drop entries for names no longer present, push,
- * cache, adopt, write `.env` + sync state).
- *
- * Callers are expected to have already confirmed `names` are all present and
- * that nothing ELSE in `ctx.localPlaintext` has drifted from the pinned
- * baseline — this function does no such checking itself, it only performs
- * the write.
+ * `capy remove NAME...` — drop `names` from the active branch. Only those names
+ * move: everything else on the server is left alone.
  */
 export async function removeAndSync(ctx: ResolvedContext, names: readonly string[]): Promise<void> {
-  const removed = new Set(names);
-  const finalEnv = Object.fromEntries(Object.entries(ctx.localPlaintext).filter(([k]) => !removed.has(k)));
-  await commitFinalEnv(ctx, finalEnv, (merged) => merged);
+  await commitGated(ctx, { set: {}, remove: names });
 }
 
 /**
  * Write SEVERAL NEW variables at once — a `capy connect <import-connector>`
  * import — and sync, in one push/commit rather than one per variable.
  *
- * Mirrors `writeAndSync`, but that function's `(varName, value)` pair is for
- * ONE variable's value; an import adds N brand-new key/value pairs
- * simultaneously. Chaining `writeAndSync` calls per variable would each read
- * `ctx.localPlaintext`/`ctx.keep` as they stood BEFORE the run started, so a
- * second call would push a snapshot missing the first call's write — this
- * function builds the one final `env`/`keep.lock` state and writes it once.
- *
- * Every entry becomes a managed connector on its own (varName, branch) entry,
- * same as `writeAndSync`'s `alsoConnect`.
+ * `writeAndSync`'s `(varName, value)` pair is for ONE variable's value; an import adds
+ * N key/value pairs simultaneously, in one commit. Every entry becomes a managed
+ * connector on its own (varName, branch) entry, same as `writeAndSync`'s `alsoConnect`.
  */
 export async function writeImportedAndSync(
   ctx: ResolvedContext,
@@ -356,22 +256,19 @@ export async function writeImportedAndSync(
     push: boolean;
     /**
      * `--overwrite` clear-only writes: proceed even when `entries` is empty.
-     * Clearing removes names from `ctx.localPlaintext` (the caller passes a
-     * PRUNED context — see `writeImportOutcome`) rather than adding an
-     * entry, so a clear-only run has nothing in `entries` at all; without
-     * this flag that would hit the early return below and write nothing.
-     * Default false preserves every other caller's "nothing to do" no-op.
+     * Clearing removes names (`opts.clear`) rather than adding an entry, so a
+     * clear-only run has nothing in `entries` at all; without this flag that
+     * would hit the early return below and write nothing. Default false
+     * preserves every other caller's "nothing to do" no-op.
      */
     forceWrite?: boolean;
+    /** `--overwrite`: names to drop from the branch in the same write. */
+    clear?: readonly string[];
   },
 ): Promise<void> {
   if (entries.length === 0 && !opts.forceWrite) return;
-  const { pm, fileManager, serviceClient, orgId, projectId, branch, userId, projectKey, keep, localPlaintext } = ctx;
-
-  const finalEnv: Record<string, string> = {
-    ...localPlaintext,
-    ...Object.fromEntries(entries.map((e) => [e.varName, e.value])),
-  };
+  const { fileManager, branch, projectKey, keep, localPlaintext } = ctx;
+  const clear = opts.clear ?? [];
   const also = entries.map((e) => ({ varName: e.varName, entry: e.entry }));
   // `entries[0]?.varName ?? ''`: the positional `varName` argument below is
   // only ever READ by `applyConnectors` when its own `connector` argument
@@ -379,59 +276,17 @@ export async function writeImportedAndSync(
   // empty, `forceWrite: true`) this placeholder is never actually consulted,
   // but `entries[0].varName` would still throw evaluating it eagerly.
   const attachAll = (k: KeepFile): KeepFile => applyConnectors(k, branch, entries[0]?.varName ?? '', undefined, also);
+  const set = Object.fromEntries(entries.map((e) => [e.varName, e.value]));
 
   if (!opts.push) {
+    const finalEnv = { ...Object.fromEntries(Object.entries(localPlaintext).filter(([k]) => !clear.includes(k))), ...set };
     const merged = attachAll(keep);
     if (merged !== keep) fileManager.writeKeepFile(merged);
     fileManager.writeEncryptedEnvFile(finalEnv, projectKey, undefined, merged, branch);
     return;
   }
 
-  const encrypted: Record<string, string> = Object.fromEntries(
-    Object.entries(finalEnv).map(([k, v]) => [
-      k,
-      `capy:${deriveResourceId(branch, k)}:${Encryptor.encrypt(v, projectKey)}`,
-    ]),
-  );
-  const envBlob = Object.entries(encrypted)
-    .map(([k, v]) => `${k}=${v}`)
-    .join('\n');
-
-  const pushedVars: Record<string, { resource_id: string; value_hash: string }> = Object.fromEntries(
-    Object.entries(finalEnv).map(([k, v]) => [
-      k,
-      { resource_id: deriveResourceId(branch, k), value_hash: createHash('sha256').update(v).digest('hex').slice(0, 16) },
-    ]),
-  );
-
-  const syncEngine = new SyncEngine();
-  const merged = syncEngine.mergeWithKeep(keep, pushedVars, branch);
-  const pruned: KeepFile = {
-    ...merged,
-    variables: Object.fromEntries(
-      Object.entries(merged.variables).flatMap(([name, varEntries]) => {
-        if (name in finalEnv) return [[name, varEntries]] as const;
-        const filtered = varEntries.filter((e) => e.branch !== branch);
-        return filtered.length > 0 ? ([[name, filtered]] as const) : [];
-      }),
-    ),
-  };
-  const finalKeep = attachAll(pruned);
-
-  const result = await serviceClient.pushSecrets(projectId, JSON.stringify(finalKeep), envBlob, branch);
-
-  writeKeepCache(orgId, projectId, result.keep_hash, envBlob);
-  fileManager.writeKeepFile(SyncEngine.adoptServerKeep(result.keep_file, finalKeep, branch));
-  fileManager.writeEncryptedEnvFile(finalEnv, projectKey, undefined, finalKeep, branch);
-
-  const existingSyncState = pm.readSyncState();
-  fileManager.writeSyncState({
-    ...existingSyncState,
-    last_sync: new Date().toISOString(),
-    synced_variables: Object.keys(finalEnv),
-    user_id: userId,
-    keep_hash: setSyncKeepHash(existingSyncState, branch, SyncEngine.computeKeepHash(finalKeep, branch)),
-  });
+  await commitGated(ctx, { set, remove: clear }, { transformKeep: attachAll });
 }
 
 /**
@@ -445,9 +300,9 @@ export async function writeImportedAndSync(
  * before anything is read even from `outcome`. Otherwise writes when there
  * is either something to import OR (an `--overwrite` run) something to
  * clear; a clear-only overwrite (nothing new or changed, only removals) has
- * an empty `entries` array, so `ctx.localPlaintext` is pruned of the
- * cleared names and `forceWrite` is set so `writeImportedAndSync` does not
- * take its normal "nothing to do" early return.
+ * an empty `entries` array, so the cleared names are passed as `clear` and
+ * `forceWrite` is set so `writeImportedAndSync` does not take its normal
+ * "nothing to do" early return.
  */
 export async function writeImportOutcome(
   ctx: ResolvedContext,
@@ -467,14 +322,10 @@ export async function writeImportOutcome(
   const hasWrite = outcome.imported.length > 0 || cleared.length > 0 || unchangedEntries.length > 0;
   if (!hasWrite) return { wrote: false };
 
-  const prunedCtx: ResolvedContext =
-    cleared.length > 0
-      ? { ...ctx, localPlaintext: Object.fromEntries(Object.entries(ctx.localPlaintext).filter(([k]) => !cleared.includes(k))) }
-      : ctx;
-
-  await writeImportedAndSync(prunedCtx, [...outcome.imported, ...unchangedEntries], {
+  await writeImportedAndSync(ctx, [...outcome.imported, ...unchangedEntries], {
     push: opts.push,
     forceWrite: cleared.length > 0 || unchangedEntries.length > 0,
+    clear: cleared,
   });
   return { wrote: true };
 }
