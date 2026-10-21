@@ -196,6 +196,8 @@ The `capy secrets` edit screens and `capy secrets set` do the same check against
 
 `capy run -- <cmd>` decrypts `.env` in memory and spawns your command with the values set as environment variables. Works in any runtime that reads env vars. See [docs.capy.sc/using/running-your-app](https://docs.capy.sc/using/running-your-app).
 
+**Docker Compose:** `capy run -- docker compose up` works with an unchanged `env_file: .env`. Capy passes compose an extra override listing only the decrypted variable *names* for the services that read `.env`, so compose forwards the real values into those containers. Nothing is written to disk.
+
 ## Deploying
 
 `capy deploy` walks through Vercel, Cloudflare, Docker, Fly, Railway, Render, Heroku, GitHub Actions, and AWS Lambda. See [docs.capy.sc/using/deploying](https://docs.capy.sc/using/deploying).
