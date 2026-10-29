@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { createInterface } from 'node:readline';
 import { InteractionCommandError, type Interaction, type ProviderAuthentication } from '../../ui/interaction';
@@ -14,7 +14,15 @@ export function workosLoginHandoff(text: string): Readonly<{ url: string; code: 
   return { url: url.toString(), code };
 }
 
-export async function runWorkOSFlowLogin(interaction: Interaction): Promise<void> {
+/** File storage is opt-in for a sandbox whose owner has approved that backend. */
+export const workosFlowLoginArgs = (insecureStorage: boolean): readonly string[] => [
+  'auth', 'login', '--json', ...(insecureStorage ? ['--insecure-storage'] : []),
+];
+
+export async function runWorkOSFlowLogin(
+  interaction: Interaction,
+  options: Readonly<{ force?: boolean }> = {},
+): Promise<void> {
   const id = randomUUID();
   const report = async (state: ProviderAuthentication['state'], handoff?: Readonly<{ url: string; code: string }>, failureCode?: string): Promise<void> => {
     await interaction.progress({
@@ -26,7 +34,19 @@ export async function runWorkOSFlowLogin(interaction: Interaction): Promise<void
     });
   };
   await report('starting');
-  const child = spawn('workos', ['auth', 'login', '--json'], {
+  // WorkOS auth login reuses a valid session unless the provider CLI logs out
+  // first. This only clears WorkOS credentials, never the Capy session.
+  if (options.force) {
+    const storage = process.env.CAPY_WORKOS_INSECURE_STORAGE === '1' ? ['--insecure-storage'] : [];
+    const logout = spawnSync('workos', ['auth', 'logout', '--json', ...storage], {
+      stdio: 'pipe', env: { ...process.env, WORKOS_MODE: 'agent' },
+    });
+    if (logout.status !== 0) {
+      await report('failed', undefined, 'ROTATE_WORKOS_LOGOUT_FAILED');
+      throw new InteractionCommandError('ROTATE_WORKOS_LOGOUT_FAILED', 'Could not reset the WorkOS session for a fresh sign-in.');
+    }
+  }
+  const child = spawn('workos', workosFlowLoginArgs(process.env.CAPY_WORKOS_INSECURE_STORAGE === '1'), {
     stdio: ['ignore', 'pipe', 'pipe'], detached: process.platform !== 'win32',
     env: { ...process.env, WORKOS_MODE: 'agent', CI: '', NO_COLOR: '1', FORCE_COLOR: '0' },
   });

@@ -248,13 +248,13 @@ async function acquireToken(nonTty?: boolean): Promise<string> {
  * waits — so stdio is inherited and the refusal comes first when there is
  * nobody to answer it.
  */
-async function loginAndReadToken(nonTty?: boolean): Promise<string> {
+async function loginAndReadToken(nonTty?: boolean, force = false): Promise<string> {
   // Wording covers both callers: never signed in, and signed in but stale.
   // Naming the wrong one sends the user looking for a session that was never
   // there, or makes them think they have to sign out first.
   const interaction = currentInteraction();
   if (interaction) {
-    await runWorkOSFlowLogin(interaction);
+    await runWorkOSFlowLogin(interaction, { force });
     const renewed = readStoredCredentials();
     if (!renewed || renewed.expiresAt <= Date.now()) throw new InteractionCommandError(
       'ROTATE_WORKOS_SESSION_UNAVAILABLE', 'WorkOS login completed, but its saved session could not be read.');
@@ -268,7 +268,12 @@ async function loginAndReadToken(nonTty?: boolean): Promise<string> {
   }
 
   human(`\n  Capy needs a WorkOS session. Opening ${B('workos auth login')}.`);
-  const result = spawnSync('workos', ['auth', 'login'], { stdio: 'inherit' });
+  const storage = process.env.CAPY_WORKOS_INSECURE_STORAGE === '1' ? ['--insecure-storage'] : [];
+  if (force) {
+    const logout = spawnSync('workos', ['auth', 'logout', ...storage], { stdio: 'inherit' });
+    if (logout.status !== 0) throw new InteractionCommandError('ROTATE_WORKOS_LOGOUT_FAILED', 'Could not reset the WorkOS session.');
+  }
+  const result = spawnSync('workos', ['auth', 'login', ...storage], { stdio: 'inherit' });
   if (result.status !== 0) {
     humanError(`\n  ${B('workos auth login')} failed or was cancelled. Nothing was changed.\n`);
     commandExit(1, 'WorkOS could not complete this step. Review the preceding instructions before retrying.');
@@ -340,6 +345,10 @@ async function fetchJson(url: string, init: RequestInit): Promise<unknown> {
   const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   try {
     const res = await fetch(url, { ...init, signal: controller.signal });
+    // HTTP authentication failures may have no GraphQL/JSON body.
+    if (res.status === 401 || res.status === 403) {
+      throw new WorkOSGraphQLError('WorkOS rejected the request', undefined, res.status);
+    }
     return await res.json();
   } finally {
     clearTimeout(timeout);
@@ -361,6 +370,7 @@ export class WorkOSGraphQLError extends Error {
     message: string,
     readonly code: string | undefined,
     readonly status: number | undefined,
+    readonly operationName?: string,
   ) {
     super(message);
   }
@@ -397,14 +407,21 @@ async function graphql<T>(
       ...(environmentId ? { 'x-url-environment-id': environmentId } : {}),
     },
     body: JSON.stringify({ query, variables, operationName }),
+  }).catch((error: unknown) => {
+    if (error instanceof WorkOSGraphQLError) throw new WorkOSGraphQLError(error.message, error.code, error.status, operationName);
+    throw error;
   });
   const res = body as GraphQLResponse<T>;
   const firstError = res.errors?.[0];
   if (firstError) {
+    if (operationName === 'createKey' && res.data != null) {
+      throw new InteractionCommandError('ROTATE_WORKOS_CREATE_UNCERTAIN', 'WorkOS returned a partial createKey result. Check the WorkOS dashboard before retrying; this creation will not be replayed.');
+    }
     throw new WorkOSGraphQLError(
       firstError.message ?? 'WorkOS request failed',
       firstError.extensions?.code,
       firstError.extensions?.exception?.status,
+      operationName,
     );
   }
   if (res.data === undefined || res.data === null) {
@@ -489,40 +506,24 @@ export interface WorkOSKey {
   readonly expiredAt: string | null;
 }
 
-/**
- * Turn a WorkOS API failure into something a person can act on.
- *
- * Every call here goes through this, because the alternative is what shipped:
- * an unhandled `WorkOSGraphQLError` printing a stack trace through
- * `processTicksAndRejections` at somebody who typed `capy connect workos`.
- *
- * 403 gets its own message because it has a specific cause and a specific fix.
- * WorkOS returns it for anything the signed-in account cannot see, which in
- * practice means the wrong account is signed in — so the message names the
- * account, the client ID and the environment it was reaching for, since the
- * whole question is which of those three does not line up.
- *
- * NOTE THE STATUS, NOT THE CODE. WorkOS labels these `INTERNAL_SERVER_ERROR`
- * in `extensions.code` and puts the real 403 in `exception.status`, so the code
- * is not the discriminator it looks like.
- */
+/** A provider rejection is not proof that the signed-in account is wrong. */
+class WorkOSAuthenticationError extends InteractionCommandError {
+  constructor(readonly rejection: WorkOSGraphQLError, context: WorkOSErrorContext) {
+    super(
+      rejection.status === 401 || rejection.code === 'UNAUTHENTICATED'
+        ? 'ROTATE_WORKOS_SESSION_REJECTED' : 'ROTATE_WORKOS_PERMISSION_DENIED',
+      `WorkOS refused ${rejection.operationName ?? 'the request'}${rejection.status ? ` (HTTP ${rejection.status})` : ''}${context.email ? ` for ${context.email}` : ''}. Sign in to WorkOS again to retry. If access is still denied, check the WorkOS role and session permissions for this environment.`,
+    );
+  }
+}
+
 function failWorkOSRequest(err: unknown, context: WorkOSErrorContext): never {
   if (!(err instanceof WorkOSGraphQLError)) throw err;
-
-  if (err.status === 403) {
-    humanError(`\n  Your WorkOS account cannot see this environment.`);
-    if (context.email) humanError(`  Signed in as ${B(context.email)}.`);
-    if (context.clientIdVar && context.clientId) {
-      humanError(`  ${B(context.clientIdVar)} is ${context.clientId}.`);
-    }
-    if (context.environmentName) humanError(`  Reaching for ${B(context.environmentName)}.`);
-    humanError(`\n  Check ${B('workos auth status')} — signing in as a different account is`);
-    humanError('  the usual fix.\n');
-    commandExit(1, 'WorkOS could not complete this step. Review the preceding instructions before retrying.');
+  if (err.status === 401 || err.status === 403 || err.code === 'FORBIDDEN' || err.code === 'UNAUTHENTICATED') {
+    throw new WorkOSAuthenticationError(err, context);
   }
-
   const status = err.status ? ` (${err.status})` : '';
-  humanError(`\n  WorkOS request failed${status}. Try again.\n`);
+  humanError(`\n  WorkOS request ${err.operationName ?? ''} failed${status}. Try again.\n`);
   commandExit(1, 'WorkOS could not complete this step. Review the preceding instructions before retrying.');
 }
 
@@ -1217,44 +1218,9 @@ async function rotate(
     commandExit(1, 'WorkOS could not complete this step. Review the preceding instructions before retrying.');
   }
 
-  const token = await acquireToken(opts.nonTty);
-
-  // Re-resolve from `.env` rather than trusting `previous.account_id`. The
-  // client ID is the source of truth and the user may have repointed the app
-  // at a different environment since `connect` — in which case the recorded
-  // environment is stale and rotating against it would mint a key nothing
-  // uses while leaving the live one alone.
-  const target = await resolveTarget(ctx, token, opts.nonTty, previous.account_id);
-  if (previous.account_id && previous.account_id !== target.environmentId) {
-    human(`\n  ${B(CLIENT_ID_VAR)} now points at ${target.environmentName}.`);
-    human('  Rotating there, and updating the recorded environment.\n');
-  }
-
-  const current = ctx.localPlaintext[varName];
-  const keys = await fetchKeys(token, target.environmentId);
-  const outgoing = current ? findKeyByValue(keys, current) : undefined;
-
-  // Which application to mint into. The outgoing key's application when we
-  // could identify it, so the new key lands beside the one it replaces;
-  // otherwise the environment's sole application. Two applications and no
-  // match is genuinely ambiguous, and guessing would put the key on the wrong
-  // one.
-  const applicationId = await chooseApplicationId(keys, outgoing, varName, target, opts.nonTty);
-
-  const superseded = outgoing ?? findPreviousRotatedKey(keys, '', applicationId);
-  if (currentInteraction()) {
-    const { approved } = await prompt([{ type: 'confirm', name: 'approved', default: false,
-      message: `Rotate ${varName} in WorkOS ${target.environmentName} (${target.sandbox ? 'sandbox' : 'production'})?\nEnvironment: ${target.environmentId}\nClient: ${target.clientId}\nApplication: ${applicationId}\n${superseded ? `Expire ${superseded.name} (${superseded.id}) after 1 hour.` : 'No existing key will be expired.'}`,
-    }]);
-    if (!approved) throw new ExitPromptError('Rotation cancelled');
-  }
-
-  const created = await createKey(token, target.environmentId, applicationId, rotationKeyName());
-  if (!created) {
-    humanError(`\n  WorkOS did not create a new key for ${B(varName)}.`);
-    humanError('  Nothing was changed. Try again, or check the WorkOS dashboard.\n');
-    commandExit(1, 'WorkOS could not complete this step. Review the preceding instructions before retrying.');
-  }
+  const initialToken = await acquireToken(opts.nonTty);
+  const replacement = await createReplacement(ctx, varName, previous, opts, initialToken);
+  const { token, target, outgoing, superseded, created } = replacement;
 
   // Who gets expired. The key whose value is in `.env` when we could identify
   // it; otherwise the last key Capy minted here. The second route is what
@@ -1297,6 +1263,84 @@ async function rotate(
       ...(keyTypePrefix(created.value) ? { key_prefix: keyTypePrefix(created.value) as string } : {}),
     },
   };
+}
+
+interface RotationPlan {
+  readonly target: ResolvedTarget;
+  readonly applicationId: string;
+  readonly outgoing: WorkOSKey | undefined;
+  readonly superseded: WorkOSKey | undefined;
+}
+
+interface Replacement extends RotationPlan {
+  readonly token: string;
+  readonly created: CreatedKey;
+}
+
+/** Retry a definite provider auth rejection once, only before a key exists. */
+async function createReplacement(
+  ctx: ResolvedContext,
+  varName: string,
+  previous: ConnectorMetadata,
+  opts: RotateOpts,
+  initialToken: string,
+): Promise<Replacement> {
+  const prepare = async (token: string, expected?: RotationPlan): Promise<RotationPlan> => {
+    // After reauthentication, resolve the approved environment directly: never
+    // let a different account's defaults or a picker silently retarget it.
+    const target = expected ? await (async (): Promise<ResolvedTarget> => {
+      const environments = await fetchEnvironments(token);
+      const match = environments.find(environment => environment.id === expected.target.environmentId);
+      if (!match || match.clientId !== expected.target.clientId || (match.sandbox ?? false) !== expected.target.sandbox) {
+        throw new InteractionCommandError('ROTATE_WORKOS_TARGET_CHANGED', 'The new WorkOS session cannot access the approved environment and client. No key was created.');
+      }
+      return expected.target;
+    })() : await resolveTarget(ctx, token, opts.nonTty, previous.account_id);
+    if (!expected && previous.account_id && previous.account_id !== target.environmentId) {
+      human(`\n  ${B(CLIENT_ID_VAR)} now points at ${target.environmentName}.`);
+      human('  Rotating there, and updating the recorded environment.\n');
+    }
+    const keys = await fetchKeys(token, target.environmentId);
+    const current = ctx.localPlaintext[varName];
+    const outgoing = current ? findKeyByValue(keys, current) : undefined;
+    const applicationId = expected ? expected.applicationId : await chooseApplicationId(keys, outgoing, varName, target, opts.nonTty);
+    if (expected && (!keys.some(key => key.applicationId === applicationId) || (outgoing && outgoing.applicationId !== applicationId))) {
+      throw new InteractionCommandError('ROTATE_WORKOS_TARGET_CHANGED', 'The approved WorkOS application could not be verified after sign-in. No key was created.');
+    }
+    const superseded = outgoing ?? findPreviousRotatedKey(keys, '', applicationId);
+    return { target, applicationId, outgoing, superseded };
+  };
+  const recover = async (error: unknown, recovered: boolean, expected?: RotationPlan): Promise<Replacement> => {
+    if (!(error instanceof WorkOSAuthenticationError)) throw error;
+    if (recovered) throw new InteractionCommandError(error.code,
+      `WorkOS still refuses ${error.rejection.operationName ?? 'the request'} after a fresh sign-in. No replacement key was created. Check the WorkOS role and session permissions for the approved environment.`);
+    if (!interactionOrTerminal(opts.nonTty)) throw error;
+    const { reauthenticate } = await prompt([{ type: 'confirm', name: 'reauthenticate', default: false,
+      message: `WorkOS refused ${error.rejection.operationName ?? 'the request'}${error.rejection.status ? ` (HTTP ${error.rejection.status})` : ''}. Sign in to WorkOS again and retry this rotation?`,
+    }]);
+    if (!reauthenticate) throw new ExitPromptError('WorkOS sign-in cancelled; no key was created');
+    const token = await loginAndReadToken(opts.nonTty, true);
+    return attempt(token, true, expected);
+  };
+  const attempt = async (token: string, recovered: boolean, expected?: RotationPlan): Promise<Replacement> => {
+    const preparation = await prepare(token, expected).then(plan => ({ ok: true as const, plan }))
+      .catch((error: unknown) => ({ ok: false as const, error }));
+    if (!preparation.ok) return recover(preparation.error, recovered, expected);
+    const plan = preparation.plan;
+    if (currentInteraction() || recovered) {
+      const { target, applicationId, superseded } = plan;
+      const { approved } = await prompt([{ type: 'confirm', name: 'approved', default: false,
+        message: `Rotate ${varName} in WorkOS ${target.environmentName} (${target.sandbox ? 'sandbox' : 'production'})?\nEnvironment: ${target.environmentId}\nClient: ${target.clientId}\nApplication: ${applicationId}\n${superseded ? `Expire ${superseded.name} (${superseded.id}) after 1 hour.` : 'No existing key will be expired.'}`,
+      }]);
+      if (!approved) throw new ExitPromptError('Rotation cancelled');
+    }
+    const creation = await createKey(token, plan.target.environmentId, plan.applicationId, rotationKeyName())
+      .then(created => ({ ok: true as const, created })).catch((error: unknown) => ({ ok: false as const, error }));
+    if (!creation.ok) return recover(creation.error, recovered, plan);
+    if (!creation.created) throw new InteractionCommandError('ROTATE_WORKOS_CREATE_FAILED', 'WorkOS did not return a replacement key. Check the WorkOS dashboard before retrying.');
+    return { ...plan, token, created: creation.created };
+  };
+  return attempt(initialToken, false);
 }
 
 /**
