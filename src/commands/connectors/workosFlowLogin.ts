@@ -1,7 +1,7 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { createInterface } from 'node:readline';
-import { InteractionCommandError, type Interaction, type ProviderAuthentication } from '../../ui/interaction';
+import { InteractionCommandError, ExitPromptError, type Interaction, type ProviderAuthentication } from '../../ui/interaction';
 
 /** Only the public handoff from WorkOS CLI v0.22 login output is forwarded. */
 export function workosLoginHandoff(text: string): Readonly<{ url: string; code: string }> | null {
@@ -19,7 +19,7 @@ export const workosFlowLoginArgs = (insecureStorage: boolean): readonly string[]
   'auth', 'login', '--json', ...(insecureStorage ? ['--insecure-storage'] : []),
 ];
 
-export async function runWorkOSFlowLogin(
+async function runWorkOSFlowLoginAttempt(
   interaction: Interaction,
   options: Readonly<{ force?: boolean }> = {},
 ): Promise<void> {
@@ -92,4 +92,28 @@ export async function runWorkOSFlowLogin(
     process.off('SIGTERM', stop);
     process.off('exit', stop);
   }
+}
+
+
+/** Keep the rotation open while the user renews an expired provider handoff. */
+export async function runWorkOSFlowLogin(
+  interaction: Interaction,
+  options: Readonly<{ force?: boolean }> = {},
+): Promise<void> {
+  const outcome = await runWorkOSFlowLoginAttempt(interaction, options)
+    .then(() => ({ ok: true as const })).catch((error: unknown) => ({ ok: false as const, error }));
+  if (outcome.ok) return;
+  if (!(outcome.error instanceof InteractionCommandError) || outcome.error.code !== 'ROTATE_WORKOS_LOGIN_FAILED') throw outcome.error;
+  const retry = await interaction.prompt<boolean>({
+    view: {
+      text: 'WorkOS login expired or could not complete. Request a new code to continue this rotation?',
+      input: { kind: 'confirm', default: true },
+    },
+    decide: payload => typeof payload.value === 'boolean'
+      ? { value: payload.value } : { error: 'Choose yes to request a new code, or no to cancel.' },
+  });
+  if (!retry) throw new ExitPromptError('WorkOS login cancelled; no key was created');
+  // The previous child is fully closed before a new device authorization starts.
+  // Logout is only needed for the initial forced reauthentication, not retries.
+  return runWorkOSFlowLogin(interaction);
 }
