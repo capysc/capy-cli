@@ -6,7 +6,7 @@ import { join } from 'node:path';
 // provider endpoint can be reached, including on an unexpected code path.
 const run = (scenario: 'success' | 'expiry-fails' | 'client-id' | 'ambiguous') => {
   const source = `
-    import { mock } from 'bun:test';
+    import { mock, spyOn } from 'bun:test';
     import * as fs from 'node:fs';
     import * as cp from 'node:child_process';
     const scenario = ${JSON.stringify(scenario)};
@@ -29,9 +29,13 @@ const run = (scenario: 'success' | 'expiry-fails' | 'client-id' | 'ambiguous') =
       createKey:{createKey:{__typename:'KeyCreated',key:{key:{id:'key_new'},value:'fixture-new-secret'}}},
       expireKey:{expireKey:{__typename:scenario==='expiry-fails'?'KeyNotFound':'KeyExpired'}},
     };
-    Reflect.set(globalThis,'fetch',async (url, options)=> {
+    spyOn(globalThis,'fetch').mockImplementation(async (url, options)=> {
       if (url !== 'https://api.workos.com/graphql') throw new Error('Unexpected network request');
       const request = JSON.parse(options.body);
+      const environmentHeader = options.headers['x-url-environment-id'];
+      if (request.operationName === 'teamProjectsV2' ? environmentHeader !== undefined : environmentHeader !== 'env_fixture') {
+        throw new Error('WorkOS environment context is missing or incorrect');
+      }
       call(request.operationName,request.variables);
       if (!(request.operationName in responses)) throw new Error('Unexpected operation');
       return Response.json({data:responses[request.operationName]});

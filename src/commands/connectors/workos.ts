@@ -381,7 +381,8 @@ async function graphql<T>(
   token: string,
   operationName: string,
   query: string,
-  variables: Record<string, unknown> = {},
+  variables: Readonly<Record<string, unknown>> = {},
+  environmentId?: string,
 ): Promise<T> {
   const body = await fetchJson(GRAPHQL_URL, {
     method: 'POST',
@@ -392,6 +393,8 @@ async function graphql<T>(
       // logs it. Sending it keeps Capy's traffic legible on WorkOS's side
       // rather than anonymous.
       'x-operation-name': operationName,
+      // Key operations require the same selected environment as the dashboard.
+      ...(environmentId ? { 'x-url-environment-id': environmentId } : {}),
     },
     body: JSON.stringify({ query, variables, operationName }),
   });
@@ -562,6 +565,7 @@ async function fetchKeys(
     'keys',
     KEYS_QUERY,
     { environmentId },
+    environmentId,
   ).catch((err) => failWorkOSRequest(err, { ...context, email: signedInEmail() }));
   return data.keys.data;
 }
@@ -1263,7 +1267,7 @@ async function rotate(
   // creation then failed, and expiring immediately would break it in the
   // window between `.env` being written and the deploy that reads it.
   const scheduled = superseded
-    ? await expireKey(token, superseded.id, new Date(Date.now() + OVERLAP_MS))
+    ? await expireKey(token, superseded.id, new Date(Date.now() + OVERLAP_MS), target.environmentId)
     : false;
 
   human(`\n  Rotated ${B(varName)} in ${target.environmentName}.`);
@@ -1391,7 +1395,7 @@ async function createKey(
     };
   }>(token, 'createKey', CREATE_KEY_MUTATION, {
     input: { environmentId, applicationId, name },
-  }).catch((err) => failWorkOSRequest(err, { email: signedInEmail() }));
+  }, environmentId).catch((err) => failWorkOSRequest(err, { email: signedInEmail() }));
   // Branch on the union member, not on any message. `KeyCreated` is the only
   // success shape; anything else is a refusal the server named.
   if (data.createKey.__typename !== 'KeyCreated') return undefined;
@@ -1400,13 +1404,14 @@ async function createKey(
   return { id: created.key.id, value: created.value };
 }
 
-async function expireKey(token: string, keyId: string, expiredAt: Date): Promise<boolean> {
+async function expireKey(token: string, keyId: string, expiredAt: Date, environmentId: string): Promise<boolean> {
   try {
     const data = await graphql<{ expireKey: { __typename: string } }>(
       token,
       'expireKey',
       EXPIRE_KEY_MUTATION,
       { input: { keyId, expiredAt: expiredAt.toISOString() } },
+      environmentId,
     );
     // `KeyNotFound` is the documented miss. Treat every non-success typename
     // as a failure to schedule rather than assuming the shape of the rest.

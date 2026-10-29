@@ -50,6 +50,7 @@ ISOLATED_FILES=(
   tests/auth/oauthServer.test.ts
   tests/auth/sessionFileBackend.test.ts
   tests/auth/pairing/pairedSessionInstallation.test.ts
+  tests/auth/pairing/composedCustodyReuse.test.ts
   tests/auth/sessionLifecycle.test.ts
   tests/commands/branchKeepFile.test.ts
   tests/commands/capyCommand.test.ts

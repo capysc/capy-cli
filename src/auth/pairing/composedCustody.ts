@@ -13,6 +13,7 @@ import { hostname } from 'os';
 import { readLocalRoot, saveLocalRootExclusive } from '../../config/globalConfig';
 import { BrokerClient, type AwaitAnswerResult } from '../../service/brokerClient';
 import { AuthService } from '../authService';
+import { inspectExistingFilesystemCustody } from './existingFilesystemCustody';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const USER_ID = /^user_[A-Za-z0-9_-]+$/;
@@ -145,11 +146,16 @@ export async function continueComposedCustody(input: ContinueComposedCustodyInpu
   const previous = await previousResponse.json() as {
     readonly flow_id?: string;
     readonly user_id?: string;
+    readonly initialization_run_id?: string | null;
     readonly custody?: { readonly connection_id?: string; readonly acknowledged_at?: string };
   };
   if (previous.flow_id !== input.flowId || previous.user_id !== input.userId || previous.custody?.acknowledged_at) {
     return { kind: 'denied', code: 'AUTH_FLOW_CONFLICT' };
   }
+  // Keep repository-bound onboarding on its existing browser-custody path.
+  const existing = previous.initialization_run_id === null
+    ? await inspectExistingFilesystemCustody(input) : { kind: 'missing' } as const;
+  if (existing.kind === 'invalid') return { kind: 'indeterminate', code: 'CUSTODY_FILESYSTEM_UNVERIFIED' };
   if (previous.custody?.connection_id && UUID.test(previous.custody.connection_id)) {
     await broker.cancel(previous.custody.connection_id);
   }
@@ -167,6 +173,22 @@ export async function continueComposedCustody(input: ContinueComposedCustodyInpu
       : binding === 'conflict'
         ? { kind: 'denied', code: 'AUTH_FLOW_CONFLICT' }
         : { kind: 'retryable', code: 'BROKER_UNAVAILABLE' };
+  }
+  if (existing.kind === 'verified') {
+    const readback = await inspectExistingFilesystemCustody(input);
+    if (readback.kind !== 'verified' || readback.orgId !== existing.orgId) {
+      await broker.cancel(connection.connectionId).catch(() => undefined);
+      return { kind: 'indeterminate', code: 'CUSTODY_FILESYSTEM_UNVERIFIED' };
+    }
+    const acknowledgement = await acknowledgeDelivery(input, connection.connectionId);
+    await broker.cancel(connection.connectionId).catch(() => undefined);
+    return acknowledgement === 'acknowledged'
+      ? { kind: 'complete', flowId: input.flowId, orgId: existing.orgId }
+      : acknowledgement === 'expired'
+        ? { kind: 'denied', code: 'AUTH_FLOW_EXPIRED' }
+        : acknowledgement === 'conflict'
+          ? { kind: 'denied', code: 'AUTH_FLOW_CONFLICT' }
+          : { kind: 'indeterminate', code: 'CUSTODY_ACKNOWLEDGEMENT_UNCONFIRMED' };
   }
   const answer = await broker.awaitAnswer(connection, { deadlineMs: 900_000, waitSeconds: 25 });
   const terminal = brokerOutcome(answer);
