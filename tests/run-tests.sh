@@ -65,6 +65,7 @@ ISOLATED_FILES=(
   tests/commands/rotatePromotesThenRotates.test.ts
   tests/commands/rotateRefusals.test.ts
   tests/commands/removeCommand.test.ts
+  tests/commands/editNamePrompt.test.ts
   tests/commands/connectDokploy.test.ts
   tests/commands/gateFirst.test.ts
   tests/commands/bootstrapNoSecrets.test.ts
