@@ -84,6 +84,45 @@ describe('capy help --json', () => {
   });
 });
 
+describe('capy deploy dokploy --discover (CAP-703), both entrypoints', () => {
+  test.each([
+    ['prod', PROD_CLI],
+    ['dev', DEV_CLI],
+  ])('%s: the deploy command lists --discover, --plan, --confirm and --base-url', (_name, cli) => {
+    const { stdout } = run(cli, ['deploy', '--help']);
+    for (const flag of ['--discover', '--plan <file>', '--confirm <plan_id>', '--base-url <url>']) {
+      expect(stdout, `missing ${flag}`).toContain(flag);
+    }
+  });
+
+  test.each([
+    ['prod', PROD_CLI],
+    ['dev', DEV_CLI],
+  ])('%s: --discover on another target is a JSON refusal on stdout, in a terminal or not', (_name, cli) => {
+    const { stdout, code } = run(cli, ['deploy', 'aws-ssm', '--discover']);
+    expect(code).toBe(1);
+    expect(JSON.parse(stdout)).toMatchObject({ ok: false, code: 'DISCOVER_UNSUPPORTED_TARGET' });
+  });
+
+  test.each([
+    ['prod', PROD_CLI],
+    ['dev', DEV_CLI],
+  ])('%s: --confirm without --plan is a coded refusal before anything is read', (_name, cli) => {
+    const { stdout, code } = run(cli, ['deploy', 'dokploy', '--discover', '--confirm', 'abc', '--base-url', 'https://dokploy.example.com']);
+    expect(code).toBe(1);
+    expect(JSON.parse(stdout)).toMatchObject({ ok: false, code: 'PLAN_REQUIRED' });
+  });
+
+  test('help --json lists the mode with supportsDryRun and publishes the plan schema', () => {
+    const doc = JSON.parse(run(PROD_CLI, ['help', '--json']).stdout);
+    const deploy = flatten(doc.commands).find((c: any) => c.path === 'deploy');
+    expect(deploy.supportsDryRun).toBe(true);
+    expect(deploy.modes[0]).toMatchObject({ invocation: 'capy deploy dokploy --discover', supportsDryRun: true, alwaysJson: true, planSchema: 'deploy_dokploy_plan' });
+    expect(doc.schemas.deploy_dokploy_plan.properties.entries.items.required).toContain('service_id');
+    expect(doc.errorCodes).toEqual(expect.arrayContaining(['PLAN_CHANGED', 'SERVICE_NOT_FOUND', 'DUPLICATE_ENTRY', 'TARGET_EXISTS']));
+  });
+});
+
 function flatten(commands: any[]): any[] {
   return commands.flatMap((c) => [c, ...flatten(c.subcommands ?? [])]);
 }

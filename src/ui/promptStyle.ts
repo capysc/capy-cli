@@ -40,6 +40,23 @@ export const CHECKBOX_INSTRUCTIONS =
   DIM(' to proceed') +
   '\n';
 
+// COPY-FLAG: new user-facing string — the existing line plus a `/` filter key, minimal/neutral wording.
+/** `CHECKBOX_INSTRUCTIONS` for the searchable checkbox, which adds `/` to start filtering. */
+export const SEARCHABLE_CHECKBOX_INSTRUCTIONS =
+  '\n\n' +
+  DIM('Press ') +
+  KEY('space') +
+  DIM(' to select, ') +
+  KEY('a') +
+  DIM(' to toggle all, ') +
+  KEY('i') +
+  DIM(' to invert, ') +
+  KEY('/') +
+  DIM(' to filter, ') +
+  KEY('enter') +
+  DIM(' to proceed') +
+  '\n';
+
 /**
  * Theme override for `inquirer.prompt({ type: 'checkbox', ... })`.
  *
@@ -65,6 +82,13 @@ export const CHECKBOX_THEME = {
   // still useful.
   helpMode: 'always' as const,
 };
+
+/**
+ * The cursor glyph in front of the active row of a checkbox list (inquirer's own
+ * default, which `searchableCheckbox` and the `capy secrets` pickers draw). With
+ * `CHECKBOX_THEME.icon` it makes `❯ ◉ FOO` (active, ticked) and `  ◯ BAR`.
+ */
+export const CHECKBOX_CURSOR = '❯';
 
 /**
  * Theme override for `inquirer.prompt({ type: 'list', ... })`. List prompts

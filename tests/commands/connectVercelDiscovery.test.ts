@@ -251,9 +251,11 @@ const fakeDiscoveryCtx = (over: Record<string, unknown> = {}): DiscoveryContext 
 
 const discoverOpts = (over: Partial<ConnectOpts> = {}): ConnectOpts => ({ nonTty: true, tokenEnv: 'T', ...over });
 
+// Bare `capy` in each discovered folder (sync/gate.ts) is the real thing unless a test supplies its own `syncFolder`;
+// the default here reports every folder in sync (the gate itself is tested in tests/sync/gate.test.ts).
 const connectorFor = (root: string, data: FakeVercelData, extra: Partial<Parameters<typeof createVercelConnector>[0]> = {}) => {
   const fetchMock = mock(fakeVercelFetch(data));
-  const connector = createVercelConnector({ fetch: fetchMock as unknown as VercelFetchLike, env: { T: 'tok_fake' }, cwd: root, sleep: async () => {}, ...extra });
+  const connector = createVercelConnector({ fetch: fetchMock as unknown as VercelFetchLike, env: { T: 'tok_fake' }, cwd: root, sleep: async () => {}, syncFolder: async () => ({ ok: true }), ...extra });
   return { connector, fetchMock };
 };
 

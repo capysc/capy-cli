@@ -119,9 +119,8 @@ describe('live-mode firewall (capy-dev)', () => {
     });
     // Both streams. The firewall refusal is a typed `DEV_LIVE_FIREWALL` now,
     // so it goes out through `displayErrorAndExit` — which prints on stdout
-    // like every other typed failure in the CLI, and which is also what serves
-    // the page under `--web`. What matters here is the sentence a person sees,
-    // not which descriptor it arrived on.
+    // like every other typed failure in the CLI. What matters here is the
+    // sentence a person sees, not which descriptor it arrived on.
     const logSpy = spyOn(console, 'log').mockImplementation(() => {});
     const errorSpy = spyOn(console, 'error').mockImplementation(() => {});
 

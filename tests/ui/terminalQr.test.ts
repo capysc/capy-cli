@@ -10,6 +10,15 @@
 import { describe, test, expect, afterEach } from 'bun:test';
 import { buildTerminalQr, readQrEnv, qrFit, renderTerminalQr, type QrEnv } from '../../src/ui/terminalQr';
 
+// Set process.stdout's TTY fields with defineProperty, never plain assignment:
+// another test file in the same bun process may leave `isTTY` defined
+// non-writable (CI's Linux runner exposed this), and assignment would throw.
+type StdoutProp = 'isTTY' | 'columns' | 'rows';
+function setStdout(prop: StdoutProp, value: unknown): void {
+  Object.defineProperty(process.stdout, prop, { value, configurable: true, writable: true });
+}
+
+
 const PAIR_URL = 'https://keep.capy.sc/pair';
 
 // Captured from a real `qrcode-terminal` `{small: true}` encode of PAIR_URL
@@ -108,17 +117,17 @@ describe('readQrEnv', () => {
   const originalNoColor = process.env.NO_COLOR;
 
   afterEach(() => {
-    process.stdout.isTTY = originalIsTTY;
-    process.stdout.columns = originalColumns;
-    process.stdout.rows = originalRows;
+    setStdout('isTTY', originalIsTTY);
+    setStdout('columns', originalColumns);
+    setStdout('rows', originalRows);
     if (originalNoColor === undefined) delete process.env.NO_COLOR;
     else process.env.NO_COLOR = originalNoColor;
   });
 
   test('reads isTTY/columns/rows/NO_COLOR off the real process', () => {
-    process.stdout.isTTY = true;
-    process.stdout.columns = 100;
-    process.stdout.rows = 40;
+    setStdout('isTTY', true);
+    setStdout('columns', 100);
+    setStdout('rows', 40);
     delete process.env.NO_COLOR;
 
     const env = readQrEnv();
@@ -126,9 +135,9 @@ describe('readQrEnv', () => {
   });
 
   test('falls back to 80x24 when columns/rows are unknown (matches the repo-wide convention)', () => {
-    process.stdout.isTTY = true;
-    process.stdout.columns = undefined as unknown as number;
-    process.stdout.rows = undefined as unknown as number;
+    setStdout('isTTY', true);
+    setStdout('columns', undefined as unknown as number);
+    setStdout('rows', undefined as unknown as number);
 
     const env = readQrEnv();
     expect(env.columns).toBe(80);
@@ -143,7 +152,7 @@ describe('readQrEnv', () => {
   });
 
   test('isTTY undefined (spawned-process shape) reads as false, never truthy-by-accident', () => {
-    process.stdout.isTTY = undefined as unknown as true;
+    setStdout('isTTY', undefined as unknown as true);
     expect(readQrEnv().isTTY).toBe(false);
   });
 });
@@ -155,26 +164,26 @@ describe('renderTerminalQr — end to end', () => {
   const originalNoColor = process.env.NO_COLOR;
 
   afterEach(() => {
-    process.stdout.isTTY = originalIsTTY;
-    process.stdout.columns = originalColumns;
-    process.stdout.rows = originalRows;
+    setStdout('isTTY', originalIsTTY);
+    setStdout('columns', originalColumns);
+    setStdout('rows', originalRows);
     if (originalNoColor === undefined) delete process.env.NO_COLOR;
     else process.env.NO_COLOR = originalNoColor;
   });
 
   test('renders the golden block on a real wide TTY, with no hint', () => {
-    process.stdout.isTTY = true;
-    process.stdout.columns = 80;
-    process.stdout.rows = 24;
+    setStdout('isTTY', true);
+    setStdout('columns', 80);
+    setStdout('rows', 24);
     delete process.env.NO_COLOR;
 
     expect(renderTerminalQr(PAIR_URL)).toEqual({ text: GOLDEN_PAIR_URL_QR });
   });
 
   test('returns null when piped (isTTY undefined, spawned-process shape) — hard skip even though it would fit', () => {
-    process.stdout.isTTY = undefined as unknown as true;
-    process.stdout.columns = 80;
-    process.stdout.rows = 24;
+    setStdout('isTTY', undefined as unknown as true);
+    setStdout('columns', 80);
+    setStdout('rows', 24);
 
     expect(renderTerminalQr(PAIR_URL)).toBeNull();
   });
@@ -185,9 +194,9 @@ describe('renderTerminalQr — end to end', () => {
   // terminal window, and the QR just vanished with no indication). It now
   // still renders, plus a hint to zoom the terminal out.
   test('still renders on a narrow (too-small) real TTY, plus the zoom hint', () => {
-    process.stdout.isTTY = true;
-    process.stdout.columns = 20;
-    process.stdout.rows = 24;
+    setStdout('isTTY', true);
+    setStdout('columns', 20);
+    setStdout('rows', 24);
     delete process.env.NO_COLOR;
 
     const result = renderTerminalQr(PAIR_URL);
@@ -196,9 +205,9 @@ describe('renderTerminalQr — end to end', () => {
   });
 
   test('still renders on a too-short real TTY, plus the zoom hint', () => {
-    process.stdout.isTTY = true;
-    process.stdout.columns = 80;
-    process.stdout.rows = 4;
+    setStdout('isTTY', true);
+    setStdout('columns', 80);
+    setStdout('rows', 4);
     delete process.env.NO_COLOR;
 
     const result = renderTerminalQr(PAIR_URL);
@@ -207,18 +216,18 @@ describe('renderTerminalQr — end to end', () => {
   });
 
   test('returns null under NO_COLOR even on a wide real TTY — hard skip even though it would fit', () => {
-    process.stdout.isTTY = true;
-    process.stdout.columns = 80;
-    process.stdout.rows = 24;
+    setStdout('isTTY', true);
+    setStdout('columns', 80);
+    setStdout('rows', 24);
     process.env.NO_COLOR = '1';
 
     expect(renderTerminalQr(PAIR_URL)).toBeNull();
   });
 
   test('NO_COLOR still wins over too_small — no QR, no hint', () => {
-    process.stdout.isTTY = true;
-    process.stdout.columns = 20;
-    process.stdout.rows = 4;
+    setStdout('isTTY', true);
+    setStdout('columns', 20);
+    setStdout('rows', 4);
     process.env.NO_COLOR = '1';
 
     expect(renderTerminalQr(PAIR_URL)).toBeNull();

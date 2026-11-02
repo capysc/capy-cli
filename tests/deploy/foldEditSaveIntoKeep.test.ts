@@ -1,6 +1,6 @@
 /**
  * Unit tests for `foldEditSaveIntoKeep` (src/deploy/keepGate.ts) — the pure
- * fold the `capy edit` exit-time PR flow (editExitFlow.ts) replays, one
+ * fold the `capy edit` exit-time PR flow (keepLockPr.ts) replays, one
  * recorded session save at a time, onto whatever keep.lock the chosen
  * target git branch actually has.
  */

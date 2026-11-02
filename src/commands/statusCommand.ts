@@ -1,9 +1,9 @@
-import { createHash } from 'crypto';
 import { ProjectManager } from '../core/projectManager';
 import { FileManager } from '../files/fileManager';
 import { AuthService, silentAuthFailureMessage } from '../auth/authService';
 import { ServiceClient } from '../service/serviceClient';
 import { SyncEngine } from '../sync/syncEngine';
+import { compareSecrets, hashValue, type DiffResult } from '../sync/compareSecrets';
 import { CapyError, ERROR_CODES, KeepFile } from '../types/index';
 import { fetchSecretsWithCache, readSecretsLocal } from '../config/globalConfig';
 import { isLocalOnly } from '../config/profileConfig';
@@ -12,6 +12,12 @@ import { resolveLocalProjectKey } from '../core/localUnlock';
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
 type RemoteFailure = 'access_denied' | 'network_error' | 'no_data';
+
+/** Why the remote column is missing: the sentence a person reads, and the verdict the report branches on. */
+interface RemoteSkip {
+  reason: string;
+  kind: RemoteFailure;
+}
 
 /**
  * Why the remote column is missing — from the ERROR, not from its sentence.
@@ -34,93 +40,6 @@ function classifyRemoteFailure(err: unknown): RemoteFailure {
   return 'network_error';
 }
 
-export interface DiffResult {
-  variable: string;
-  type: 'new' | 'changed' | 'deleted';
-  pinned?: string;
-  local?: string;
-  remote?: string;
-}
-
-/**
- * Compare three sources: pinned (keep.lock hashes), local (.env values), remote (Keep values).
- * Returns diff results and column visibility flags.
- */
-export function compareSecrets(
-  pinned: Record<string, string>,  // variable -> value_hash
-  local: Record<string, string>,   // variable -> plaintext value (hashed for comparison)
-  remote: Record<string, string>,  // variable -> plaintext value (hashed for comparison)
-): { diffs: DiffResult[]; showLocal: boolean; showRemote: boolean } {
-  const hasRemote = Object.keys(remote).length > 0;
-
-  const allVars = new Set([
-    ...Object.keys(pinned),
-    ...Object.keys(local),
-    ...(hasRemote ? Object.keys(remote) : []),
-  ]);
-
-  const diffs: DiffResult[] = [];
-  let localDiffersFromPinned = false;
-  let remoteDiffersFromPinned = false;
-
-  for (const variable of allVars) {
-    const pinnedHash = pinned[variable];
-    const localHash = local[variable];
-    // If remote has no data at all, treat each variable as matching pinned.
-    // If remote has data but this variable is missing, it's a real absence.
-    const remoteHash = hasRemote ? remote[variable] : pinnedHash;
-
-    // Silent reconcile (CAP-307): no pinned baseline yet, but local and remote
-    // already agree. There is nothing to push (remote already holds this exact
-    // value) and nothing to pull — so don't report a diff and don't let this
-    // variable flip the showLocal/showRemote direction hints. The pin is adopted
-    // naturally via the "Everything is up to date!" path when no other variable
-    // differs. Scoped tightly: only when pinned is absent AND local === remote
-    // (both present); genuine divergence (local !== remote) still surfaces below.
-    if (!pinnedHash && localHash !== undefined && localHash === remoteHash) {
-      continue;
-    }
-
-    // Track if local or remote differs from pinned at all
-    if (localHash !== pinnedHash) localDiffersFromPinned = true;
-    if (remoteHash !== pinnedHash) remoteDiffersFromPinned = true;
-
-    // Only report rows with mismatches
-    if (pinnedHash === localHash && pinnedHash === remoteHash) continue;
-    if (!pinnedHash && !localHash && !remoteHash) continue;
-
-    // Determine type
-    let type: 'new' | 'changed' | 'deleted';
-    if (!pinnedHash && !localHash && remoteHash) {
-      type = 'new';
-    } else if (!pinnedHash && localHash && !remoteHash) {
-      type = 'new';
-    } else if (pinnedHash && !remoteHash && !localHash) {
-      type = 'deleted';
-    } else if ((pinnedHash && !remoteHash) || (!pinnedHash && remoteHash)) {
-      type = remoteHash ? 'new' : 'deleted';
-    } else {
-      type = 'changed';
-    }
-
-    diffs.push({
-      variable,
-      type,
-      pinned: pinnedHash || undefined,
-      local: localHash || undefined,
-      remote: remoteHash || undefined,
-    });
-  }
-
-  // Column visibility:
-  // If all local values match pinned → hide Local column
-  // If all remote values match pinned → hide Remote column
-  const showLocal = localDiffersFromPinned;
-  const showRemote = remoteDiffersFromPinned;
-
-  return { diffs, showLocal, showRemote };
-}
-
 /**
  * Create a value snippet in abc...xyz format.
  */
@@ -131,12 +50,9 @@ export function formatSnippet(value: string): string {
   return `${value.slice(0, 3)}...${value.slice(-3)}`;
 }
 
-/**
- * Hash a plaintext value the same way keep.lock stores it.
- */
-export function hashValue(value: string): string {
-  return createHash('sha256').update(value).digest('hex').slice(0, 16);
-}
+// Where they have always been imported from (the comparison itself lives in sync/compareSecrets.ts).
+export { compareSecrets, hashValue };
+export type { DiffResult };
 
 export class StatusCommand {
   private projectManager: ProjectManager;
@@ -155,7 +71,7 @@ export class StatusCommand {
     this.serviceClient.setTokenProvider(() => this.authService.getValidToken());
   }
 
-  async execute(opts: { json?: boolean; web?: boolean } = {}): Promise<void> {
+  async execute(opts: { json?: boolean } = {}): Promise<void> {
     try {
       await this._execute(opts);
     } catch {
@@ -165,7 +81,116 @@ export class StatusCommand {
     }
   }
 
-  private async _execute(opts: { json?: boolean; web?: boolean } = {}): Promise<void> {
+  /** The project key, or why it could not be had. Never throws. */
+  private async resolveEncryptionKey(
+    projectState: { userId?: string; organizationId?: string; projectId?: string },
+    localMode: boolean,
+  ): Promise<{ encryptionKey: string } | { skip: RemoteSkip }> {
+    try {
+      if (localMode) {
+        return { encryptionKey: await resolveLocalProjectKey(projectState.projectId!) };
+      }
+      if (projectState.userId) {
+        this.authService.setSessionUserId(projectState.userId);
+      }
+      const { resolveProjectKey } = await import('../crypto/keyResolver');
+      const authResult = await this.authService.authenticateSilent(projectState.organizationId);
+      // The message becomes the skip reason, which the report shows.
+      // "auth failed" told the reader nothing about whether to sign in again or
+      // check the network.
+      if (!authResult.success) throw new Error(silentAuthFailureMessage(authResult));
+
+      const keyOps = {
+        coDecrypt: (oid: string, ct: string) => this.serviceClient.coDecrypt(oid, ct).then(r => r.plaintext),
+        wrapOuterLayer: (oid: string, pt: string) => this.serviceClient.wrapOuterLayer(oid, pt).then(r => r.ciphertext),
+      };
+      return {
+        encryptionKey: await resolveProjectKey(
+          projectState.organizationId!,
+          projectState.projectId!,
+          authResult.user_id!,
+          keyOps,
+        ),
+      };
+    } catch (err: any) {
+      // Auth or key resolution failed — compare pinned vs local only
+      return { skip: { reason: err?.message || 'auth or key resolution failed', kind: classifyRemoteFailure(err) } };
+    }
+  }
+
+  /** Hashes of the local .env values; a value this key cannot decrypt is left out. */
+  private hashLocalEnv(encryptionKey: string): Record<string, string> {
+    const rawLocal = this.fileManager.readEnvFile();
+    return Object.fromEntries(
+      Object.entries(rawLocal).flatMap(([key, value]) => {
+        if (!(value.startsWith('capy:') && encryptionKey)) return [[key, hashValue(value)] as const];
+        try {
+          return [[key, hashValue(this.fileManager.decryptValue(value, encryptionKey))] as const];
+        } catch {
+          return [];
+        }
+      }),
+    );
+  }
+
+  /** The key (when there is one) and the hashes of the local .env, or the reason the comparison is local-only. */
+  private async readLocalState(
+    projectState: { userId?: string; organizationId?: string; projectId?: string },
+    localMode: boolean,
+  ): Promise<{ encryptionKey: string | undefined; localHashes: Record<string, string>; skip: RemoteSkip | undefined }> {
+    const keyed = await this.resolveEncryptionKey(projectState, localMode);
+    if ('skip' in keyed) return { encryptionKey: undefined, localHashes: {}, skip: keyed.skip };
+    try {
+      return { encryptionKey: keyed.encryptionKey, localHashes: this.hashLocalEnv(keyed.encryptionKey), skip: undefined };
+    } catch (err: any) {
+      return {
+        encryptionKey: keyed.encryptionKey,
+        localHashes: {},
+        skip: { reason: err?.message || 'auth or key resolution failed', kind: classifyRemoteFailure(err) },
+      };
+    }
+  }
+
+  /** Hashes of the remote (Keep) values for the pinned keep, or why there are none to show. */
+  private async fetchRemoteHashes(args: {
+    keep: KeepFile;
+    branch: string;
+    pinned: Record<string, string>;
+    encryptionKey: string;
+    organizationId: string;
+    projectId: string;
+    localMode: boolean;
+  }): Promise<{ remoteHashes: Record<string, string>; skip: RemoteSkip | undefined }> {
+    const { keep, branch, pinned, encryptionKey, organizationId, projectId, localMode } = args;
+    try {
+      const hasVariables = Object.keys(pinned).length > 0;
+      if (!hasVariables) return { remoteHashes: {}, skip: undefined };
+      const keepHash = SyncEngine.computeKeepHash(keep, branch);
+      const blob = localMode
+        ? readSecretsLocal(organizationId, projectId, keepHash)
+        : await fetchSecretsWithCache(this.serviceClient, organizationId, projectId, keepHash);
+      if (!blob?.env_file) {
+        // Known here, so recorded here. Nothing downstream re-reads the
+        // sentence to work out what this line already knew.
+        return { remoteHashes: {}, skip: { reason: 'no data at this keep_hash', kind: 'no_data' } };
+      }
+      const encrypted = this.fileManager.parseEnvContent(blob.env_file);
+      const remoteHashes = Object.fromEntries(
+        Object.entries(encrypted).flatMap(([key, value]) => {
+          try {
+            return [[key, hashValue(this.fileManager.decryptValue(value, encryptionKey))] as const];
+          } catch {
+            return []; // Skip values we can't decrypt
+          }
+        }),
+      );
+      return { remoteHashes, skip: undefined };
+    } catch (err: any) {
+      return { remoteHashes: {}, skip: { reason: err?.message || 'network error', kind: classifyRemoteFailure(err) } };
+    }
+  }
+
+  private async _execute(opts: { json?: boolean } = {}): Promise<void> {
     const projectState = await this.projectManager.detectProjectState();
     if (!projectState.initialized) {
       if (this.terse) return;
@@ -185,115 +210,46 @@ export class StatusCommand {
     const branchLabel = branch;
 
     // Build pinned hashes from keep.lock for active branch
-    const pinned: Record<string, string> = {};
-    for (const [varName, entries] of Object.entries(keep.variables)) {
-      const entry = entries.find(e => e.branch === branch);
-      if (entry) {
-        pinned[varName] = entry.value_hash;
-      }
-    }
+    const pinned: Record<string, string> = Object.fromEntries(
+      Object.entries(keep.variables).flatMap(([varName, entries]) => {
+        const entry = entries.find(e => e.branch === branch);
+        return entry ? [[varName, entry.value_hash] as const] : [];
+      }),
+    );
 
-    // Build local hashes from .env
-    const localHashes: Record<string, string> = {};
-    let encryptionKey: string | undefined;
-    // Two facts, deliberately separate: the sentence a person reads, and the
-    // verdict the report and the screen branch on. Deriving the second from
-    // the first is what this pair replaces.
-    let remoteSkipReason: string | undefined;
-    let remoteFailureKind: RemoteFailure | undefined;
+    // Build local hashes from .env. Two facts, deliberately separate: the
+    // sentence a person reads, and the verdict the report branches on.
+    // Deriving the second from the first is what this pair replaces.
     const localMode = isLocalOnly();
-    try {
-      if (localMode) {
-        encryptionKey = await resolveLocalProjectKey(projectState.projectId!);
-      } else {
-        if (projectState.userId) {
-          this.authService.setSessionUserId(projectState.userId);
-        }
-        const { resolveProjectKey } = await import('../crypto/keyResolver');
-        const authResult = await this.authService.authenticateSilent(projectState.organizationId);
-        // The message becomes `remoteSkipReason`, which the report and the
-        // screen both show. "auth failed" told the reader nothing about
-        // whether to sign in again or check the network.
-        if (!authResult.success) throw new Error(silentAuthFailureMessage(authResult));
-
-        const keyOps = {
-          coDecrypt: (oid: string, ct: string) => this.serviceClient.coDecrypt(oid, ct).then(r => r.plaintext),
-          wrapOuterLayer: (oid: string, pt: string) => this.serviceClient.wrapOuterLayer(oid, pt).then(r => r.ciphertext),
-        };
-        encryptionKey = await resolveProjectKey(
-          projectState.organizationId!,
-          projectState.projectId!,
-          authResult.user_id!,
-          keyOps,
-        );
-      }
-
-      const rawLocal = this.fileManager.readEnvFile();
-      for (const [key, value] of Object.entries(rawLocal)) {
-        let plaintext = value;
-        if (value.startsWith('capy:') && encryptionKey) {
-          try {
-            plaintext = this.fileManager.decryptValue(value, encryptionKey);
-          } catch {
-            continue;
-          }
-        }
-        localHashes[key] = hashValue(plaintext);
-      }
-    } catch (err: any) {
-      // Auth or key resolution failed — compare pinned vs local only
-      remoteSkipReason = err?.message || 'auth or key resolution failed';
-      remoteFailureKind = classifyRemoteFailure(err);
-    }
+    const local = await this.readLocalState(projectState, localMode);
+    const { encryptionKey, localHashes } = local;
 
     // Build remote hashes (fetch from Keep)
-    const remoteHashes: Record<string, string> = {};
-    if (encryptionKey) {
-      try {
-        const hasVariables = Object.keys(pinned).length > 0;
-        if (hasVariables) {
-          const keepHash = SyncEngine.computeKeepHash(keep, branch);
-          const blob = localMode
-            ? readSecretsLocal(projectState.organizationId!, projectState.projectId!, keepHash)
-            : await fetchSecretsWithCache(
-                this.serviceClient,
-                projectState.organizationId!,
-                projectState.projectId!,
-                keepHash,
-              );
-          if (blob?.env_file) {
-            const encrypted = this.fileManager.parseEnvContent(blob.env_file);
-            for (const [key, value] of Object.entries(encrypted)) {
-              try {
-                const plaintext = this.fileManager.decryptValue(value, encryptionKey);
-                remoteHashes[key] = hashValue(plaintext);
-              } catch {
-                // Skip values we can't decrypt
-              }
-            }
-          } else {
-            remoteSkipReason = 'no data at this keep_hash';
-            // Known here, so recorded here. Nothing downstream re-reads the
-            // sentence to work out what this line already knew.
-            remoteFailureKind = 'no_data';
-          }
-        }
-      } catch (err: any) {
-        remoteSkipReason = err?.message || 'network error';
-        remoteFailureKind = classifyRemoteFailure(err);
-      }
-    }
+    const remote = encryptionKey
+      ? await this.fetchRemoteHashes({
+          keep,
+          branch,
+          pinned,
+          encryptionKey,
+          organizationId: projectState.organizationId!,
+          projectId: projectState.projectId!,
+          localMode,
+        })
+      : { remoteHashes: {} as Record<string, string>, skip: undefined };
+    const { remoteHashes } = remote;
+    // The remote step's skip, when it has one, is the later write and wins.
+    const skip = remote.skip ?? local.skip;
+    const remoteSkipReason = skip?.reason;
 
     const hasRemote = Object.keys(remoteHashes).length > 0;
     const remoteFailure: RemoteFailure | undefined =
-      !hasRemote && remoteSkipReason ? (remoteFailureKind ?? 'network_error') : undefined;
+      !hasRemote && remoteSkipReason ? (skip?.kind ?? 'network_error') : undefined;
     const { diffs, showLocal, showRemote } = compareSecrets(pinned, localHashes, remoteHashes);
 
-    // ONE report object, rendered three ways. `--json` prints it, `--web`
-    // carries it into the page verbatim, and the TTY draws the same numbers
-    // below — so what a person reads and what a script parses cannot describe
-    // different states. diffs carry value HASHES only (sha256 prefix), never
-    // plaintext.
+    // ONE report object, rendered two ways. `--json` prints it, and the TTY
+    // draws the same numbers below — so what a person reads and what a script
+    // parses cannot describe different states. diffs carry value HASHES only
+    // (sha256 prefix), never plaintext.
     const totalSecrets = new Set([...Object.keys(pinned), ...Object.keys(localHashes)]).size;
     const report = {
       projectName: keep.project_name,
@@ -308,33 +264,6 @@ export class StatusCommand {
 
     if (opts.json) {
       console.log(JSON.stringify(report, null, 2));
-      return;
-    }
-
-    if (opts.web) {
-      // No TTY under --web (this is the agent-driven path), so the report goes
-      // to the browser instead of to a stream nobody is reading. The page is
-      // display-only: it posts nothing, carries no nonce, and is served under
-      // the strict policy that cannot open a socket at all.
-      const { showSyncStatusInBrowser } = await import('../ui/syncScreens');
-      const { checkExpiringKeys } = await import('./connectors/shared');
-      await showSyncStatusInBrowser({
-        projectName: keep.project_name ?? '',
-        branch,
-        totalSecrets,
-        localMatchesPinned: !showLocal,
-        remoteMatchesPinned: !showRemote,
-        hasRemote,
-        remoteFailure,
-        diffs,
-        // The warnings `printExpiryWarnings` puts on stderr after every run,
-        // where they can still be acted on.
-        expiring: checkExpiringKeys().map(k => ({ variable: k.varName, expiresInDays: k.expiresIn })),
-        json: JSON.stringify(report, null, 2),
-        // Open the user's browser by default; CAPY_WEB_NO_OPEN lets CI /
-        // headless verification drive the loopback without hijacking one.
-        open: !process.env.CAPY_WEB_NO_OPEN,
-      });
       return;
     }
 
@@ -402,29 +331,7 @@ export class StatusCommand {
       : remoteFailure === 'no_data' ? '(no data)' : undefined;
 
     for (const diff of diffs) {
-      let prefix: string;
-      let desc: string;
-
-      if (failureLabel) {
-        prefix = '?';
-        desc = failureLabel;
-      } else if (diff.type === 'new') {
-        prefix = '+';
-        if (diff.remote && !diff.pinned) desc = '(new on remote)';
-        else if (diff.local && !diff.pinned) desc = '(new locally)';
-        else desc = '(new)';
-      } else if (diff.type === 'deleted') {
-        prefix = '-';
-        if (!diff.remote && diff.pinned) desc = '(missing from remote)';
-        else if (!diff.local && diff.pinned) desc = '(missing locally)';
-        else desc = '(missing)';
-      } else {
-        prefix = '~';
-        if (diff.local !== diff.pinned && diff.remote === diff.pinned) desc = '(changed locally)';
-        else if (diff.remote !== diff.pinned && diff.local === diff.pinned) desc = '(changed on remote)';
-        else desc = '(changed)';
-      }
-
+      const { prefix, desc } = describeDiff(diff, failureLabel);
       console.log(`  ${prefix} ${diff.variable.padEnd(20)} ${desc}`);
     }
 
@@ -441,4 +348,22 @@ export class StatusCommand {
     }
     process.exit(0);
   }
+}
+
+/** The marker and the wording for one diff row. `failureLabel` replaces both when the remote could not be read. */
+function describeDiff(diff: DiffResult, failureLabel: string | undefined): { prefix: string; desc: string } {
+  if (failureLabel) return { prefix: '?', desc: failureLabel };
+  if (diff.type === 'new') {
+    if (diff.remote && !diff.pinned) return { prefix: '+', desc: '(new on remote)' };
+    if (diff.local && !diff.pinned) return { prefix: '+', desc: '(new locally)' };
+    return { prefix: '+', desc: '(new)' };
+  }
+  if (diff.type === 'deleted') {
+    if (!diff.remote && diff.pinned) return { prefix: '-', desc: '(missing from remote)' };
+    if (!diff.local && diff.pinned) return { prefix: '-', desc: '(missing locally)' };
+    return { prefix: '-', desc: '(missing)' };
+  }
+  if (diff.local !== diff.pinned && diff.remote === diff.pinned) return { prefix: '~', desc: '(changed locally)' };
+  if (diff.remote !== diff.pinned && diff.local === diff.pinned) return { prefix: '~', desc: '(changed on remote)' };
+  return { prefix: '~', desc: '(changed)' };
 }

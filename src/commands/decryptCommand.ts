@@ -15,39 +15,11 @@ import {
   saveRecoverySession,
 } from '../config/globalConfig';
 import { ERROR_CODES } from '../types/index';
-import { formatRelativeTime } from '../ui/relativeTime';
 
 const bold = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
-/**
- * How long the open recovery session has been open, humanised.
- *
- * `saveRecoverySession` writes `created_at` and `readRecoverySession`'s return
- * type does not mention it, so it is read defensively: a session file written
- * by an older CLI has no stamp, and a stop that cannot say when says nothing
- * rather than "Invalid Date".
- */
-function sessionAge(session: { org_id: string; master_key: string }): string {
-  const createdAt = (session as { created_at?: unknown }).created_at;
-  return typeof createdAt === 'string' ? formatRelativeTime(createdAt) : '—';
-}
-
-export interface DecryptOpts {
-  /**
-   * Ask for the phrase in a browser instead of on this terminal.
-   *
-   * Agent-only. A seed phrase typed at an inquirer password prompt is fine
-   * when a human is at the keyboard; headless, that prompt blocks on a piped
-   * stdin and then — at EOF — prints `Cancelled.` and exits 0, which an agent
-   * reads as a decrypt that succeeded and wrote nothing.
-   */
-  web?: boolean;
-  /** false when --no-open was passed: print the URL, do not open a browser. */
-  open?: boolean;
-}
-
 export class DecryptCommand {
-  async execute(opts: DecryptOpts = {}): Promise<void> {
+  async execute(): Promise<void> {
     try {
       const pm = new ProjectManager();
       const fm = new FileManager();
@@ -113,13 +85,10 @@ export class DecryptCommand {
       // version against the encrypted .env (the oracle) and keep the one that
       // decrypts — this is how legacy (v1) and current (v2) orgs are told apart
       // without any stored version marker.
-      let masterKeyHex: string;
-      let decrypted: Record<string, string>;
 
-      // The whole trial, as one function, because `--web` needs to run it per
-      // submitted phrase rather than once at the top of the command. Returns
-      // null when no known KDF version opened this .env — which is the same
-      // condition the terminal path calls a wrong seed phrase.
+      // The whole trial, as one function. Returns null when no known KDF
+      // version opened this .env — which is the same condition the terminal
+      // path calls a wrong seed phrase.
       const resolveFromPhrase = (
         seedPhrase: string,
       ): { hex: string; decrypted: Record<string, string> } | null => {
@@ -139,104 +108,15 @@ export class DecryptCommand {
       // (PEM keys, certs) are quoted/`\n`-escaped and survive being re-read by
       // dotenv — a bare `KEY=value` line would truncate at the first newline.
       const outputFile = `.env.${branch}.decrypted`;
-      const writeDecrypted = (values: Record<string, string>): number => {
+      const writeDecrypted = (values: Record<string, string>): void => {
         const content = Object.entries(values)
           .map(([key, value]) => `${key}=${dotenvEscape(value)}`)
           .join('\n');
         writeFileSync(join(process.cwd(), outputFile), content + '\n', 'utf-8');
         fm.updateGitignore(['.env.*.decrypted']);
-        return Object.keys(values).length;
       };
 
-      if (opts.web) {
-        // The phrase is asked for in the browser. It reaches this process once,
-        // in the body of one loopback POST, and is not held past the attempt
-        // that uses it — never printed, never logged, never in a payload.
-        const session = isRecoveryActive() ? readRecoverySession() : null;
-        if (isRecoveryActive() && !session) {
-          console.error('\n  Recovery session is corrupt. Run `capy end-recover` and try again.\n');
-          process.exit(1);
-        }
-        if (session && session.org_id !== orgId) {
-          console.error(
-            `\n  Recovery session is for a different org.` +
-            `\n  Run ${bold('capy end-recover')} first, then try again.\n`
-          );
-          process.exit(1);
-        }
-
-        const { decryptInBrowser, showDecryptResult } = await import('../ui/decryptScreen');
-        const { isLocalOnly } = await import('../config/profileConfig');
-        const params = {
-          projectName: keep.project_name,
-          branch,
-          outputFile,
-          session: session
-            ? {
-                // The session file holds an org id and no name, and inventing
-                // one would be the screen claiming knowledge the CLI does not
-                // have. The id is what identifies the org here.
-                orgName: session.org_id,
-                startedAt: sessionAge(session),
-              }
-            : undefined,
-          localOnly: isLocalOnly(),
-          // Open the user's browser by default; CAPY_WEB_NO_OPEN lets CI and
-          // headless runs drive the loopback without hijacking a real browser.
-          open: opts.open !== false && !process.env.CAPY_WEB_NO_OPEN,
-        };
-
-        const outcome = await decryptInBrowser(params, async (input) => {
-          let values: Record<string, string>;
-          if ('useSession' in input) {
-            try {
-              values = decryptWith(session!.master_key);
-            } catch (error: any) {
-              if (error?.code === ERROR_CODES.DECRYPT_KEY_MISMATCH) {
-                return { ok: false, reason: 'KEY_MISMATCH' };
-              }
-              throw error;
-            }
-          } else {
-            if (!validateSeedPhrase(input.phrase)) return { ok: false, reason: 'INVALID' };
-            const resolved = resolveFromPhrase(input.phrase);
-            if (!resolved) return { ok: false, reason: 'KEY_MISMATCH' };
-            values = resolved.decrypted;
-            saveRecoverySession(resolved.hex, orgId);
-            console.log('  ✓ Recovery session started');
-          }
-
-          // An .env with no `capy:` values in it has nothing to decrypt. Not a
-          // failure: the terminal exits 0 here and writes no file.
-          if (Object.keys(values).length === 0) return { ok: true, count: 0, wrote: false };
-          return { ok: true, count: writeDecrypted(values), wrote: true };
-        });
-
-        if (outcome.action === 'cancelled') {
-          // Three ways to refuse and one outcome: nothing on disk changed. The
-          // sentence differs because "the browser never answered" is not a
-          // thing the person did, and used to arrive as a thrown error on a
-          // command that had done no harm.
-          const why =
-            outcome.reason === 'timeout'
-              ? 'The browser never answered.'
-              : outcome.reason === 'closed'
-                ? 'Browser closed.'
-                : 'Cancelled.';
-          console.log(`\n  ${why} Nothing was decrypted.\n`);
-          return;
-        }
-        if (!outcome.wrote) {
-          console.log('\n  No encrypted secrets found in .env\n');
-        } else {
-          console.log(`  ✓ Decrypted ${outcome.count} secret(s) to ${bold(outputFile)}`);
-          console.log(`\n  Run ${bold('capy end-recover')} when done to clean up.\n`);
-        }
-        await showDecryptResult(params, { count: outcome.count, wrote: outcome.wrote });
-        return;
-      }
-
-      if (isRecoveryActive()) {
+      const decryptFromSession = (): Record<string, string> => {
         const session = readRecoverySession();
         if (!session) {
           console.error('\n  Recovery session is corrupt. Run `capy end-recover` and try again.\n');
@@ -249,14 +129,15 @@ export class DecryptCommand {
           );
           process.exit(1);
         }
-        masterKeyHex = session.master_key;
         try {
-          decrypted = decryptWith(masterKeyHex);
+          return decryptWith(session.master_key);
         } catch (error: any) {
-          if (error?.code === ERROR_CODES.DECRYPT_KEY_MISMATCH) wrongSeedExit();
+          if (error?.code === ERROR_CODES.DECRYPT_KEY_MISMATCH) return wrongSeedExit();
           throw error;
         }
-      } else {
+      };
+
+      const decryptFromPrompt = async (): Promise<Record<string, string>> => {
         // Prompt for seed phrase
         const inquirer = (await import('inquirer')).default;
         const { seedPhrase } = await inquirer.prompt([{
@@ -274,11 +155,12 @@ export class DecryptCommand {
         const resolved = resolveFromPhrase(seedPhrase);
         if (!resolved) return wrongSeedExit();
 
-        masterKeyHex = resolved.hex;
-        decrypted = resolved.decrypted;
-        saveRecoverySession(masterKeyHex, orgId);
+        saveRecoverySession(resolved.hex, orgId);
         console.log('  ✓ Recovery session started');
-      }
+        return resolved.decrypted;
+      };
+
+      const decrypted = isRecoveryActive() ? decryptFromSession() : await decryptFromPrompt();
 
       if (Object.keys(decrypted).length === 0) {
         console.log('\n  No encrypted secrets found in .env\n');

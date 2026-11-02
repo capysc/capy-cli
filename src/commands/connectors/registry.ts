@@ -5,6 +5,7 @@ import type { DokployImportSource } from '../../deploy/dokployApi';
 import type { VercelImportSource } from '../../deploy/vercelApi';
 import type { DiscoveryContext, DiscoveryOutcome } from './dokployDiscovery';
 import { ResolvedContext } from './shared';
+import type { RawConflictFlags } from '../../sync/conflicts';
 
 export interface ConnectOpts {
   live?: boolean;
@@ -29,6 +30,11 @@ export interface ConnectOpts {
   /** Disable interactive prompts: resolve every choice from flags or fail fast. */
   nonTty?: boolean;
   /**
+   * `--resolve` / `--conflict` as typed (CAP-717): they decide a conflict between what this
+   * run writes and what someone else saved to Capy since this folder last synced.
+   */
+  conflictFlags?: RawConflictFlags;
+  /**
    * Pair with the provider again even when a usable session already exists.
    *
    * Off by default on purpose. `stripe login` rewrites the machine's shared
@@ -37,15 +43,6 @@ export interface ConnectOpts {
    * way to ask for it deliberately.
    */
   reauth?: boolean;
-  /**
-   * Render this command's questions as compiled screens in a local browser.
-   *
-   * Not the same axis as `nonTty`, and the pairing is the whole point: the
-   * caller `--web` exists for runs with piped stdio, so `isInteractive()` is
-   * already false and every picker below has either defaulted or refused
-   * without asking. `--web` is what turns those back into questions.
-   */
-  web?: boolean;
   /**
    * A `capy-dev` binary. Live mode is refused outright, so the mode question
    * says so beside the option rather than accepting it and exiting afterwards.
@@ -212,8 +209,11 @@ export interface RotateOpts {
   noPush?: boolean;
   /** Disable interactive prompts: resolve every choice from flags or fail fast. */
   nonTty?: boolean;
-  /** Render this command's questions as compiled screens in a local browser. */
-  web?: boolean;
+  /**
+   * `--resolve` / `--conflict` as typed (CAP-717). A rotation replaces a value with a key the provider
+   * only issues once, so a conflict on the variable is settled BEFORE the new key is issued.
+   */
+  conflictFlags?: RawConflictFlags;
 }
 
 /** Result of provider.connect(): the provider hands us a value + the connector metadata to record on the keep.lock entry. */
@@ -294,7 +294,8 @@ export type ImportOutcome =
       unchanged: readonly string[];
       skipped: readonly ImportSkip[];
       warnings: readonly ImportWarning[];
-      deployTargetSaved: boolean;
+      /** Vercel `--targets` only. */
+      deployTargetSaved?: boolean;
       /** Vercel `--targets` only: the deploy target this import wrote (dry run: would write). Absent when none applies. */
       deployTarget?: DeployTargetReport;
       /**
@@ -352,6 +353,8 @@ export interface ConnectFailure {
   message: string;
   link?: { label: string; url: string };
   remedy?: string;
+  /** CAP-703: what a caller must still supply, as flags (`DOKPLOY_SETTINGS_MISSING`). */
+  unanswered?: ReadonlyArray<{ readonly id: string; readonly flag: string; readonly hint: string; readonly alternative?: string }>;
 }
 
 export interface ConnectorModule {

@@ -9,17 +9,9 @@ const DATA_PLACEHOLDER = '/*__CAPY_DATA__*/ null';
 /**
  * How wide a window this document wants, travelling with the document.
  *
- * The window is opened by `browserWizard`, which holds HTML and has never been
- * told which screen it is — `WizardScreen` carries markup, not a name. The
- * alternative was a `wide` flag on twenty-odd call sites, each free to forget
- * it. Stamping it here means the one place that knows the screen's NAME is the
- * one place that answers the question, and a screen cannot be served at the
- * wrong size without someone editing this line.
+ * Stamped here because this is the one place that knows the screen's NAME.
  */
 const WIDE_WINDOW_MARKER = '<meta name="capy-window" content="wide">';
-
-/** Does this rendered document want the wide window? */
-export const wantsWideWindow = (html: string): boolean => html.includes(WIDE_WINDOW_MARKER);
 
 /**
  * Content-Security-Policy — the browser header that limits what a page may

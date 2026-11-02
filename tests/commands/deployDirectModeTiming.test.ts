@@ -34,6 +34,8 @@ import { SyncEngine } from '../../src/sync/syncEngine';
 
 const REPO_FOR_MOCK = join(tmpdir(), `capy-deploy-timing-${process.pid}`, 'repo');
 
+mock.module('../../src/crypto/keyResolver', () => fixedKeyResolver());
+
 mock.module('../../src/auth/authService', () => ({
   AuthService: class {
     async authenticateSilent() {
@@ -51,6 +53,12 @@ mock.module('../../src/service/serviceClient', () => ({
     // Always "in sync" — reads local keep.lock the same working-copy-first
     // way the real code under test does, so this pre-check never refuses.
     // Staleness itself is covered separately (deployRevokeWiring.test.ts).
+    // The same server, for the compare-before-delivering step (CAP-717) and the commit path.
+    async getDecryptData(_projectId: string, branch: string) {
+      const keep = new ProjectManager(REPO_FOR_MOCK).readKeepFile();
+      if (!keep) throw new Error('test fixture has no keep.lock to read');
+      return agreeingDecryptData(keep, branch);
+    }
     async getLatestSecrets(_projectId: string, branch: string) {
       const keep = new ProjectManager(REPO_FOR_MOCK).readKeepFile();
       if (!keep) return null;
@@ -59,7 +67,12 @@ mock.module('../../src/service/serviceClient', () => ({
   },
 }));
 
+import { agreeingDecryptData, fixedKeyResolver } from '../helpers/deployServer';
 import { deployCommand } from '../../src/commands/deployCommand';
+import { hashValue } from '../../src/sync/compareSecrets';
+
+/** `.env`'s value; keep.lock pins its real fingerprint (the folder agrees with Capy, so the deploy has nothing of its own to commit). */
+const SUPABASE_VALUE = 'https://x.supabase.co';
 
 const HAS_WRANGLER = spawnSync('which', ['wrangler']).status === 0;
 
@@ -88,7 +101,7 @@ function workingKeepWithPins(): string {
     project_id: 'proj-1',
     project_name: 'test-project',
     variables: {
-      SUPABASE_URL: [{ resource_id: 'r1', branch: 'production', value_hash: 'h1' }],
+      SUPABASE_URL: [{ resource_id: 'r1', branch: 'production', value_hash: hashValue(SUPABASE_VALUE) }],
     },
   });
 }
@@ -143,7 +156,7 @@ function setUpRepo(): void {
 
   // Plaintext .env (gitignored) so decryptCurrentBranch never needs a real
   // project key — it only decrypts values that start with `capy:`.
-  writeFileSync(join(REPO, '.env'), 'SUPABASE_URL=https://x.supabase.co\n');
+  writeFileSync(join(REPO, '.env'), `SUPABASE_URL=${SUPABASE_VALUE}\n`);
 }
 
 describe.if(HAS_WRANGLER)('deploy direct mode: keep.lock timing (real git, no mocks)', () => {
@@ -198,7 +211,7 @@ describe.if(HAS_WRANGLER)('deploy direct mode: keep.lock timing (real git, no mo
     expect(git(['rev-parse', 'HEAD'], REPO).stdout.trim()).not.toBe(headBefore);
     const committed = JSON.parse(git(['show', 'HEAD:keep.lock'], REPO).stdout);
     expect(Object.keys(committed.variables)).toEqual(['SUPABASE_URL']);
-    expect(committed.variables.SUPABASE_URL[0].value_hash).toBe('h1');
+    expect(committed.variables.SUPABASE_URL[0].value_hash).toBe(hashValue(SUPABASE_VALUE));
 
     // The working copy itself was never written to by any of this.
     expect(readFileSync(join(REPO, '.capy', 'keep.lock'), 'utf-8')).toBe(workingKeepWithPins());

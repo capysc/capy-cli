@@ -1,4 +1,4 @@
-import { ServiceClient } from '../service/serviceClient';
+import { ServiceClient, type OrgRepoLink } from '../service/serviceClient';
 import { resolveOrgContext } from '../core/orgContext';
 import { excludeSystemProject } from '../system/reservedProjectName';
 import { Spinner } from '../ui/spinner';
@@ -14,10 +14,48 @@ export interface ProjectBranchSummary {
   protected: boolean;
 }
 
+/** CAP-697: one repo (and folder) that holds this project's keep.lock. */
+export interface ProjectRepoSummary {
+  host: string;
+  owner: string;
+  name: string;
+  path: string;
+  github_repo_id: number | null;
+}
+
 export interface ProjectSummary {
   id: string;
   name: string;
   branches: ProjectBranchSummary[];
+  /**
+   * Linked repos. Absent when the caller may not read them (only owners, admins
+   * and project admins can) or the lookup failed; `[]` means "none linked".
+   */
+  repos?: ProjectRepoSummary[];
+}
+
+/** `owner/name`, plus `/path` when the keep.lock is not at the repo root. */
+export function formatRepo(repo: { owner: string; name: string; path: string }): string {
+  return repo.path === '.' ? `${repo.owner}/${repo.name}` : `${repo.owner}/${repo.name}/${repo.path}`;
+}
+
+/** The org's repo links, or `null` when they cannot be read (a 403 for a plain member, a network error): never fails the command. */
+async function loadOrgRepos(serviceClient: ServiceClient, orgId: string): Promise<readonly OrgRepoLink[] | null> {
+  try {
+    return (await serviceClient.getOrgRepos(orgId)).repos;
+  } catch {
+    return null;
+  }
+}
+
+function withRepos(projects: readonly ProjectSummary[], links: readonly OrgRepoLink[] | null): ProjectSummary[] {
+  if (links === null) return [...projects];
+  return projects.map((p) => ({
+    ...p,
+    repos: links
+      .filter((l) => l.project_id === p.id)
+      .map((l) => ({ host: l.host, owner: l.owner, name: l.name, path: l.path, github_repo_id: l.github_repo_id ?? null })),
+  }));
 }
 
 /**
@@ -49,8 +87,9 @@ export class ProjectsCommand {
     spinner?.start();
 
     try {
-      const { serviceClient } = await resolveOrgContext(this.apiUrl, this.devMode);
-      const projects = await this.loadProjectSummaries(serviceClient);
+      const { orgId, serviceClient } = await resolveOrgContext(this.apiUrl, this.devMode);
+      const summaries = await this.loadProjectSummaries(serviceClient);
+      const projects = withRepos(summaries, await loadOrgRepos(serviceClient, orgId));
 
       spinner?.succeed(`${projects.length} project${projects.length !== 1 ? 's' : ''}`);
       this.render(projects, json);
@@ -89,9 +128,15 @@ export class ProjectsCommand {
 
     console.log('');
     for (const project of projects) {
-      console.log(`  ${B(project.name)} ${DIM}·${RESET} ${this.formatBranches(project.branches)}`);
+      console.log(`  ${B(project.name)} ${DIM}·${RESET} ${this.formatBranches(project.branches)}${this.formatRepos(project.repos)}`);
     }
     console.log('');
+  }
+
+  /** ` · owner/name` (plus `/path` when not the repo root) per linked repo; nothing when there are none. */
+  private formatRepos(repos: ProjectRepoSummary[] | undefined): string {
+    if (repos === undefined || repos.length === 0) return '';
+    return ` ${DIM}·${RESET} ${repos.map(formatRepo).join(', ')}`;
   }
 
   private formatBranches(branches: ProjectBranchSummary[]): string {

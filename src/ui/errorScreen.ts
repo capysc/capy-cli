@@ -50,11 +50,7 @@ export function renderError(error: any, context: ErrorContext = {}): string {
         return renderNoKeepFile();
       case ERROR_CODES.QUOTA_EXCEEDED:
         return renderQuotaExceeded(error);
-      // The local-state refusals. Each of these was a bare `console.error` at
-      // the top of a command, which is fine in a terminal and invisible under
-      // `--web` — the flag exists because the caller is an agent. Routing them
-      // through here costs the terminal nothing and gives the browser half a
-      // payload to draw, from one switch on one code.
+      // The local-state refusals, one switch on one code.
       case ERROR_CODES.NO_ACTIVE_BRANCH:
         return renderNoActiveBranch();
       case ERROR_CODES.NO_MANAGED_KEYS:
@@ -78,19 +74,9 @@ export function renderError(error: any, context: ErrorContext = {}): string {
 }
 
 /**
- * End the run on the failure, wherever the caller is looking.
+ * End the run on the failure: print it, then exit 1.
  *
- * Async, and every call site awaits it. That is not ceremony: under `--web`
- * this has to hold the process open until the browser has actually fetched the
- * page. `ScreenServer.start()` resolves when the socket is LISTENING, and a
- * command that exits on the next line closes it microseconds before the
- * browser connects — the same defect that made every ending page in the
- * connectors parcel undeliverable. `serveEndingPage` waits for delivery; this
- * function cannot return before it does.
- *
- * The terminal still gets its ANSI in both modes. A `--web` run has a terminal
- * somewhere even when nobody is watching it, and a transcript that goes quiet
- * at the moment of failure is worse than one nobody reads.
+ * Async because every call site awaits it; the exit code is the contract.
  */
 export async function displayErrorAndExit(
   error: any,
@@ -102,24 +88,6 @@ export async function displayErrorAndExit(
 
   const output = renderError(error, context);
   if (output) console.log(output);
-
-  const { isWebMode } = await import('./webMode');
-  if (isWebMode()) {
-    try {
-      const { buildCommandErrorData } = await import('./commandErrorScreen');
-      const { serveEndingPage } = await import('./endingPage');
-      await serveEndingPage('command-error', buildCommandErrorData(error, context), {
-        lead: 'What went wrong is in your browser:',
-        // Shorter than an ending that reports work: the run is already over
-        // and nothing is pending, so a page nobody collects must not hold a
-        // failed command open for two minutes.
-        timeoutMs: 60_000,
-      });
-    } catch {
-      // A failure while reporting a failure is not worth a second failure.
-      // The ANSI above already went out, and the exit code is the contract.
-    }
-  }
 
   process.exit(1);
 }

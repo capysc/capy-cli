@@ -63,6 +63,11 @@ function isPermissionDenied(err: unknown): boolean {
     && err.details?.status === 403;
 }
 
+/** Check whether an error is the service saying "too many requests" (a transient limit, never "no access"). */
+function isRateLimited(err: unknown): boolean {
+  return err instanceof CapyError && err.code === ERROR_CODES.RATE_LIMITED;
+}
+
 /** Check whether an error is a network / connectivity failure. */
 function isNetworkError(err: unknown): boolean {
   return err instanceof CapyError && err.code === ERROR_CODES.NETWORK_ERROR;
@@ -150,6 +155,10 @@ export async function unwrapMasterKey(
     // doesn't get misclassified as PERMISSION_DENIED and nuke local keys.
     if (isNetworkError(err)) throw err;
 
+    // 429 = a rate limit, equally transient: it must not fall through to the legacy
+    // path and come out as "no access".
+    if (isRateLimited(err)) throw err;
+
     // K_local stranded in the removed keychain backend — re-throw. Falling
     // through here would mint a fresh file-backed root and silently mask it.
     if (isLocalKeyBackendError(err)) throw err;
@@ -213,6 +222,29 @@ export async function resolveProjectKey(
 ): Promise<string> {
   const masterKey = await unwrapMasterKey(orgId, userId, service);
   return deriveProjectKey(masterKey, projectId, orgId);
+}
+
+/**
+ * A key resolver for ONE run (a bulk edit that touches many projects): the org
+ * master key M is unwrapped once (one co-decrypt), shared by every caller whether
+ * they ask at the same time or later, and every project key is derived locally from
+ * it with the same `deriveProjectKey(M, projectId, orgId)` that `resolveProjectKey`
+ * uses. M lives only in this closure, in memory, for as long as the resolver is
+ * reachable: never written anywhere, never returned, never logged. Nothing is
+ * cached across runs or processes (each run unlocks again: access is re-checked).
+ *
+ * If the unwrap fails, every caller gets that same error and nothing is retried here.
+ * Call it only when a key will be needed: the unwrap starts right away.
+ */
+export function createRunKeyResolver(
+  orgId: string,
+  userId: string,
+  service: KeyServiceOps,
+): (projectId: string) => Promise<string> {
+  const masterKey = unwrapMasterKey(orgId, userId, service);
+  // A caller that has not asked yet must not turn a failed unwrap into an unhandled rejection.
+  masterKey.catch(() => undefined);
+  return async (projectId) => deriveProjectKey(await masterKey, projectId, orgId);
 }
 
 /**

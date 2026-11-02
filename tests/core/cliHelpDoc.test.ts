@@ -43,6 +43,25 @@ describe('buildCliHelpDoc', () => {
     expect(typeof doc.conventions.codes).toBe('string');
   });
 
+  test('CAP-703: publishes the deploy_dokploy_plan schema and the dokploy --discover mode (structured, supportsDryRun) under deploy', () => {
+    const doc = buildCliHelpDoc(buildProgram());
+    const schema = doc.schemas.deploy_dokploy_plan as any;
+    expect(schema.required).toEqual(['version', 'entries']);
+    expect(schema.properties.entries.items.required).toEqual(['project_id', 'branch', 'service_id', 'git_branch', 'vars']);
+    const deploy = doc.commands.find((c) => c.name === 'deploy')!;
+    expect(deploy.modes).toHaveLength(1);
+    expect(deploy.modes![0]).toMatchObject({
+      invocation: 'capy deploy dokploy --discover',
+      supportsDryRun: true,
+      supportsJson: true,
+      alwaysJson: true,
+      planSchema: 'deploy_dokploy_plan',
+    });
+    expect(deploy.modes![0].flags).toEqual(expect.arrayContaining(['--discover', '--plan', '--confirm', '--base-url', '--dry-run']));
+    // A command with no modes carries no `modes` field at all.
+    expect(doc.commands.find((c) => c.name === 'status')).not.toHaveProperty('modes');
+  });
+
   test('includes every registered error code', () => {
     const doc = buildCliHelpDoc(buildProgram());
     expect(doc.errorCodes).toEqual(Object.values(ERROR_CODES));

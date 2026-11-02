@@ -205,6 +205,19 @@ describe('systemCommand', () => {
       expect(stdout.includes('_CONNECTOR_FOO_KEY')).toBe(true);
     });
 
+    // CAP-703: the Dokploy base URL variable is listed exactly like the API key: by name (and when it changed), no value.
+    it('lists _CONNECTOR_DOKPLOY_BASE_URL beside _CONNECTOR_DOKPLOY_API_KEY, names only', async () => {
+      listReturn = [
+        { name: '_CONNECTOR_DOKPLOY_API_KEY', changed_at: '2026-01-01T00:00:00Z' },
+        { name: '_CONNECTOR_DOKPLOY_BASE_URL', changed_at: '2026-01-02T00:00:00Z' },
+      ];
+      const human = await capture(() => systemListCommand({}));
+      expect(human.stdout).toContain('_CONNECTOR_DOKPLOY_API_KEY');
+      expect(human.stdout).toContain('_CONNECTOR_DOKPLOY_BASE_URL');
+      const json = await capture(() => systemListCommand({ json: true }));
+      expect(JSON.parse(json.stdout).names.map((n: { name: string }) => n.name)).toEqual(['_CONNECTOR_DOKPLOY_API_KEY', '_CONNECTOR_DOKPLOY_BASE_URL']);
+    });
+
     // CAP-679 follow-up: a reference entry shows what it points at — a NAME,
     // never a value, in both human and --json output.
     it('a reference entry shows its target NAME in human mode, never a value', async () => {

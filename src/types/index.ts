@@ -123,10 +123,14 @@ export interface TargetDelivery {
   target: string;
   /** Adapter-specific handle for what was written, e.g. `{ composeId }` or `{ applicationId }`. */
   ref?: Record<string, string>;
-  /** sha256(value).slice(0,16) — same algorithm as `value_hash`, computed at delivery time. */
-  deployed_value_hash: string;
-  /** ISO8601 UTC — when this was delivered to the target's configuration (not "running"). */
-  deployed_at: string;
+  /**
+   * sha256(value).slice(0,16) — same algorithm as `value_hash`, computed at
+   * delivery time. Absent on a CAP-702 placeholder: the target is configured
+   * but has never received a push, so it is always behind.
+   */
+  deployed_value_hash?: string;
+  /** ISO8601 UTC — when this was delivered to the target's configuration (not "running"). Absent on a CAP-702 placeholder. */
+  deployed_at?: string;
   /** Token deploys only (Dokploy): the deploy id `capy deploy revoke` takes. */
   deploy_id?: string;
   /**
@@ -391,10 +395,26 @@ export interface CliOptions {
   verbose?: boolean;
   force?: boolean;
   dryRun?: boolean;
-  /** Render bare `capy`'s interactive steps (init trainstops / sync conflict resolver)
-   *  in a local browser instead of TTY prompts. Lazy: the browser only opens when an
-   *  interactive decision is actually reached (a clean sync stays terminal-only). */
-  web?: boolean;
+  /** `--resolve` / `--conflict` as typed (CAP-717): off a terminal they answer the differences between the folder and Capy. */
+  conflictFlags?: { readonly resolve?: readonly string[]; readonly conflict?: string };
+  /**
+   * Nobody can answer the menu (off a terminal, `--json`, or given `--resolve`): the differences are reported with a
+   * `conflict_id` and `conflictFlags` answer them. Prose goes to stderr. Absent: the menu, as at a terminal.
+   */
+  protocol?: boolean;
+  /** Say nothing while the folder and Capy agree (spinners, "Everything is up to date!"): stdout and stderr belong to the command that ran this first. */
+  quiet?: boolean;
+  /** Never the browser sign-in: a command that runs the sync as its first step and has no one to sign in is told why instead. */
+  silentAuthOnly?: boolean;
+  /**
+   * Bare `capy` as a command's first step (sync/gate.ts), not typed by a person: what to do when `.capy/branch` and the
+   * `.env` header name different, real branches (an interrupted checkout). Absent (a person ran `capy`): stop with the
+   * recovery message, exit 1. `follow-env-header`: the header outranks `.capy/branch`, so compare against the header's
+   * branch and leave `.capy/branch` for the command to settle (this is what lets `capy checkout <branch>` recover).
+   * `throw`: a coded `BRANCH_STATE_INCONSISTENT` error, for a folder other than the working directory, so one folder's
+   * state ends only that folder's sync.
+   */
+  onBranchMismatch?: 'follow-env-header' | 'throw';
 }
 
 export interface ProjectInitResult {
@@ -453,6 +473,8 @@ export const ERROR_CODES = {
   BRANCH_NOT_FOUND: 'BRANCH_NOT_FOUND',
   // No .env header, no .capy/branch, and no unambiguous local fallback.
   NO_ACTIVE_BRANCH: 'NO_ACTIVE_BRANCH',
+  // .capy/branch and the .env header name different, real branches (an interrupted checkout) and the run cannot follow either.
+  BRANCH_STATE_INCONSISTENT: 'BRANCH_STATE_INCONSISTENT',
   SNAPSHOT_NOT_FOUND: 'SNAPSHOT_NOT_FOUND',
   NO_SECRETS: 'NO_SECRETS',
   DEPLOY_TOKEN_NOT_FOUND: 'DEPLOY_TOKEN_NOT_FOUND',
@@ -460,9 +482,7 @@ export const ERROR_CODES = {
   LOCAL_KEY_BACKEND_ERROR: 'LOCAL_KEY_BACKEND_ERROR',
   // Local-state refusals: the command cannot start because this directory,
   // this branch or this build does not hold what it needs. Nothing has been
-  // asked of the service yet, so none of these is a SERVICE_ERROR — and each
-  // one used to be a bare `console.error` + `process.exit(1)`, which under
-  // `--web` is a decision reported to a stream nobody is reading.
+  // asked of the service yet, so none of these is a SERVICE_ERROR.
   /** The branch has no connector-managed credentials, so there is nothing to rotate. */
   NO_MANAGED_KEYS: 'NO_MANAGED_KEYS',
   /** The branch has no variables at all yet. */
@@ -636,16 +656,56 @@ export const ERROR_CODES = {
   // --- capy remove (CAP-686) ---
   /** `capy remove NAME...`: one or more names given are not on the active branch. */
   VAR_NOT_FOUND: 'VAR_NOT_FOUND',
-  /**
-   * `capy remove` refused: the working `.env` has unpushed differences (new,
-   * changed, or locally-missing values) for variables OTHER than the ones
-   * being removed. Removing would push that full remaining set — including
-   * those unrelated edits — as a side effect, so it's refused instead of
-   * carrying someone else's in-progress change along for the ride.
-   */
-  REMOVE_LOCAL_DRIFT: 'REMOVE_LOCAL_DRIFT',
   /** `capy remove` needs a human (confirmation) and there is no TTY, and `--yes` wasn't passed. */
   REMOVE_NEEDS_TTY: 'REMOVE_NEEDS_TTY',
+  // --- One commit path (CAP-712) ---
+  /**
+   * The server refused a push because the keep it was built from is no longer
+   * the server's latest (HTTP 409). Mirrors the server's `code`. The commit
+   * path re-reads and re-plans once; it is only seen when that fails too.
+   */
+  SECRETS_STALE_BASE: 'SECRETS_STALE_BASE',
+  /**
+   * The folder and Capy differ on a variable (or a Dokploy value was changed outside Capy) and nobody can answer:
+   * off a terminal, bare `capy` reports the rows with a `conflict_id` and exits 3. Nothing was written.
+   * `details.names` lists the variables (names only, never values); never auto-resolved.
+   */
+  SECRETS_CONFLICT: 'SECRETS_CONFLICT',
+  // --- Conflicts everywhere: the non-TTY protocol (CAP-717, docs/conflict-resolution.md) ---
+  /**
+   * A rerun with `--conflict <id>` whose state moved since the id was issued: the old answers
+   * no longer apply. Nothing was written; the fresh rows (with a new id) come back
+   * with it. Exit 3.
+   */
+  SECRETS_CONFLICT_STALE: 'SECRETS_CONFLICT_STALE',
+  /** `--resolve` is not `NAME=pinned|local|remote|delete` (or `NAME@TARGET=local|remote`), or `--conflict` is not a conflict id. Exit 1. */
+  SECRETS_RESOLVE_INVALID: 'SECRETS_RESOLVE_INVALID',
+  /** `--resolve` was given without `--conflict <id>`: an answer is only valid for the rows it was made against. Exit 1. */
+  SECRETS_RESOLVE_NEEDS_CONFLICT: 'SECRETS_RESOLVE_NEEDS_CONFLICT',
+  /**
+   * `capy remove` used to refuse when other variables had unpushed local edits.
+   * @deprecated Retired by CAP-712: `capy remove` only checks the names it removes. Kept defined
+   * so existing callers keep compiling; nothing raises it.
+   */
+  REMOVE_LOCAL_DRIFT: 'REMOVE_LOCAL_DRIFT',
+  // --- keep.lock PR step (capy add / edit / remove, CAP-699) ---
+  // Reported as `keep_lock.error.code`: the secret change itself still succeeded.
+  /** keep.lock PR step: the working directory is not inside a git repository. */
+  KEEP_PR_NOT_GIT_REPO: 'KEEP_PR_NOT_GIT_REPO',
+  /** keep.lock PR step: there is no `origin` remote, or it is not a github.com repository. */
+  KEEP_PR_NO_GITHUB_REMOTE: 'KEEP_PR_NO_GITHUB_REMOTE',
+  /** keep.lock PR step: the `gh` CLI is missing or not logged in. */
+  KEEP_PR_GH_UNAVAILABLE: 'KEEP_PR_GH_UNAVAILABLE',
+  /** keep.lock PR step: `--pr` had no `--pr-base` and the repo's default branch could not be resolved, or the base branch does not exist. */
+  KEEP_PR_BASE_UNRESOLVED: 'KEEP_PR_BASE_UNRESOLVED',
+  /** keep.lock PR step: reading the repo, its branches, the base head or the base keep.lock from GitHub failed. */
+  KEEP_PR_READ_FAILED: 'KEEP_PR_READ_FAILED',
+  /** keep.lock PR step: creating the blob, tree or commit on GitHub failed. */
+  KEEP_PR_COMMIT_FAILED: 'KEEP_PR_COMMIT_FAILED',
+  /** keep.lock PR step: creating the PR branch (git ref) on GitHub failed. */
+  KEEP_PR_BRANCH_FAILED: 'KEEP_PR_BRANCH_FAILED',
+  /** keep.lock PR step: opening the pull request on GitHub failed. */
+  KEEP_PR_CREATE_FAILED: 'KEEP_PR_CREATE_FAILED',
   // --- CI-mode target recording (CAP-687) ---
   /**
    * A CI-mode deploy delivered successfully (its PR's keep.lock already
@@ -718,6 +778,85 @@ export const ERROR_CODES = {
   VERCEL_SPLIT_NOT_RESTORED: 'VERCEL_SPLIT_NOT_RESTORED',
   /** `capy deploy`'s setup was given something that is neither a Vercel dashboard link for a project nor a project name. */
   VERCEL_URL_INVALID: 'VERCEL_URL_INVALID',
+  // --- Piped values: `<cmd> | capy edit NAME`, `<cmd> | capy add NAME` ---
+  /**
+   * `capy edit` with no name and no terminal. There is nothing to draw the
+   * table on and no variable named to take a piped value for. Exit 3.
+   */
+  EDIT_NEEDS_TTY: 'EDIT_NEEDS_TTY',
+  /** `capy edit NAME` piped mode only: the active profile is local-only, which has no piped path yet. */
+  EDIT_STDIN_LOCAL_ONLY: 'EDIT_STDIN_LOCAL_ONLY',
+  /** A piped value was empty after stripping one trailing line ending. Nothing is written. Shared by `capy edit` and `capy add`. */
+  STDIN_EMPTY: 'STDIN_EMPTY',
+  /** A piped value was over 1 MiB. Reading stops at the cap; nothing is written. Shared by `capy edit` and `capy add`. */
+  STDIN_TOO_LARGE: 'STDIN_TOO_LARGE',
+  /** `capy add` piped mode takes exactly one variable name per pipe. Exit 3. */
+  ADD_STDIN_ONE_NAME: 'ADD_STDIN_ONE_NAME',
+  /** `capy add` piped mode: the variable already exists and `--force` was not passed. Exit 3. */
+  ADD_VAR_EXISTS: 'ADD_VAR_EXISTS',
+  /** `--web` was passed. The browser screens were removed and the command is not run. Exit 1. */
+  WEB_MODE_REMOVED: 'WEB_MODE_REMOVED',
+  // --- Project → repo links (CAP-697) and shared secret edits (CAP-698) ---
+  // The first four match the service copy's order and spelling.
+  /** A keep.lock's project is already linked to other repos, none of them this one (likely a copied keep.lock). A warning, never a failure. */
+  KEEP_LOCK_REPO_MISMATCH: 'KEEP_LOCK_REPO_MISMATCH',
+  /** `capy secrets set NAME`: NAME matches more than one row (distinct values) and neither `--row` nor `--all-rows` was given. Exit 3. */
+  SECRET_AMBIGUOUS: 'SECRET_AMBIGUOUS',
+  /** `capy secrets set --confirm <plan_id>`: the plan recomputed now is not the plan that was confirmed. Nothing was changed. */
+  PLAN_CHANGED: 'PLAN_CHANGED',
+  /** `PUT /orgs/:orgId/projects/:projectId/repos` refused a project that is not a repo project (e.g. the system store). */
+  PROJECT_KIND_UNSUPPORTED: 'PROJECT_KIND_UNSUPPORTED',
+  // Added by CAP-698 beyond the service copy (the service copy needs them only if the service ever sends them).
+  /** `capy secrets set NAME` without `--dry-run` and without `--confirm <plan_id>`. The refusal carries the plan. Exit 3. */
+  PLAN_CONFIRM_REQUIRED: 'PLAN_CONFIRM_REQUIRED',
+  /** `capy secrets set NAME`: no row has that name, or a `--row` id matches no row. */
+  SECRET_NOT_FOUND: 'SECRET_NOT_FOUND',
+  /** `capy secrets set NAME`: the selection (rows minus `--exclude`) left no location to change. */
+  SECRETS_NOTHING_SELECTED: 'SECRETS_NOTHING_SELECTED',
+  /** `capy secrets set NAME`: the run finished but at least one location or repo failed. Exit 1. */
+  SECRETS_PARTIAL: 'SECRETS_PARTIAL',
+  /** `GET /orgs/:orgId/repos` answered 404: the service predates project -> repo links. Never a failure of the command that asked. */
+  REPO_LINKS_UNSUPPORTED: 'REPO_LINKS_UNSUPPORTED',
+  /** `--dry-run` on a path that would prompt (the `capy edit` TUI, an interactive `capy add`, `capy remove`'s confirmation): it cannot preview, and a dry run never runs for real. Exit 1. */
+  DRY_RUN_UNSUPPORTED: 'DRY_RUN_UNSUPPORTED',
+  /** A `gh` call (the GitHub reads and writes of the keep.lock PR step, `capy secrets`) did not answer in time and was stopped. */
+  GITHUB_TIMEOUT: 'GITHUB_TIMEOUT',
+  /** The Capy service answered 429 (too many requests) and the bounded retries ran out. Decided by the status code. */
+  RATE_LIMITED: 'RATE_LIMITED',
+  /** GitHub refused with a rate limit (429, or 403 with a `retry-after` / `x-ratelimit-remaining: 0` header) and the bounded retries ran out. */
+  GITHUB_RATE_LIMITED: 'GITHUB_RATE_LIMITED',
+  // --- `capy deploy dokploy --discover` (CAP-703) ---
+  /** A plan entry's `service_id` names no Dokploy service (path-precise: `entries[i].service_id`). */
+  SERVICE_NOT_FOUND: 'SERVICE_NOT_FOUND',
+  /** Two plan entries assign the same (project_id, branch) (path-precise: the later `entries[i]`). */
+  DUPLICATE_ENTRY: 'DUPLICATE_ENTRY',
+  /** A plan entry would add a Dokploy target to a project branch that already has a Dokploy target for a DIFFERENT service. */
+  TARGET_EXISTS: 'TARGET_EXISTS',
+  /** A plan entry's project has no GitHub repo link, so no deploy.json PR can be opened for it. */
+  NO_REPO_LINK: 'NO_REPO_LINK',
+  /** A plan entry's service tracks a repo that is not one of its project's linked repos. */
+  REPO_MISMATCH: 'REPO_MISMATCH',
+  /** `--plan <file>` could not be read as a file. */
+  PLAN_FILE_UNREADABLE: 'PLAN_FILE_UNREADABLE',
+  /** The plan failed validation; the refusal carries `errors: [{ path, code }]`. Nothing was changed. */
+  PLAN_INVALID: 'PLAN_INVALID',
+  /** `--confirm <plan_id>` without `--plan <file>`. */
+  PLAN_REQUIRED: 'PLAN_REQUIRED',
+  /** `--discover` on a `capy deploy` target that has no discovery (only `dokploy` has one). */
+  DISCOVER_UNSUPPORTED_TARGET: 'DISCOVER_UNSUPPORTED_TARGET',
+  /** `--confirm` wrote some repos' deploy.json PRs and at least one repo failed; the refusal lists `failed: [{ repo, code }]`. Exit 1. */
+  DISCOVER_PARTIAL: 'DISCOVER_PARTIAL',
+  // --- `capy secrets deploy` and the `capy secrets` deploy key (CAP-704) ---
+  /** `capy secrets deploy`: the run finished but at least one target failed, or a stop left some undone. Exit 1. */
+  DEPLOY_BATCH_PARTIAL: 'DEPLOY_BATCH_PARTIAL',
+  /** `capy secrets deploy`: the selection has no Dokploy CI-mode target on the default branch to deploy. */
+  DEPLOY_NOTHING_TO_DEPLOY: 'DEPLOY_NOTHING_TO_DEPLOY',
+  /** A batch deploy target ships a variable that is not in its Capy branch. Nothing was pushed to the platform. */
+  DEPLOY_VARS_MISSING: 'DEPLOY_VARS_MISSING',
+  /** A batch deploy target's preflight refused and gave no code of its own. Nothing was pushed to the platform. */
+  DEPLOY_PREFLIGHT_FAILED: 'DEPLOY_PREFLIGHT_FAILED',
+  /** A batch deploy target's delivery to the platform failed and gave no code of its own. */
+  DEPLOY_PUSH_FAILED: 'DEPLOY_PUSH_FAILED',
 } as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES];

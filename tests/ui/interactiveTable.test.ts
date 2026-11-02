@@ -775,6 +775,62 @@ describe('InteractiveTable', () => {
         expect((table as any).projectPicker).toBeNull();
         expect(getResolved()).toBeNull();
       });
+
+      it('typing filters the rows; Space ticks the highlighted match; Enter returns it', () => {
+        const { table } = makeTable('owner');
+        const getResolved = openPicker(table);
+        press(table, 'g');
+        press(table, 'a');
+        const plain = stripAnsi(table.renderTable(MEMBERS, 120, 30));
+        expect(plain).toContain('gamma');
+        expect(plain).not.toContain('alpha');
+        expect(plain).not.toContain('beta');
+        expect(plain).toContain('search:');
+        press(table, ' ');
+        press(table, ENTER);
+        expect(getResolved()).toEqual(['p3']);
+      });
+
+      it('table hotkeys (q, r, g) neither quit nor open anything while the picker is open — they filter', () => {
+        const { table } = makeTable('owner');
+        openPicker(table);
+        const onQuit = jest.fn();
+        (table as any).handleKeypress(Buffer.from('q'), onQuit);
+        press(table, 'r');
+        expect(onQuit).not.toHaveBeenCalled();
+        expect((table as any).projectPicker.query).toBe('qr');
+        expect((table as any).editingMemberIndex).toBeNull();
+      });
+
+      it('Esc clears a typed filter first, and only the next Esc cancels', () => {
+        const { table } = makeTable('owner');
+        const getResolved = openPicker(table, new Set(['p1']));
+        press(table, 'b');
+        press(table, ESC);
+        expect((table as any).projectPicker).not.toBeNull();
+        expect((table as any).projectPicker.query).toBe('');
+        expect(getResolved()).toBeUndefined();
+        press(table, ESC);
+        expect((table as any).projectPicker).toBeNull();
+        expect(getResolved()).toBeNull();
+      });
+
+      it('Enter returns ticked projects even when the filter is hiding them', () => {
+        const { table } = makeTable('owner');
+        const getResolved = openPicker(table, new Set(['p1']));
+        press(table, 'g');
+        press(table, ENTER);
+        expect(getResolved()).toEqual(['p1']);
+      });
+
+      it('Backspace edits the filter', () => {
+        const { table } = makeTable('owner');
+        openPicker(table);
+        press(table, 'z');
+        expect(stripAnsi(table.renderTable(MEMBERS, 120, 30))).not.toContain('alpha');
+        press(table, '\x7f');
+        expect(stripAnsi(table.renderTable(MEMBERS, 120, 30))).toContain('alpha');
+      });
     });
 
     // -------------------------------------------------------------------------

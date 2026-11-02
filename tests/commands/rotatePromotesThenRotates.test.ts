@@ -30,6 +30,7 @@ import type { ConnectorMetadata, KeepFile } from '../../src/types/index';
 // can spread it. Resolving it from inside the factory instead hands back the
 // mock that is being defined, and every untouched export comes out missing.
 import * as realShared from '../../src/commands/connectors/shared';
+import { stubbedGate } from '../helpers/gateMock';
 
 const TEST_DIR = join(tmpdir(), `capy-rotate-promote-${process.pid}`);
 const ORIGINAL_CWD = process.cwd();
@@ -68,6 +69,9 @@ function writeKeep(keep: KeepFile): void {
 // about whether rotate carries on afterwards. What it DOES do is the one thing
 // the rest of the flow depends on — record the connector in keep.lock — so the
 // stub does exactly that and nothing else.
+// Bare `capy` (rotate's first step) is not what this file is about: see tests/commands/gateFirst.test.ts.
+mock.module(join(import.meta.dir, '../../src/sync/gate.ts'), () => stubbedGate());
+
 mock.module(join(import.meta.dir, '../../src/commands/connectCommand.ts'), () => ({
   ConnectCommand: class {
     constructor(_devMode?: boolean) {}

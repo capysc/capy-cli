@@ -1,34 +1,14 @@
 /**
  * `capy invite`, at the command level.
  *
- * WHAT THIS FILE IS FOR, in order of what would hurt most if it broke:
- *
- *   1. THE REDEEM CODE STOPS BEING PRINTED UNDER `--web`. It carries a
- *      double-wrapped copy of the organization key, unwrappable only by the
- *      invited email. `--web` is agent-only and an agent shelling
- *      `capy` reads stdout, so under it the code goes to a page and NOWHERE
- *      else — not stdout, not stderr, not the clipboard prompt. That is the
- *      load-bearing claim of this whole path and it was pinned by nothing:
- *      code reading confirmed it held, and one refactor would have moved the
- *      `console.log` out of its `else` branch with no test to notice.
- *   2. THE PAGE IS STILL THERE WHEN THE COMMAND RETURNS. A URL printed for a
- *      server that has already been torn down is worse than no page at all —
- *      the code is unreachable and unrecoverable. So the page is fetched AFTER
- *      `execute()` has resolved, the way a human opening the printed link does.
- *   3. A CANCELLED BROWSER MINTS NOTHING. Everything past the browser hands
- *      somebody a copy of the org key.
- *   4. The rail `--json` prints describes the run that happened.
- *
- * The browser itself is driven in tests/ui/browserFlow.e2e.test.ts. Here the
- * question wizard is stubbed and the CODE PAGE IS REAL, because the code page
- * is where the invariant above lives.
- *
- * NEVER remove `CAPY_WEB_NO_OPEN`. Without it these tests open the developer's
- * real browser.
+ *   1. The redeem code is printed (or, under `--json`, put on stdout because it
+ *      was asked for).
+ *   2. The rail `--json` prints describes the run that happened.
+ *   3. A role this caller cannot grant is refused before anything is minted.
+ *   4. The interactive project checkbox is searchable (CAP-700).
  */
 import { mock, spyOn, jest, describe, test, expect, beforeEach, afterAll } from 'bun:test';
 
-process.env.CAPY_WEB_NO_OPEN = '1';
 
 const mockDetectProjectState = jest.fn();
 const mockAuthenticate = jest.fn();
@@ -96,14 +76,11 @@ mock.module('inquirer', () => ({
   prompt: mockPromptFn,
 }));
 
-// The question wizard is stubbed; the code page is not. `serveInviteCode` is
-// the real one, on a real loopback server, because "the code is on the page and
-// not on stdout" cannot be checked against a stub of the page.
-const real = await import('../../src/ui/memberScreens');
-const mockAskInBrowser = jest.fn();
-mock.module('../../src/ui/memberScreens', () => ({
-  ...real,
-  askInviteInBrowser: mockAskInBrowser,
+// The terminal project checkbox (CAP-700) is its own prompt, not an inquirer
+// question — stubbed so the test can see what it was asked and answer it.
+const mockSearchableCheckbox = jest.fn();
+mock.module('../../src/ui/searchableCheckbox', () => ({
+  searchableCheckbox: mockSearchableCheckbox,
 }));
 
 afterAll(() => {
@@ -129,10 +106,6 @@ function captureOutput(): { out: () => string; restore: () => void } {
     },
   };
 }
-
-/** The loopback URL the `--web` run prints for its code page. */
-const pageUrlIn = (output: string): string =>
-  output.match(/http:\/\/127\.0\.0\.1:\d+\/s\/[A-Za-z0-9_-]+/)?.[0] ?? '';
 
 describe('InviteCommand', () => {
   const mockExit = spyOn(process, 'exit').mockImplementation((() => {
@@ -162,50 +135,8 @@ describe('InviteCommand', () => {
     mockInviteToProject.mockResolvedValue(undefined);
   });
 
-  describe('--web keeps the redeem code off stdout', () => {
-    test('the code is on the page, the page is reachable, and neither stream holds it', async () => {
-      mockAskInBrowser.mockResolvedValue({
-        role: 'member',
-        projectIds: ['p1'],
-        ttl: '6h',
-        cancelled: false,
-      });
-
-      const cap = captureOutput();
-      try {
-        await new InviteCommand().execute('bob@example.com', { web: true });
-      } finally {
-        cap.restore();
-      }
-      const output = cap.out();
-
-      // The command has RETURNED. The page has to survive that — a URL printed
-      // for a server already torn down hands the user nothing.
-      const url = pageUrlIn(output);
-      expect(url, `no code-page URL in output:\n${output}`).not.toBe('');
-      const res = await fetch(url);
-      expect(res.status).toBe(200);
-      const html = await res.text();
-
-      // The code, read off the page the way the browser reads it.
-      const redeem = html.match(/capy redeem [A-Za-z0-9_\-+/=]+/)?.[0] ?? '';
-      expect(redeem, 'the page carries no redeem command').not.toBe('');
-      expect(redeem.length).toBeGreaterThan('capy redeem '.length + 40);
-
-      // …and nowhere in what the caller — an agent reading stdout — was given.
-      expect(output).not.toContain(redeem);
-      expect(output).not.toContain(redeem.slice('capy redeem '.length));
-      expect(output).not.toMatch(/redeem [A-Za-z0-9_\-+/=]{20,}/);
-      // The clipboard prompt is a second copy of the same credential.
-      expect(mockPromptFn).not.toHaveBeenCalled();
-      // What it DOES say: where the code is, and that this is deliberate.
-      expect(output).toContain('deliberately not printed here');
-    });
-
-    test('--json still puts the code on stdout, because it was asked for', async () => {
-      // A caller that explicitly asks for the code in a machine-readable form
-      // gets it. `--web` is the flag that means "there is a browser to hand it
-      // to"; `--json` is the one that means "I am the one who needs it".
+  describe('the redeem code', () => {
+    test('--json puts the code on stdout, because it was asked for', async () => {
       const cap = captureOutput();
       try {
         await new InviteCommand().execute('bob@example.com', {
@@ -221,10 +152,7 @@ describe('InviteCommand', () => {
       expect(parsed.redeemCode.length).toBeGreaterThan(40);
     });
 
-    test('without --web the code is printed, which is what --web exists to stop', async () => {
-      // The control for the test above: same command, no flag, and the code is
-      // right there on stdout. Without this the leak test could pass because
-      // nothing was minted at all.
+    test('without --json the code is printed for the caller to send', async () => {
       const cap = captureOutput();
       try {
         await new InviteCommand().execute('bob@example.com', {
@@ -238,79 +166,12 @@ describe('InviteCommand', () => {
       // `capy` is bold on this path, so the two words are not adjacent bytes.
       expect(cap.out()).toMatch(/redeem [A-Za-z0-9_\-+/=]{20,}/);
     });
-  });
 
-  describe('the browser is asked, and its answer is the run', () => {
-    test('cancelling mints nothing and says so', async () => {
-      mockAskInBrowser.mockResolvedValue({ role: '', projectIds: [], cancelled: true });
-
-      const cap = captureOutput();
-      try {
-        await new InviteCommand().execute('bob@example.com', { web: true });
-      } finally {
-        cap.restore();
-      }
-
-      expect(cap.out()).toContain('No invite created.');
-      // Everything past the browser hands somebody a copy of the org key.
-      expect(mockCreateInvite).not.toHaveBeenCalled();
-      expect(mockWrapOuterLayer).not.toHaveBeenCalled();
-      expect(pageUrlIn(cap.out())).toBe('');
-    });
-
-    test('the page is told what the code is bound to, not what argv typed', async () => {
-      // `innerWrap` lowercases into the HKDF salt, so `Bob@Example.com` mints a
-      // code bound to `bob@example.com`. The screen draws "The address was
-      // cleaned up" from the two together — and could not, while the producer
-      // set neither.
-      mockAskInBrowser.mockResolvedValue({ role: 'admin', projectIds: [], cancelled: false });
-
-      const cap = captureOutput();
-      try {
-        await new InviteCommand().execute('Bob@Example.com', { web: true });
-      } finally {
-        cap.restore();
-      }
-
-      const params = mockAskInBrowser.mock.calls[0][0];
-      expect(params.email).toBe('bob@example.com');
-      expect(params.rawEmail).toBe('Bob@Example.com');
-    });
-
-    test('a project flag that settled the stop still reaches the invite', async () => {
-      // `--project` settles the projects stop, so the browser never serves it
-      // and its answer comes back empty. Read as "no projects", this run grants
-      // nothing and reports success.
-      mockAskInBrowser.mockResolvedValue({ role: 'member', projectIds: [], ttl: '6h', cancelled: false });
-
-      const cap = captureOutput();
-      try {
-        await new InviteCommand().execute('bob@example.com', { web: true, projects: ['warehouse'] });
-      } finally {
-        cap.restore();
-      }
-
-      expect(mockCreateInvite).toHaveBeenCalledWith('org-123', 'bob@example.com', 'member', 'p2');
-    });
-
-    test('a lifetime argv gave outranks one the browser offered', async () => {
-      // The bound on the one divergence `--web` introduces. The browser asks
-      // about expiry and the terminal never does, so `capy invite bob` and
-      // `capy invite bob --web` can mint different lifetimes — but only where
-      // argv left the lifetime unspecified. Name it on the command line and
-      // both paths mint the same invite, because §8.2's precedence puts an
-      // explicit flag above a control the same run put on screen.
-      mockAskInBrowser.mockResolvedValue({
-        role: 'member',
-        projectIds: ['p1'],
-        ttl: '30m',
-        cancelled: false,
-      });
-
+    test('a lifetime argv gave sets the expiry and is named on the rail', async () => {
       const cap = captureOutput();
       const before = Date.now();
       try {
-        await new InviteCommand().execute('bob@example.com', { web: true, json: true, ttl: '6h' });
+        await new InviteCommand().execute('bob@example.com', { json: true, role: 'admin', ttl: '6h' });
       } finally {
         cap.restore();
       }
@@ -322,44 +183,29 @@ describe('InviteCommand', () => {
       expect(parsed.stops.find((s: any) => s.id === 'expiry').flag).toBe('--ttl 6h');
     });
 
-    test('never opens the developer\'s real browser when CAPY_WEB_NO_OPEN is set', async () => {
-      mockAskInBrowser.mockResolvedValue({ role: 'admin', projectIds: [], cancelled: false });
-
-      const cap = captureOutput();
-      try {
-        await new InviteCommand().execute('bob@example.com', { web: true });
-      } finally {
-        cap.restore();
-      }
-
-      expect(mockAskInBrowser.mock.calls[0][0].open).toBe(false);
-    });
-
-    test('a run every flag already answered opens no browser at all', async () => {
-      // `--web` is where a question gets asked, not a page that must be opened.
-      // Nothing is outstanding here, so nothing is served but the code.
+    test('a project flag reaches the invite', async () => {
       const cap = captureOutput();
       try {
         await new InviteCommand().execute('bob@example.com', {
-          web: true,
-          role: 'admin',
-          ttl: '6h',
+          role: 'member',
+          projects: ['warehouse'],
+          nonTty: true,
+          json: true,
         });
       } finally {
         cap.restore();
       }
 
-      expect(mockAskInBrowser).not.toHaveBeenCalled();
-      expect(pageUrlIn(cap.out())).not.toBe('');
+      expect(mockCreateInvite).toHaveBeenCalledWith('org-123', 'bob@example.com', 'member', 'p2');
     });
   });
 
   describe('the rail describes the run that happened', () => {
     test('a re-issue that asked nothing reports nothing outstanding', async () => {
-      // `capy invite <existing member> --web` with no --role takes the pure
-      // re-issue branch: no browser opens and the default lifetime is used. The
-      // rail used to carry `expiry · current` on a run that had already minted
-      // the code — a stop whose state does not describe what the run did.
+      // `capy invite <existing member>` with no --role takes the pure re-issue
+      // branch: nothing is asked and the default lifetime is used. The rail
+      // used to carry `expiry · current` on a run that had already minted the
+      // code — a stop whose state does not describe what the run did.
       mockListMemberDetails.mockResolvedValue({
         members: [
           {
@@ -375,13 +221,12 @@ describe('InviteCommand', () => {
 
       const cap = captureOutput();
       try {
-        await new InviteCommand().execute('bob@example.com', { web: true, json: true });
+        await new InviteCommand().execute('bob@example.com', { json: true });
       } finally {
         cap.restore();
       }
 
       const { stops } = JSON.parse(cap.out());
-      expect(mockAskInBrowser).not.toHaveBeenCalled();
       expect(stops.map((s: any) => [s.id, s.state])).toEqual([
         ['role', 'done'],
         ['projects', 'done'],
@@ -397,83 +242,110 @@ describe('InviteCommand', () => {
       // lists a refused project as granted is a rail arguing with the failure
       // printed underneath it.
       mockInviteToProject.mockRejectedValue(new Error('503 from the service'));
-      mockAskInBrowser.mockResolvedValue({
-        role: 'member',
-        projectIds: ['p1', 'p2'],
-        ttl: '6h',
-        cancelled: false,
-      });
 
       const cap = captureOutput();
       try {
-        await new InviteCommand().execute('bob@example.com', { web: true, json: true });
+        await new InviteCommand().execute('bob@example.com', {
+          json: true,
+          role: 'member',
+          projects: ['p1', 'p2'],
+          nonTty: true,
+        });
       } finally {
         cap.restore();
       }
 
       const parsed = JSON.parse(cap.out());
       const projects = parsed.stops.find((s: any) => s.id === 'projects');
-      expect(projects.answer).toBe('storefront');
-      expect(projects.answer).not.toContain('warehouse');
-      expect(projects.detail).toContain('warehouse');
+      expect(projects.answer).toBe('p1');
+      expect(projects.answer).not.toContain('p2');
+      expect(projects.detail).toContain('p2');
       expect(parsed.projectAssignmentFailures).toHaveLength(1);
     });
 
-    test('an answer given in the browser carries no flag, and one argv gave does', async () => {
-      mockAskInBrowser.mockResolvedValue({
-        role: 'member',
-        projectIds: ['p1'],
-        ttl: '30m',
-        cancelled: false,
-      });
-
+    test('an answer an argv flag gave names the flag', async () => {
       const cap = captureOutput();
       try {
-        await new InviteCommand().execute('bob@example.com', { web: true, json: true });
-      } finally {
-        cap.restore();
-      }
-
-      const { stops } = JSON.parse(cap.out());
-      const byId = Object.fromEntries(stops.map((s: any) => [s.id, s]));
-      expect(byId.role.flag).toBeUndefined();
-      expect(byId.role.answer).toBe('member');
-      expect(byId.expiry.answer).toBe('30m');
-      expect(byId.expiry.flag).toBeUndefined();
-
-      const cap2 = captureOutput();
-      try {
         await new InviteCommand().execute('bob@example.com', {
-          web: true,
           json: true,
           role: 'admin',
           ttl: '6h',
         });
       } finally {
-        cap2.restore();
+        cap.restore();
       }
-      const flagged = Object.fromEntries(
-        JSON.parse(cap2.out()).stops.map((s: any) => [s.id, s]),
-      );
+      const flagged = Object.fromEntries(JSON.parse(cap.out()).stops.map((s: any) => [s.id, s]));
       expect(flagged.role.flag).toBe('--role admin');
       expect(flagged.expiry.flag).toBe('--ttl 6h');
     });
   });
 
-  test('a role this caller cannot grant is refused before a browser opens', async () => {
+  test('a role this caller cannot grant is refused before anything is minted', async () => {
     mockGetOrgMe.mockResolvedValue({ role: 'project-admin', user_id: 'u-mike', admin_projects: ['p1'] });
 
     const cap = captureOutput();
     try {
       await expect(
-        new InviteCommand().execute('bob@example.com', { web: true, role: 'admin' }),
+        new InviteCommand().execute('bob@example.com', { role: 'admin', nonTty: true }),
       ).rejects.toThrow('process.exit');
     } finally {
       cap.restore();
     }
 
     expect(mockExit).toHaveBeenCalledWith(1);
-    expect(mockAskInBrowser).not.toHaveBeenCalled();
     expect(mockCreateInvite).not.toHaveBeenCalled();
+  });
+
+  describe('the interactive project checkbox is searchable (CAP-700)', () => {
+    const planInput = {} as any;
+    const askProjects = (opts: Record<string, unknown>, interactive: boolean) =>
+      (new InviteCommand() as any).resolveInviteeProjects(
+        'member',
+        opts,
+        { listProjects: mockListProjects },
+        interactive,
+        false,
+        [],
+        planInput,
+      );
+
+    test('asks the searchable checkbox with the same message, in project order, nothing pre-ticked without a cwd project', async () => {
+      mockSearchableCheckbox.mockResolvedValue(['p2']);
+      const result = await askProjects({}, true);
+      expect(mockSearchableCheckbox).toHaveBeenCalledTimes(1);
+      const config = mockSearchableCheckbox.mock.calls[0][0] as any;
+      expect(config.message).toBe('Grant Member access to which projects?');
+      expect(config.choices).toEqual([
+        { name: 'storefront', value: 'p1', checked: false },
+        { name: 'warehouse', value: 'p2', checked: false },
+      ]);
+      expect(result).toEqual({ projectId: 'p2', extraProjectIds: [], projectSource: undefined });
+    });
+
+    test('the cwd project is listed first and pre-ticked', async () => {
+      mockDetectProjectState.mockResolvedValue({ initialized: true, organizationId: 'org-123', projectId: 'p2' });
+      mockSearchableCheckbox.mockResolvedValue(['p2', 'p1']);
+      const result = await askProjects({}, true);
+      const config = mockSearchableCheckbox.mock.calls[0][0] as any;
+      expect(config.choices.map((c: any) => [c.value, c.checked])).toEqual([['p2', true], ['p1', false]]);
+      expect(result).toEqual({ projectId: 'p2', extraProjectIds: ['p1'], projectSource: undefined });
+    });
+
+    test('still refuses an empty selection', async () => {
+      mockSearchableCheckbox.mockResolvedValue(['p1']);
+      await askProjects({}, true);
+      const config = mockSearchableCheckbox.mock.calls[0][0] as any;
+      expect(config.validate([])).toBe('Pick at least one project');
+      expect(config.validate(['p1'])).toBe(true);
+    });
+
+    test('--project and non-interactive runs never open the picker', async () => {
+      const byFlag = await askProjects({ projects: ['warehouse'] }, true);
+      expect(byFlag.projectId).toBe('p2');
+      mockDetectProjectState.mockResolvedValue({ initialized: true, organizationId: 'org-123', projectId: 'p1' });
+      const piped = await askProjects({}, false);
+      expect(piped.projectId).toBe('p1');
+      expect(mockSearchableCheckbox).not.toHaveBeenCalled();
+    });
   });
 });

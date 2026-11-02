@@ -119,6 +119,8 @@ import { KeepFile } from '../../types/index';
 import type { AuthService } from '../../auth/authService';
 import type { ServiceClient } from '../../service/serviceClient';
 import type { ConnectFailure, ImportOutcome } from './registry';
+import type { FolderSync } from '../../sync/gate';
+import type { ConflictPayload } from '../../sync/conflicts';
 import type { DiscoveryCommitOutcome } from '../../git/discoveryCommit';
 
 /**
@@ -414,7 +416,9 @@ export const DISCOVERY_PROJECT_NAME_MAX_LENGTH = 255;
 /** `'vercel'` (CAP-696): a Vercel project, whose id rides in `serviceId` — see `vercelDiscovery.ts`. */
 export type DiscoveryServiceKind = 'application' | 'compose' | 'vercel';
 
-interface ServiceDetail {
+export interface ServiceDetail {
+  /** Dokploy PROJECT id (CAP-703); `projectName` alone is not unique. */
+  projectId?: string;
   projectName: string;
   environmentId: string;
   environmentName: string;
@@ -426,6 +430,8 @@ interface ServiceDetail {
   repository?: string;
   branch?: string;
   composePath?: string;
+  /** Application only (CAP-703): the build directory within the repo. UNVERIFIED live — see `DokployApplication.buildPath`. */
+  buildPath?: string;
   rawEnv: string | null;
 }
 
@@ -462,6 +468,7 @@ function serviceDisplayName(ref: { name?: string; appName?: string; id: string }
 
 /** Every service across every project/environment, with full detail (`GET application.one`/`GET compose.one` each). Sequential — deterministic call order for tests, and gentle on the Dokploy instance. */
 interface ServiceRefContext {
+  projectId: string;
   projectName: string;
   environmentId: string;
   environmentName: string;
@@ -475,6 +482,7 @@ function flattenServiceRefs(projects: readonly DokployProjectSummary[]): readonl
   return projects.flatMap((project) =>
     project.environments.flatMap((env) => [
       ...env.applications.map((ref) => ({
+        projectId: project.projectId,
         projectName: project.name,
         environmentId: env.environmentId,
         environmentName: env.name,
@@ -483,6 +491,7 @@ function flattenServiceRefs(projects: readonly DokployProjectSummary[]): readonl
         serviceName: serviceDisplayName(ref),
       })),
       ...env.composes.map((ref) => ({
+        projectId: project.projectId,
         projectName: project.name,
         environmentId: env.environmentId,
         environmentName: env.name,
@@ -494,43 +503,59 @@ function flattenServiceRefs(projects: readonly DokployProjectSummary[]): readonl
   );
 }
 
-async function fetchAllServiceDetails(client: DiscoveryDokployClient): Promise<readonly ServiceDetail[]> {
+/**
+ * Every service with its full detail. `onProgress` (CAP-703) is told after
+ * each service has been read, so a caller can report progress somewhere that
+ * is not stdout.
+ */
+export async function fetchAllServiceDetails(
+  client: DiscoveryDokployClient,
+  onProgress?: (done: number, total: number) => void,
+  /** Only these service ids are read in full (a plan names a few of them); the rest are skipped without a request. */
+  only?: ReadonlySet<string>,
+): Promise<readonly ServiceDetail[]> {
   const projects = await client.listProjects();
-  const refs = flattenServiceRefs(projects);
+  const refs = flattenServiceRefs(projects).filter((ref) => only === undefined || only.has(ref.serviceId));
   // Sequential (not parallel): deterministic call order for tests, and
   // gentle on the Dokploy instance. A `.reduce` over a promise keeps that
   // order without a mutable accumulator — same pattern the single-service
   // import's own conflict-classification reduce uses.
   return refs.reduce<Promise<readonly ServiceDetail[]>>(async (accPromise, ref) => {
     const acc = await accPromise;
-    if (ref.serviceKind === 'application') {
-      const app = await client.getApplication(ref.serviceId);
-      return [
-        ...acc,
-        {
-          ...ref,
-          sourceType: app.sourceType,
-          owner: app.owner,
-          repository: app.repository,
-          branch: app.branch,
-          rawEnv: app.env,
-        },
-      ];
-    }
-    const compose = await client.getCompose(ref.serviceId);
-    return [
-      ...acc,
-      {
-        ...ref,
-        sourceType: compose.sourceType,
-        owner: compose.owner,
-        repository: compose.repository,
-        branch: compose.branch,
-        composePath: compose.composePath,
-        rawEnv: compose.env,
-      },
-    ];
+    const detail = await fetchOneServiceDetail(client, ref);
+    onProgress?.(acc.length + 1, refs.length);
+    return [...acc, detail];
   }, Promise.resolve([]));
+}
+
+async function fetchOneServiceDetail(client: DiscoveryDokployClient, ref: ServiceRefContext): Promise<ServiceDetail> {
+  if (ref.serviceKind === 'application') {
+    const app = await client.getApplication(ref.serviceId);
+    return {
+      ...ref,
+      sourceType: app.sourceType,
+      owner: app.owner,
+      repository: app.repository,
+      branch: app.branch,
+      buildPath: app.buildPath,
+      rawEnv: app.env,
+    };
+  }
+  const compose = await client.getCompose(ref.serviceId);
+  return {
+    ...ref,
+    sourceType: compose.sourceType,
+    owner: compose.owner,
+    repository: compose.repository,
+    branch: compose.branch,
+    composePath: compose.composePath,
+    rawEnv: compose.env,
+  };
+}
+
+/** The one rule for "this service tracks a git repo": an owner and a repository, and not a `raw` source. Shared by `capy connect dokploy --discover` and `capy deploy dokploy --discover`. */
+export function hasGitSource(detail: Pick<ServiceDetail, 'owner' | 'repository' | 'sourceType'>): boolean {
+  return !!detail.owner && !!detail.repository && detail.sourceType?.toLowerCase() !== 'raw';
 }
 
 function matchDetail(
@@ -543,8 +568,7 @@ function matchDetail(
     serviceKind: detail.serviceKind,
     serviceId: detail.serviceId,
   };
-  const hasGitSource = !!detail.owner && !!detail.repository && detail.sourceType?.toLowerCase() !== 'raw';
-  if (!hasGitSource) {
+  if (!hasGitSource(detail)) {
     return { kind: 'unmatched', value: { ...base, reason: 'no_git_source' } };
   }
   const hit = repos.find(
@@ -1000,6 +1024,13 @@ export function orderEnvironments<T extends { environmentName: string }>(environ
  */
 export interface DiscoverySequenceDeps {
   /**
+   * Bare `capy` in (repoDir, folder), until it and Capy agree: the FIRST step for every folder, before anything is written
+   * into it (docs/conflict-resolution.md). A folder that is not a Capy project yet has nothing to compare. A difference
+   * nobody can answer (discovery never prompts), a stop or a failure skips the folder: nothing was written into it, and the
+   * result carries the folder's coded failure (and, for a difference, its `conflict_id` and rows).
+   */
+  syncFolder: (repoDir: string, folder: string) => Promise<FolderSync>;
+  /**
    * No keep.lock at (repoDir, folder) → run the init flow (existing-project
    * picking, or create new, in the caller's org) — interactive only; a
    * non-interactive run refuses `DOKPLOY_FOLDER_NOT_INITIALIZED` naming the
@@ -1081,6 +1112,8 @@ export type DiscoveryFolderResult =
       message: string;
       /** Environments this folder finished BEFORE the step that aborted it. */
       environments: readonly DiscoverySequenceEnvResult[];
+      /** The folder differed from Capy and nobody could answer: the rows and `conflict_id` for a rerun with `--resolve` + `--conflict`. */
+      conflict?: ConflictPayload;
     };
 
 interface SequenceAcc {
@@ -1111,6 +1144,20 @@ export async function runDiscoverySequence(
   opts: { overwrite: boolean },
   deps: DiscoverySequenceDeps,
 ): Promise<DiscoveryFolderResult> {
+  // Bare `capy` first, in this folder, before anything is written into it.
+  const synced = await deps.syncFolder(folder.repoDir, folder.folder);
+  if (!synced.ok) {
+    return {
+      repoDir: folder.repoDir,
+      folder: folder.folder,
+      ok: false,
+      code: synced.code,
+      message: synced.message,
+      environments: [],
+      ...(synced.conflict === undefined ? {} : { conflict: synced.conflict }),
+    };
+  }
+
   const project = await deps.ensureProject(folder.repoDir, folder.folder, folder.remote);
   if (!project.ok) {
     return { repoDir: folder.repoDir, folder: folder.folder, ok: false, code: project.code, message: project.message, environments: [] };
@@ -1217,5 +1264,9 @@ export type DiscoveryOutcome =
       commits?: readonly DiscoveryRepoCommitResult[];
       /** Vercel `--targets` under `--dry-run` only: the targets a real run would write. A real run reports them per environment (`applied`). */
       deployTargets?: readonly DiscoveryDeployTarget[];
+      /** CAP-703: `{ base_url: true }` when this run saved the Dokploy base URL to the org system variable. */
+      saved?: { readonly base_url: true };
+      /** CAP-703: `BASE_URL_NOT_SAVED` / `BASE_URL_DIFFERS_FROM_STORED`, as codes. */
+      notices?: ReadonlyArray<{ readonly code: string; readonly reason?: string; readonly stored?: string; readonly used?: string }>;
     }
   | ConnectFailure;

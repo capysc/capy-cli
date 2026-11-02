@@ -68,7 +68,6 @@ const successOutcome = (): ImportOutcome => ({
   unchanged: [],
   skipped: [],
   warnings: [{ code: 'DOKPLOY_PLAINTEXT_REMAINS', names: ['API_KEY'] }],
-  deployTargetSaved: false,
 });
 
 function fakeImportModule(outcome: ImportOutcome): ConnectorModule {
@@ -98,8 +97,10 @@ function fakeCtx(dir: string): ResolvedContext {
       writeSyncState: () => {},
     },
     serviceClient: {
-      // No real server round trip: `keep_file` omitted so `adoptServerKeep`
-      // falls back to the locally-merged keep (see its own doc).
+      // No real server round trip. The commit path reads the server's latest first (an empty
+      // project here); `keep_file` omitted from the push answer so `adoptServerKeep` falls back
+      // to the keep that was uploaded (see its own doc).
+      getDecryptData: async () => ({ env_content: '', decrypt_key: '', expires_at: '' }),
       pushSecrets: async () => ({ keep_hash: 'h'.repeat(16) }),
     },
     orgId: 'o',

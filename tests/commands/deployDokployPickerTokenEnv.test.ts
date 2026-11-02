@@ -46,7 +46,7 @@ mock.module('../../src/system/systemStore', () => ({
   getDirectionalConnectorSecret: mock(async () => null),
 }));
 
-import { resolveAdapterOptions, settingsDefaults } from '../../src/commands/deployCommand';
+import { resolveAdapterOptions } from '../../src/commands/deployCommand';
 import { getAdapter } from '../../src/deploy/registry';
 
 afterEach(() => {
@@ -436,51 +436,6 @@ describe('capy deploy picker — dokploy URL input (CAP-657) + tokenEnv (CAP-664
         } finally {
           fetchSpy.mockRestore();
         }
-      });
-    });
-  });
-
-  // ── validator fix-first: settingsDefaults (the WEB surface's copy of the
-  // terminal picker's own defaults) is UNCHANGED by CAP-657 — Dokploy setup
-  // stays terminal-only (TERMINAL_ONLY_SETUP), so this function never drives
-  // the URL question at all; it must still include composeId/kind so a
-  // re-edit never disagrees between the two surfaces about what a Compose
-  // target starts from. ──
-  describe('settingsDefaults — dokploy (web surface parity, unchanged by CAP-657)', () => {
-    test('a brand-new target defaults kind to compose, with both ids blank', () => {
-      expect(settingsDefaults('dokploy', '/tmp', {}, {})).toEqual({
-        baseUrl: '',
-        applicationId: '',
-        composeId: '',
-        kind: 'compose',
-      });
-    });
-
-    test('an existing Compose target defaults kind to compose and carries composeId', () => {
-      expect(settingsDefaults('dokploy', '/tmp', { baseUrl: 'https://x', composeId: 'compose_old' }, {})).toEqual({
-        baseUrl: 'https://x',
-        applicationId: '',
-        composeId: 'compose_old',
-        kind: 'compose',
-      });
-    });
-
-    test('an existing Application target defaults kind to application and carries applicationId', () => {
-      expect(settingsDefaults('dokploy', '/tmp', { baseUrl: 'https://x', applicationId: 'app_old' }, {})).toEqual({
-        baseUrl: 'https://x',
-        applicationId: 'app_old',
-        composeId: '',
-        kind: 'application',
-      });
-    });
-
-    test('tokenEnv is carried through only when an existing target already has one', () => {
-      expect(settingsDefaults('dokploy', '/tmp', { applicationId: 'app_old', tokenEnv: 'MY_TOKEN' }, {})).toEqual({
-        baseUrl: '',
-        applicationId: 'app_old',
-        composeId: '',
-        kind: 'application',
-        tokenEnv: 'MY_TOKEN',
       });
     });
   });

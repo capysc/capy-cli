@@ -5,12 +5,14 @@
  *
  * 1. Mint a one-time P-256 ECDH key pair and `POST /auth/device/authorize`.
  * 2. Print a QR code + link, then poll `/auth/device/token` (RFC 8628).
- * 3. Once approved, install the session the same way `capy` login does
+ * 3. Once approved, require confirmation of the returned account before
+ *    installing the session the same way `capy` login does
  *    (`AuthService#installDeviceGrantSession`).
  * 4. `POST /device-pairings/pickup` with the new token, open the sealed
  *    payload with the key pair from step 1, and write `local.key` +
  *    `key.enc` for every entry whose `user_id` matches the logged-in user.
  */
+import { confirmPairAccount } from './pairAccountConfirmation';
 import { resolveActiveUrl } from '../config/profileConfig';
 import { resolveKeepOrigin } from '../config/keepOrigin';
 import { generatePairKeyPair, openPairEnvelope, parsePairEnvelope } from '../crypto/pairCrypto';
@@ -26,10 +28,10 @@ import { refuseError } from './pairingRefusal';
 import type { PairingEntry } from '../crypto/pairingPayload';
 
 export interface PairOptions {
-  json?: boolean;
-  force?: boolean;
-  apiUrl?: string;
-  devMode?: boolean;
+  readonly json?: boolean;
+  readonly force?: boolean;
+  readonly apiUrl?: string;
+  readonly devMode?: boolean;
 }
 
 /** Prose/QR/progress output. Always sent to stderr under `--json` so stdout stays pure JSON; stdout in human mode otherwise. */
@@ -63,6 +65,7 @@ function writeEntry(entry: PairingEntry, force: boolean): 'written' {
 }
 
 const PAIR_LINK_LABEL = 'Approve on your other device:'; // COPY-FLAG
+
 
 /**
  * Prints the non-`--json` (human) link block: QR (always the full,
@@ -162,6 +165,13 @@ export async function pairCommand(options: PairOptions = {}): Promise<void> {
         prompt?.stop();
       }
     })();
+
+    if (!await confirmPairAccount(exchange.user.email, json)) {
+      throw new CapyError(
+        'Pairing cancelled. No session or keys were installed.',
+        ERROR_CODES.AUTH_FAILED,
+      );
+    }
 
     const authService = new AuthService(options.apiUrl, devMode);
     const installed = await authService.installDeviceGrantSession(exchange.token, exchange.user, exchange.organizations);

@@ -13,6 +13,11 @@
  * `mock.module()` and does not have to run in `run-tests.sh`'s isolated list.
  */
 import { describe, test, expect, spyOn, mock, beforeEach, afterEach } from 'bun:test';
+import { stubbedGate } from '../helpers/gateMock';
+
+// Bare `capy` (the first step of `capy rotate` / `capy connect`) is tested in tests/sync/gate.test.ts and
+// tests/commands/gateFirst.test.ts. `mock.module()` is process-wide: this file runs isolated (tests/run-tests.sh).
+mock.module('../../src/sync/gate', () => stubbedGate());
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -29,6 +34,7 @@ import {
 import type { ResolvedContext } from '../../src/commands/connectors/shared';
 import { writeImportedAndSync, writeImportOutcome } from '../../src/commands/connectors/shared';
 import { FileManager } from '../../src/files/fileManager';
+import { Encryptor } from '../../src/crypto/encryptor';
 import { ConnectCommand } from '../../src/commands/connectCommand';
 import { DokployApiError } from '../../src/deploy/dokployApi';
 import type { DokploySystemStoreCallOptions, FetchLike } from '../../src/deploy/dokployApi';
@@ -207,6 +213,8 @@ describe('resolveDokploySettings', () => {
       baseUrl: 'https://asked.example.com',
       applicationId: 'app_asked',
       tokenEnv: 'DOKPLOY_API_KEY',
+      // CAP-703: a URL typed at a prompt is marked, so the caller can offer it to the org.
+      baseUrlAsked: true,
     });
   });
 });
@@ -568,61 +576,49 @@ describe('dokploy import — keep.lock metadata + warnings', () => {
   });
 });
 
-describe('dokploy import — deploy-target offer', () => {
+// CAP-703 (Vince, 2026-10-03): "connect is for retrieval, target is for deploy". A connector
+// import never creates, offers or writes a deploy target. This block used to cover the offer
+// (`maybeOfferDeployTarget`); it now pins that the offer is gone: no question asked, nothing
+// saved, in a terminal or not, and an existing deploy.json is left exactly as it was.
+describe('dokploy import — never offers or saves a deploy target', () => {
   const ROOT = mkdtempSync(join(tmpdir(), 'capy-dokploy-import-'));
 
   afterEach(() => {
     if (existsSync(join(ROOT, '.capy'))) rmSync(join(ROOT, '.capy'), { recursive: true, force: true });
   });
 
-  test('non-interactive: never asks, never saves', async () => {
+  test('non-interactive: nothing saved, and the outcome carries no deploy-target field', async () => {
     const calls: FakeCall[] = [];
     const connector = createDokployConnector({ fetch: fakeFetch({ env: 'A=1', calls }), env: { T: 'x' }, cwd: ROOT });
     const outcome = await connector.import!(ctxWith(), { nonTty: true, baseUrl: 'https://d', application: 'app_new', tokenEnv: 'T' });
     expect(outcome.ok).toBe(true);
     if (!outcome.ok) return;
-    expect(outcome.deployTargetSaved).toBe(false);
+    expect(outcome).not.toHaveProperty('deployTargetSaved');
     expect(listTargets(ROOT)).toEqual([]);
   });
 
-  test('interactive + yes: saves a target with the imported names', async () => {
+  test('interactive, with a confirm that would say yes to anything: no target question, nothing saved', async () => {
     const calls: FakeCall[] = [];
+    const asked = mock(async (_message: string, _defaultValue: boolean) => true);
     const connector = createDokployConnector({
       fetch: fakeFetch({ env: 'A=1', calls }),
       env: { T: 'x' },
       cwd: ROOT,
-      confirm: async () => true,
+      confirm: asked,
       selectVars: async (c: readonly string[]) => c,
     });
     const outcome = await withTTY(() => connector.import!(ctxWith(), { nonTty: false, baseUrl: 'https://d', application: 'app_yes', tokenEnv: 'T' }));
     expect(outcome.ok).toBe(true);
     if (!outcome.ok) return;
-    expect(outcome.deployTargetSaved).toBe(true);
-    const targets = listTargets(ROOT);
-    expect(targets.length).toBe(1);
-    expect(targets[0].kind).toBe('dokploy');
-    expect(targets[0].vars).toEqual(['A']);
-    expect((targets[0].options as { applicationId: string }).applicationId).toBe('app_yes');
-  });
-
-  test('interactive + no: nothing saved', async () => {
-    const calls: FakeCall[] = [];
-    const connector = createDokployConnector({
-      fetch: fakeFetch({ env: 'A=1', calls }),
-      env: { T: 'x' },
-      cwd: ROOT,
-      confirm: async () => false,
-      selectVars: async (c: readonly string[]) => c,
-    });
-    const outcome = await withTTY(() => connector.import!(ctxWith(), { nonTty: false, baseUrl: 'https://d', application: 'app_no', tokenEnv: 'T' }));
-    expect(outcome.ok).toBe(true);
-    if (!outcome.ok) return;
-    expect(outcome.deployTargetSaved).toBe(false);
+    expect(outcome.imported.map((i) => i.varName)).toEqual(['A']);
+    expect(asked).not.toHaveBeenCalled();
     expect(listTargets(ROOT)).toEqual([]);
+    expect(existsSync(join(ROOT, '.capy', 'deploy.json'))).toBe(false);
   });
 
-  test('already has a target for this application: not offered again', async () => {
+  test('an existing target for this application is left exactly as it was', async () => {
     upsertTarget(ROOT, DOKPLOY_TARGET({ options: { baseUrl: 'https://d', applicationId: 'app_existing', tokenEnv: 'T' } }));
+    const before = readFileSync(join(ROOT, '.capy', 'deploy.json'), 'utf-8');
     let confirmCalled = false;
     const calls: FakeCall[] = [];
     const connector = createDokployConnector({
@@ -638,11 +634,11 @@ describe('dokploy import — deploy-target offer', () => {
     const outcome = await withTTY(() => connector.import!(ctxWith(), { nonTty: false, baseUrl: 'https://d', application: 'app_existing', tokenEnv: 'T' }));
     expect(outcome.ok).toBe(true);
     if (!outcome.ok) return;
-    expect(outcome.deployTargetSaved).toBe(false);
     expect(confirmCalled).toBe(false);
+    expect(readFileSync(join(ROOT, '.capy', 'deploy.json'), 'utf-8')).toBe(before);
   });
 
-  test('nothing imported: never offered', async () => {
+  test('nothing imported: nothing asked, nothing saved', async () => {
     const calls: FakeCall[] = [];
     let confirmCalled = false;
     const connector = createDokployConnector({
@@ -657,8 +653,8 @@ describe('dokploy import — deploy-target offer', () => {
     const outcome = await withTTY(() => connector.import!(ctxWith(), { nonTty: false, baseUrl: 'https://d', application: 'app_empty', tokenEnv: 'T' }));
     expect(outcome.ok).toBe(true);
     if (!outcome.ok) return;
-    expect(outcome.deployTargetSaved).toBe(false);
     expect(confirmCalled).toBe(false);
+    expect(listTargets(ROOT)).toEqual([]);
   });
 });
 
@@ -740,6 +736,16 @@ describe('writeImportOutcome — unchanged-value connector backfill', () => {
         writeSyncState: () => {},
       },
       serviceClient: {
+        // The commit path reads the server's latest first: the server already holds PORT=3000.
+        getDecryptData: async () => ({
+          env_content: `PORT=capy:r1:${Encryptor.encrypt('3000', 'k')}`,
+          decrypt_key: '',
+          expires_at: '',
+          keep_file: JSON.stringify({
+            ...keep,
+            variables: { PORT: [{ resource_id: 'r1', branch: 'development', value_hash: createHash('sha256').update('3000').digest('hex').slice(0, 16) }] },
+          }),
+        }),
         pushSecrets: async (projectId: string, keepFile: string, envBlob: string, branch: string) => {
           pushCalls.push({ projectId, keepFile, envBlob, branch });
           return { keep_hash: 'h'.repeat(16) };
@@ -770,7 +776,6 @@ describe('writeImportOutcome — unchanged-value connector backfill', () => {
       unchangedEntries: [{ varName: 'PORT', value: '3000', entry: backfillEntry }],
       skipped: [],
       warnings: [],
-      deployTargetSaved: false,
     };
 
     const { wrote } = await writeImportOutcome(ctx, outcome, { push: true, dryRun: false });
@@ -808,7 +813,6 @@ describe('writeImportOutcome — unchanged-value connector backfill', () => {
       unchanged: [],
       skipped: [],
       warnings: [],
-      deployTargetSaved: false,
     };
     const { wrote } = await writeImportOutcome(ctx, outcome, { push: true, dryRun: false });
     expect(wrote).toBe(false);
@@ -829,7 +833,6 @@ describe('writeImportOutcome — unchanged-value connector backfill', () => {
       unchangedEntries: [{ varName: 'PORT', value: '3000', entry: { provider: 'dokploy', source: 'import', created_at: 1, fingerprint: 'x' } }],
       skipped: [],
       warnings: [],
-      deployTargetSaved: false,
     };
     const { wrote } = await writeImportOutcome(ctx, outcome, { push: true, dryRun: true });
     expect(wrote).toBe(false);
@@ -903,7 +906,6 @@ describe('connectCommand import output — no secret value on any output surface
     unchanged: [],
     skipped: [],
     warnings: [{ code: 'DOKPLOY_PLAINTEXT_REMAINS', names: ['API_KEY'] }],
-    deployTargetSaved: false,
   });
 
   /**
@@ -1339,22 +1341,6 @@ describe('dokploy import — system store token resolution', () => {
     return { getConnectorSecret, promptFn };
   }
 
-  test('--web: a real TTY does not let the store prompt — refused, zero prompt calls', async () => {
-    const { getConnectorSecret, promptFn } = fakeSystemStore(null);
-    const connector = createDokployConnector({ fetch: unreachableFetch, env: {}, getConnectorSecret });
-    const outcome = await withTTY(() =>
-      connector.import!(ctxWith(), {
-        ...BASE_OPTS,
-        nonTty: false,
-        web: true,
-        baseUrl: 'https://d.example.com',
-        application: 'app_1',
-      }),
-    );
-    expect(outcome.ok).toBe(false);
-    expect(promptFn).not.toHaveBeenCalled();
-  });
-
   test('--json: a real TTY does not let the store prompt — refused, zero prompt calls', async () => {
     const { getConnectorSecret, promptFn } = fakeSystemStore(null);
     const connector = createDokployConnector({ fetch: unreachableFetch, env: {}, getConnectorSecret });
@@ -1371,7 +1357,7 @@ describe('dokploy import — system store token resolution', () => {
     expect(promptFn).not.toHaveBeenCalled();
   });
 
-  test('neither --web nor --json: a real TTY DOES let the store prompt (sanity check for the two tests above)', async () => {
+  test('without --json: a real TTY DOES let the store prompt (sanity check for the test above)', async () => {
     const { getConnectorSecret, promptFn } = fakeSystemStore(null);
     const connector = createDokployConnector({
       fetch: fakeFetch({ env: 'A=1', calls: [] }),
@@ -1462,6 +1448,8 @@ describe('resolveDokployImportSource', () => {
       baseUrl: 'https://asked.example.com',
       source: { kind: 'compose', id: 'compose_asked' },
       tokenEnv: 'DOKPLOY_API_KEY',
+      // CAP-703: a URL typed at a prompt is marked, so the caller can offer it to the org.
+      baseUrlAsked: true,
     });
   });
 
@@ -1507,6 +1495,8 @@ describe('resolveDokployImportSource', () => {
       baseUrl: 'https://asked.example.com',
       source: { kind: 'compose', id: 'compose_asked' },
       tokenEnv: 'DOKPLOY_API_KEY',
+      // CAP-703: a URL typed at a prompt is marked, so the caller can offer it to the org.
+      baseUrlAsked: true,
     });
   });
 
@@ -1521,6 +1511,8 @@ describe('resolveDokployImportSource', () => {
       baseUrl: 'https://asked.example.com',
       source: { kind: 'application', id: 'app_asked' },
       tokenEnv: 'DOKPLOY_API_KEY',
+      // CAP-703: a URL typed at a prompt is marked, so the caller can offer it to the org.
+      baseUrlAsked: true,
     });
   });
 });
@@ -1646,7 +1638,7 @@ describe('dokploy import — compose source, end to end', () => {
       );
       expect(outcome.ok).toBe(true);
       if (!outcome.ok) return;
-      expect(outcome.deployTargetSaved).toBe(false);
+      expect(outcome).not.toHaveProperty('deployTargetSaved');
       expect(confirmCalls.length).toBe(0);
       expect(listTargets(ROOT)).toEqual([]);
     } finally {
@@ -1697,7 +1689,6 @@ describe('dokploy import — compose source, end to end', () => {
         unchanged: [],
         skipped: [],
         warnings: [{ code: 'DOKPLOY_PLAINTEXT_REMAINS', names: ['SECRET_TOKEN'] }],
-        deployTargetSaved: false,
       };
 
       const fakeMod: ConnectorModule = {
@@ -1918,7 +1909,7 @@ describe('dokploy import — dry run', () => {
       );
       expect(outcome.ok).toBe(true);
       if (!outcome.ok) return;
-      expect(outcome.deployTargetSaved).toBe(false);
+      expect(outcome).not.toHaveProperty('deployTargetSaved');
       expect(confirmCalls.length).toBe(0);
       expect(listTargets(ROOT)).toEqual([]);
     } finally {
@@ -1975,7 +1966,6 @@ describe('dokploy import — dry run', () => {
         unchanged: ['UNCHANGED_VAR'],
         skipped: [{ name: 'SKIPPED_VAR', code: 'IMPORT_CONFLICT_SKIPPED' }],
         warnings: [],
-        deployTargetSaved: false,
         wouldAsk: ['CONFLICT_VAR'],
       };
     }
@@ -2027,7 +2017,7 @@ describe('dokploy import — dry run', () => {
       expect(parsed.wouldAsk).toEqual(['CONFLICT_VAR']);
       expect(parsed.skipped).toEqual([{ name: 'SKIPPED_VAR', code: 'IMPORT_CONFLICT_SKIPPED' }]);
       expect(parsed.pushed).toBe(false);
-      expect(parsed.deployTargetSaved).toBe(false);
+      expect(parsed).not.toHaveProperty('deployTargetSaved');
     });
 
     test('terminal: no write/push, prints names only (never the sentinel value)', async () => {
@@ -2301,7 +2291,7 @@ describe('dokploy import — --overwrite', () => {
           localPlaintext: { GONE: 'old-value', KEPT: 'still-here' },
         } as unknown as ResolvedContext;
 
-        const outcome: ImportOutcome = { ok: true, source: { kind: 'compose', id: 'c1' }, imported: [], cleared: ['GONE'], replacedNames: [], unchanged: ['KEPT'], skipped: [], warnings: [], deployTargetSaved: false };
+        const outcome: ImportOutcome = { ok: true, source: { kind: 'compose', id: 'c1' }, imported: [], cleared: ['GONE'], replacedNames: [], unchanged: ['KEPT'], skipped: [], warnings: [] };
         const fakeModule: ConnectorModule = {
           name: 'dokploy',
           description: 'test double',

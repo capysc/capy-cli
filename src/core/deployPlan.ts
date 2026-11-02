@@ -1,17 +1,9 @@
 /**
- * The route `capy deploy` travels, computed before anything opens.
+ * The route `capy deploy` travels, computed before anything runs, and emitted
+ * by `capy deploy --json`.
  *
- * ONE function, because three screens draw this rail — `deploy-destination`,
- * `deploy-target-setup`, `deploy-plan-confirm` — and until now each of them
- * carried its own copy of the station list in a lookup table inside its
- * `Screen.svelte`. Three copies of one route is three chances for the rail to
- * say something different depending on which page you happen to be standing
- * on, and none of the three was the CLI's: the command that decides how many
- * questions there are had no say in the diagram claiming to describe it.
- *
- * So the plan is built here, and both the browser payload and `--json` render
- * what this returns. The screens draw it and may say where the traveller is
- * STANDING; they may not add a station, drop one, or reword a detail.
+ * ONE function: the array an agent parses is built here, from argv and
+ * `.capy/deploy.json` alone.
  *
  * Why the whole route, including the parts a run will not travel: the terminal
  * asks its deploy questions as a run of `inquirer` prompts with nothing
@@ -134,30 +126,10 @@ export function deployPlan(input: DeployPlanInput = {}): DeployPlanConfirmStop[]
  * about what is outstanding.
  *
  * Called by `describeDeployRoute` in deployCommand.ts, which is what
- * `capy deploy --json` emits — the same array the three browser screens draw.
- * That is the whole claim: the rail a person reads and the array an agent
- * parses come out of one builder. (argv wiring for the flag lives in
- * src/index.ts, which the coordinator owns, exactly as `--web` does.)
+ * `capy deploy --json` emits.
  */
 export function unansweredDeployStops(stops: DeployPlanConfirmStop[]): string[] {
   return stops
     .filter((s) => s.state !== 'done' && s.state !== 'skipped' && s.id !== 'deploy')
     .map((s) => s.id);
 }
-
-/**
- * What the manual sign-in stop was, per adapter.
- *
- * `signin` is the one station Capy does not perform: the vendor CLI holds its
- * own session and the user establishes it in their own terminal. Preflight is
- * where Capy finds out whether that happened, so the stop stays `upcoming`
- * until preflight passes and then carries the command that made it true.
- */
-export const SIGNIN_COMMAND: Readonly<Record<string, string>> = {
-  'cf-worker': 'wrangler login',
-  'cf-pages': 'wrangler login',
-  vercel: 'vercel link',
-  'aws-ssm': 'aws configure',
-  'gh-actions': 'gh auth login',
-  dokploy: 'export DOKPLOY_API_KEY=<token>',
-};

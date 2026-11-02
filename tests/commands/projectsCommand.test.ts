@@ -30,9 +30,15 @@ interface FakeBranch {
 const listProjectsImpl = mock(async (): Promise<FakeProject[]> => []);
 const listBranchesImpl = mock(async (_projectId: string): Promise<FakeBranch[]> => []);
 
+// CAP-697: the org's repo links. Unless a test says otherwise the caller may not read them (a plain member's 403).
+const getOrgReposImpl = mock(async (_orgId: string): Promise<{ org_id: string; repos: unknown[] }> => {
+  throw new CapyError('forbidden', ERROR_CODES.PERMISSION_DENIED);
+});
+
 const fakeServiceClient = {
   listProjects: (...args: unknown[]) => listProjectsImpl(...(args as [])),
   listBranches: (...args: [string]) => listBranchesImpl(...args),
+  getOrgRepos: (...args: [string]) => getOrgReposImpl(...args),
 };
 
 mock.module('../../src/ui/spinner', () => ({
@@ -123,6 +129,10 @@ describe('ProjectsCommand', () => {
     if (!ProjectsCommand) await importCommand();
     listProjectsImpl.mockReset();
     listBranchesImpl.mockReset();
+    getOrgReposImpl.mockReset();
+    getOrgReposImpl.mockImplementation(async () => {
+      throw new CapyError('forbidden', ERROR_CODES.PERMISSION_DENIED);
+    });
     listProjectsImpl.mockImplementation(async () => []);
     listBranchesImpl.mockImplementation(async () => []);
   });
@@ -220,5 +230,96 @@ describe('ProjectsCommand', () => {
     expect(exitCode).toBe(1);
     expect(stderr).toContain('Service unavailable');
     expect(stdout).toBe('');
+  });
+
+  describe('repo links (CAP-697)', () => {
+    const link = (projectId: string, over: Record<string, unknown> = {}) => ({
+      project_id: projectId,
+      project_name: 'ignored',
+      host: 'github.com',
+      owner: 'Acme',
+      name: 'mono',
+      path: '.',
+      github_repo_id: 123,
+      last_seen_at: '2026-10-02T00:00:00.000Z',
+      ...over,
+    });
+
+    it('--json: each project gains `repos` [{host, owner, name, path, github_repo_id}]; a project with none gets []', async () => {
+      listProjectsImpl.mockImplementation(async () => [project('p1', 'web'), project('p2', 'api')]);
+      listBranchesImpl.mockImplementation(async () => []);
+      getOrgReposImpl.mockImplementation(async () => ({
+        org_id: 'org_1',
+        repos: [link('p1'), link('p1', { owner: 'Acme', name: 'fork', path: 'services/web', github_repo_id: null })],
+      }));
+
+      const { stdout, stderr } = await capture(() => new ProjectsCommand().execute({ json: true }));
+
+      expect(stderr).toBe('');
+      const payload = JSON.parse(stdout);
+      expect(payload.projects[0].repos).toEqual([
+        { host: 'github.com', owner: 'Acme', name: 'mono', path: '.', github_repo_id: 123 },
+        { host: 'github.com', owner: 'Acme', name: 'fork', path: 'services/web', github_repo_id: null },
+      ]);
+      expect(payload.projects[1].repos).toEqual([]);
+      // Additive: everything that was there still is.
+      expect(Object.keys(payload.projects[0]).sort()).toEqual(['branches', 'id', 'name', 'repos']);
+    });
+
+    it('human output shows owner/name, plus /path when it is not the repo root', async () => {
+      listProjectsImpl.mockImplementation(async () => [project('p1', 'web'), project('p2', 'api')]);
+      listBranchesImpl.mockImplementation(async () => []);
+      getOrgReposImpl.mockImplementation(async () => ({
+        org_id: 'org_1',
+        repos: [link('p1'), link('p2', { path: 'services/api' })],
+      }));
+
+      const { stdout } = await capture(() => new ProjectsCommand().execute({}));
+
+      const lines = stdout.split('\n');
+      expect(lines.find((l) => l.includes('web'))).toContain('Acme/mono');
+      expect(lines.find((l) => l.includes('web'))).not.toContain('Acme/mono/');
+      expect(lines.find((l) => l.includes('api'))).toContain('Acme/mono/services/api');
+    });
+
+    it('a plain member (403 on the repo list) still gets their projects: no `repos`, no failure, no stderr', async () => {
+      listProjectsImpl.mockImplementation(async () => [project('p1', 'web')]);
+      listBranchesImpl.mockImplementation(async () => [branch('b1', 'main', false)]);
+
+      const asJson = await capture(() => new ProjectsCommand().execute({ json: true }));
+      expect(asJson.exitCode).toBeUndefined();
+      expect(asJson.stderr).toBe('');
+      expect(JSON.parse(asJson.stdout)).toEqual({
+        ok: true,
+        projects: [{ id: 'p1', name: 'web', branches: [{ id: 'b1', name: 'main', protected: false }] }],
+      });
+
+      const human = await capture(() => new ProjectsCommand().execute({}));
+      expect(human.exitCode).toBeUndefined();
+      expect(human.stdout).toContain('web');
+    });
+
+    it('a service that predates repo links (REPO_LINKS_UNSUPPORTED): repos omitted, command succeeds', async () => {
+      listProjectsImpl.mockImplementation(async () => [project('p1', 'web')]);
+      listBranchesImpl.mockImplementation(async () => []);
+      getOrgReposImpl.mockImplementation(async () => {
+        throw new CapyError('not supported', ERROR_CODES.REPO_LINKS_UNSUPPORTED, { status: 404 });
+      });
+      const { exitCode, stdout, stderr } = await capture(() => new ProjectsCommand().execute({ json: true }));
+      expect(exitCode).toBeUndefined();
+      expect(stderr).toBe('');
+      expect(JSON.parse(stdout).projects[0].repos).toBeUndefined();
+    });
+
+    it('any other failure of the repo list never fails the command either', async () => {
+      listProjectsImpl.mockImplementation(async () => [project('p1', 'web')]);
+      listBranchesImpl.mockImplementation(async () => []);
+      getOrgReposImpl.mockImplementation(async () => {
+        throw new Error('network down');
+      });
+      const { exitCode, stdout } = await capture(() => new ProjectsCommand().execute({ json: true }));
+      expect(exitCode).toBeUndefined();
+      expect(JSON.parse(stdout).projects[0].repos).toBeUndefined();
+    });
   });
 });

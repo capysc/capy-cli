@@ -2,7 +2,7 @@
 
 # capy CLI reference
 
-Version `0.9.7`. Generated from `capy help --json`.
+Version `0.9.13`. Generated from `capy help --json`.
 
 ## Commands
 
@@ -34,15 +34,26 @@ JSON support: yes (`--json`)
 
 ## `capy edit`
 
-Inspect and edit secrets in an interactive TUI
+Inspect and edit secrets in an interactive TUI, or set one variable from a piped value
 
 ```
-capy edit
+capy edit [name] [options]
 ```
 
-_No options._
+| Option | Description | Default |
+|---|---|---|
+| `--no-push` | piped value: write .env only; do not push to Capy |  |
+| `--json` | emit machine-readable JSON instead of the human UI (piped value) |  |
+| `--non-tty` | treat stdin as not a terminal; never prompt (agents/CI) |  |
+| `--pr` | create a PR with the keep.lock change (answers the prompt) |  |
+| `--no-pr` | do not create a PR with the keep.lock change |  |
+| `--pr-base <branch>` | base branch for the PR (answers the prompt) |  |
+| `--resolve <NAME=pinned|local|remote|delete>` | answer a difference from Capy: pinned, local, remote or delete; NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict) | `[]` |
+| `--conflict <conflict_id>` | the conflict_id a conflict returned: binds --resolve to what was seen |  |
 
-JSON support: no
+JSON support: yes (`--json`)
+
+Dry run: yes (`--dry-run`)
 
 ## `capy branch`
 
@@ -73,6 +84,9 @@ capy checkout <branch> [options]
 | `--protected` | Mark as a protected branch (invite-only) |  |
 | `--no-protected` | Create it open to the project |  |
 | `--json` | emit machine-readable JSON instead of the human UI |  |
+| `--non-tty` | treat stdin as not a terminal; differences from Capy stop the checkout with the conflict_id (agents/CI) |  |
+| `--resolve <NAME=pinned|local|remote|delete>` | answer a difference from Capy: pinned, local, remote or delete; NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict) | `[]` |
+| `--conflict <conflict_id>` | the conflict_id a conflict returned: binds --resolve to what was seen |  |
 
 JSON support: yes (`--json`)
 
@@ -81,10 +95,14 @@ JSON support: yes (`--json`)
 Push encrypted values to Keep
 
 ```
-capy push
+capy push [options]
 ```
 
-_No options._
+| Option | Description | Default |
+|---|---|---|
+| `--non-tty` | treat stdin as not a terminal; differences from Capy stop the push with the conflict_id (agents/CI) |  |
+| `--resolve <NAME=pinned|local|remote|delete>` | answer a difference from Capy: pinned, local, remote or delete; NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict) | `[]` |
+| `--conflict <conflict_id>` | the conflict_id a conflict returned: binds --resolve to what was seen |  |
 
 JSON support: no
 
@@ -99,7 +117,7 @@ capy deploy [target] [options]
 | Option | Description | Default |
 |---|---|---|
 | `--target <id>` | adapter id; requires --yes (CI mode) |  |
-| `--yes` | skip all prompts (CI) |  |
+| `--yes` | skip all prompts (CI); any difference between the folder and Capy stops the deploy with exit 3 |  |
 | `--dry-run` | preflight + show plan, push nothing (target mode) |  |
 | `--force` | redeploy even when keep.lock is unchanged — bumps keep.lock to trigger CI |  |
 | `--edit` | re-enter the picker for an existing target |  |
@@ -110,18 +128,39 @@ capy deploy [target] [options]
 | `--env-name <name>` | gh-actions: env name when --scope env |  |
 | `--no-deploy` | write and verify the target, but skip the platform deploy/redeploy (target mode) |  |
 | `--json` | describe the route (unanswered stops + any known branch problem) as JSON instead of travelling it |  |
+| `--discover` | dokploy: find the services that match Capy projects and print JSON (never prompts) |  |
+| `--plan <file>` | dokploy --discover: the plan file to check (see schemas.deploy_dokploy_plan in `capy help --json`) |  |
+| `--confirm <plan_id>` | dokploy --discover: write the plan that --dry-run printed (one PR per repo) |  |
+| `--base-url <url>` | dokploy --discover: the Dokploy dashboard URL (else the org system variable _CONNECTOR_DOKPLOY_BASE_URL) |  |
+| `--resolve <NAME=pinned|local|remote|delete>` | answer a difference from Capy: pinned, local, remote or delete; NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict) | `[]` |
+| `--conflict <conflict_id>` | the conflict_id a conflict returned: binds --resolve to what was seen |  |
 
 JSON support: yes (`--json`)
+
+Dry run: yes (`--dry-run`)
+
+Mode: `capy deploy dokploy --discover`
+
+Find the Dokploy services that match Capy projects, check a plan for them, and write the deploy targets as one pull request per repo. Pushes no values.
+
+- Flags: `--discover`, `--plan`, `--confirm`, `--base-url`, `--dry-run`, `--json`
+- Always prints JSON: yes
+- Dry run: yes
+- Plan schema: `schemas.deploy_dokploy_plan` in `capy help --json`
 
 ### `capy deploy revoke`
 
 Revoke a deploy token
 
 ```
-capy deploy revoke <deployId>
+capy deploy revoke <deployId> [options]
 ```
 
-_No options._
+| Option | Description | Default |
+|---|---|---|
+| `--non-tty` | treat stdin as not a terminal; differences from Capy stop the revoke with the conflict_id (agents/CI) |  |
+| `--resolve <NAME=pinned|local|remote|delete>` | answer a difference from Capy: pinned, local, remote or delete; NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict) | `[]` |
+| `--conflict <conflict_id>` | the conflict_id a conflict returned: binds --resolve to what was seen |  |
 
 JSON support: no
 
@@ -160,6 +199,9 @@ capy deploy targets-remove <name> [options]
 | Option | Description | Default |
 |---|---|---|
 | `--no-deploy` | strip the config but skip the redeploy that would apply the revert |  |
+| `--non-tty` | treat stdin as not a terminal; differences from Capy stop the removal with the conflict_id (agents/CI) |  |
+| `--resolve <NAME=pinned|local|remote|delete>` | answer a difference from Capy: pinned, local, remote or delete; NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict) | `[]` |
+| `--conflict <conflict_id>` | the conflict_id a conflict returned: binds --resolve to what was seen |  |
 
 JSON support: no
 
@@ -291,6 +333,8 @@ capy agents [options]
 
 JSON support: yes (`--json`)
 
+Dry run: yes (`--dry-run`)
+
 ## `capy invite`
 
 Invite a teammate to this organization
@@ -338,7 +382,7 @@ JSON support: yes (`--json`)
 
 ## `capy pair`
 
-Pair this device into an org via Keep (device-code login + key pickup)
+Pair this device via Keep; requires interactive confirmation of the returned account before installing any session or keys
 
 ```
 capy pair [options]
@@ -426,10 +470,14 @@ JSON support: yes (`--json`)
 Switch organization
 
 ```
-capy org
+capy org [options]
 ```
 
-_No options._
+| Option | Description | Default |
+|---|---|---|
+| `--non-tty` | treat stdin as not a terminal; differences from Capy stop the switch with the conflict_id (agents/CI) |  |
+| `--resolve <NAME=pinned|local|remote|delete>` | answer a difference from Capy: pinned, local, remote or delete; NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict) | `[]` |
+| `--conflict <conflict_id>` | the conflict_id a conflict returned: binds --resolve to what was seen |  |
 
 JSON support: no
 
@@ -502,8 +550,57 @@ capy secrets [options]
 | `--json` | emit machine-readable JSON instead of the human UI |  |
 | `--project <name>` | only rows with a location in this project |  |
 | `--branch <name>` | only rows with a location on this branch |  |
+| `--name <NAME>` | only rows with exactly this secret name |  |
 
 JSON support: yes (`--json`)
+
+Dry run: yes (`--dry-run`)
+
+### `capy secrets set`
+
+Set one secret to a new value (read from stdin) in several locations and open keep.lock PRs. Never prompts.
+
+```
+capy secrets set <name> [options]
+```
+
+| Option | Description | Default |
+|---|---|---|
+| `--json` | emit machine-readable JSON instead of the human UI |  |
+| `--row <row_id>` | change this row of that name (repeatable; ids from `capy secrets --name NAME --json`) | `[]` |
+| `--all-rows` | change every row of that name |  |
+| `--exclude <project:branch>` | leave this location out (repeatable) | `[]` |
+| `--no-pr-for <owner/name>` | do not open a PR in this repo (repeatable) | `[]` |
+| `--no-pr` | do not open any PR |  |
+| `--confirm <plan_id>` | run the plan that --dry-run printed (required for a real run) |  |
+| `--resolve <NAME=pinned|local|remote|delete>` | answer a difference from Capy: pinned, local, remote or delete; NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict) | `[]` |
+| `--conflict <conflict_id>` | the conflict_id a conflict returned: binds --resolve to what was seen |  |
+
+JSON support: yes (`--json`)
+
+Dry run: yes (`--dry-run`)
+
+### `capy secrets deploy`
+
+Deploy the Dokploy targets of one or more secrets with no project folder, and open one keep.lock PR per target. Never prompts.
+
+```
+capy secrets deploy <names...> [options]
+```
+
+| Option | Description | Default |
+|---|---|---|
+| `--json` | emit machine-readable JSON instead of the human UI |  |
+| `--row <row_id>` | deploy this row of a name (repeatable; ids from `capy secrets --name NAME --json`) | `[]` |
+| `--all-rows` | deploy every row of those names |  |
+| `--exclude <project:branch>` | leave this location out (repeatable) | `[]` |
+| `--confirm <plan_id>` | run the plan that --dry-run printed (required for a real run) |  |
+| `--resolve <NAME=pinned|local|remote|delete>` | answer a difference from Capy: pinned, local, remote or delete; NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict) | `[]` |
+| `--conflict <conflict_id>` | the conflict_id a conflict returned: binds --resolve to what was seen |  |
+
+JSON support: yes (`--json`)
+
+Dry run: yes (`--dry-run`)
 
 ## `capy grant-branch`
 
@@ -575,14 +672,19 @@ capy add <vars...> [options]
 
 | Option | Description | Default |
 |---|---|---|
-| `--reason <text>` | short note shown on the intake page |  |
-| `--help-url <NAME=URL>` | per-variable "where to find this" link, e.g. STRIPE_SECRET_KEY=https://dashboard.stripe.com/apikeys (repeatable) | `[]` |
-| `--no-open` | do not auto-open the browser; print the URL only |  |
 | `--no-push` | write to .env only; do not push to Capy |  |
 | `-f, --force` | overwrite existing values without prompting |  |
 | `--non-tty` | never prompt; resolve from flags or fail fast (agents/CI) |  |
+| `--json` | emit machine-readable JSON instead of the human UI (piped value) |  |
+| `--pr` | create a PR with the keep.lock change (answers the prompt) |  |
+| `--no-pr` | do not create a PR with the keep.lock change |  |
+| `--pr-base <branch>` | base branch for the PR (answers the prompt) |  |
+| `--resolve <NAME=pinned|local|remote|delete>` | answer a difference from Capy: pinned, local, remote or delete; NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict) | `[]` |
+| `--conflict <conflict_id>` | the conflict_id a conflict returned: binds --resolve to what was seen |  |
 
-JSON support: no
+JSON support: yes (`--json`)
+
+Dry run: yes (`--dry-run`)
 
 ## `capy remove`
 
@@ -597,8 +699,15 @@ capy remove <vars...> [options]
 | `-y, --yes` | skip the confirmation prompt (required non-interactively) |  |
 | `--json` | emit machine-readable JSON instead of the human UI |  |
 | `--non-tty` | never prompt; resolve from flags or fail fast (agents/CI) |  |
+| `--pr` | create a PR with the keep.lock change (answers the prompt) |  |
+| `--no-pr` | do not create a PR with the keep.lock change |  |
+| `--pr-base <branch>` | base branch for the PR (answers the prompt) |  |
+| `--resolve <NAME=pinned|local|remote|delete>` | answer a difference from Capy: pinned, local, remote or delete; NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict) | `[]` |
+| `--conflict <conflict_id>` | the conflict_id a conflict returned: binds --resolve to what was seen |  |
 
 JSON support: yes (`--json`)
+
+Dry run: yes (`--dry-run`)
 
 ## `capy connect`
 
@@ -626,11 +735,15 @@ capy connect [provider] [options]
 | `--targets` | Also write a Vercel deploy target for each imported environment |  |
 | `--dry-run` | dokploy import/discover: preview the plan only — resolve settings + read Dokploy, write/push nothing |  |
 | `--discover` | dokploy/vercel: find every Dokploy service / Vercel project matching a repo under cwd, instead of one named --application/--compose/--project |  |
-| `-y, --yes` | dokploy import/discover: skip the confirmation prompt (import: --overwrite's clear/replace/import ask; discover: the real-run "proceed?" ask) — required non-interactively |  |
+| `-y, --yes` | dokploy import/discover: skip the confirmation prompt (import: --overwrite's clear/replace/import ask) — discover never prompts and needs --yes to write |  |
 | `--overwrite` | dokploy import: set the branch's vars to EXACTLY Dokploy's set — clear names not in Dokploy, replace differing values, import new ones |  |
 | `--environment <names>` | dokploy/vercel discover: restrict the plan to these environment names, comma-separated (e.g. staging,preview); vercel import: which Vercel environment to read (default: the current branch's name) |  |
+| `--resolve <NAME=pinned|local|remote|delete>` | answer a difference from Capy: pinned, local, remote or delete; NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict) | `[]` |
+| `--conflict <conflict_id>` | the conflict_id a conflict returned: binds --resolve to what was seen |  |
 
 JSON support: yes (`--json`)
+
+Dry run: yes (`--dry-run`)
 
 ## `capy rotate`
 
@@ -648,6 +761,8 @@ capy rotate [var] [options]
 | `--skip-prompts` | alias for --yes |  |
 | `--non-tty` | never prompt; resolve choices from flags or fail fast (agents/CI) |  |
 | `--provider <name>` | integration to promote an unmanaged var through (non-interactive) |  |
+| `--resolve <NAME=pinned|local|remote|delete>` | answer a difference from Capy: pinned, local, remote or delete; NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict) | `[]` |
+| `--conflict <conflict_id>` | the conflict_id a conflict returned: binds --resolve to what was seen |  |
 
 JSON support: no
 
@@ -662,6 +777,76 @@ capy lock
 _No options._
 
 JSON support: no
+
+## Schemas
+
+JSON Schemas of the files commands read, as published under `schemas` in `capy help --json`.
+
+### `deploy_dokploy_plan`
+
+```json
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "capy deploy dokploy --discover plan",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "entries"
+  ],
+  "properties": {
+    "version": {
+      "const": 1
+    },
+    "entries": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "project_id",
+          "branch",
+          "service_id",
+          "git_branch",
+          "vars"
+        ],
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Capy project id"
+          },
+          "branch": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Capy branch the target ships from"
+          },
+          "service_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Dokploy application or compose service id"
+          },
+          "git_branch": {
+            "type": "string",
+            "minLength": 1,
+            "description": "git branch the Dokploy service tracks (the CI deploy PR base)"
+          },
+          "vars": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+            },
+            "description": "Variable names the target delivers; each must exist on the Capy branch"
+          }
+        }
+      }
+    }
+  }
+}
+```
 
 ## Error codes
 
@@ -682,6 +867,7 @@ Every refusal carries a stable `code` — branch on it, never on message text.
 - `PROJECT_NOT_FOUND`
 - `BRANCH_NOT_FOUND`
 - `NO_ACTIVE_BRANCH`
+- `BRANCH_STATE_INCONSISTENT`
 - `SNAPSHOT_NOT_FOUND`
 - `NO_SECRETS`
 - `DEPLOY_TOKEN_NOT_FOUND`
@@ -730,8 +916,21 @@ Every refusal carries a stable `code` — branch on it, never on message text.
 - `PAIR_NO_KEYS`
 - `PAIR_LOCAL_KEY_CONFLICT`
 - `VAR_NOT_FOUND`
-- `REMOVE_LOCAL_DRIFT`
 - `REMOVE_NEEDS_TTY`
+- `SECRETS_STALE_BASE`
+- `SECRETS_CONFLICT`
+- `SECRETS_CONFLICT_STALE`
+- `SECRETS_RESOLVE_INVALID`
+- `SECRETS_RESOLVE_NEEDS_CONFLICT`
+- `REMOVE_LOCAL_DRIFT`
+- `KEEP_PR_NOT_GIT_REPO`
+- `KEEP_PR_NO_GITHUB_REMOTE`
+- `KEEP_PR_GH_UNAVAILABLE`
+- `KEEP_PR_BASE_UNRESOLVED`
+- `KEEP_PR_READ_FAILED`
+- `KEEP_PR_COMMIT_FAILED`
+- `KEEP_PR_BRANCH_FAILED`
+- `KEEP_PR_CREATE_FAILED`
 - `CI_DEPLOY_TARGETS_RECORD_FAILED`
 - `DEPLOY_STALE_KEEP`
 - `DEPLOY_TOKEN_UNTRACKED`
@@ -756,8 +955,44 @@ Every refusal carries a stable `code` — branch on it, never on message text.
 - `VERCEL_OPTIONS_INVALID`
 - `VERCEL_SPLIT_NOT_RESTORED`
 - `VERCEL_URL_INVALID`
+- `EDIT_NEEDS_TTY`
+- `EDIT_STDIN_LOCAL_ONLY`
+- `STDIN_EMPTY`
+- `STDIN_TOO_LARGE`
+- `ADD_STDIN_ONE_NAME`
+- `ADD_VAR_EXISTS`
+- `WEB_MODE_REMOVED`
+- `KEEP_LOCK_REPO_MISMATCH`
+- `SECRET_AMBIGUOUS`
+- `PLAN_CHANGED`
+- `PROJECT_KIND_UNSUPPORTED`
+- `PLAN_CONFIRM_REQUIRED`
+- `SECRET_NOT_FOUND`
+- `SECRETS_NOTHING_SELECTED`
+- `SECRETS_PARTIAL`
+- `REPO_LINKS_UNSUPPORTED`
+- `DRY_RUN_UNSUPPORTED`
+- `GITHUB_TIMEOUT`
+- `RATE_LIMITED`
+- `GITHUB_RATE_LIMITED`
+- `SERVICE_NOT_FOUND`
+- `DUPLICATE_ENTRY`
+- `TARGET_EXISTS`
+- `NO_REPO_LINK`
+- `REPO_MISMATCH`
+- `PLAN_FILE_UNREADABLE`
+- `PLAN_INVALID`
+- `PLAN_REQUIRED`
+- `DISCOVER_UNSUPPORTED_TARGET`
+- `DISCOVER_PARTIAL`
+- `DEPLOY_BATCH_PARTIAL`
+- `DEPLOY_NOTHING_TO_DEPLOY`
+- `DEPLOY_VARS_MISSING`
+- `DEPLOY_PREFLIGHT_FAILED`
+- `DEPLOY_PUSH_FAILED`
 
 ## Conventions
 
 - **JSON**: Pass --json on any command whose supportsJson is true and parse stdout as JSON; prose (progress, prompts, errors) goes to stderr so stdout stays pure JSON.
 - **Codes**: Branch only on the machine-readable `code` field (from --json output or a CapyError), never on human-readable message text — messages may be reworded without notice.
+- **Conflicts**: Every command that writes from a folder (edit, add, remove, connect, rotate, push, checkout, org, deploy, deploy revoke, deploy targets-remove) runs bare `capy` first; `checkout -b` is the one exception (a new branch carries the uncommitted values of the folder). Off a terminal, if the folder and Capy differ on any variable, nothing is written, the exit code is 3, and stdout is {ok:false, code:"SECRETS_CONFLICT", conflict_id, conflicts:[{name, project, branch, type, pinned, local, remote}]} (fingerprints only, never values; a Dokploy value has {name, target, pinned, local, remote}). Ask the person, then rerun the same command with --resolve NAME=pinned|local|remote|delete for every row (NAME@TARGET=local|remote for a Dokploy value) and --conflict <conflict_id>. A state that moved since is SECRETS_CONFLICT_STALE with the fresh rows. There is no resolve-all.

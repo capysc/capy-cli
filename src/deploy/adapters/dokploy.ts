@@ -84,14 +84,17 @@ import {
   mergeManagedValuesBlock,
   mismatchedDeliveredValues,
   outsideLines,
+  planTargetDelivery,
   removeManagedValuesBlock,
   resolveDokployApiKey,
   resolveDokployToken,
   sortedCopy,
   splitManagedBlock,
   stripManagedBlock,
+  targetConflictsOf,
   trackedGitBranch,
   watchPathsExcludeKeep,
+  type TargetPlan,
 } from '../dokployApi';
 import { repoRelPath } from '../git';
 
@@ -126,11 +129,13 @@ export {
   mergeManagedValuesBlock,
   mismatchedDeliveredValues,
   outsideLines,
+  planTargetDelivery,
   removeManagedValuesBlock,
   resolveDokployApiKey,
   resolveDokployToken,
   splitManagedBlock,
   stripManagedBlock,
+  targetConflictsOf,
   trackedGitBranch,
   watchPathsExcludeKeep,
 };
@@ -152,6 +157,8 @@ export type {
   ImportableEnvEntry,
   ImportSkipReason,
   ResolveDokployApiKeyResult,
+  TargetCheck,
+  TargetPlan,
 } from '../dokployApi';
 
 export interface DokployOptions {
@@ -537,7 +544,8 @@ export function optionsProblem(config: TargetConfig): PreflightResult | null {
  */
 export function dokployCiPreflightProblem(
   config: TargetConfig,
-  cwd: string,
+  /** keep.lock's path relative to the repo root (`keep.lock`, or `<folder>/keep.lock`): what the service's watch paths must cover. */
+  relKeep: string,
   entity: { autoDeploy?: boolean | null; branch?: string; customGitBranch?: string | null; watchPaths?: readonly string[] | null },
 ): PreflightResult | null {
   if (config.mode !== 'ci') return null;
@@ -564,7 +572,6 @@ export function dokployCiPreflightProblem(
       hint,
     };
   }
-  const relKeep = repoRelPath(cwd, 'keep.lock');
   if (watchPathsExcludeKeep(entity.watchPaths, relKeep)) {
     return {
       ok: false,
@@ -575,6 +582,14 @@ export function dokployCiPreflightProblem(
     };
   }
   return null;
+}
+
+/**
+ * keep.lock's repo-relative path for a preflight: the caller's own (`keepLockPath`, a caller with no
+ * checkout such as the batch deploy), else worked out from `cwd` with git, as `capy deploy` always did.
+ */
+function keepLockPathFor(ctx: { cwd: string; keepLockPath?: string }): string {
+  return ctx.keepLockPath ?? repoRelPath(ctx.cwd, 'keep.lock');
 }
 
 /** A failed Dokploy call as a reason (and fix-it hint) a person can act on. */
@@ -733,6 +748,74 @@ function deliveredValuesFor(
 }
 
 /**
+ * What a Dokploy delivery does with its target conflicts (CAP-717), once the service's env was freshly read:
+ * `stop` a result that ends the delivery with nothing written (an unanswered conflict, a dry run, or nothing
+ * left to write), or `write` the plan with the `ManagedMergeOptions` to merge it with.
+ */
+type Prepared =
+  | { readonly kind: 'stop'; readonly result: (steps: readonly DeployStep[], label: string) => DeployResult }
+  | {
+      readonly kind: 'write';
+      readonly deliver: ReadonlyArray<{ name: string; value: string }>;
+      readonly skipped: readonly string[];
+      readonly merge: { readonly keep?: (name: string) => boolean };
+    };
+
+function prepareDelivery(
+  config: TargetConfig,
+  ctx: DeployContext,
+  currentEnv: string | null,
+  values: ReadonlyArray<{ name: string; value: string }>,
+  withWarnings: (r: DeployResult) => DeployResult,
+): Prepared {
+  const plan: TargetPlan = planTargetDelivery(currentEnv, values, ctx.targetCheck);
+  // A dry run (with a `targetCheck`) is the preview: everything found, nothing written, nothing refused.
+  if (ctx.dryRun) {
+    return {
+      kind: 'stop',
+      result: (steps, label) =>
+        withWarnings({
+          ok: true,
+          steps: [...steps, { label, status: 'skip', detail: 'dry-run' }],
+          conflicts: targetConflictsOf(config.name, plan.found),
+          skipped: plan.kind === 'clear' ? plan.skipped : [],
+        }),
+    };
+  }
+  if (plan.kind === 'conflict') {
+    return {
+      kind: 'stop',
+      result: (steps, label) =>
+        withWarnings({
+          ok: false,
+          // COPY-FLAG: minimal wording; the names are in `conflicts`.
+          steps: [...steps, { label, status: 'fail', detail: 'the service changed since Capy last delivered', code: ERROR_CODES.SECRETS_CONFLICT }],
+          conflicts: targetConflictsOf(config.name, plan.found),
+        }),
+    };
+  }
+  const keepOthers = ctx.keepOtherManaged === true;
+  if (plan.deliver.length === 0 && (keepOthers || plan.skipped.length > 0)) {
+    return {
+      kind: 'stop',
+      result: (steps, label) =>
+        withWarnings({
+          ok: true,
+          // COPY-FLAG: minimal wording.
+          steps: [...steps, { label, status: 'skip', detail: 'nothing to write: the values on the service were kept' }],
+          skipped: plan.skipped,
+        }),
+    };
+  }
+  return {
+    kind: 'write',
+    deliver: plan.deliver,
+    skipped: plan.skipped,
+    merge: keepOthers || plan.skipped.length > 0 ? { keep: (name: string) => keepOthers || plan.skipped.includes(name) } : {},
+  };
+}
+
+/**
  * The Compose sequence (CAP-679, plain-value delivery per CAP-682): read →
  * refuse on `createEnvFile: false` → merge delivered vars as plain values
  * into the Capy block, commenting/un-commenting matching outside lines,
@@ -793,10 +876,17 @@ async function deployComposeFlow(
   const warnings: readonly DeployWarning[] | undefined = stackWarning ? [stackWarning] : undefined;
   const withWarnings = (r: DeployResult): DeployResult => (warnings ? { ...r, warnings } : r);
 
-  const merged = mergeManagedValuesBlock(current.env, values);
+  // Before anything is written: the live value of every delivered name against what Capy last delivered (CAP-717).
+  const prepared = prepareDelivery(config, ctx, current.env, values, withWarnings);
+  if (prepared.kind === 'stop') return prepared.result(s1, 'compose.saveEnvironment');
+  const deliver = prepared.deliver;
+  // A delivery that left names alone says so: they must not be recorded as delivered.
+  const withOutcome = (r: DeployResult): DeployResult => withWarnings(prepared.skipped.length > 0 ? { ...r, skipped: prepared.skipped } : r);
+
+  const merged = mergeManagedValuesBlock(current.env, deliver, prepared.merge);
   if (!merged.ok) {
     const described = describeDokployPlainMergeProblem(merged.problem);
-    return withWarnings(
+    return withOutcome(
       fail(s1, {
         label: 'env merge',
         status: 'fail',
@@ -812,7 +902,7 @@ async function deployComposeFlow(
     client.saveComposeEnvironment({ composeId: current.composeId, env: nextEnv, createEnvFile: current.createEnvFile }),
   );
   if (!saved.ok) {
-    return withWarnings(
+    return withOutcome(
       fail(s1, { label: 'compose.saveEnvironment', status: 'fail', detail: explainApiError(saved.error, 'write', opts).reason }),
     );
   }
@@ -821,7 +911,7 @@ async function deployComposeFlow(
   const reread = await settle(client.getCompose(composeId));
   const byteIntact = reread.ok && reread.value.env === nextEnv && reread.value.createEnvFile === current.createEnvFile;
   if (!byteIntact) {
-    return withWarnings(
+    return withOutcome(
       fail(s1, {
         label: 'compose.saveEnvironment',
         status: 'fail',
@@ -831,9 +921,9 @@ async function deployComposeFlow(
       }),
     );
   }
-  const mismatched = mismatchedDeliveredValues(nextEnv, values);
+  const mismatched = mismatchedDeliveredValues(nextEnv, deliver);
   if (mismatched.length > 0) {
-    return withWarnings(
+    return withOutcome(
       fail(s1, {
         label: 'compose.saveEnvironment',
         status: 'fail',
@@ -845,18 +935,18 @@ async function deployComposeFlow(
   const otherVarsCount = 'code' in nextSplit ? 0 : envKeys(outsideLines(nextSplit)).length;
   const s2: readonly DeployStep[] = [
     ...s1,
-    { label: 'compose.saveEnvironment', status: 'ok', detail: `${values.length} var(s) written plaintext; ${otherVarsCount} other var(s) kept` },
+    { label: 'compose.saveEnvironment', status: 'ok', detail: `${deliver.length} var(s) written plaintext; ${otherVarsCount} other var(s) kept` },
   ];
 
   if (ctx.secretsOnly) {
-    return withWarnings({
+    return withOutcome({
       ok: true,
       steps: [...s2, { label: 'compose.redeploy', status: 'skip', detail: 'CI mode — merging the deploy PR triggers Dokploy’s own auto-deploy' }],
       epilogue: plainDeliveryEpilogue(config.name),
     });
   }
   if (ctx.noDeploy) {
-    return withWarnings({
+    return withOutcome({
       ok: true,
       steps: [...s2, { label: 'compose.redeploy', status: 'skip', detail: '--no-deploy' }],
       epilogue: plainDeliveryEpilogue(config.name),
@@ -867,7 +957,7 @@ async function deployComposeFlow(
   //    redeploy call returns no id.
   const baseline = await settle(client.listComposeDeployments(composeId));
   if (!baseline.ok) {
-    return withWarnings(
+    return withOutcome(
       fail(s2, { label: 'deployment.allByCompose', status: 'fail', detail: explainApiError(baseline.error, 'list', opts).reason }),
     );
   }
@@ -875,7 +965,7 @@ async function deployComposeFlow(
   // 5. Redeploy — never `compose.deploy` (re-clones the branch head), never `freshVolumes`.
   const triggered = await settle(client.redeployCompose(composeId, `capy deploy ${config.name}`));
   if (!triggered.ok) {
-    return withWarnings(
+    return withOutcome(
       fail(s2, { label: 'compose.redeploy', status: 'fail', detail: explainApiError(triggered.error, 'trigger', opts).reason }),
     );
   }
@@ -894,12 +984,12 @@ async function deployComposeFlow(
     ),
   );
   if (!polled.ok) {
-    return withWarnings(fail(s3, { label: 'deployment', status: 'fail', detail: explainApiError(polled.error, 'status', opts).reason }));
+    return withOutcome(fail(s3, { label: 'deployment', status: 'fail', detail: explainApiError(polled.error, 'status', opts).reason }));
   }
   const outcome = polled.value;
   switch (outcome.kind) {
     case 'succeeded':
-      return withWarnings({
+      return withOutcome({
         ok: true,
         steps: [...s3, { label: 'deployment', status: 'ok', detail: `succeeded (${outcome.deployment.deploymentId})` }],
         epilogue: plainDeliveryEpilogue(config.name),
@@ -907,7 +997,7 @@ async function deployComposeFlow(
     case 'failed': {
       const logs = await settle(client.readLogs(outcome.deployment.deploymentId));
       const logText = logs.ok ? logs.value.trim() : '';
-      return withWarnings(
+      return withOutcome(
         fail(
           s3,
           {
@@ -924,7 +1014,7 @@ async function deployComposeFlow(
       );
     }
     case 'timed_out':
-      return withWarnings(
+      return withOutcome(
         fail(s3, {
           label: 'deployment',
           status: 'fail',
@@ -1102,6 +1192,8 @@ export function createDokployAdapter(deps: DokployAdapterDeps = {}): DeployAdapt
     // token is minted for it. The blob/token machinery itself is untouched
     // for adapters that still use it, and for `capy run`.
     needsDeployToken: false,
+    // CAP-717: the service's env is read before it is written, so a value changed outside Capy can be compared.
+    readsLiveValues: true,
     requires: { binaries: [] },
 
     async detect(): Promise<DetectedDefaults> {
@@ -1110,7 +1202,7 @@ export function createDokployAdapter(deps: DokployAdapterDeps = {}): DeployAdapt
       return {};
     },
 
-    async preflight(config: TargetConfig, ctx: { cwd: string } & AdapterCallContext): Promise<PreflightResult> {
+    async preflight(config: TargetConfig, ctx: { cwd: string; keepLockPath?: string } & AdapterCallContext): Promise<PreflightResult> {
       const shape = optionsProblem(config);
       if (shape) return shape;
       const opts = config.options as unknown as DokployOptions;
@@ -1132,7 +1224,7 @@ export function createDokployAdapter(deps: DokployAdapterDeps = {}): DeployAdapt
         // active line for a delivered var gets COMMENTED OUT at deploy time
         // (see `mergeManagedValuesBlock`), not silently shadowed, so warning
         // about it here would be actively misleading.
-        const ciProblem = dokployCiPreflightProblem(config, ctx.cwd, compose.value);
+        const ciProblem = dokployCiPreflightProblem(config, keepLockPathFor(ctx), compose.value);
         if (ciProblem) return ciProblem;
         const stackWarning = await composeStackVersionWarning(client, compose.value);
         return { ok: true, ...(stackWarning ? { warnings: [stackWarning] } : {}) };
@@ -1141,14 +1233,15 @@ export function createDokployAdapter(deps: DokployAdapterDeps = {}): DeployAdapt
       if (!app.ok) return { ok: false, ...explainApiError(app.error, 'application.one', opts) };
       const problem = envProblems(app.value.env);
       if (problem) return { ok: false, ...describeEnvProblem(problem) };
-      const ciProblem = dokployCiPreflightProblem(config, ctx.cwd, app.value);
+      const ciProblem = dokployCiPreflightProblem(config, keepLockPathFor(ctx), app.value);
       if (ciProblem) return ciProblem;
       return { ok: true };
     },
 
     async deploy(config: TargetConfig, ctx: DeployContext): Promise<DeployResult> {
       const opts = config.options as unknown as DokployOptions;
-      if (ctx.dryRun) {
+      // A plain dry run reads nothing; with a `targetCheck` it reads the service and reports the conflicts (CAP-717).
+      if (ctx.dryRun && ctx.targetCheck === undefined) {
         return {
           ok: true,
           steps: [
@@ -1215,7 +1308,13 @@ export function createDokployAdapter(deps: DokployAdapterDeps = {}): DeployAdapt
       }
       // CAP-682: DOKPLOY_SHADOWED_VAR no longer applies — see the identical
       // note in `deployComposeFlow`.
-      const merged = mergeManagedValuesBlock(current.env, delivered.values);
+      // Before anything is written: the live value of every delivered name against what Capy last delivered (CAP-717).
+      const prepared = prepareDelivery(config, ctx, current.env, delivered.values, (r) => r);
+      if (prepared.kind === 'stop') return prepared.result(s1, 'application.saveEnvironment');
+      const deliver = prepared.deliver;
+      // A delivery that left names alone says so: they must not be recorded as delivered.
+      const withSkipped = (r: DeployResult): DeployResult => (prepared.skipped.length > 0 ? { ...r, skipped: prepared.skipped } : r);
+      const merged = mergeManagedValuesBlock(current.env, deliver, prepared.merge);
       if (!merged.ok) {
         const described = describeDokployPlainMergeProblem(merged.problem);
         return fail(s1, {
@@ -1265,7 +1364,7 @@ export function createDokployAdapter(deps: DokployAdapterDeps = {}): DeployAdapt
             'same moment. Check the Environment tab in Dokploy, then re-run.',
         });
       }
-      const mismatched = mismatchedDeliveredValues(nextEnv, delivered.values);
+      const mismatched = mismatchedDeliveredValues(nextEnv, deliver);
       if (mismatched.length > 0) {
         return fail(s1, {
           label: 'application.saveEnvironment',
@@ -1280,26 +1379,26 @@ export function createDokployAdapter(deps: DokployAdapterDeps = {}): DeployAdapt
         {
           label: 'application.saveEnvironment',
           status: 'ok',
-          detail: `${delivered.values.length} var(s) written plaintext; ${otherVarsCount} other var(s), build args and build secrets kept`,
+          detail: `${deliver.length} var(s) written plaintext; ${otherVarsCount} other var(s), build args and build secrets kept`,
         },
       ];
 
       if (ctx.secretsOnly) {
-        return {
+        return withSkipped({
           ok: true,
           steps: [
             ...s2,
             { label: 'application.deploy', status: 'skip', detail: "CI mode — merging the deploy PR triggers Dokploy's own auto-deploy" },
           ],
           epilogue: plainDeliveryEpilogue(config.name),
-        };
+        });
       }
       if (ctx.noDeploy) {
-        return {
+        return withSkipped({
           ok: true,
           steps: [...s2, { label: 'application.deploy', status: 'skip', detail: '--no-deploy' }],
           epilogue: plainDeliveryEpilogue(config.name),
-        };
+        });
       }
 
       // 4. Trigger, remembering which deployments already existed — Dokploy's
@@ -1347,14 +1446,14 @@ export function createDokployAdapter(deps: DokployAdapterDeps = {}): DeployAdapt
       const outcome = polled.value;
       switch (outcome.kind) {
         case 'succeeded':
-          return {
+          return withSkipped({
             ok: true,
             steps: [
               ...s3,
               { label: 'deployment', status: 'ok', detail: `succeeded (${outcome.deployment.deploymentId})` },
             ],
             epilogue: plainDeliveryEpilogue(config.name),
-          };
+          });
         case 'failed': {
           const logs = await settle(client.readLogs(outcome.deployment.deploymentId));
           const logText = logs.ok ? logs.value.trim() : '';

@@ -6,14 +6,21 @@
  */
 import { config } from 'dotenv';
 import { resolve } from 'path';
-import { Command } from 'commander';
+import { Command, Option } from 'commander';
 import { CapyCommand } from './commands/capyCommand';
 import { CliOptions } from './types/index';
 import { version as CLI_VERSION } from '../package.json';
-import { setWebMode } from './ui/webMode';
+import { conflictOption, rawConflictFlagsOf, resolveOption } from './sync/conflicts';
+import { answersByProtocol } from './sync/gate';
+import { refuseWebMode } from './core/webModeRemoved';
 import { ACCENT } from './ui/colors';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
+
+/** Commander accumulator for repeatable options whose values are taken whole (e.g. --row, --exclude). */
+function collectRepeatable(val: string, acc: string[]): string[] {
+  return acc.concat(val);
+}
 
 /** Commander accumulator for repeatable, comma-splittable options (e.g. --project). */
 function collectProjects(val: string, acc: string[]): string[] {
@@ -81,42 +88,24 @@ program
   .option('-v, --verbose', 'enable detailed logging')
   .option('-f, --force', 're-encrypt existing variables')
   .option('-d, --dry-run', 'preview changes without applying')
-  .option('--web', 'render interactive steps (first-run setup / sync conflicts) in a local browser instead of TTY prompts')
+  .addOption(resolveOption())
+  .addOption(conflictOption())
+  // Hidden: `--web` was removed. It still parses so the hook below can refuse it (WEB_MODE_REMOVED).
+  .addOption(new Option('--web').hideHelp())
   // Root help only (Commander scopes addHelpText to the command it's called
   // on) — points an agent at `capy help --json` for the full, drift-proof
   // command reference (CAP-681).
   .addHelpText('after', '\nAgents: run `capy help --json` for a machine-readable command reference.')
-  // Record `--web` once, before any handler runs, for the code that has no way
-  // to ask. `displayErrorAndExit` is reached from eighteen catch blocks — a key
-  // resolver, a service client, a crypto path — none of which is handed the
-  // flag, and threading a boolean through every signature between here and
-  // there would be forgotten on the nineteenth. Commands that decide their own
-  // flow still read `command.optsWithGlobals().web`.
-  .hook('preAction', (thisCommand) => {
-    setWebMode(thisCommand.opts().web === true);
+  // `--web` is gone: refuse it before any handler runs, so an agent that still
+  // passes it is told so instead of having the command run unattended.
+  .hook('preAction', (_thisCommand, actionCommand) => {
+    const opts = actionCommand.optsWithGlobals();
+    if (opts.web === true) refuseWebMode(opts.json === true);
   })
   .action(async (options, cmd) => {
     if (cmd.args.length > 0) {
-      console.log(`\n  Unknown command: ${cmd.args[0]}\n`);
-      console.log('  Available commands:\n');
-      console.log(`    ${B('capy-dev')}                        \x1b[90mSync secrets\x1b[0m`);
-      console.log(`    ${B('capy-dev')} edit                   \x1b[90mInspect and edit secrets in a TUI\x1b[0m`);
-      console.log(`    ${B('capy-dev')} branch                 \x1b[90mList secret branches\x1b[0m`);
-      console.log(`    ${B('capy-dev')} checkout -b <branch>   \x1b[90mSwitch to a secret branch\x1b[0m`);
-      console.log(`    ${B('capy-dev')} invite <email>         \x1b[90mInvite a teammate\x1b[0m`);
-      console.log(`    ${B('capy-dev')} redeem <code>          \x1b[90mRedeem an invite code\x1b[0m`);
-      console.log(`    ${B('capy-dev')} transport              \x1b[90mMove your account to another machine\x1b[0m`);
-      console.log(`    ${B('capy-dev')} kick <email>           \x1b[90mRemove a teammate\x1b[0m`);
-      console.log(`    ${B('capy-dev')} users                  \x1b[90mList organization members\x1b[0m`);
-      console.log(`    ${B('capy-dev')} deploy                 \x1b[90mGenerate a deployment\x1b[0m`);
-      console.log(`    ${B('capy-dev')} decrypt                \x1b[90mDecrypt secrets offline (owner only)\x1b[0m`);
-      console.log(`    ${B('capy-dev')} end-recover            \x1b[90mEnd recovery session\x1b[0m`);
-      console.log(`    ${B('capy-dev')} recover                \x1b[90mReconstruct master key from recovery phrase\x1b[0m`);
-      console.log(`    ${B('capy-dev')} auth-decrypt           \x1b[90mDecrypt using auth (dev only)\x1b[0m`);
-      console.log(`    ${B('capy-dev')} byoc [url]             \x1b[90mConnect to a self-hosted Capy (BYOC) instance\x1b[0m`);
-      console.log(`    ${B('capy-dev')} use <profile>          \x1b[90mSwitch to a different profile\x1b[0m`);
-      console.log(`    ${B('capy-dev')} profile list           \x1b[90mList configured profiles\x1b[0m`);
-      console.log('');
+      const { unknownCommandText } = await import('./core/availableCommands');
+      console.log(unknownCommandText(program, cmd.args[0]));
       process.exit(1);
     }
 
@@ -125,7 +114,9 @@ program
       verbose: options.verbose,
       force: options.force,
       dryRun: options.dryRun,
-      web: options.web
+      conflictFlags: rawConflictFlagsOf(cmd),
+      // Off a terminal, under --dry-run, or given --resolve nobody can answer the menu: the flags do (CAP-717).
+      protocol: answersByProtocol({ conflictFlags: rawConflictFlagsOf(cmd), dryRun: options.dryRun === true }),
     };
 
     const command = new CapyCommand(cliOptions, true);
@@ -252,7 +243,7 @@ program
       if (selected !== '__stay__') {
         const { CheckoutCommand } = await import('./commands/checkoutCommand');
         const cmd = new CheckoutCommand(true);
-        await cmd.execute(selected, { web: command.optsWithGlobals().web === true });
+        await cmd.execute(selected);
       }
     }
 
@@ -271,23 +262,30 @@ program
   .description('Switch to a secret branch')
   .option('-b, --create', 'Create the branch if it does not exist')
   .option('--protected', 'Mark as a protected branch (invite-only)')
+  .option('--non-tty', 'treat stdin as not a terminal; differences from Capy stop the checkout with the conflict_id (agents/CI)') // COPY-FLAG
+  .addOption(resolveOption())
+  .addOption(conflictOption())
   .action(async (branch, options, command) => {
     const { CheckoutCommand } = await import('./commands/checkoutCommand');
     const cmd = new CheckoutCommand(true);
     await cmd.execute(branch, {
       create: options.create,
       protected: options.protected,
-      web: command.optsWithGlobals().web === true,
+      nonTty: options.nonTty === true,
+      conflictFlags: rawConflictFlagsOf(command),
     });
   });
 
 program
   .command('push')
   .description('Push encrypted values to Keep')
-  .action(async () => {
+  .option('--non-tty', 'treat stdin as not a terminal; differences from Capy stop the push with the conflict_id (agents/CI)') // COPY-FLAG
+  .addOption(resolveOption())
+  .addOption(conflictOption())
+  .action(async (options, command) => {
     const { PushCommand } = await import('./commands/pushCommand');
     const cmd = new PushCommand(true);
-    await cmd.execute();
+    await cmd.execute({ nonTty: options.nonTty, conflictFlags: rawConflictFlagsOf(command) });
   });
 
 program
@@ -297,23 +295,48 @@ program
   .action(async (options, command) => {
     const { StatusCommand } = await import('./commands/statusCommand');
     const cmd = new StatusCommand(false, true);
-    await cmd.execute({ json: options.json, web: command.optsWithGlobals().web === true });
+    await cmd.execute({ json: options.json });
   });
 
 program
-  .command('edit')
-  .description('Inspect and edit secrets in an interactive TUI')
-  .action(async (_options, command) => {
+  .command('edit [name]')
+  // COPY-FLAG — minimal-neutral; names the two modes.
+  .description('Inspect and edit secrets in an interactive TUI, or set one variable from a piped value')
+  .option('--no-push', 'piped value: write .env only; do not push to Capy')
+  .option('--json', 'emit machine-readable JSON instead of the human UI (piped value)')
+  .option('--non-tty', 'treat stdin as not a terminal; never prompt (agents/CI)')
+  .option('--pr', 'create a PR with the keep.lock change (answers the prompt)') // COPY-FLAG
+  .option('--no-pr', 'do not create a PR with the keep.lock change') // COPY-FLAG
+  .option('--pr-base <branch>', 'base branch for the PR (answers the prompt)') // COPY-FLAG
+  .addHelpText(
+    'after',
+    // COPY-FLAG
+    '\n' +
+      'With a name and a piped value, sets that one variable. The value is read from stdin only:\n' +
+      '  <cmd> | capy-dev edit NAME --json\n',
+  )
+  .addOption(resolveOption())
+  .addOption(conflictOption())
+  .action(async (name, options, command) => {
     const { EditCommand } = await import('./commands/editCommand');
+    const { prFlagsFromCommand } = await import('./commands/keepLockPr');
     const cmd = new EditCommand(process.env.CAPY_API_URL, true);
-    await cmd.execute({ web: command.optsWithGlobals().web === true });
+    await cmd.execute({
+      name,
+      json: options.json,
+      noPush: options.push === false,
+      nonTty: options.nonTty,
+      pr: prFlagsFromCommand(command, options.prBase),
+      // The program-level `--dry-run`, wherever it was typed.
+      dryRun: command.optsWithGlobals().dryRun === true,
+    });
   });
 
 const deploy = program
   .command('deploy [target]')
   .description('Set up secret delivery — token + docs (existing) or connector deploy')
   .option('--target <id>', 'adapter id; requires --yes (CI mode)')
-  .option('--yes', 'skip all prompts (CI)')
+  .option('--yes', 'skip all prompts (CI); any difference between the folder and Capy stops the deploy with exit 3') // COPY-FLAG
   .option('--dry-run', 'preflight + show plan, push nothing (connector mode)')
   .option('--edit', 're-enter the picker for an existing connector target')
   .option('--connect', 'force connector mode (skip the token+docs path)')
@@ -321,8 +344,20 @@ const deploy = program
   .option('--mode <mode>', 'skip mode picker: "connector" or "token"')
   .option('--scope <scope>', 'gh-actions: "repo" or "env"')
   .option('--env-name <name>', 'gh-actions: env name when --scope env')
+  // COPY-FLAG: the option descriptions of `deploy <target> --discover` are minimal and neutral.
+  .option('--discover', 'dokploy: find the services that match Capy projects and print JSON (never prompts)')
+  .option('--plan <file>', 'dokploy --discover: the plan file to check (see schemas.deploy_dokploy_plan in `capy help --json`)')
+  .option('--confirm <plan_id>', 'dokploy --discover: write the plan that --dry-run printed (one PR per repo)')
+  .option('--base-url <url>', 'dokploy --discover: the Dokploy dashboard URL (else the org system variable _CONNECTOR_DOKPLOY_BASE_URL)')
+  .addOption(resolveOption())
+  .addOption(conflictOption())
   .action(async (target: string | undefined, options: any, cmd: any) => {
     const merged = cmd.optsWithGlobals ? cmd.optsWithGlobals() : options;
+
+    // `capy-dev deploy dokploy --discover` (CAP-703): always JSON, never prompts.
+    const { routeDeployDiscover } = await import('./commands/deployDiscover/route');
+    const discoverCode = await routeDeployDiscover(target, options, (options.dryRun ?? merged.dryRun) === true, true, rawConflictFlagsOf(cmd));
+    if (discoverCode !== undefined) process.exit(discoverCode);
 
     // CI/explicit connector path — go straight to the adapter flow (devMode).
     if (options.target || options.connect || target) {
@@ -331,11 +366,9 @@ const deploy = program
         target: options.target,
         yes: options.yes ?? merged.yes,
         dryRun: options.dryRun ?? merged.dryRun,
-        // Same inherited-global rule as every other converted command: --web
-        // is declared once on the root program, so it arrives in merged opts.
-        web: merged.web === true,
         edit: options.edit,
         devMode: true,
+        conflictFlags: rawConflictFlagsOf(cmd),
       });
       process.exit(code);
     }
@@ -349,6 +382,9 @@ const deploy = program
       scope: options.scope,
       envName: options.envName,
       yes: !!options.yes,
+      json: !!options.json,
+      dryRun: (options.dryRun ?? merged.dryRun) === true,
+      conflictFlags: rawConflictFlagsOf(cmd),
     });
     await c.execute();
   });
@@ -356,12 +392,13 @@ const deploy = program
 deploy
   .command('revoke <deployId>')
   .description('Revoke a deploy token')
-  .action(async (deployId: string, _options: unknown, command: any) => {
+  .option('--non-tty', 'treat stdin as not a terminal; differences from Capy stop the revoke with the conflict_id (agents/CI)') // COPY-FLAG
+  .addOption(resolveOption())
+  .addOption(conflictOption())
+  .action(async (deployId: string, options: any, command: any) => {
     const { DeployRevokeCommand } = await import('./commands/deployTokenCommand');
-    const cmd = new DeployRevokeCommand(process.env.CAPY_API_URL, true, {
-      web: command.optsWithGlobals().web === true,
-    });
-    await cmd.execute(deployId);
+    const cmd = new DeployRevokeCommand(process.env.CAPY_API_URL, true);
+    await cmd.execute(deployId, { nonTty: options.nonTty, conflictFlags: rawConflictFlagsOf(command) });
   });
 
 deploy
@@ -369,9 +406,7 @@ deploy
   .description('List deploy tokens for this project')
   .action(async (_options, command) => {
     const { DeployListCommand } = await import('./commands/deployTokenCommand');
-    const cmd = new DeployListCommand(process.env.CAPY_API_URL, true, {
-      web: command.optsWithGlobals().web === true,
-    });
+    const cmd = new DeployListCommand(process.env.CAPY_API_URL, true);
     await cmd.execute();
   });
 
@@ -386,16 +421,19 @@ deploy
   .description('List configured connector targets (connector mode)')
   .action(async (_options, command) => {
     const { deployList } = await import('./commands/deployCommand');
-    process.exit(await deployList(process.cwd(), { web: command.optsWithGlobals().web === true }));
+    process.exit(await deployList(process.cwd()));
   });
 
 deploy
   .command('targets-remove <name>')
   .description('Remove a configured connector target')
-  .action(async (name: string, _options, command) => {
+  .option('--non-tty', 'treat stdin as not a terminal; differences from Capy stop the removal with the conflict_id (agents/CI)') // COPY-FLAG
+  .addOption(resolveOption())
+  .addOption(conflictOption())
+  .action(async (name: string, options: any, command) => {
     const { deployRemove } = await import('./commands/deployCommand');
     process.exit(
-      await deployRemove(name, process.cwd(), { web: command.optsWithGlobals().web === true, devMode: true }),
+      await deployRemove(name, process.cwd(), { devMode: true, nonTty: options.nonTty, conflictFlags: rawConflictFlagsOf(command) }),
     );
   });
 
@@ -412,7 +450,6 @@ program
     const { InviteCommand } = await import('./commands/inviteCommand');
     const cmd = new InviteCommand(process.env.CAPY_API_URL, true);
     await cmd.execute(email, {
-      web: command.optsWithGlobals().web === true,
       role: options.role,
       projects: options.project,
       ttl: options.ttl,
@@ -443,9 +480,10 @@ program
 
 program
   .command('pair')
-  .description('Pair this device into an org via Keep (device-code login + key pickup)')
+  .description('Pair this device via Keep; requires interactive confirmation of the returned account before installing any session or keys')
   .option('--json', 'emit machine-readable JSON instead of the human UI')
   .option('--force', 'overwrite a different local key already on this machine')
+  .addHelpText('after', '\nAfter browser approval: Enable this location as [email]? (y/N)\nAgents: use an interactive terminal/PTY, show the email to the human, and obtain explicit approval before answering Yes. Never auto-confirm. No upfront email is required.\n')
   .action(async (options) => {
     const { pairCommand } = await import('./commands/pairCommand');
     await pairCommand({ json: options.json === true, force: options.force === true, apiUrl: process.env.CAPY_API_URL, devMode: true });
@@ -457,7 +495,7 @@ program
   .action(async (email, _options, command) => {
     const { KickCommand } = await import('./commands/kickCommand');
     const cmd = new KickCommand(process.env.CAPY_API_URL, true);
-    await cmd.execute(email, { web: command.optsWithGlobals().web === true });
+    await cmd.execute(email);
   });
 
 const systemCmd = program
@@ -698,14 +736,13 @@ program
 program
   .command('org')
   .description('Switch organization')
-  .action(async (_options, command) => {
+  .option('--non-tty', 'treat stdin as not a terminal; differences from Capy stop the switch with the conflict_id (agents/CI)') // COPY-FLAG
+  .addOption(resolveOption())
+  .addOption(conflictOption())
+  .action(async (options, command) => {
     const { OrgCommand } = await import('./commands/orgCommand');
-    // OrgCommand takes it at construction — see its own note on why a
-    // subcommand must read the inherited global rather than its own options.
-    const cmd = new OrgCommand(process.env.CAPY_API_URL, true, {
-      web: command.optsWithGlobals().web === true,
-    });
-    await cmd.execute();
+    const cmd = new OrgCommand(process.env.CAPY_API_URL, true);
+    await cmd.execute({ nonTty: options.nonTty === true, conflictFlags: rawConflictFlagsOf(command) });
   });
 
 program
@@ -748,16 +785,105 @@ program
     await cmd.execute({ json: options.json });
   });
 
-program
+const secretsCmd = program
   .command('secrets')
   .description('List every secret name across the active organization, grouped by value (read-only, never shows a value)')
   .option('--json', 'emit machine-readable JSON instead of the human UI')
   .option('--project <name>', 'only rows with a location in this project')
   .option('--branch <name>', 'only rows with a location on this branch')
-  .action(async (options) => {
+  .option('--name <NAME>', 'only rows with exactly this secret name') // COPY-FLAG
+  .action(async (options, command) => {
     const { SecretsCommand } = await import('./commands/secretsCommand');
     const cmd = new SecretsCommand(process.env.CAPY_API_URL, true);
-    await cmd.execute({ json: options.json, project: options.project, branch: options.branch });
+    await cmd.execute({ json: options.json, project: options.project, branch: options.branch, name: options.name, dryRun: command.optsWithGlobals().dryRun === true });
+  });
+
+secretsCmd
+  .command('set <name>')
+  // COPY-FLAG: minimal-neutral. Agent mode: never prompts; the value is read from stdin only.
+  .description('Set one secret to a new value (read from stdin) in several locations and open keep.lock PRs. Never prompts.')
+  .option('--json', 'emit machine-readable JSON instead of the human UI')
+  // COPY-FLAG: the option descriptions of `secrets set` are minimal and neutral.
+  .option('--row <row_id>', 'change this row of that name (repeatable; ids from `capy secrets --name NAME --json`)', collectRepeatable, [])
+  .option('--all-rows', 'change every row of that name')
+  .option('--exclude <project:branch>', 'leave this location out (repeatable)', collectRepeatable, [])
+  .addOption(new Option('--no-pr-for <owner/name>', 'do not open a PR in this repo (repeatable)').argParser(collectRepeatable).default([]))
+  .option('--no-pr', 'do not open any PR')
+  .option('--confirm <plan_id>', 'run the plan that --dry-run printed (required for a real run)')
+  .addHelpText(
+    'after',
+    // COPY-FLAG
+    '\n' +
+      'Agents: look the rows up, show the human a table, let the human pick the row(s), dry run, get approval, then run with --confirm. Never pick a row yourself.\n' +
+      '  capy secrets --name NAME --json\n' +
+      '  <cmd> | capy secrets set NAME --row <row_id> --dry-run --json\n' +
+      '  <cmd> | capy secrets set NAME --row <row_id> --confirm <plan_id> --json\n',
+  )
+  .addOption(resolveOption())
+  .addOption(conflictOption())
+  .action(async (name: string, options: any, command: any) => {
+    // `--json` is also a `capy secrets` option, which Commander lets the parent claim;
+    // `--dry-run` is the program-level flag. Read both from the merged options.
+    const merged = command.optsWithGlobals();
+    const { secretsSetCommand } = await import('./commands/secretsSetCommand');
+    const code = await secretsSetCommand(
+      name,
+      {
+        json: merged.json === true,
+        dryRun: merged.dryRun === true,
+        confirm: options.confirm,
+        row: options.row,
+        allRows: options.allRows === true,
+        exclude: options.exclude,
+        noPrFor: options.prFor,
+        noPr: options.pr === false,
+        conflictFlags: rawConflictFlagsOf(command),
+      },
+      true,
+    );
+    process.exit(code);
+  });
+
+secretsCmd
+  .command('deploy <names...>')
+  // COPY-FLAG: minimal-neutral. Agent mode: never prompts; takes no value.
+  .description('Deploy the Dokploy targets of one or more secrets with no project folder, and open one keep.lock PR per target. Never prompts.')
+  .option('--json', 'emit machine-readable JSON instead of the human UI')
+  // COPY-FLAG: the option descriptions of `secrets deploy` are minimal and neutral.
+  .option('--row <row_id>', 'deploy this row of a name (repeatable; ids from `capy secrets --name NAME --json`)', collectRepeatable, [])
+  .option('--all-rows', 'deploy every row of those names')
+  .option('--exclude <project:branch>', 'leave this location out (repeatable)', collectRepeatable, [])
+  .option('--confirm <plan_id>', 'run the plan that --dry-run printed (required for a real run)')
+  .addHelpText(
+    'after',
+    // COPY-FLAG
+    '\n' +
+      'Agents: look the rows up, show the human a table, let the human pick the row(s), dry run, get approval, then run with --confirm. Never pick a row yourself.\n' +
+      '  capy secrets --name NAME --json\n' +
+      '  capy secrets deploy NAME --row <row_id> --dry-run --json\n' +
+      '  capy secrets deploy NAME --row <row_id> --confirm <plan_id> --json\n',
+  )
+  .addOption(resolveOption())
+  .addOption(conflictOption())
+  .action(async (names: string[], options: any, command: any) => {
+    // `--json` is also a `capy secrets` option, which Commander lets the parent claim;
+    // `--dry-run` is the program-level flag. Read both from the merged options.
+    const merged = command.optsWithGlobals();
+    const { secretsDeployCommand } = await import('./commands/secretsDeployCommand');
+    const code = await secretsDeployCommand(
+      names,
+      {
+        json: merged.json === true,
+        dryRun: merged.dryRun === true,
+        confirm: options.confirm,
+        row: options.row,
+        allRows: options.allRows === true,
+        exclude: options.exclude,
+        conflictFlags: rawConflictFlagsOf(command),
+      },
+      true,
+    );
+    process.exit(code);
   });
 
 program
@@ -783,7 +909,7 @@ program
   .description('Connect to a self-hosted Capy (BYOC) instance')
   .action(async (url: string | undefined, _options: unknown, command: any) => {
     const { byocCommand } = await import('./commands/byocCommand');
-    process.exit(await byocCommand(url, { web: command.optsWithGlobals().web === true }));
+    process.exit(await byocCommand(url));
   });
 
 program
@@ -878,7 +1004,7 @@ program
   .action(async (_options, command) => {
     const { DecryptCommand } = await import('./commands/decryptCommand');
     const cmd = new DecryptCommand();
-    await cmd.execute({ web: command.optsWithGlobals().web === true });
+    await cmd.execute();
   });
 
 program
@@ -887,7 +1013,7 @@ program
   .action(async (_options, command) => {
     const { EndRecoverCommand } = await import('./commands/endRecoverCommand');
     const cmd = new EndRecoverCommand();
-    await cmd.execute({ web: command.optsWithGlobals().web === true });
+    await cmd.execute();
   });
 
 program
@@ -896,7 +1022,7 @@ program
   .action(async (_options, command) => {
     const { RecoverCommand } = await import('./commands/recoverCommand');
     const cmd = new RecoverCommand(process.env.CAPY_API_URL, true);
-    await cmd.execute({ web: command.optsWithGlobals().web === true });
+    await cmd.execute();
   });
 
 program
@@ -915,32 +1041,35 @@ program
 program
   .command('add <vars...>')
   .description('Add one or more secret values to the project (encrypts + syncs)')
-  .option('--reason <text>', 'short note shown on the intake page')
-  .option(
-    '--help-url <NAME=URL>',
-    'per-variable "where to find this" link, e.g. STRIPE_SECRET_KEY=https://dashboard.stripe.com/apikeys (repeatable)',
-    (val: string, acc: string[]) => {
-      acc.push(val);
-      return acc;
-    },
-    [] as string[],
-  )
-  .option('--no-open', 'do not auto-open the browser; print the URL only')
   .option('--no-push', 'write to .env only; do not push to Capy')
   .option('-f, --force', 'overwrite existing values without prompting')
   .option('--non-tty', 'never prompt; resolve from flags or fail fast (agents/CI)')
+  .option('--json', 'emit machine-readable JSON instead of the human UI (piped value)')
+  .option('--pr', 'create a PR with the keep.lock change (answers the prompt)') // COPY-FLAG
+  .option('--no-pr', 'do not create a PR with the keep.lock change') // COPY-FLAG
+  .option('--pr-base <branch>', 'base branch for the PR (answers the prompt)') // COPY-FLAG
+  .addHelpText(
+    'after',
+    // COPY-FLAG
+    '\n' +
+      'With a value piped in and one name, adds that variable (an existing one needs --force):\n' +
+      '  <cmd> | capy-dev add NAME --json\n',
+  )
+  .addOption(resolveOption())
+  .addOption(conflictOption())
   .action(async (varNames, options, command) => {
     const { AddCommand } = await import('./commands/addCommand');
+    const { prFlagsFromCommand } = await import('./commands/keepLockPr');
     const cmd = new AddCommand(true); // devMode: dev backend + ~/.capy-dev
     const merged = command.optsWithGlobals();
     await cmd.execute(varNames, {
-      web: command.optsWithGlobals().web === true,
-      reason: options.reason,
-      helpUrls: options.helpUrl,
-      open: options.open,
       noPush: options.push === false,
       force: merged.force,
       nonTty: options.nonTty,
+      json: options.json,
+      pr: prFlagsFromCommand(command, options.prBase),
+      dryRun: merged.dryRun === true,
+      conflictFlags: rawConflictFlagsOf(command),
     });
   });
 
@@ -950,13 +1079,22 @@ program
   .option('-y, --yes', 'skip the confirmation prompt (required non-interactively)')
   .option('--json', 'emit machine-readable JSON instead of the human UI')
   .option('--non-tty', 'never prompt; resolve from flags or fail fast (agents/CI)')
-  .action(async (varNames, options) => {
+  .option('--pr', 'create a PR with the keep.lock change (answers the prompt)') // COPY-FLAG
+  .option('--no-pr', 'do not create a PR with the keep.lock change') // COPY-FLAG
+  .option('--pr-base <branch>', 'base branch for the PR (answers the prompt)') // COPY-FLAG
+  .addOption(resolveOption())
+  .addOption(conflictOption())
+  .action(async (varNames, options, command) => {
     const { RemoveCommand } = await import('./commands/removeCommand');
+    const { prFlagsFromCommand } = await import('./commands/keepLockPr');
     const cmd = new RemoveCommand(true); // devMode: dev backend + ~/.capy-dev
     await cmd.execute(varNames, {
       yes: options.yes,
       json: options.json,
       nonTty: options.nonTty,
+      pr: prFlagsFromCommand(command, options.prBase),
+      dryRun: command.optsWithGlobals().dryRun === true,
+      conflictFlags: rawConflictFlagsOf(command),
     });
   });
 
@@ -984,7 +1122,8 @@ program
   )
   .option(
     '-y, --yes',
-    'dokploy import/discover: skip the confirmation prompt (import: --overwrite\'s clear/replace/import ask; discover: the real-run "proceed?" ask) — required non-interactively',
+    // COPY-FLAG: discover never prompts (it always prints JSON), so `--yes` is what lets it write.
+    'dokploy import/discover: skip the confirmation prompt (import: --overwrite\'s clear/replace/import ask) — discover never prompts and needs --yes to write',
   )
   .option(
     '--overwrite',
@@ -994,23 +1133,17 @@ program
     '--environment <names>',
     'dokploy discover: restrict the plan to these Dokploy environment names, comma-separated (e.g. staging,preview)',
   )
+  .addOption(resolveOption())
+  .addOption(conflictOption())
   .action(async (provider, options, command) => {
     const { ConnectCommand } = await import('./commands/connectCommand');
     const cmd = new ConnectCommand(true); // devMode: hard-blocks live
-    // Globals, because `--web` is declared once on the root program. Dropping
-    // it here is not a no-op: `ConnectCommand` reads `opts.web` to decide
-    // between the browser route and the TTY prompts, so an unpassed flag makes
-    // `capy-dev connect stripe --web` silently answer in the terminal — or
-    // fail as "ambiguous without a prompt" when there isn't one. That is the
-    // dev binary, which is the only one the Stripe sandbox flow ever runs.
     const merged = command.optsWithGlobals();
-    const web = merged.web === true;
     if (!provider) {
-      await cmd.list({ web });
+      await cmd.list();
       return;
     }
     await cmd.execute(provider, {
-      web,
       live: options.live,
       var: options.var,
       account: options.account,
@@ -1027,6 +1160,7 @@ program
       yes: options.yes === true,
       overwrite: options.overwrite === true,
       environment: options.environment,
+      conflictFlags: rawConflictFlagsOf(command),
     });
   });
 
@@ -1039,16 +1173,18 @@ program
   .option('--skip-prompts', 'alias for --yes')
   .option('--non-tty', 'never prompt; resolve choices from flags or fail fast (agents/CI)')
   .option('--provider <name>', 'integration to promote an unmanaged var through (non-interactive)')
+  .addOption(resolveOption())
+  .addOption(conflictOption())
   .action(async (varName, options, command) => {
     const { RotateCommand } = await import('./commands/rotateCommand');
     const cmd = new RotateCommand(true); // devMode: skips live entries
     await cmd.execute(varName, {
-      web: command.optsWithGlobals().web === true,
       all: options.all,
       noPush: options.push === false,
       skipPrompts: !!(options.yes || options.skipPrompts),
       nonTty: options.nonTty,
       provider: options.provider,
+      conflictFlags: rawConflictFlagsOf(command),
     });
   });
 

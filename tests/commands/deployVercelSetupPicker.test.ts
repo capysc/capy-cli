@@ -128,23 +128,11 @@ describe('capy deploy picker — Vercel (API mode)', () => {
     }
   });
 
-  test('with --web the Vercel setup stays in the terminal (no browser page is opened), like Dokploy\'s', async () => {
-    const cwd = repo();
-    try {
-      answerBy({ branch: 'production', projectUrl: 'https://vercel.com/acme/web', confirmed: true, vercelEnv: 'production', vars: ['API_KEY'], name: 'v' });
-      const saved = await withFakeVercel(() => captureConsole(() => runPicker(cwd, KEEP, undefined, 'vercel', { web: true })));
-      expect(saved.stdout.join('\n')).toContain('Vercel setup runs in the terminal.');
-      expect((saved.result as TargetConfig).options).toMatchObject({ projectId: 'prj_web' });
-    } finally {
-      rmSync(cwd, { recursive: true, force: true });
-    }
-  });
-
   test('a dry run (readOnly) never lets the store ask for or save a token', async () => {
     const cwd = repo();
     try {
       answerBy({ branch: 'production', projectUrl: 'https://vercel.com/acme/web', confirmed: true, vercelEnv: 'production', vars: ['API_KEY'], name: 'v' });
-      await withFakeVercel(() => captureConsole(() => runPicker(cwd, KEEP, undefined, 'vercel', undefined, { readOnly: true })));
+      await withFakeVercel(() => captureConsole(() => runPicker(cwd, KEEP, undefined, 'vercel', { readOnly: true })));
       expect(getSecret.mock.calls[0][2]).toMatchObject({ interactive: false });
     } finally {
       rmSync(cwd, { recursive: true, force: true });

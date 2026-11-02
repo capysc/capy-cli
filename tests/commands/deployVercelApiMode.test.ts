@@ -23,6 +23,11 @@ import { join } from 'path';
 import { tmpdir } from 'os';
 import { spawnSync } from 'child_process';
 import { SyncEngine } from '../../src/sync/syncEngine';
+import { agreeingDecryptData, fixedKeyResolver } from '../helpers/deployServer';
+import { stubbedGate } from '../helpers/gateMock';
+
+// Bare `capy` (a deploy's first step) is tested in tests/sync/gate.test.ts and tests/commands/gateFirst.test.ts.
+mock.module('../../src/sync/gate', () => stubbedGate());
 
 const TMP = join(tmpdir(), `capy-deploy-vercel-api-${process.pid}`);
 const REPO = join(TMP, 'repo');
@@ -49,7 +54,21 @@ mock.module('../../src/service/serviceClient', () => ({
   ServiceClient: class {
     setTokenProvider() {}
     async pushSecrets(projectId: string, keepFileJson: string, envBlob: string, branch: string) {
-      return pushSecretsMock(projectId, keepFileJson, envBlob, branch);
+      const pushed = await pushSecretsMock(projectId, keepFileJson, envBlob, branch);
+      // The server keeps what it accepted: the next read (a later push's base) is the pushed state.
+      const existing = existsSync(SERVER_SNAPSHOTS_PATH)
+        ? (JSON.parse(readFileSync(SERVER_SNAPSHOTS_PATH, 'utf-8')) as Record<string, { keepFile: string; envFile: string }>)
+        : {};
+      writeFileSync(SERVER_SNAPSHOTS_PATH, JSON.stringify({ ...existing, [branch]: { keepFile: keepFileJson, envFile: envBlob } }));
+      return pushed;
+    }
+    // The same snapshot as `getLatestSecrets`, for the commit path (which reads the server's latest before it writes).
+    async getDecryptData(_projectId: string, branch: string) {
+      const snap = existsSync(SERVER_SNAPSHOTS_PATH)
+        ? (JSON.parse(readFileSync(SERVER_SNAPSHOTS_PATH, 'utf-8')) as Record<string, { keepFile: string; envFile: string }>)[branch]
+        : undefined;
+      if (!snap) throw new Error('no server snapshot written for this branch');
+      return agreeingDecryptData(JSON.parse(snap.keepFile), branch, snap.envFile);
     }
     async getLatestSecrets(_projectId: string, branch: string) {
       if (!existsSync(SERVER_SNAPSHOTS_PATH)) return null;
@@ -64,6 +83,7 @@ mock.module('../../src/service/serviceClient', () => ({
     }
   },
 }));
+mock.module('../../src/crypto/keyResolver', () => fixedKeyResolver());
 mock.module('../../src/utils/gh', () => ({
   resolveGh: () => null,
   GH_SEARCHED: ['PATH'],

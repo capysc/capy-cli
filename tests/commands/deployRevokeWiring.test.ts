@@ -24,18 +24,18 @@
  *     the adapter that recorded them still mints tokens at all (the LAST
  *     test: two pre-recorded `superseded_deploy_ids` plus the current one).
  *
- * CAP-687 (validator fix-first): `pushKeepTransform` no longer builds the
- * pushed env blob from local `.env` at all — it fetches the server's OWN
- * current snapshot for the branch (`getLatestSecrets`) and re-sends that
- * blob unchanged, after verifying its `keep_hash` matches the local keep's
- * branch entries. The mocked `ServiceClient` below fakes that snapshot by
- * reading + hashing `ROOT/keep.lock` itself (via the REAL `SyncEngine`, not
- * mocked here) — always "in sync", since this file is about the REVOKE
- * WIRING, not the drift guard (see `deployCiTargetsRecord.test.ts` for
- * that). No crypto mocking is needed any more: `pushKeepTransform` never
- * touches `resolveProjectKey`/`Encryptor`/`deriveResourceId`, and this
- * fixture's `.env` is plain (unencrypted), so `decryptCurrentBranch` never
- * needs them either.
+ * CAP-687 (validator fix-first): `pushKeepTransform` never builds the
+ * pushed env blob from local `.env` — it fetches the server's OWN current
+ * snapshot for the branch and re-sends that blob unchanged, after
+ * verifying its `keep_hash` matches the local keep's branch entries. The
+ * mocked `ServiceClient` below fakes that snapshot by reading + hashing
+ * `ROOT/keep.lock` itself (via the REAL `SyncEngine`, not mocked here) —
+ * always "in sync", since this file is about the REVOKE WIRING, not the
+ * drift guard (see `deployCiTargetsRecord.test.ts` for that). The record is
+ * now written through the one commit path (CAP-717/712), which reads the
+ * server's latest with `getDecryptData` and needs the project key, so
+ * `resolveProjectKey` is mocked to a fixed key; the server's lines in this
+ * fixture are ones nobody holds the key for, so no value is ever decrypted.
  *
  * `mock.module()` is process-wide: this file runs isolated (tests/run-tests.sh).
  */
@@ -45,6 +45,7 @@ import { join } from 'path';
 import { tmpdir } from 'os';
 import { SyncEngine } from '../../src/sync/syncEngine';
 import { ProjectManager } from '../../src/core/projectManager';
+import { agreeingDecryptData, fixedKeyResolver } from '../helpers/deployServer';
 
 /** Sentinel filename (see the mocked `getLatestSecrets` below) — its mere presence next to `ROOT/keep.lock` models a stale local keep.lock. */
 const STALE_KEEP_MARKER = '.simulate-stale-keep';
@@ -78,6 +79,8 @@ mock.module('../../src/auth/authService', () => ({
   silentAuthFailureMessage: () => 'auth failed',
 }));
 
+mock.module('../../src/crypto/keyResolver', () => fixedKeyResolver());
+
 const revokeDeployTokenMock = mock(async (_id: string) => ({}));
 const pushSecretsMock = mock(async (_projectId: string, keepFileJson: string, _envBlob: string, _branch: string) => ({
   keep_hash: 'h'.repeat(16),
@@ -103,6 +106,15 @@ mock.module('../../src/service/serviceClient', () => ({
     // that can never match the local file's real one. `SERVER_SNAPSHOT_OVERRIDE`
     // (also below) models an independent server snapshot instead of
     // deriving one from the local read at all.
+    // The same server, for the commit path (which reads the server's latest before it writes).
+    async getDecryptData(_projectId: string, branch: string) {
+      const overridePath = join(ROOT, SERVER_SNAPSHOT_OVERRIDE);
+      const keep = existsSync(overridePath)
+        ? JSON.parse(readFileSync(overridePath, 'utf-8'))
+        : new ProjectManager(ROOT).readKeepFile();
+      if (!keep) throw new Error('test fixture has no keep.lock to read');
+      return agreeingDecryptData(keep, branch);
+    }
     async getLatestSecrets(_projectId: string, branch: string) {
       const overridePath = join(ROOT, SERVER_SNAPSHOT_OVERRIDE);
       const keep = existsSync(overridePath)
@@ -144,10 +156,15 @@ afterEach(() => {
 
 import { deployCommand, deployRemove } from '../../src/commands/deployCommand';
 import { mergeManagedValuesBlock } from '../../src/deploy/dokployApi';
+import { hashValue } from '../../src/sync/compareSecrets';
 
 const APP_ID = 'app_revoke_test';
-/** An active line for STRIPE_KEY already outside the block — gets COMMENTED once Capy delivers it. */
-const RAW_ENV = 'STRIPE_KEY=stale\n';
+/**
+ * The service's env before the deploy. (It used to hold a different active `STRIPE_KEY` outside the block, which the
+ * deploy silently commented out; since CAP-717 that is a conflict that needs an answer, which is not what this file is
+ * about. The comment-out itself is covered in tests/deploy/dokploy.test.ts and tests/deploy/dokployTargetConflict.test.ts.)
+ */
+const RAW_ENV = 'NODE_ENV=production\n';
 /** `.env`'s own plaintext value for STRIPE_KEY (see `setUp`) — a fake, non-secret test value. */
 const DECRYPTED_STRIPE_KEY = 'whatever';
 
@@ -179,12 +196,12 @@ function setUp(opts: { mode?: 'ci' | 'direct'; priorSuperseded?: string[]; gitBa
           {
             resource_id: 'r-1',
             branch: 'production',
-            value_hash: 'h',
+            value_hash: hashValue('whatever'),
             targets: [
               {
                 provider: 'dokploy',
                 target: 'dokploy-direct',
-                deployed_value_hash: 'h',
+                deployed_value_hash: hashValue('whatever'),
                 deployed_at: '2026-01-01T00:00:00.000Z',
                 deploy_id: 'dep_prior',
                 ...(opts.priorSuperseded?.length ? { superseded_deploy_ids: opts.priorSuperseded } : {}),
@@ -237,7 +254,8 @@ function tearDown(): void {
  */
 function dokployFetchMock(opts: { failWrite?: boolean; realDeploy?: boolean } = {}) {
   const expectedMergedEnv = mergedEnv(RAW_ENV);
-  const reads = [RAW_ENV, RAW_ENV, expectedMergedEnv][Symbol.iterator]();
+  // preflight, the conflict check before anything is written (CAP-717), deploy's fresh read, the post-write verify.
+  const reads = [RAW_ENV, RAW_ENV, RAW_ENV, expectedMergedEnv][Symbol.iterator]();
   const deploymentReads = [
     [] as const,
     [{ deploymentId: 'dep_triggered', status: 'done' as const, createdAt: '2026-01-01T00:00:00.000Z' }],

@@ -9,7 +9,9 @@
  * thin part that carries the plan out.
  */
 import { describe, test, expect } from 'bun:test';
-import { planOpen, type DefaultBrowser } from '../../src/ui/openScreen';
+import { spawn } from 'node:child_process';
+import { EventEmitter } from 'node:events';
+import { planOpen, openScreen, launched, type DefaultBrowser, type Launchable } from '../../src/ui/openScreen';
 
 const CHROME: DefaultBrowser = {
   family: 'chromium',
@@ -90,5 +92,77 @@ describe('which window a screen opens in', () => {
     });
     if (plan.via !== 'app-window') throw new Error('unreachable');
     expect(plan.args.filter((a) => a.includes('127.0.0.1'))).toHaveLength(1);
+  });
+});
+
+/**
+ * Carrying the plan out when there is no browser to start — a VM, a container,
+ * a server over SSH. The defect being guarded is Node's own: a failed spawn is
+ * reported as an `error` event a tick later, and an `error` event with no
+ * listener throws after every try/catch has returned and kills the CLI.
+ */
+describe('opening when no browser can start', () => {
+  const MISSING = 'capy-test-no-such-launcher-7f3a';
+  const dialog = { kind: 'dialog' as const, browser: CHROME, env: env() };
+  const handoff = { kind: 'handoff' as const, env: env() };
+
+  /**
+   * How Node reports a missing executable: no throw, `pid` left undefined, and
+   * an `error` event on the next tick. An EventEmitter's unhandled `error`
+   * throws, so if the listener were missing this would fail the run exactly as
+   * it killed the CLI. Built by hand because Bun (which runs this suite) throws
+   * synchronously from `spawn` instead, which is not the path the CLI takes.
+   */
+  const nodeStyleMissing = (): Launchable => {
+    const child = Object.assign(new EventEmitter(), { pid: undefined });
+    process.nextTick(() =>
+      child.emit('error', Object.assign(new Error(`spawn ${MISSING} ENOENT`), { code: 'ENOENT' })),
+    );
+    return child;
+  };
+  /** Mirrors the `open` package: start inside an async function, return the child. */
+  const openMissing = async (): Promise<Launchable> => {
+    await Promise.resolve();
+    return nodeStyleMissing();
+  };
+
+  test('a missing launcher resolves as not opened instead of crashing', async () => {
+    const result = await openScreen(URL, handoff, { openDefault: openMissing });
+    expect(result.via).toBe('default-browser');
+    expect(result.opened).toBe(false);
+  });
+
+  test('a missing app-window binary falls back, and reports not opened when that fails too', async () => {
+    const result = await openScreen(URL, dialog, {
+      spawnApp: nodeStyleMissing,
+      openDefault: openMissing,
+    });
+    expect(result.via).toBe('app-window');
+    expect(result.opened).toBe(false);
+  });
+
+  test('a launcher that throws while starting is not opened', async () => {
+    const result = await openScreen(URL, handoff, {
+      openDefault: () => Promise.reject(new Error('boom')),
+    });
+    expect(result.opened).toBe(false);
+  });
+
+  test('a launcher that starts is opened', async () => {
+    const result = await openScreen(URL, handoff, {
+      openDefault: async () => spawn(process.execPath, ['-e', ''], { stdio: 'ignore' }),
+    });
+    expect(result.opened).toBe(true);
+  });
+
+  test('suppressed never starts anything and is not opened', async () => {
+    const result = await openScreen(URL, { kind: 'handoff', env: env({ CAPY_WEB_NO_OPEN: '1' }) }, {
+      openDefault: () => Promise.reject(new Error('must not be called')),
+    });
+    expect(result).toEqual({ via: 'suppressed', opened: false });
+  });
+
+  test('launched() treats an object without events as started', async () => {
+    expect(launched({})).toBe(true);
   });
 });

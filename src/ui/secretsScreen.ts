@@ -17,9 +17,49 @@
 
 import type { SecretIndexLocation, SecretIndexRow, SecretIndexTarget } from '../service/serviceClient';
 import { formatRelativeTime } from './relativeTime';
-import { renderInlineValue } from './editScreen';
+import { ValueState, maskSecretValue, renderValueLine } from './valueDisplay';
 import { hashValue } from '../commands/statusCommand';
 import { ACCENT } from './colors';
+import { normalizeQuery, textMatches } from './searchMatch';
+import { CANCELLED_NOTHING, DRY_RUN_LABEL } from '../commands/secretsSetText';
+import type { RunProgress } from '../commands/secretsSet';
+import { clipLine } from './pickerTable';
+import { BEHIND_LABEL, DEPLOYED_LABEL, NO_TARGET_LABEL, TARGET_STATUS_HEADING, formatSecretRowStatus, locationState, secretRowStatus } from '../core/deployStatus';
+import { statusBadge, statusColor } from './statusBadge';
+import {
+  EditEffect,
+  EditFlow,
+  ReposLoaded,
+  RunFinished,
+  applyBasesLoaded,
+  applyProgress,
+  applyReposLoaded,
+  basesEffectFor,
+  applyOldValue,
+  applyEditCopied,
+  applyRunFinished,
+  isRunning,
+  renderEdit,
+  startEdit,
+  stepEdit,
+} from './secretsEditFlow';
+import {
+  DeployEffect,
+  DeployFinished,
+  DeployFlow,
+  DeployPlanLoaded,
+  applyDeployCopied,
+  applyDeployFinished,
+  applyDeployPlanLoaded,
+  applyDeployProgress,
+  applyDeployValue,
+  isDeployRunning,
+  renderDeploy,
+  startDeploy,
+  stepDeploy,
+  wantsValue,
+} from './secretsDeployFlow';
+import type { BatchProgress } from '../deploy/batchDeploy';
 
 // ── ANSI (mirrors EditScreen's palette/look-and-feel) ───────────────────────
 
@@ -36,9 +76,17 @@ const RESET = `${ESC}[0m`;
 const DIM = `${ESC}[90m`;
 const BOLD = `${ESC}[1m`;
 const RED = `${ESC}[31m`;
+const YELLOW = `${ESC}[33m`;
+
+// Bracketed paste: the terminal wraps pasted text in markers so a multi-line
+// value (a PEM key) can be taken verbatim by the edit dialog.
+const ENABLE_BRACKETED_PASTE = `${ESC}[?2004h`;
+const DISABLE_BRACKETED_PASTE = `${ESC}[?2004l`;
 
 export const SECRETS_SCREEN_ANSI = {
   ESC,
+  ENABLE_BRACKETED_PASTE,
+  DISABLE_BRACKETED_PASTE,
   HIDE_CURSOR,
   SHOW_CURSOR,
   MOVE_HOME,
@@ -63,6 +111,10 @@ const KEY_TAB = '\t';
 const KEY_ESC = ESC;
 const KEY_ESC_ESC = `${ESC}${ESC}`;
 const KEY_CTRL_C = '\x03';
+/** Ctrl+E: edit the selected row's value, from the list while no filter is typed. The plain `e` is only a hotkey in the details view, where nothing types. */
+const KEY_CTRL_E = '\x05';
+/** Ctrl+D: deploy the selected row's Dokploy targets, from the list while no filter is typed. The plain `d` is only a hotkey in the details view. */
+const KEY_CTRL_D = '\x04';
 const KEY_BACKSPACE = '\x7f';
 const KEY_BACKSPACE2 = '\b';
 
@@ -150,9 +202,20 @@ function tokenizeFrom(chunk: string, index: number): readonly string[] {
 
 // ── Column cycling ───────────────────────────────────────────────────────────
 
-export type ColumnMode = 'connector' | 'target' | 'integrations' | 'users' | 'branch' | 'project';
-/** Tab cycles forward through this order (wrapping); Shift-Tab backward. CONNECTOR is the default/first-shown column (CAP-679 — "service" was a misnomer for what's really an inbound connector, and is gone as a column). */
-export const COLUMN_ORDER: readonly ColumnMode[] = ['connector', 'target', 'integrations', 'users', 'branch', 'project'];
+export type ColumnMode = 'project' | 'branch' | 'status' | 'connector' | 'target' | 'integrations' | 'users';
+/** Tab cycles forward through this order (wrapping); Shift-Tab backward. PROJECT is the default/first-shown column (CAP-702, Vince 2026-10-03). */
+export const COLUMN_ORDER: readonly ColumnMode[] = ['project', 'branch', 'status', 'connector', 'target', 'integrations', 'users'];
+
+/** What each column is called on screen. `status` describes Capy's own targets only; its heading is TARGET_STATUS_HEADING. */
+const COLUMN_HEADINGS: Readonly<Record<ColumnMode, string>> = {
+  project: 'PROJECT',
+  branch: 'BRANCH',
+  status: TARGET_STATUS_HEADING,
+  connector: 'CONNECTOR',
+  target: 'TARGET',
+  integrations: 'INTEGRATIONS',
+  users: 'USERS',
+};
 
 function nextColumn(column: ColumnMode, dir: 1 | -1): ColumnMode {
   const idx = COLUMN_ORDER.indexOf(column);
@@ -162,10 +225,8 @@ function nextColumn(column: ColumnMode, dir: 1 | -1): ColumnMode {
 
 // ── State ────────────────────────────────────────────────────────────────────
 
-export type ValueState =
-  | { readonly status: 'loading' }
-  | { readonly status: 'ok'; readonly value: string }
-  | { readonly status: 'unavailable'; readonly code: string };
+export type { ValueState };
+export { maskSecretValue };
 
 export interface PopupState {
   /** Identifies which (name, value_hash) row this popup belongs to, so a value that resolves after the popup moved on (or closed) is dropped instead of applied to the wrong row. */
@@ -174,6 +235,17 @@ export interface PopupState {
   readonly revealed: boolean;
   readonly value: ValueState;
   readonly panOffset: number;
+  /** The locations table's switchable middle column (Tab / Shift-Tab while the details view is open). */
+  readonly locationColumn: LocationColumn;
+}
+
+/** The details view's locations table: Tab cycles its middle column through this order (wrapping); DEPLOY STATUS first. */
+export type LocationColumn = 'status' | 'connector' | 'target';
+export const LOCATION_COLUMN_ORDER: readonly LocationColumn[] = ['status', 'connector', 'target'];
+
+function nextLocationColumn(column: LocationColumn, dir: 1 | -1): LocationColumn {
+  const idx = LOCATION_COLUMN_ORDER.indexOf(column);
+  return LOCATION_COLUMN_ORDER[(idx + dir + LOCATION_COLUMN_ORDER.length) % LOCATION_COLUMN_ORDER.length];
 }
 
 export interface SearchState {
@@ -186,17 +258,32 @@ export interface SecretsScreenState {
   readonly cursorIndex: number;
   readonly search: SearchState;
   readonly popup: PopupState | null;
+  /** The edit flow (CAP-698), open while a value is being changed; `null` otherwise. */
+  readonly edit: EditFlow | null;
+  /** The deploy flow (CAP-704), open while a batch deploy is planned or running; `null` otherwise. */
+  readonly deploy: DeployFlow | null;
+  /** `capy --dry-run secrets`: the edit flow only plans, and every screen says so. */
+  readonly dryRun: boolean;
   readonly quit: boolean;
+  /** Printed to stdout after the screen is left (the edit confirmation, so it stays in the scrollback). */
+  readonly exitText: string | null;
+  /** A short dim note shown under the list until the next key (e.g. that an edit was cancelled). */
+  readonly note: string | null;
 }
 
-export function initialSecretsScreenState(rows: readonly SecretIndexRow[]): SecretsScreenState {
+export function initialSecretsScreenState(rows: readonly SecretIndexRow[], dryRun: boolean = false): SecretsScreenState {
   return {
     rows,
-    column: 'connector',
+    column: COLUMN_ORDER[0],
     cursorIndex: 0,
     search: { query: '' },
     popup: null,
+    edit: null,
+    deploy: null,
+    dryRun,
     quit: false,
+    exitText: null,
+    note: null,
   };
 }
 
@@ -237,22 +324,22 @@ function locationConnectorMatches(location: SecretIndexLocation, qLower: string)
   const provider = location.connector?.provider ?? location.service?.provider;
   const name = location.service?.name;
   const candidates = [provider, name].filter((s): s is string => Boolean(s));
-  return candidates.some((s) => s.toLowerCase().includes(qLower));
+  return candidates.some((s) => textMatches(s, qLower));
 }
 
 /** Whether ANY of `location`'s outbound deploy targets (absent/`[]` on a server that predates CAP-676) matches `qLower` — a substring of that target's provider or of its target name. */
 function locationTargetMatches(location: SecretIndexLocation, qLower: string): boolean {
   return (location.targets ?? []).some(
-    (t) => t.provider.toLowerCase().includes(qLower) || t.target.toLowerCase().includes(qLower),
+    (t) => textMatches(t.provider, qLower) || textMatches(t.target, qLower),
   );
 }
 
 /** `qLower` is the trimmed, lowercased query; `rawHash`/`trimmedHash` are the query's hash(es) — computed once by the caller, never here. */
 function rowMatchReasons(row: SecretIndexRow, qLower: string, rawHash: string, trimmedHash: string | null): readonly MatchReason[] {
   const isValueMatch = row.value_hash === rawHash || (trimmedHash !== null && row.value_hash === trimmedHash);
-  const isNameMatch = row.name.toLowerCase().includes(qLower);
-  const isProjectMatch = row.locations.some((l) => l.project_name.toLowerCase().includes(qLower));
-  const isBranchMatch = row.locations.some((l) => l.branch.toLowerCase().includes(qLower));
+  const isNameMatch = textMatches(row.name, qLower);
+  const isProjectMatch = row.locations.some((l) => textMatches(l.project_name, qLower));
+  const isBranchMatch = row.locations.some((l) => textMatches(l.branch, qLower));
   const isConnectorMatch = row.locations.some((l) => locationConnectorMatches(l, qLower));
   const isTargetMatch = row.locations.some((l) => locationTargetMatches(l, qLower));
   return (
@@ -279,7 +366,7 @@ function rowMatchReasons(row: SecretIndexRow, qLower: string, rawHash: string, t
  */
 function computeFilteredRows(rows: readonly SecretIndexRow[], query: string): readonly MatchedRow[] {
   const trimmed = query.trim();
-  const qLower = trimmed.toLowerCase();
+  const qLower = normalizeQuery(query);
   if (!qLower) return rows.map((row) => ({ row, reasons: [] as const }));
 
   // Computed ONCE per filter pass — never inside the per-row map below.
@@ -309,7 +396,7 @@ function clampIndex(index: number, length: number): number {
 // ── Effects (data describing a side effect the driver must perform — the
 // reducer itself performs none) ─────────────────────────────────────────────
 
-export type SecretsScreenEffect = { readonly type: 'fetchValue'; readonly row: SecretIndexRow } | null;
+export type SecretsScreenEffect = { readonly type: 'fetchValue'; readonly row: SecretIndexRow } | EditEffect | DeployEffect | null;
 
 export interface ReduceResult {
   readonly state: SecretsScreenState;
@@ -319,12 +406,117 @@ export interface ReduceResult {
 const noEffect = (state: SecretsScreenState): ReduceResult => ({ state, effect: null });
 
 /** Pure reducer: `(state, key) => { state, effect }`. Never touches stdin/stdout/network — see module doc. */
-export function handleKey(state: SecretsScreenState, key: string): ReduceResult {
-  if (key === KEY_CTRL_C) return noEffect({ ...state, quit: true });
+export function handleKey(state: SecretsScreenState, rawKey: string): ReduceResult {
+  const key = rawKey;
+  // The note lasts until the next key.
+  if (state.note !== null) return handleKey({ ...state, note: null }, rawKey);
 
-  if (state.popup) return noEffect(handlePopupKey(state, key));
+  // While an edit runs, Ctrl-C and Esc STOP it (never leave the screen hanging, never cut a push in half).
+  if (key === KEY_CTRL_C && !isRunning(state.edit) && !isDeployRunning(state.deploy)) return noEffect({ ...state, quit: true });
+
+  if (state.edit) return handleEditFlowKey(state, state.edit, key);
+  if (state.deploy) return handleDeployFlowKey(state, state.deploy, key);
+
+  if (state.popup) {
+    if (key === 'd' || key === 'D' || key === KEY_CTRL_D) return openDeployOnCursor(state);
+    return key === 'e' || key === 'E' || key === KEY_CTRL_E ? openEditOnCursor(state) : noEffect(handlePopupKey(state, key));
+  }
 
   return handleListKey(state, key);
+}
+
+/**
+ * The row under the cursor, as the edit flow's starting point. Its current value
+ * is fetched with the same effect (and so the same decrypt path) the details view
+ * uses, so the dialog's Old value row can show it on request.
+ */
+function openEditOnCursor(state: SecretsScreenState): ReduceResult {
+  const rows = filteredRows(state);
+  const row = rows[clampIndex(state.cursorIndex, rows.length)];
+  return row ? { state: { ...state, popup: null, edit: startEdit(row) }, effect: { type: 'fetchValue', row } } : noEffect(state);
+}
+
+/** The row under the cursor, as the deploy flow's starting point: its Dokploy targets are read from GitHub next (reads only). */
+function openDeployOnCursor(state: SecretsScreenState): ReduceResult {
+  const rows = filteredRows(state);
+  const row = rows[clampIndex(state.cursorIndex, rows.length)];
+  if (!row) return noEffect(state);
+  const started = startDeploy(row);
+  return { state: { ...state, popup: null, deploy: started.flow }, effect: started.effect };
+}
+
+function handleDeployFlowKey(state: SecretsScreenState, flow: DeployFlow, key: string): ReduceResult {
+  const step = stepDeploy(flow, key, state.dryRun);
+  if (step.exitText !== undefined) return noEffect({ ...state, deploy: null, quit: true, exitText: step.exitText });
+  return { state: { ...state, deploy: step.flow, note: step.note ?? null }, effect: step.effect };
+}
+
+/** The deploy plan the `loadDeployPlan` effect asked for. */
+export function applyDeployPlan(state: SecretsScreenState, loaded: DeployPlanLoaded): SecretsScreenState {
+  return { ...state, deploy: applyDeployPlanLoaded(state.deploy, loaded) };
+}
+
+/**
+ * After the plan arrived: the effect that fetches the row's value for the plan's `value` line, the
+ * same `fetchValue` (and so the same decrypt path) the details view uses. `null` unless the flow
+ * is on a plan step that has targets.
+ */
+export function pendingDeployValueEffect(state: SecretsScreenState): SecretsScreenEffect {
+  return wantsValue(state.deploy) ? { type: 'fetchValue', row: state.deploy.row } : null;
+}
+
+/** The deploy run reported progress (a single re-render). */
+export function applyDeployRunProgress(state: SecretsScreenState, progress: BatchProgress): SecretsScreenState {
+  return { ...state, deploy: applyDeployProgress(state.deploy, progress) };
+}
+
+/** The clipboard copy the `copyToClipboard` effect started finished (on whichever result screen is open). */
+export function applyCopied(state: SecretsScreenState, ok: boolean): SecretsScreenState {
+  return { ...state, edit: applyEditCopied(state.edit, ok), deploy: applyDeployCopied(state.deploy, ok) };
+}
+
+/** The run the `runDeploy` effect started. */
+export function applyDeployRunDone(state: SecretsScreenState, finished: DeployFinished): SecretsScreenState {
+  return { ...state, deploy: applyDeployFinished(state.deploy, finished) };
+}
+
+function handleEditFlowKey(state: SecretsScreenState, flow: EditFlow, key: string): ReduceResult {
+  // A dry run only plans (reads): stopping it is immediate and nothing was ever going to change.
+  if (state.dryRun && flow.step === 'running' && (key === KEY_CTRL_C || key === KEY_ESC || key === KEY_ESC_ESC)) {
+    return { state: { ...state, edit: null, note: CANCELLED_NOTHING }, effect: { type: 'cancelRun', phase: 'planning' } };
+  }
+  const step = stepEdit(flow, key);
+  if (step.exitText !== undefined) return noEffect({ ...state, edit: null, quit: true, exitText: step.exitText });
+  return { state: { ...state, edit: step.flow, note: step.note ?? null }, effect: step.effect };
+}
+
+/** The run reported progress (a single re-render). */
+export function applyRunProgress(state: SecretsScreenState, progress: RunProgress): SecretsScreenState {
+  return { ...state, edit: applyProgress(state.edit, progress) };
+}
+
+/** The repo list the `loadRepos` effect asked for. */
+export function applyRepos(state: SecretsScreenState, result: ReposLoaded): SecretsScreenState {
+  return { ...state, edit: applyReposLoaded(state.edit, result) };
+}
+
+/**
+ * The repo table is up: the effect that reads its BASE column, or `null` when
+ * there is nothing to read. The driver performs it right after `applyRepos`.
+ */
+export function pendingBasesEffect(state: SecretsScreenState): SecretsScreenEffect {
+  return basesEffectFor(state.edit);
+}
+
+/** The BASE column's data arrived (a single re-render), possibly starting a run that was waiting for it. */
+export function applyBases(state: SecretsScreenState, bases: Readonly<Record<string, string>>): ReduceResult {
+  const step = applyBasesLoaded(state.edit, bases);
+  return { state: { ...state, edit: step.flow }, effect: step.effect };
+}
+
+/** The run the `runSet` effect started. */
+export function applyRunDone(state: SecretsScreenState, finished: RunFinished): SecretsScreenState {
+  return { ...state, edit: applyRunFinished(state.edit, finished) };
 }
 
 function filteredRowsFor(rows: readonly SecretIndexRow[], query: string): readonly SecretIndexRow[] {
@@ -362,6 +554,12 @@ function handlePopupKey(state: SecretsScreenState, key: string): SecretsScreenSt
   if (key === KEY_END || key === KEY_END2) {
     return { ...state, popup: { ...popup, panOffset: Number.MAX_SAFE_INTEGER } };
   }
+  if (key === KEY_TAB) {
+    return { ...state, popup: { ...popup, locationColumn: nextLocationColumn(popup.locationColumn, 1) } };
+  }
+  if (key === KEY_SHIFT_TAB) {
+    return { ...state, popup: { ...popup, locationColumn: nextLocationColumn(popup.locationColumn, -1) } };
+  }
   return state;
 }
 
@@ -381,6 +579,10 @@ function handleListKey(state: SecretsScreenState, key: string): ReduceResult {
     if (state.search.query !== '') return noEffect(applyQuery(state, ''));
     return noEffect({ ...state, quit: true });
   }
+
+  // Never while a filter is typed: the search owns the keyboard then. Enter (details), then `e`, edits a filtered row.
+  if (key === KEY_CTRL_E && state.search.query === '') return openEditOnCursor(state);
+  if (key === KEY_CTRL_D && state.search.query === '') return openDeployOnCursor(state);
 
   if (key === KEY_TAB) {
     return noEffect({ ...state, column: nextColumn(state.column, 1) });
@@ -418,6 +620,7 @@ function handleListKey(state: SecretsScreenState, key: string): ReduceResult {
       revealed: false,
       value: { status: 'loading' },
       panOffset: 0,
+      locationColumn: LOCATION_COLUMN_ORDER[0],
     };
     return { state: { ...state, popup }, effect: { type: 'fetchValue', row } };
   }
@@ -446,9 +649,12 @@ export function applyValueResult(
   forRow: { readonly name: string; readonly value_hash: string },
   result: ValueState,
 ): SecretsScreenState {
-  if (!state.popup) return state;
-  if (state.popup.rowName !== forRow.name || state.popup.rowHash !== forRow.value_hash) return state;
-  return { ...state, popup: { ...state.popup, value: result } };
+  const popup =
+    state.popup !== null && state.popup.rowName === forRow.name && state.popup.rowHash === forRow.value_hash
+      ? { ...state.popup, value: result }
+      : state.popup;
+  // The edit dialog's Old value row and the deploy plan's value line are fed by the same fetch (and dropped by the same row guard).
+  return { ...state, popup, edit: applyOldValue(state.edit, forRow, result), deploy: applyDeployValue(state.deploy, forRow, result) };
 }
 
 // ── Value resolution (pure given an injected decryptor — see module doc) ────
@@ -634,7 +840,15 @@ export function formatMiddleCell(row: SecretIndexRow, column: ColumnMode, width:
   if (column === 'integrations') return formatIntegrationsCellFitted(row, width);
   if (column === 'users') return formatUsersCell(row);
   if (column === 'branch') return formatBranchCell(row);
+  if (column === 'status') return secretRowStatusBadge(row);
   return formatProjectCell(row);
+}
+
+/** The STATUS cell: the same coloured `● status` badge `capy edit` shows (CAP-702). */
+function secretRowStatusBadge(row: SecretIndexRow): string {
+  const status = secretRowStatus(row);
+  if (status.kind === 'no target') return `${DIM}${formatSecretRowStatus(status)}${RESET}`;
+  return statusBadge(status.kind, formatSecretRowStatus(status));
 }
 
 /** Most recent `changed_at` across a row's locations, or undefined if none carry one. */
@@ -647,29 +861,6 @@ export function mostRecentChangedAt(row: SecretIndexRow): string | undefined {
 export function formatUpdatedCell(row: SecretIndexRow, now?: Date): string {
   const ts = mostRecentChangedAt(row);
   return ts ? formatRelativeTime(ts, now) : '—';
-}
-
-// ── Masking (security-critical — see module doc and CAP-675's spec) ─────────
-
-const FULL_MASK = '••••••••';
-
-/**
- * Never reveals a value ≤8 chars (always the same fixed-width mask, so
- * length itself isn't leaked either). For longer values, shows at most 4
- * characters total, split as a prefix and a suffix, and never more than a
- * third of the value's length — deliberately weaker than
- * `formatSnippet`, which shows values ≤6 chars verbatim; that behavior is
- * not reused here on purpose.
- */
-export function maskSecretValue(value: string): string {
-  if (value.length === 0) return '(empty)';
-  if (value.length <= 8) return FULL_MASK;
-  const maxShown = Math.min(4, Math.floor(value.length / 3));
-  const prefixLen = Math.ceil(maxShown / 2);
-  const suffixLen = maxShown - prefixLen;
-  const prefix = value.slice(0, prefixLen);
-  const suffix = suffixLen > 0 ? value.slice(value.length - suffixLen) : '';
-  return `${prefix}...${suffix}`;
 }
 
 // ── Rendering (pure) ─────────────────────────────────────────────────────────
@@ -746,7 +937,7 @@ function buildNameCell(left: string, tag: string, width: number): string {
 }
 
 function columnHeaderLabel(column: ColumnMode): string {
-  return `${column.toUpperCase()} ⇥`;
+  return `${COLUMN_HEADINGS[column]} ⇥`;
 }
 
 /**
@@ -765,8 +956,23 @@ function searchBarLine(state: SecretsScreenState, matchedCount: number): string 
   return `${DIM}search:${RESET} ${queryDisplay}${caret} ${DIM}${countLabel}${RESET}`;
 }
 
+/**
+ * The main list's column widths for `available` columns: NAME, the
+ * Tab-switched middle column, UPDATED. The details view's locations table
+ * uses the same widths so its columns line up with the list's (CAP-702).
+ */
+export function mainTableLayout(available: number): { readonly nameW: number; readonly middleW: number; readonly updatedW: number; readonly gap: string } {
+  const nameW = Math.max(16, Math.floor(available * 0.4));
+  const updatedW = 14;
+  const gap = '  ';
+  const middleW = Math.max(10, available - nameW - updatedW - gap.length * 2);
+  return { nameW, middleW, updatedW, gap };
+}
+
 /** Pure render — a total function of state + terminal size. Never mutates `state`; any "clamping" of a display-only quantity (e.g. panning past the end of a value) is a local `const`, never written back. */
 export function render(state: SecretsScreenState, termWidth: number, termHeight: number): string {
+  if (state.edit) return renderEditScreen(state.edit, termWidth, termHeight, state.dryRun);
+  if (state.deploy) return renderDeployScreen(state.deploy, termWidth, termHeight, state.dryRun);
   const m = ' '.repeat(MARGIN);
   const available = Math.max(40, termWidth - MARGIN * 2);
   const matched = filteredRowsWithReasons(state);
@@ -775,15 +981,12 @@ export function render(state: SecretsScreenState, termWidth: number, termHeight:
   const cursorIndex = clampIndex(state.cursorIndex, rows.length);
 
   const headerLines: readonly string[] = [
-    `${m}${BOLD}capy secrets${RESET} ${DIM}(${state.rows.length} secret${state.rows.length === 1 ? '' : 's'})${RESET}`,
+    `${m}${BOLD}capy secrets${RESET}${dryRunTag(state.dryRun)} ${DIM}(${state.rows.length} secret${state.rows.length === 1 ? '' : 's'})${RESET}`,
     m + searchBarLine(state, rows.length),
     '',
   ];
 
-  const nameW = Math.max(16, Math.floor(available * 0.4));
-  const updatedW = 14;
-  const gap = '  ';
-  const middleW = Math.max(10, available - nameW - updatedW - gap.length * 2);
+  const { nameW, middleW, updatedW, gap } = mainTableLayout(available);
 
   const headerLine = pad('NAME', nameW) + gap + pad(columnHeaderLabel(state.column), middleW) + gap + pad('UPDATED', updatedW);
   // Everything pushed before the body, in one array — `preBodyLines.length`
@@ -804,7 +1007,8 @@ export function render(state: SecretsScreenState, termWidth: number, termHeight:
     const middleCell = pad(formatMiddleCell(row, state.column, middleW), middleW);
     const updatedCell = pad(formatUpdatedCell(row), updatedW);
     const line = nameCell + gap + middleCell + gap + updatedCell;
-    return isSelected ? INVERSE + padVis(line, available) + RESET : line;
+    // A coloured cell's own RESET would end the highlight mid-row, so the highlight is re-applied after each one.
+    return isSelected ? INVERSE + padVis(line, available).replaceAll(RESET, RESET + INVERSE) + RESET : line;
   });
 
   const withPopup: readonly string[] =
@@ -820,11 +1024,47 @@ export function render(state: SecretsScreenState, termWidth: number, termHeight:
   const bodyOutputLines: readonly string[] =
     rows.length === 0 ? [`${m}${DIM}No secrets match.${RESET}`] : slice.map((line) => m + line);
 
-  const footerLines: readonly string[] = ['', m + footerLine(state)];
+  const noteLines: readonly string[] = state.note === null ? [] : [`${m}${DIM}${state.note}${RESET}`];
+  const footerLines: readonly string[] = ['', ...noteLines, m + footerLine(state)];
 
   const lines: readonly string[] = [...preBodyLines, ...bodyOutputLines, ...footerLines];
 
   return lines.map((l) => l + CLEAR_EOL).join('\n');
+}
+
+/** The marker every screen carries while `--dry-run` is on, so nobody mistakes it for the real thing. */
+function dryRunTag(dryRun: boolean): string {
+  return dryRun ? `  ${BOLD}${YELLOW}${DRY_RUN_LABEL}${RESET}` : '';
+}
+
+/** The edit flow's screen: a header, the step's body, and its key hints. */
+function renderEditScreen(flow: EditFlow, termWidth: number, termHeight: number, dryRun: boolean): string {
+  const m = ' '.repeat(MARGIN);
+  const { lines, footer } = renderEdit(flow, termWidth, termHeight, dryRun);
+  const out: readonly string[] = [
+    `${m}${BOLD}capy secrets${RESET}${dryRunTag(dryRun)}`,
+    '',
+    ...lines.map((l) => m + l),
+    '',
+    m + footer,
+  ];
+  // No line is ever wider than the terminal (a wrapped line would break the layout).
+  return out.map((l) => clipLine(l, termWidth) + CLEAR_EOL).join('\n');
+}
+
+/** The deploy flow's screen: a header, the step's body, and its key hints. */
+function renderDeployScreen(flow: DeployFlow, termWidth: number, termHeight: number, dryRun: boolean): string {
+  const m = ' '.repeat(MARGIN);
+  const { lines, footer } = renderDeploy(flow, termWidth, termHeight);
+  const out: readonly string[] = [
+    `${m}${BOLD}capy secrets${RESET}${dryRunTag(dryRun)}`,
+    '',
+    ...lines.map((l) => m + l),
+    '',
+    m + footer,
+  ];
+  // No line is ever wider than the terminal (a wrapped line would break the layout).
+  return out.map((l) => clipLine(l, termWidth) + CLEAR_EOL).join('\n');
 }
 
 function spliceIn(bodyLines: readonly string[], afterIndex: number, insert: readonly string[]): string[] {
@@ -848,7 +1088,7 @@ function buildPopupLines(row: SecretIndexRow, popup: PopupState, width: number):
   const inner = '   ';
   const ruleWidth = Math.max(10, width - indent.length);
   const rule = `${indent}${DIM}╶${'─'.repeat(Math.max(0, ruleWidth - 2))}╴${RESET}`;
-  const labelW = 9;
+  const labelW = 15;
   const contentWidth = Math.max(20, ruleWidth - inner.length - 1);
   const valueWidth = Math.max(10, contentWidth - labelW);
 
@@ -859,31 +1099,14 @@ function buildPopupLines(row: SecretIndexRow, popup: PopupState, width: number):
     '',
     `${indent}${inner}${BOLD}${truncate(row.name, contentWidth)}${RESET}`,
     '',
-    field('value', renderPopupValueLine(popup, valueWidth)),
+    field('value', renderValueLine(popup.value, popup.revealed, popup.panOffset, valueWidth)),
     field('updated', formatUpdatedCell(row)),
+    field(TARGET_STATUS_HEADING.toLowerCase(), secretRowStatusBadge(row)),
     '',
     `${indent}${inner}${BOLD}locations${RESET}`,
   ];
 
-  // Per-location: project · branch (protected marker), the CONNECTOR that
-  // brought the value IN (renamed from "service" — CAP-679), when it
-  // changed, and — only when this location has any — every TARGET it was
-  // pushed OUT to, each spelled out with its full "(stale)" wording (the
-  // table's own TARGET column uses a compact `*` instead; there's no room
-  // pressure here to justify that shorthand).
-  const locationLines: readonly string[] = row.locations.map((loc) => {
-    const protMarker = loc.protected ? ` ${DIM}(protected)${RESET}` : '';
-    const connectorLabel = formatLocationConnectorLabel(loc);
-    const updated = loc.changed_at ? formatRelativeTime(loc.changed_at) : '—';
-    const targets = loc.targets ?? [];
-    const targetsLabel =
-      targets.length > 0
-        ? ` · targets: ${targets
-            .map((t) => `[${t.provider}] ${t.target}${t.stale ? ' (stale)' : ''}${t.pending ? ' (pending)' : ''}`)
-            .join(', ')}`
-        : '';
-    return `${indent}${inner}${truncate(`${loc.project_name} · ${loc.branch}`, contentWidth)}${protMarker} ${DIM}· ${connectorLabel} · ${updated}${targetsLabel}${RESET}`;
-  });
+  const locationLines = buildLocationTable(row.locations, popup.locationColumn, width, indent.length + inner.length).map((l) => `${indent}${inner}${l}`);
 
   const usersHeaderLines: readonly string[] = ['', `${indent}${inner}${BOLD}users${RESET}`];
   const userLines: readonly string[] =
@@ -894,30 +1117,87 @@ function buildPopupLines(row: SecretIndexRow, popup: PopupState, width: number):
   return [...topLines, ...locationLines, ...usersHeaderLines, ...userLines, '', rule];
 }
 
-function renderPopupValueLine(popup: PopupState, width: number): string {
-  if (popup.value.status === 'loading') return `${DIM}loading…${RESET}`;
-  if (popup.value.status === 'unavailable') return `${RED}unavailable ${DIM}(${popup.value.code})${RESET}`;
+// ── Details view: locations table (CAP-702) ─────────────────────────────────
 
-  const raw = popup.value.value;
-  if (!popup.revealed) return maskSecretValue(raw);
-  if (raw === '') return `${DIM}(empty)${RESET}`;
+const LOCATION_COLUMN_HEADINGS: Readonly<Record<LocationColumn, string>> = {
+  status: TARGET_STATUS_HEADING,
+  connector: 'CONNECTOR',
+  target: 'TARGET',
+};
 
-  const value = renderInlineValue(raw);
-  if (value.length <= width) return value;
+/** One location's DEPLOY STATUS badge — the row's words and colours. */
+function locationStatusBadge(loc: SecretIndexLocation): string {
+  const state = locationState(loc);
+  if (state === 'none') return `${DIM}${NO_TARGET_LABEL}${RESET}`;
+  if (state === 'unknown') return statusBadge('unknown');
+  return statusBadge(state, state === 'behind' ? BEHIND_LABEL : DEPLOYED_LABEL);
+}
 
-  const visibleWidth = Math.max(1, width - 4);
-  const maxOffset = Math.max(0, value.length - visibleWidth);
-  const offset = Math.min(Math.max(0, popup.panOffset), maxOffset);
-  const leftIndicator = offset > 0 ? `${DIM}◂${RESET} ` : '  ';
-  const rightIndicator = offset < maxOffset ? ` ${DIM}▸${RESET}` : '  ';
-  return leftIndicator + value.slice(offset, offset + visibleWidth) + rightIndicator;
+/** Every target this location was pushed to, `[provider] target`, a lagging one marked in yellow; `—` if none. */
+function locationTargetsLabel(loc: SecretIndexLocation): string {
+  const targets = loc.targets ?? [];
+  if (targets.length === 0) return '—';
+  return targets
+    .map((t) => `[${t.provider}] ${t.target}${t.stale ? ` ${statusColor('behind')}(${BEHIND_LABEL})${RESET}` : ''}${t.pending ? ' (pending)' : ''}`)
+    .join(', ');
+}
+
+function locationMiddleCell(loc: SecretIndexLocation, column: LocationColumn): string {
+  if (column === 'status') return locationStatusBadge(loc);
+  if (column === 'connector') return formatLocationConnectorLabel(loc);
+  return locationTargetsLabel(loc);
+}
+
+/**
+ * LOCATION (always) · a Tab-switched middle column · UPDATED, on the main
+ * list's own column positions (`mainTableLayout(available)`): the middle and
+ * UPDATED columns start where the list's do, at the same widths, and
+ * LOCATION fills the NAME column's space less the details view's `indent`.
+ * When narrow, the project name shrinks first so the branch stays readable.
+ */
+export function buildLocationTable(
+  locations: readonly SecretIndexLocation[],
+  column: LocationColumn,
+  available: number,
+  indent: number,
+): readonly string[] {
+  const { nameW, middleW, updatedW, gap } = mainTableLayout(available);
+  const locationW = Math.max(1, nameW - indent);
+  const protectedMark = ` ${DIM}(protected)${RESET}`;
+  const locationTail = (loc: SecretIndexLocation) => ` · ${loc.branch}${loc.protected ? protectedMark : ''}`;
+  const middleHeading = `${LOCATION_COLUMN_HEADINGS[column]} ⇥`;
+
+  const header = `${DIM}${pad('LOCATION', locationW)}${gap}${pad(middleHeading, middleW)}${gap}${pad('UPDATED', updatedW)}${RESET}`;
+  const body = locations.map((loc) => {
+    const location = pad(fitLocation(loc.project_name, [locationTail(loc), ` · ${loc.branch}`], locationW), locationW);
+    const middle = pad(locationMiddleCell(loc, column), middleW);
+    const updated = pad(loc.changed_at ? formatRelativeTime(loc.changed_at) : '—', updatedW);
+    return `${location}${gap}${middle}${gap}${DIM}${updated}${RESET}`;
+  });
+  return [header, ...body];
+}
+
+/**
+ * `project · branch` in `width`: the project name shrinks first (with `…`) so
+ * the branch stays readable. `tails` is tried in order (with the protected
+ * marker, then without); only when none fits is the whole cell cut.
+ */
+function fitLocation(project: string, tails: readonly string[], width: number): string {
+  const [tail, ...rest] = tails;
+  if (tail === undefined) return truncate(project, width);
+  const full = `${project}${tail}`;
+  if (visLen(full) <= width) return full;
+  const room = width - visLen(tail);
+  if (room >= 4) return `${project.slice(0, room - 1)}…${tail}`;
+  return rest.length > 0 ? fitLocation(project, rest, width) : truncate(full, width);
 }
 
 function footerLine(state: SecretsScreenState): string {
   if (state.popup) {
     const revealLabel = state.popup.revealed ? 'hide' : 'reveal';
     const panHint = state.popup.revealed ? `${DIM} · ${RESET}${BOLD}←/→${RESET}${DIM} pan${RESET}` : '';
-    return `${BOLD}r${RESET}${DIM} ${revealLabel}${RESET}${panHint}${DIM} · ${RESET}${BOLD}esc${RESET}${DIM}/${RESET}${BOLD}q${RESET}${DIM} close${RESET}`;
+    return `${BOLD}r${RESET}${DIM} ${revealLabel}${RESET}${panHint}${DIM} · ${RESET}${BOLD}tab${RESET}${DIM} column · ${RESET}${BOLD}e${RESET}${DIM} edit${RESET}${DIM} · ${RESET}${BOLD}d${RESET}${DIM} deploy${RESET}${DIM} · ${RESET}${BOLD}esc${RESET}${DIM}/${RESET}${BOLD}q${RESET}${DIM} close${RESET}`; // COPY-FLAG
   }
-  return `${DIM}↑↓ navigate · ${RESET}${BOLD}tab${RESET}${DIM} column · ${RESET}${BOLD}enter${RESET}${DIM} inspect · ${RESET}${BOLD}esc${RESET}${DIM} clear/quit${RESET}`;
+  const editHint = state.search.query === '' ? `${BOLD}ctrl+e${RESET}${DIM} edit · ${RESET}${BOLD}ctrl+d${RESET}${DIM} deploy · ${RESET}` : ''; // COPY-FLAG
+  return `${DIM}↑↓ navigate · ${RESET}${BOLD}tab${RESET}${DIM} column · ${RESET}${BOLD}enter${RESET}${DIM} inspect · ${RESET}${editHint}${BOLD}esc${RESET}${DIM} clear/quit${RESET}`; // COPY-FLAG
 }

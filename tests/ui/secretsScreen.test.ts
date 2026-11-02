@@ -6,6 +6,8 @@ import {
   applyValueResult,
   resolveSecretValue,
   render,
+  formatMiddleCell,
+  buildLocationTable,
   filteredRows,
   filteredRowsWithReasons,
   formatUsersCell,
@@ -22,6 +24,7 @@ import {
   LocationDecryptResult,
 } from '../../src/ui/secretsScreen';
 import type { SecretIndexLocation, SecretIndexRow } from '../../src/service/serviceClient';
+import { BEHIND_LABEL, DEPLOYED_LABEL, TARGET_STATUS_HEADING } from '../../src/core/deployStatus';
 
 // A very long, obviously-fake secret used everywhere a "real" value is
 // needed — never a plausible credential, never logged.
@@ -182,42 +185,183 @@ describe('multi-key chunks reach the reducer in order (paste / fast-typing bug)'
   });
 });
 
-describe('handleKey — column cycling (CAP-679: CONNECTOR/TARGET/INTEGRATIONS replace SERVICE)', () => {
-  test('CONNECTOR is the default (first-shown) column', () => {
+describe('handleKey — column cycling (CAP-702: PROJECT first, STATUS added)', () => {
+  test('PROJECT is the default (first-shown) column', () => {
     const s0 = initialSecretsScreenState([row()]);
-    expect(s0.column).toBe('connector');
+    expect(s0.column).toBe('project');
   });
 
-  test('Tab cycles CONNECTOR -> TARGET -> INTEGRATIONS -> USERS -> BRANCH -> PROJECT -> CONNECTOR (wrapping)', () => {
-    const s0 = initialSecretsScreenState([row()]);
-    const s1 = handleKey(s0, KEY_TAB).state;
-    expect(s1.column).toBe('target');
-    const s2 = handleKey(s1, KEY_TAB).state;
-    expect(s2.column).toBe('integrations');
-    const s3 = handleKey(s2, KEY_TAB).state;
-    expect(s3.column).toBe('users');
-    const s4 = handleKey(s3, KEY_TAB).state;
-    expect(s4.column).toBe('branch');
-    const s5 = handleKey(s4, KEY_TAB).state;
-    expect(s5.column).toBe('project');
-    const s6 = handleKey(s5, KEY_TAB).state;
-    expect(s6.column).toBe('connector');
+  test('Tab cycles PROJECT -> BRANCH -> STATUS -> CONNECTOR -> TARGET -> INTEGRATIONS -> USERS -> PROJECT (wrapping)', () => {
+    const order = ['branch', 'status', 'connector', 'target', 'integrations', 'users', 'project'];
+    const states = order.reduce<SecretsScreenState[]>(
+      (acc) => [...acc, handleKey(acc[acc.length - 1], KEY_TAB).state],
+      [initialSecretsScreenState([row()])],
+    );
+    expect(states.slice(1).map((st) => st.column)).toEqual(order as SecretsScreenState['column'][]);
   });
 
   test('Shift-Tab cycles backwards, wrapping the other way', () => {
-    const s0 = initialSecretsScreenState([row()]);
-    const s1 = handleKey(s0, KEY_SHIFT_TAB).state;
-    expect(s1.column).toBe('project');
-    const s2 = handleKey(s1, KEY_SHIFT_TAB).state;
-    expect(s2.column).toBe('branch');
-    const s3 = handleKey(s2, KEY_SHIFT_TAB).state;
-    expect(s3.column).toBe('users');
-    const s4 = handleKey(s3, KEY_SHIFT_TAB).state;
-    expect(s4.column).toBe('integrations');
-    const s5 = handleKey(s4, KEY_SHIFT_TAB).state;
-    expect(s5.column).toBe('target');
-    const s6 = handleKey(s5, KEY_SHIFT_TAB).state;
-    expect(s6.column).toBe('connector');
+    const order = ['users', 'integrations', 'target', 'connector', 'status', 'branch', 'project'];
+    const states = order.reduce<SecretsScreenState[]>(
+      (acc) => [...acc, handleKey(acc[acc.length - 1], KEY_SHIFT_TAB).state],
+      [initialSecretsScreenState([row()])],
+    );
+    expect(states.slice(1).map((st) => st.column)).toEqual(order as SecretsScreenState['column'][]);
+  });
+});
+
+describe('STATUS column (CAP-702)', () => {
+  const stale = (target: string) => ({ provider: 'dokploy', target, stale: true });
+  const current = (target: string) => ({ provider: 'dokploy', target, stale: false });
+  const YELLOW = `${ESC}[33m`;
+  const GREEN = `${ESC}[32m`;
+  const DIM = `${ESC}[90m`;
+  const cell = (r: SecretIndexRow) => formatMiddleCell(r, 'status', 30);
+
+  test('a row with one target that lags reads the behind badge in yellow, like capy edit', () => {
+    expect(cell(row({ locations: [loc({ targets: [stale('prod')] })] }))).toBe(`${YELLOW}● ${BEHIND_LABEL}${ANSI_RESET}`);
+  });
+
+  test('counts are per LOCATION: one lagging location out of two reads "(1 of 2)", whatever the target count', () => {
+    const r = row({ locations: [loc({ targets: [stale('prod'), current('preview')] }), loc({ branch: 'staging', targets: [current('staging')] })] });
+    expect(cell(r)).toBe(`${YELLOW}● ${BEHIND_LABEL} (1 of 2)${ANSI_RESET}`);
+  });
+
+  test('any lagging location outranks deployed ones; locations with no target still count in the total', () => {
+    const r = row({ locations: [loc({ targets: [current('a')] }), loc({ branch: 'b', targets: [stale('b')] }), loc({ branch: 'c', targets: [] })] });
+    expect(cell(r)).toBe(`${YELLOW}● ${BEHIND_LABEL} (1 of 3)${ANSI_RESET}`);
+  });
+
+  test('every location lagging: plain badge, no count', () => {
+    const r = row({ locations: [loc({ targets: [stale('a')] }), loc({ branch: 'b', targets: [stale('b'), stale('c')] })] });
+    expect(cell(r)).toBe(`${YELLOW}● ${BEHIND_LABEL}${ANSI_RESET}`);
+  });
+
+  test('every target current reads "● deployed" in green', () => {
+    expect(cell(row({ locations: [loc({ targets: [current('prod')] })] }))).toBe(`${GREEN}● ${DEPLOYED_LABEL}${ANSI_RESET}`);
+  });
+
+  test('AWS_REGION case: 33 locations, one with a current target, reads "deployed (1 of 33)"', () => {
+    const others = Array.from({ length: 32 }, (_, i) => loc({ branch: `b${i}`, targets: [] }));
+    const r = row({ name: 'AWS_REGION', locations: [loc({ targets: [current('backend-preview')] }), ...others] });
+    expect(cell(r)).toBe(`${GREEN}● ${DEPLOYED_LABEL} (1 of 33)${ANSI_RESET}`);
+  });
+
+  test('a row with no Capy deploy target reads a grey "—", never deployed', () => {
+    expect(cell(row({ locations: [loc({ targets: [] }), loc({ branch: 'staging', targets: [] })] }))).toBe(`${DIM}—${ANSI_RESET}`);
+  });
+
+  test('a server that sent no targets reads "● unknown", dim — it cannot be told', () => {
+    expect(cell(row({ locations: [loc()] }))).toBe(`${DIM}● unknown${ANSI_RESET}`);
+  });
+
+  test('the STATUS header and cell render when the column is selected, padded by visible width', () => {
+    const r = row({ name: 'ROW', locations: [loc({ targets: [stale('prod'), current('preview')] }), loc({ branch: 'staging', targets: [] })] });
+    const frame = render({ ...initialSecretsScreenState([r]), column: 'status' }, 100, 20);
+    const stripped = stripAnsiForTest(frame);
+    expect(stripped).toContain(`${TARGET_STATUS_HEADING} ⇥`);
+    const line = stripped.split('\n').find((l) => l.includes('ROW'));
+    expect(line).toContain(`● ${BEHIND_LABEL} (1 of 2)`);
+    const header = stripped.split('\n').find((l) => l.includes(`${TARGET_STATUS_HEADING} ⇥`));
+    // The UPDATED column starts at the same visible offset on the header and the row: colour codes don't shift it.
+    expect(line!.indexOf('—', line!.indexOf('(1 of 2)'))).toBe(header!.indexOf('UPDATED'));
+  });
+
+  test('the highlighted row stays highlighted after its coloured STATUS badge', () => {
+    const r = row({ name: 'ROW', locations: [loc({ targets: [stale('prod')] })] });
+    const frame = render({ ...initialSecretsScreenState([r]), column: 'status' }, 100, 20);
+    expect(frame).toContain(`${YELLOW}● ${BEHIND_LABEL}${ANSI_RESET}${ESC}[7m`);
+  });
+
+  test('the details view shows the row status badge, and a lagging target in yellow', () => {
+    const r = row({ name: 'ROW', locations: [loc({ targets: [stale('prod')] })] });
+    const frame = render(handleKey(initialSecretsScreenState([r]), ENTER).state, 100, 30);
+    expect(stripAnsiForTest(frame)).toContain(`${TARGET_STATUS_HEADING.toLowerCase()}  `);
+    expect(stripAnsiForTest(frame)).toContain(`● ${BEHIND_LABEL}`);
+    expect(frame).toContain(`${YELLOW}● ${BEHIND_LABEL}${ANSI_RESET}`);
+    const targetFrame = render(pressKeys(initialSecretsScreenState([r]), ENTER, KEY_TAB, KEY_TAB), 100, 30);
+    expect(targetFrame).toContain(`${YELLOW}(${BEHIND_LABEL})`);
+  });
+
+  describe('details view locations table', () => {
+    const locs = [
+      loc({ project_name: 'web', branch: 'production', protected: true, changed_at: '2026-06-15T10:00:00.000Z', targets: [stale('prod')], connector: { provider: 'dokploy' } }),
+      loc({ project_name: 'web', branch: 'preview', targets: [current('preview')] }),
+      loc({ project_name: 'api', branch: 'staging', targets: [] }),
+    ];
+    const opened = (keys: string[] = []) => pressKeys(initialSecretsScreenState([row({ name: 'ROW', locations: locs })]), ENTER, ...keys);
+    const tableLines = (st: SecretsScreenState, width = 100) => {
+      const lines = stripAnsiForTest(render(st, width, 40)).split('\n');
+      const start = lines.findIndex((l) => l.includes('LOCATION'));
+      return lines.slice(start, start + 1 + locs.length);
+    };
+
+    test('DEPLOY STATUS is the default middle column, one badge per location, in location order', () => {
+      const [header, ...body] = tableLines(opened());
+      expect(header).toContain(`${TARGET_STATUS_HEADING} ⇥`);
+      expect(header).toContain('UPDATED');
+      expect(body[0]).toContain('web · production (protected)');
+      expect(body[0]).toContain(`● ${BEHIND_LABEL}`);
+      expect(body[1]).toContain(`● ${DEPLOYED_LABEL}`);
+      expect(body[2]).toContain('api · staging');
+      expect(body[2]).toContain('—');
+      expect(body[2]).not.toContain('●');
+    });
+
+    test('columns line up by visible width: every row starts UPDATED where the header does', () => {
+      const [header, ...body] = tableLines(opened());
+      const col = header.indexOf('UPDATED');
+      expect(body[0].slice(col).trim()).not.toBe('');
+      body.forEach((l) => expect(l[col - 1]).toBe(' '));
+    });
+
+    test('Tab cycles DEPLOY STATUS → CONNECTOR → TARGET → DEPLOY STATUS; Shift-Tab goes back', () => {
+      expect(tableLines(opened([KEY_TAB]))[0]).toContain('CONNECTOR ⇥');
+      expect(tableLines(opened([KEY_TAB]))[1]).toContain('[dokploy]');
+      expect(tableLines(opened([KEY_TAB, KEY_TAB]))[0]).toContain('TARGET ⇥');
+      expect(tableLines(opened([KEY_TAB, KEY_TAB]))[3]).toContain('—');
+      expect(tableLines(opened([KEY_TAB, KEY_TAB, KEY_TAB]))[0]).toContain(`${TARGET_STATUS_HEADING} ⇥`);
+      expect(tableLines(opened([KEY_SHIFT_TAB]))[0]).toContain('TARGET ⇥');
+    });
+
+    for (const width of [80, 120, 160]) {
+      for (const column of ['status', 'connector', 'target'] as const) {
+        test(`width ${width}, ${column}: the locations table uses the main table's column positions`, () => {
+          const keys = { status: [], connector: [KEY_TAB], target: [KEY_TAB, KEY_TAB] }[column];
+          const lines = stripAnsiForTest(render(opened(keys), width, 60)).split('\n');
+          const mainHeader = lines.find((l) => l.includes('NAME') && l.includes('UPDATED'))!;
+          const detailsHeader = lines.find((l) => l.includes('LOCATION'))!;
+          const mainMiddleX = mainHeader.indexOf('PROJECT ⇥');
+          const middleWord = column === 'status' ? TARGET_STATUS_HEADING : column.toUpperCase();
+          expect(detailsHeader.indexOf(`${middleWord} ⇥`)).toBe(mainMiddleX);
+          expect(detailsHeader.indexOf('UPDATED')).toBe(mainHeader.indexOf('UPDATED'));
+          // The UPDATED column has the main table's width: both headers end at the same column.
+          expect(detailsHeader.length).toBe(mainHeader.length);
+          // Every location row's values start exactly under its headers.
+          const start = lines.indexOf(detailsHeader);
+          lines.slice(start + 1, start + 1 + locs.length).forEach((l) => {
+            expect(l[mainMiddleX - 1]).toBe(' ');
+            expect(l[mainMiddleX]).not.toBe(' ');
+            expect(l[mainHeader.indexOf('UPDATED')]).not.toBe(' ');
+          });
+        });
+      }
+    }
+
+    test('Tab in the details view leaves the main table column alone', () => {
+      expect(opened([KEY_TAB]).column).toBe(initialSecretsScreenState([]).column);
+    });
+
+    test('narrow: LOCATION shrinks to the NAME column, the project name first so the branch stays readable', () => {
+      const long = [loc({ project_name: 'slidespeak-monorepo/backend/deployment', branch: 'preview', targets: [stale('p')] })];
+      const [, first] = buildLocationTable(long, 'status', 66, 5).map(stripAnsiForTest);
+      expect(first).toContain('… · preview');
+      expect(first).toContain(`● ${BEHIND_LABEL}`);
+    });
+
+    test('the details footer mentions tab', () => {
+      expect(stripAnsiForTest(render(opened(), 100, 40))).toContain('tab column');
+    });
   });
 });
 
@@ -938,7 +1082,7 @@ describe('CAP-679 rendering: "+N" survives truncation, INTEGRATIONS overflow, po
         loc({ connector: { provider: 'dokploy' }, service: { provider: 'dokploy', name: 'other' } }),
       ],
     });
-    const frame = render(initialSecretsScreenState([target]), 100, 20);
+    const frame = render({ ...initialSecretsScreenState([target]), column: 'connector' }, 100, 20);
     const stripped = stripAnsiForTest(frame);
     const line = stripped.split('\n').find((l) => l.includes('ROW'));
     expect(line).toBeDefined();
@@ -960,7 +1104,7 @@ describe('CAP-679 rendering: "+N" survives truncation, INTEGRATIONS overflow, po
         }),
       ],
     });
-    const s = pressKeys(initialSecretsScreenState([target]), KEY_TAB); // connector -> target
+    const s: SecretsScreenState = { ...initialSecretsScreenState([target]), column: 'target' };
     const frame = render(s, 100, 20);
     const stripped = stripAnsiForTest(frame);
     const line = stripped.split('\n').find((l) => l.includes('ROW'));
@@ -985,7 +1129,7 @@ describe('CAP-679 rendering: "+N" survives truncation, INTEGRATIONS overflow, po
         }),
       ],
     });
-    const s = pressKeys(initialSecretsScreenState([manyProvidersRow]), KEY_TAB, KEY_TAB); // connector -> target -> integrations
+    const s: SecretsScreenState = { ...initialSecretsScreenState([manyProvidersRow]), column: 'integrations' };
     const frame = render(s, 100, 20);
     const stripped = stripAnsiForTest(frame);
     const line = stripped.split('\n').find((l) => l.includes('ROW'));
@@ -997,7 +1141,7 @@ describe('CAP-679 rendering: "+N" survives truncation, INTEGRATIONS overflow, po
 
   test('INTEGRATIONS shows "—" when a row has neither a connector nor a target', () => {
     const target = row({ name: 'ROW', locations: [loc({ service: null })] });
-    const s = pressKeys(initialSecretsScreenState([target]), KEY_TAB, KEY_TAB);
+    const s: SecretsScreenState = { ...initialSecretsScreenState([target]), column: 'integrations' };
     const frame = render(s, 100, 20);
     const stripped = stripAnsiForTest(frame);
     const line = stripped.split('\n').find((l) => l.includes('ROW'));
@@ -1009,19 +1153,19 @@ describe('CAP-679 rendering: "+N" survives truncation, INTEGRATIONS overflow, po
       name: 'ROW',
       locations: [loc({ connector: { provider: 'dokploy' }, service: { provider: 'dokploy', name: 'backend-preview' } })],
     });
-    const s1 = handleKey(initialSecretsScreenState([target]), ENTER).state;
+    const s1 = pressKeys(initialSecretsScreenState([target]), ENTER, KEY_TAB); // details → CONNECTOR column
     const frame = render(s1, 100, 30);
     expect(frame).toContain('[dokploy] backend-preview');
   });
 
-  test('the details popup spells out a stale target with "(stale)"', () => {
+  test('the details popup spells out a stale target with the behind label (CAP-702)', () => {
     const target = row({
       name: 'ROW',
       locations: [loc({ targets: [{ provider: 'aws-ecs', target: 'prod-cluster', stale: true }] })],
     });
-    const s1 = handleKey(initialSecretsScreenState([target]), ENTER).state;
+    const s1 = pressKeys(initialSecretsScreenState([target]), ENTER, KEY_TAB, KEY_TAB); // details → TARGET column
     const frame = render(s1, 100, 30);
-    expect(frame).toContain('targets: [aws-ecs] prod-cluster (stale)');
+    expect(stripAnsiForTest(frame)).toContain(`[aws-ecs] prod-cluster (${BEHIND_LABEL})`);
   });
 
   test('the details popup spells out a pending target with "(pending)"', () => {
@@ -1029,20 +1173,20 @@ describe('CAP-679 rendering: "+N" survives truncation, INTEGRATIONS overflow, po
       name: 'ROW',
       locations: [loc({ targets: [{ provider: 'dokploy', target: 'backend-preview', stale: false, pending: true }] })],
     });
-    const s1 = handleKey(initialSecretsScreenState([target]), ENTER).state;
+    const s1 = pressKeys(initialSecretsScreenState([target]), ENTER, KEY_TAB, KEY_TAB);
     const frame = render(s1, 100, 30);
-    expect(frame).toContain('targets: [dokploy] backend-preview (pending)');
+    expect(frame).toContain('[dokploy] backend-preview (pending)');
   });
 
-  test('the details popup lists a non-stale target with no "(stale)" marker', () => {
+  test('the details popup lists a non-stale target with no behind marker', () => {
     const target = row({
       name: 'ROW',
       locations: [loc({ targets: [{ provider: 'aws-ecs', target: 'prod-cluster', stale: false }] })],
     });
-    const s1 = handleKey(initialSecretsScreenState([target]), ENTER).state;
+    const s1 = pressKeys(initialSecretsScreenState([target]), ENTER, KEY_TAB, KEY_TAB);
     const frame = render(s1, 100, 30);
-    expect(frame).toContain('targets: [aws-ecs] prod-cluster');
-    expect(frame).not.toContain('(stale)');
+    expect(frame).toContain('[aws-ecs] prod-cluster');
+    expect(frame).not.toContain(`(${BEHIND_LABEL})`);
   });
 
   test('the details popup shows nothing target-related for a location with no targets', () => {
@@ -1050,5 +1194,6 @@ describe('CAP-679 rendering: "+N" survives truncation, INTEGRATIONS overflow, po
     const s1 = handleKey(initialSecretsScreenState([target]), ENTER).state;
     const frame = render(s1, 100, 30);
     expect(frame).not.toContain('targets:');
+    expect(stripAnsiForTest(frame)).not.toMatch(/\[[a-z-]+\]/); // no `[provider]` label anywhere
   });
 });

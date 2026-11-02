@@ -29,6 +29,7 @@
  * non-interactive). Discovery never saves one by itself.
  */
 import { join } from 'node:path';
+import { syncFolder, type FolderSync, type GateOptions } from '../../sync/gate';
 import { TargetConfig } from '../../deploy/adapter';
 import { classifyImportCandidates } from '../../deploy/dokployApi';
 import {
@@ -152,6 +153,8 @@ async function defaultAskProject(): Promise<string> {
 }
 
 export interface VercelConnectorDeps {
+  /** Discovery mode only: bare `capy` in one discovered folder (sync/gate.ts `syncFolder`). Injectable for tests. */
+  syncFolder?: (dir: string, gate: GateOptions) => Promise<FolderSync>;
   fetch?: VercelFetchLike;
   env?: Record<string, string | undefined>;
   cwd?: string;
@@ -416,10 +419,10 @@ export function createVercelConnector(deps: VercelConnectorDeps = {}): Connector
     interactive: boolean,
   ): Promise<{ ok: true; client: VercelClient; tokenEnv: string } | Failure> => {
     const tokenEnv = opts.tokenEnv?.trim() || DEFAULT_VERCEL_TOKEN_ENV;
-    // `--web`, `--json` and `--dry-run` each suppress ONLY the system store's
-    // hidden prompt: a raw terminal prompt must not hang a browser run, be
-    // interleaved with machine output, or save a key as a preview's side effect.
-    const mayPrompt = vercelSecretsMayPrompt(interactive, !!opts.web || !!opts.json || !!opts.dryRun);
+    // `--json` and `--dry-run` each suppress ONLY the system store's hidden
+    // prompt: a raw terminal prompt must not be interleaved with machine
+    // output, or save a key as a preview's side effect.
+    const mayPrompt = vercelSecretsMayPrompt(interactive, !!opts.json || !!opts.dryRun);
     const resolved = await resolveVercelToken({
       tokenEnv,
       env: env(),
@@ -786,6 +789,9 @@ export function createVercelConnector(deps: VercelConnectorDeps = {}): Connector
       yes: !!opts.yes,
       baseUrl: '',
       tokenEnv,
+      // Discovery never prompts: a folder that differs from Capy is reported (its rows and `conflict_id`), not asked.
+      gate: { devMode: opts.devMode, json: true, nonTty: true, conflictFlags: opts.conflictFlags },
+      syncFolder: deps.syncFolder ?? syncFolder,
       importOptsFor: (env, projectName, folderPath) => ({
         project: env.serviceId,
         vercelProject: { id: env.serviceId, name: projectName, ...(env.gitBranch ? { productionBranch: env.gitBranch } : {}) },

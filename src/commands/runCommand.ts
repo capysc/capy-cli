@@ -7,6 +7,7 @@ import { getShellPinnedEnv } from '../config/prodPins';
 import { resolveActiveUrl } from '../config/profileConfig';
 import type { ParsedSecretsBlob } from '../crypto/deployRuntime';
 import { ERROR_CODES } from '../types/index';
+import { planComposeForward, OVERRIDE_FD } from './composeForward';
 
 /**
  * Writes `.capy/next-env.js`, a CommonJS module mapping each decrypted env var
@@ -34,31 +35,88 @@ function emitNextEnvModule(keys: string[]): void {
   writeFileSync(join(capyDir, 'next-env.js'), content, 'utf-8');
 }
 
+interface ChildExit {
+  readonly code: number;
+  /** capy run was told to stop (SIGINT/SIGTERM/SIGHUP, forwarded to the child) or the child died of a signal. */
+  readonly interrupted: boolean;
+}
+
 /**
  * Spawns the child process with the provided environment, forwards signals,
- * and resolves with its exit code. Shared between local and deployed modes.
+ * and resolves with how it ended. `spawnChildDetailed` is the one place a child
+ * is started; `spawnChild` is its exit-code-only face for the callers that
+ * have nothing to settle afterwards.
  */
-function spawnChild(args: string[], env: Record<string, string | undefined>): Promise<number> {
+function spawnChildDetailed(
+  args: string[],
+  env: Record<string, string | undefined>,
+  pipe?: string,
+): Promise<ChildExit> {
   // On Windows, node_modules/.bin entries are .cmd shims that Node's spawn
   // won't execute without a shell — bare `cross-env`/`nodemon` fail with
   // ENOENT. shell:true delegates to cmd.exe so PATHEXT resolution kicks in.
+  // `pipe` is written to the child's fd OVERRIDE_FD (composeForward.ts).
   const child: ChildProcess = spawn(args[0], args.slice(1), {
     env: env as Record<string, string>,
-    stdio: 'inherit',
+    stdio: pipe === undefined ? 'inherit' : ['inherit', 'inherit', 'inherit', 'pipe'],
     shell: process.platform === 'win32',
   });
-
-  for (const sig of ['SIGTERM', 'SIGINT', 'SIGHUP'] as const) {
-    process.on(sig, () => child.kill(sig));
+  if (pipe !== undefined) {
+    const fd = child.stdio[OVERRIDE_FD] as NodeJS.WritableStream | null;
+    fd?.on('error', () => undefined); // child exited without reading it
+    fd?.end(pipe);
   }
+
+  // Resolves (once) the first time a signal is forwarded. Never rejects.
+  const forwarded = new Promise<boolean>((resolve) => {
+    for (const sig of ['SIGTERM', 'SIGINT', 'SIGHUP'] as const) {
+      process.on(sig, () => {
+        child.kill(sig);
+        resolve(true);
+      });
+    }
+  });
 
   return new Promise((resolve) => {
     child.on('error', (err) => {
       console.error(`capy run: ${err.message}`);
-      resolve(1);
+      resolve({ code: 1, interrupted: false });
     });
-    child.on('close', (code) => resolve(code ?? 1));
+    child.on('close', (code, signal) => {
+      // `forwarded` is already settled if a signal came in, and a settled promise
+      // wins a race against `Promise.resolve(false)` because it is listed first.
+      void Promise.race([forwarded, Promise.resolve(false)]).then((wasForwarded) =>
+        resolve({ code: code ?? 1, interrupted: wasForwarded || signal !== null }),
+      );
+    });
   });
+}
+
+function spawnChild(args: string[], env: Record<string, string | undefined>): Promise<number> {
+  return spawnChildDetailed(args, env).then((exit) => exit.code);
+}
+
+/**
+ * Runs the child, then gives an in-flight repo-link report (CAP-697) the rest of
+ * its own wait budget before capy run exits: `capy run` exits with the child's
+ * code, and a process exit would kill a report that had not finished, so a short
+ * command (`capy run -- true`) would never record the link.
+ *
+ * `reported` started when the key was resolved and carries its OWN budget from
+ * that moment (repoLinkReporter.ts `withBudget`), so the wait here is only what is left
+ * of it: a long-running child adds none, an instant one at most the remainder.
+ * It never rejects, prints nothing, and does not touch the child's exit code. An
+ * interrupted run (a forwarded signal) does not wait at all.
+ */
+export async function runChildThenSettle(
+  args: string[],
+  env: Record<string, string | undefined>,
+  reported: Promise<unknown> | undefined,
+  pipe?: string,
+): Promise<number> {
+  const exit = await spawnChildDetailed(args, env, pipe);
+  if (reported !== undefined && !exit.interrupted) await reported.catch(() => undefined);
+  return exit.code;
 }
 
 type Result<T> = { readonly ok: true; readonly value: T } | { readonly ok: false; readonly message: string };
@@ -136,11 +194,14 @@ function resolveKeepIds(keepPath: string): Result<{ orgId: string; projectId: st
  * passphrase session when the profile is local-only, otherwise via the
  * server's co-decrypt endpoint (silent auth + ServiceClient).
  */
+/** The project key, plus the repo-link report that was started alongside it (when one was). */
+type KeyResolution = Result<string> & { readonly reported?: Promise<unknown> };
+
 async function resolveLocalModeProjectKey(
   orgId: string,
   projectId: string,
   devMode: boolean,
-): Promise<Result<string>> {
+): Promise<KeyResolution> {
   try {
     const { isLocalOnly } = await import('../config/profileConfig');
 
@@ -171,7 +232,12 @@ async function resolveLocalModeProjectKey(
     };
 
     const value = await resolveProjectKey(orgId, projectId, result.user_id, keyServiceOps);
-    return { ok: true, value };
+    // CAP-697: start the report now, say nothing on stderr (this process's stderr
+    // belongs to the child it is about to run), and let `runChildThenSettle` give it
+    // the rest of its budget after the child ends, so a short command still records the link.
+    const { reportRepoLink } = await import('../core/repoLinkReporter');
+    const reported = reportRepoLink({ cwd: process.cwd(), orgId, projectId, client: svc });
+    return { ok: true, value, reported };
   } catch (err: any) {
     return { ok: false, message: `capy run: failed to resolve project key: ${err.message}` };
   }
@@ -433,5 +499,19 @@ export async function runCommand(args: string[], devMode: boolean = false): Prom
   }
 
   const decryptedEnv = Object.fromEntries(decryptedResult.value);
-  return spawnChild(args, { ...env, ...decryptedEnv });
+
+  // `docker compose` doesn't pass its environment into containers, so
+  // `env_file: .env` would hand them ciphertext. Forward the decrypted names
+  // to the services that read this .env — see composeForward.ts.
+  const compose = planComposeForward(args, join(process.cwd(), '.env'), Object.keys(decryptedEnv), {
+    cwd: process.cwd(),
+    env: process.env,
+    platform: process.platform,
+  });
+  if (compose) debug(`capy run: compose override → ${compose.args.join(' ')}`);
+  try {
+    return await runChildThenSettle(compose?.args ?? args, { ...env, ...decryptedEnv }, projectKeyResult.reported, compose?.pipe);
+  } finally {
+    compose?.cleanup();
+  }
 }

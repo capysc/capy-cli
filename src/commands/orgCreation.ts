@@ -10,15 +10,13 @@ import {
 } from '../crypto/keyManager';
 import { wrapAndSaveMasterKey, KeyServiceOps } from '../crypto/keyResolver';
 import { displayAndConfirmRecoveryPhrase } from '../ui/recoveryPhrase';
-// Type-only: erased at compile time, so the TTY path does not pull the browser
-// wizard into its module graph just to name an organization.
-import type { OrgNameVerdict } from '../ui/onboardingWeb';
-
-/** The CLI's cap. One definition; the browser screen is handed this value. */
+/** The CLI's cap. */
 export const MAX_ORG_NAME_LENGTH = 100;
 
-// (recovery-phrase display + confirm lives in ../ui/recoveryPhrase; the browser
-// half of both questions lives in ../ui/onboardingWeb)
+/** Whether an organization name is free. A verdict, never a sentence to be parsed. */
+type OrgNameVerdict = 'available' | 'taken' | 'unreachable';
+
+// (recovery-phrase display + confirm lives in ../ui/recoveryPhrase)
 
 function keyServiceOpsFromClient(serviceClient: ServiceClient): KeyServiceOps {
   return {
@@ -74,16 +72,7 @@ export async function promptForAvailableOrgName(
   return orgName.trim();
 }
 
-/**
- * The zero-trust warning the CLI prints beside the phrase.
- *
- * Split rather than one array so the browser can turn the last two lines into
- * the anchor the screen renders ("Learn more about zero-trust") instead of
- * leaving a bare URL at the foot of the most security-sensitive page in the
- * product. The terminal still gets the block it always printed, byte for byte —
- * built by concatenation here rather than recovered by matching prose, because
- * a sentence is not a place to keep a structural fact.
- */
+/** The zero-trust warning the CLI prints beside the phrase. */
 export const ZERO_TRUST_URL = 'https://capy.sc/zero-trust';
 
 export const ORG_PHRASE_NOTES = [
@@ -106,7 +95,6 @@ export async function createNewOrganization(
   serviceClient: ServiceClient,
   refreshToken: string,
   userId: string,
-  web = false,
 ): Promise<Organization> {
   // ONE phrase for the whole run, generated before the first question. A 409
   // sends the name step round again and the same words have to key whatever
@@ -114,79 +102,46 @@ export async function createNewOrganization(
   // after they had already written the first one down.
   const seedPhrase = generateSeedPhrase();
 
-  let orgName: string;
-  if (web) {
-    // SECURITY: under --web the phrase must render in the browser only. The TTY
-    // path prints all 24 words to stdout, which an MCP-driven run captures — so
-    // the agent would see a recovery-equivalent secret. Name and phrase are one
-    // wizard in the loopback page; the phrase stays in this process's memory.
-    orgName = await nameAndConfirmInBrowser(authService, seedPhrase);
-  } else {
-    orgName = await promptForAvailableOrgName(authService);
-    await displayAndConfirmRecoveryPhrase(seedPhrase, ORG_PHRASE_BOX);
-  }
+  const orgName = await promptForAvailableOrgName(authService);
+  await displayAndConfirmRecoveryPhrase(seedPhrase, ORG_PHRASE_BOX);
 
-  while (true) {
-    const orgSpinner = ora('Creating organization...').start();
-    try {
-      const org = await authService.createOrganization(orgName, refreshToken, userId);
-      orgSpinner.succeed(`Organization "${org.name}" created`);
-
-      // New orgs derive M under the current (strongest) KDF version. This is
-      // what binds the org to v2; legacy orgs created before this stay on v1 and
-      // are detected by trial decryption at the phrase→M boundaries.
-      const masterKey = seedPhraseToMasterKey(seedPhrase, CURRENT_KDF_VERSION);
-      await wrapAndSaveMasterKey(masterKey, org.id, userId, keyServiceOpsFromClient(serviceClient));
-
-      return org;
-    } catch (err: any) {
-      orgSpinner.fail('Failed to create organization');
-      if (err && err.status === 409) {
-        console.log('');
-        orgName = web
-          ? await nameAndConfirmInBrowser(authService, seedPhrase, orgName)
-          : await promptForAvailableOrgName(authService, 'That name was claimed while you were setting up. Pick another:');
-        continue;
-      }
-      throw err;
-    }
-  }
+  return createOrganizationNamed({ authService, serviceClient, refreshToken, userId, seedPhrase }, orgName);
 }
 
-/**
- * The browser half: name the organization and write down its recovery phrase,
- * in one wizard with one rail.
- *
- * `raced` is the name the server just refused with a 409, so the retry opens on
- * the name step with that name in the field and the reason attached — the same
- * phrase, already written down, carries over untouched.
- */
-async function nameAndConfirmInBrowser(
-  authService: AuthService,
-  seedPhrase: string,
-  raced?: string,
-): Promise<string> {
-  const { createOrganizationInBrowser } = await import('../ui/onboardingWeb');
-  const result = await createOrganizationInBrowser({
-    phrase: seedPhrase,
-    bodyLines: ORG_PHRASE_NOTES,
-    learnMoreUrl: ZERO_TRUST_URL,
-    name: raced,
-    nameError: raced ? 'RACE_409' : undefined,
-    // A retry asks for the name and nothing else. The phrase is unchanged and
-    // already written down; showing it again would make "this is the only time
-    // it is shown" false the first time anybody read it.
-    nameOnly: raced !== undefined,
-    maxNameLength: MAX_ORG_NAME_LENGTH,
-    checkName: (name: string) => checkOrgNameAvailable(authService, name),
-    open: !process.env.CAPY_WEB_NO_OPEN,
-  });
-  if (result.cancelled) {
-    throw new Error(
-      raced
-        ? 'Naming cancelled — organization not created'
-        : 'Recovery phrase not confirmed — organization not created',
-    );
+/** Creates the org; on a 409 asks for another name and goes round again with the same phrase. */
+async function createOrganizationNamed(
+  ctx: {
+    authService: AuthService;
+    serviceClient: ServiceClient;
+    refreshToken: string;
+    userId: string;
+    seedPhrase: string;
+  },
+  orgName: string,
+): Promise<Organization> {
+  const { authService, serviceClient, refreshToken, userId, seedPhrase } = ctx;
+  const orgSpinner = ora('Creating organization...').start();
+  try {
+    const org = await authService.createOrganization(orgName, refreshToken, userId);
+    orgSpinner.succeed(`Organization "${org.name}" created`);
+
+    // New orgs derive M under the current (strongest) KDF version. This is
+    // what binds the org to v2; legacy orgs created before this stay on v1 and
+    // are detected by trial decryption at the phrase→M boundaries.
+    const masterKey = seedPhraseToMasterKey(seedPhrase, CURRENT_KDF_VERSION);
+    await wrapAndSaveMasterKey(masterKey, org.id, userId, keyServiceOpsFromClient(serviceClient));
+
+    return org;
+  } catch (err: any) {
+    orgSpinner.fail('Failed to create organization');
+    if (err && err.status === 409) {
+      console.log('');
+      const nextName = await promptForAvailableOrgName(
+        authService,
+        'That name was claimed while you were setting up. Pick another:',
+      );
+      return createOrganizationNamed(ctx, nextName);
+    }
+    throw err;
   }
-  return result.name;
 }

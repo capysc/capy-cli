@@ -33,6 +33,7 @@
  * file, so the store refuses with `AUTH_FAILED` instantly and locally.
  */
 import { mock, describe, test, expect, spyOn, afterAll } from 'bun:test';
+import { withEnv, withTty } from '../helpers/processState';
 import { join } from 'node:path';
 
 const FAKE_ORG_CONTEXT = {
@@ -134,6 +135,70 @@ describe('ConnectCommand.execute() --discover routing (isolated: mock.module on 
     } finally {
       process.chdir(originalCwd);
       exitSpy.mockRestore();
+      rmSync(ROOT, { recursive: true, force: true });
+    }
+  });
+});
+
+// ── CAP-703: --discover ALWAYS prints JSON and never prompts, in a terminal or not ──
+
+describe('ConnectCommand.execute() --discover is always JSON and never prompts (CAP-703)', () => {
+  test('a real TTY and no base URL: no prompt — one JSON refusal on stdout, nothing prose on stderr', async () => {
+    const ROOT = mkdtempSync(join(tmpdir(), 'capy-discover-json-tty-'));
+    const originalCwd = process.cwd();
+    const savedExitCode = process.exitCode;
+    const logMock = mock((..._a: unknown[]) => {});
+    const errMock = mock((..._a: unknown[]) => {});
+    const logSpy = spyOn(console, 'log').mockImplementation(logMock as never);
+    const errSpy = spyOn(console, 'error').mockImplementation(errMock as never);
+    try {
+      process.chdir(ROOT);
+      const result = await withTty({ stdin: true }, () => new ConnectCommand(false).execute('dokploy', { discover: true } as ConnectOpts));
+      expect(result).toEqual({ linked: false });
+      expect(logMock).toHaveBeenCalledTimes(1);
+      const parsed = JSON.parse(String(logMock.mock.calls[0][0]));
+      expect(parsed.ok).toBe(false);
+      expect(parsed.code).toBe('DOKPLOY_SETTINGS_MISSING');
+      expect(errMock).not.toHaveBeenCalled();
+    } finally {
+      logSpy.mockRestore();
+      errSpy.mockRestore();
+      process.chdir(originalCwd);
+      process.exitCode = savedExitCode ?? 0;
+      rmSync(ROOT, { recursive: true, force: true });
+    }
+  });
+
+  test('a real TTY, a dry run that reaches Dokploy: stdout is exactly one JSON document (what --json prints)', async () => {
+    const ROOT = mkdtempSync(join(tmpdir(), 'capy-discover-json-dry-'));
+    const originalCwd = process.cwd();
+    const logMock = mock((..._a: unknown[]) => {});
+    const logSpy = spyOn(console, 'log').mockImplementation(logMock as never);
+    const fetchSpy = spyOn(globalThis, 'fetch').mockImplementation((async (url: string) => {
+      const body = String(url).includes('project.all') ? [] : {};
+      return new Response(JSON.stringify(body), { status: 200 });
+    }) as never);
+    try {
+      process.chdir(ROOT);
+      // The token comes from an environment variable that is already set (any will do: fetch is stubbed above).
+      await withEnv({ CAPY_DISCOVER_JSON_TEST_TOKEN: 'token-for-this-test-only' }, () =>
+        withTty({ stdin: true }, () =>
+          new ConnectCommand(false).execute('dokploy', {
+            discover: true,
+            dryRun: true,
+            baseUrl: 'https://dokploy.example.com',
+            tokenEnv: 'CAPY_DISCOVER_JSON_TEST_TOKEN',
+          } as ConnectOpts),
+        ),
+      );
+      expect(logMock).toHaveBeenCalledTimes(1);
+      const parsed = JSON.parse(String(logMock.mock.calls[0][0]));
+      expect(parsed).toMatchObject({ ok: true, provider: 'dokploy', dryRun: true, cancelled: false });
+      expect(parsed.plan.folders).toEqual([]);
+    } finally {
+      fetchSpy.mockRestore();
+      logSpy.mockRestore();
+      process.chdir(originalCwd);
       rmSync(ROOT, { recursive: true, force: true });
     }
   });

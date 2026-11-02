@@ -31,99 +31,39 @@ export class SyncEngine {
     remoteEncrypted?: Record<string, string>,
     syncState?: SyncState | null
   ): ChangeSet {
-    const localKeys = new Set(Object.keys(local));
-    const remoteKeys = new Set(Object.keys(remote));
-    const syncedKeys = syncState ? new Set(syncState.synced_variables) : new Set();
+    const syncedKeys = new Set(syncState ? syncState.synced_variables : []);
+    const localKeys = Object.keys(local);
+    const plain = (name: string, value: string, source: EnvVariable['source'], encrypted: boolean): EnvVariable => ({ name, value, source, encrypted });
 
-    const newLocal: EnvVariable[] = [];
-    const newRemote: EnvVariable[] = [];
-    const conflicts: ConflictVariable[] = [];
-    const unchanged: EnvVariable[] = [];
-    const deleted: EnvVariable[] = [];
-    const deletedLocal: EnvVariable[] = [];
+    // A name both sides have is: marked deleted on remote, a conflict, or unchanged.
+    const both = localKeys.filter((key) => key in remote);
+    const isDeletedMarker = (key: string): boolean => remote[key] === 'capy:deleted';
 
-    // Check local variables
-    for (const key of localKeys) {
-      if (!remoteKeys.has(key)) {
-        // New local variable
-        newLocal.push({
-          name: key,
-          value: local[key],
-          source: 'local',
-          encrypted: false
-        });
-      } else if (remote[key] === 'capy:deleted') {
-        // Remote variable marked as deleted
-        deleted.push({
-          name: key,
-          value: local[key],
-          source: 'local',
-          encrypted: false
-        });
-      } else if (local[key] !== remote[key]) {
+    const conflicts: ConflictVariable[] = both
+      .filter((key) => !isDeletedMarker(key) && local[key] !== remote[key])
+      .map((key) => {
         // Conflict - check if resource_ids differ using encrypted versions
-        const localEncryptedValue = localEncrypted ? localEncrypted[key] : local[key];
-        const remoteEncryptedValue = remoteEncrypted ? remoteEncrypted[key] : remote[key];
+        const localResourceId = this.extractResourceId(localEncrypted ? localEncrypted[key] : local[key]);
+        const remoteResourceId = this.extractResourceId(remoteEncrypted ? remoteEncrypted[key] : remote[key]);
+        const isNew =
+          (localResourceId !== null && remoteResourceId !== null && localResourceId !== remoteResourceId) ||
+          (localResourceId === null && remoteResourceId !== null);
+        return { name: key, localValue: local[key], remoteValue: remote[key], isNew };
+      });
 
-        const localResourceId = this.extractResourceId(localEncryptedValue);
-        const remoteResourceId = this.extractResourceId(remoteEncryptedValue);
-
-        const isNew = (localResourceId !== null &&
-                       remoteResourceId !== null &&
-                       localResourceId !== remoteResourceId) ||
-                      (localResourceId === null && remoteResourceId !== null);
-
-        conflicts.push({
-          name: key,
-          localValue: local[key],
-          remoteValue: remote[key],
-          isNew
-        });
-      } else {
-        // Unchanged
-        unchanged.push({
-          name: key,
-          value: local[key],
-          source: 'both',
-          encrypted: false
-        });
-      }
-    }
-
-    // Check remote variables not in local
-    for (const key of remoteKeys) {
-      // Skip deleted markers if they don't exist locally (already handled above)
-      if (!localKeys.has(key) && remote[key] !== 'capy:deleted') {
-        // Check if this variable was previously synced to this machine
-        if (syncedKeys.has(key)) {
-          // Variable was synced before but now missing locally
-          // → User deleted it locally
-          deletedLocal.push({
-            name: key,
-            value: remote[key],
-            source: 'remote',
-            encrypted: true
-          });
-        } else {
-          // Variable never synced to this machine
-          // → New remote variable (or first sync)
-          newRemote.push({
-            name: key,
-            value: remote[key],
-            source: 'remote',
-            encrypted: true
-          });
-        }
-      }
-    }
+    // Remote variables not in local (a deleted marker for a name local lacks is not a new remote variable).
+    const remoteOnly = Object.keys(remote).filter((key) => !(key in local) && !isDeletedMarker(key));
 
     return {
-      newLocal,
-      newRemote,
+      newLocal: localKeys.filter((key) => !(key in remote)).map((key) => plain(key, local[key], 'local', false)),
+      // Variable never synced to this machine → new remote variable (or first sync)
+      newRemote: remoteOnly.filter((key) => !syncedKeys.has(key)).map((key) => plain(key, remote[key], 'remote', true)),
       conflicts,
-      unchanged,
-      deleted,
-      deletedLocal
+      unchanged: both.filter((key) => !isDeletedMarker(key) && local[key] === remote[key]).map((key) => plain(key, local[key], 'both', false)),
+      // Remote variable marked as deleted
+      deleted: both.filter(isDeletedMarker).map((key) => plain(key, local[key], 'local', false)),
+      // Variable was synced before but now missing locally → user deleted it locally
+      deletedLocal: remoteOnly.filter((key) => syncedKeys.has(key)).map((key) => plain(key, remote[key], 'remote', true)),
     };
   }
 
@@ -132,56 +72,27 @@ export class SyncEngine {
     remote: Record<string, string>,
     decisions: UserDecisions
   ): Record<string, string> {
-    // Start from remote as the base — unchanged variables keep their remote value
-    const result: Record<string, string> = { ...remote };
+    // Start from remote as the base — unchanged variables keep their remote value (deletion markers removed)
+    const base = Object.fromEntries(Object.entries(remote).filter(([, value]) => value !== 'capy:deleted'));
 
-    // Remove deletion markers
-    for (const key of Object.keys(result)) {
-      if (result[key] === 'capy:deleted') {
-        delete result[key];
-      }
-    }
+    // New local-only variables are included only if the user chose to push them; an explicit push decision
+    // (local value wins) and "keep local" for conflicts both take the local value.
+    const fromLocal = Object.fromEntries(
+      [...new Set([...decisions.pushVariables, ...decisions.keepLocal])]
+        .filter((name) => local[name] !== undefined)
+        .map((name) => [name, local[name]] as const),
+    );
 
-    // Add unchanged local-only variables (not in remote, not conflicts)
-    for (const key of Object.keys(local)) {
-      if (!(key in remote)) {
-        // New local variable — only include if user chose to push
-        if (decisions.pushVariables.includes(key)) {
-          result[key] = local[key];
-        }
-      }
-    }
-
-    // Apply user's explicit push decisions (local value wins)
-    for (const varName of decisions.pushVariables) {
-      if (local[varName] !== undefined) {
-        result[varName] = local[varName];
-      }
-    }
-
-    // Keep local values for conflicts resolved as "keep local" (not pushed)
-    for (const varName of decisions.keepLocal) {
-      if (local[varName] !== undefined) {
-        result[varName] = local[varName];
-      }
-    }
-
-    // Apply user's explicit pull decisions (remote value wins, already in result)
-    for (const varName of decisions.pullVariables) {
-      if (remote[varName] !== undefined && remote[varName] !== 'capy:deleted') {
-        result[varName] = remote[varName];
-      }
-    }
+    // Apply user's explicit pull decisions (remote value wins)
+    const pulled = Object.fromEntries(
+      decisions.pullVariables
+        .filter((name) => remote[name] !== undefined && remote[name] !== 'capy:deleted')
+        .map((name) => [name, remote[name]] as const),
+    );
 
     // Delete variables the user confirmed for deletion
-    for (const varName of decisions.deleteLocal) {
-      delete result[varName];
-    }
-    for (const varName of decisions.deleteRemote) {
-      delete result[varName];
-    }
-
-    return result;
+    const gone = new Set([...decisions.deleteLocal, ...decisions.deleteRemote]);
+    return Object.fromEntries(Object.entries({ ...base, ...fromLocal, ...pulled }).filter(([name]) => !gone.has(name)));
   }
 
   generateSyncResult(
@@ -221,37 +132,30 @@ export class SyncEngine {
     pushedVariables: Record<string, { resource_id: string; value_hash?: string }>,
     branch?: string,
   ): KeepFile {
-    const updatedKeep = { ...keep, variables: { ...keep.variables } };
+    const targetBranch = branch || SyncEngine.DEFAULT_BRANCH;
+    const merged = Object.fromEntries(
+      Object.entries(pushedVariables).map(([varName, data]) => {
+        // Clone existing entries
+        const entries = (keep.variables[varName] || []).map(e => ({ ...e }));
 
-    for (const [varName, data] of Object.entries(pushedVariables)) {
-      const existing = updatedKeep.variables[varName] || [];
-      // Clone existing entries
-      const entries = existing.map(e => ({ ...e }));
+        // Find existing entry for this branch
+        const idx = entries.findIndex(e => e.branch === targetBranch);
 
-      // Find existing entry for this branch
-      const targetBranch = branch || SyncEngine.DEFAULT_BRANCH;
-      const idx = entries.findIndex(e => e.branch === targetBranch);
+        // Preserve any extra fields on the existing entry (e.g. `connector`
+        // metadata set by `capy connect`). Without the spread, every sync
+        // would clobber them.
+        const entry: KeepVariableEntry = {
+          ...(idx >= 0 ? entries[idx] : {}),
+          resource_id: data.resource_id,
+          value_hash: data.value_hash || '',
+          branch: targetBranch,
+        };
 
-      // Preserve any extra fields on the existing entry (e.g. `connector`
-      // metadata set by `capy connect`). Without the spread, every sync
-      // would clobber them.
-      const entry: KeepVariableEntry = {
-        ...(idx >= 0 ? entries[idx] : {}),
-        resource_id: data.resource_id,
-        value_hash: data.value_hash || '',
-        branch: targetBranch,
-      };
+        return [varName, idx >= 0 ? entries.map((e, i) => (i === idx ? entry : e)) : [...entries, entry]] as const;
+      }),
+    );
 
-      if (idx >= 0) {
-        entries[idx] = entry;
-      } else {
-        entries.push(entry);
-      }
-
-      updatedKeep.variables[varName] = entries;
-    }
-
-    return updatedKeep;
+    return { ...keep, variables: { ...keep.variables, ...merged } };
   }
 
   /**
@@ -270,20 +174,16 @@ export class SyncEngine {
   static spliceKeepBranch(local: KeepFile | null, server: KeepFile, branch: string): KeepFile {
     if (!local) return server;
 
-    const variables: KeepFile['variables'] = {};
     const names = new Set([...Object.keys(local.variables), ...Object.keys(server.variables)]);
-
-    for (const name of names) {
-      const localEntries = local.variables[name] || [];
-      const serverEntries = server.variables[name] || [];
-      const merged = [
-        ...localEntries.filter(e => e.branch !== branch),
-        ...serverEntries.filter(e => e.branch === branch),
-      ];
-      if (merged.length > 0) {
-        variables[name] = merged;
-      }
-    }
+    const variables: KeepFile['variables'] = Object.fromEntries(
+      [...names].flatMap((name) => {
+        const merged = [
+          ...(local.variables[name] || []).filter(e => e.branch !== branch),
+          ...(server.variables[name] || []).filter(e => e.branch === branch),
+        ];
+        return merged.length > 0 ? [[name, merged] as const] : [];
+      }),
+    );
 
     return { ...local, variables };
   }
@@ -310,64 +210,37 @@ export class SyncEngine {
   }
 
   formatSyncSummary(changeSet: ChangeSet): string {
-    const lines: string[] = [];
-
-    if (changeSet.newLocal.length > 0) {
-      lines.push(`${changeSet.newLocal.length} new local variable(s)`);
-    }
-
-    if (changeSet.newRemote.length > 0) {
-      lines.push(`${changeSet.newRemote.length} new remote variable(s)`);
-    }
-
-    if (changeSet.deleted.length > 0) {
-      lines.push(`${changeSet.deleted.length} deleted variable(s)`);
-    }
-
-    if (changeSet.conflicts.length > 0) {
-      lines.push(`${changeSet.conflicts.length} conflict(s)`);
-    }
-
-    if (changeSet.unchanged.length > 0) {
-      lines.push(`${changeSet.unchanged.length} unchanged`);
-    }
-
-    return lines.join('\n');
+    return [
+      changeSet.newLocal.length > 0 ? `${changeSet.newLocal.length} new local variable(s)` : '',
+      changeSet.newRemote.length > 0 ? `${changeSet.newRemote.length} new remote variable(s)` : '',
+      changeSet.deleted.length > 0 ? `${changeSet.deleted.length} deleted variable(s)` : '',
+      changeSet.conflicts.length > 0 ? `${changeSet.conflicts.length} conflict(s)` : '',
+      changeSet.unchanged.length > 0 ? `${changeSet.unchanged.length} unchanged` : '',
+    ]
+      .filter((line) => line !== '')
+      .join('\n');
   }
 
   validateDecisions(decisions: UserDecisions, changeSet: ChangeSet): string[] {
-    const errors: string[] = [];
-
     const localVarNames = changeSet.newLocal.map(v => v.name);
     const conflictNames = changeSet.conflicts.map(c => c.name);
     const deletedVarNames = changeSet.deleted.map(v => v.name);
-    for (const varName of decisions.pushVariables) {
-      if (!localVarNames.includes(varName) && !conflictNames.includes(varName) && !deletedVarNames.includes(varName)) {
-        errors.push(`Cannot push ${varName}: not a new local variable, conflict, or deleted variable`);
-      }
-    }
-
     const remoteVarNames = changeSet.newRemote.map(v => v.name);
     const deletedLocalVarNames = changeSet.deletedLocal.map(v => v.name);
-    for (const varName of decisions.pullVariables) {
-      if (!remoteVarNames.includes(varName) && !deletedLocalVarNames.includes(varName)) {
-        errors.push(`Cannot pull ${varName}: not a new remote variable or locally deleted variable`);
-      }
-    }
-
     const allResolutions = [...decisions.keepLocal, ...decisions.keepRemote];
-    for (const varName of allResolutions) {
-      if (!conflictNames.includes(varName)) {
-        errors.push(`Cannot resolve ${varName}: not a conflict`);
-      }
-    }
 
-    const resolutionSet = new Set(allResolutions);
-    if (resolutionSet.size !== allResolutions.length) {
-      errors.push('Duplicate conflict resolutions detected');
-    }
-
-    return errors;
+    return [
+      ...decisions.pushVariables
+        .filter((varName) => !localVarNames.includes(varName) && !conflictNames.includes(varName) && !deletedVarNames.includes(varName))
+        .map((varName) => `Cannot push ${varName}: not a new local variable, conflict, or deleted variable`),
+      ...decisions.pullVariables
+        .filter((varName) => !remoteVarNames.includes(varName) && !deletedLocalVarNames.includes(varName))
+        .map((varName) => `Cannot pull ${varName}: not a new remote variable or locally deleted variable`),
+      ...allResolutions
+        .filter((varName) => !conflictNames.includes(varName))
+        .map((varName) => `Cannot resolve ${varName}: not a conflict`),
+      ...(new Set(allResolutions).size !== allResolutions.length ? ['Duplicate conflict resolutions detected'] : []),
+    ];
   }
 
   static readonly DEFAULT_BRANCH = 'development';
@@ -378,14 +251,12 @@ export class SyncEngine {
    */
   static computeKeepHash(keep: KeepFile, branch?: string): string {
     const targetBranch = branch || SyncEngine.DEFAULT_BRANCH;
-    const entries: string[] = [];
-    for (const key of Object.keys(keep.variables).sort()) {
-      const varEntries = keep.variables[key];
-      const entry = varEntries.find(e => e.branch === targetBranch);
-      if (entry) {
-        entries.push(`${key}:${entry.resource_id}:${entry.value_hash}`);
-      }
-    }
+    const entries = Object.keys(keep.variables)
+      .sort()
+      .flatMap((key) => {
+        const entry = keep.variables[key].find(e => e.branch === targetBranch);
+        return entry ? [`${key}:${entry.resource_id}:${entry.value_hash}`] : [];
+      });
     return createHash('sha256').update(entries.join('\n')).digest('hex');
   }
 }
