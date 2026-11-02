@@ -8,11 +8,11 @@ import { readFileSync } from 'node:fs';
 import { createDokployClient } from '../../deploy/dokployApi';
 import { realBaseUrlStoreOpener, savedDokployTargetUrl } from '../../deploy/dokployBaseUrl';
 import { dokployConnectorSecret } from '../connectors/dokploy';
+import { vercelConnectorSecret } from '../connectors/vercel';
 import { newPrBranchName } from '../keepLockPr';
 import { realGithub } from '../secretsSet';
 import { resolveSilentContext } from '../secretsSetCommand';
 import { createVercelClient } from '../../deploy/vercelApi';
-import { getVercelTargetSecretFromStore } from '../../deploy/vercelTargetApi';
 import { DeployDiscoverIo, DeployDiscoverOpts, runDeployDokployDiscover } from './command';
 import { DeployVercelDiscoverIo, DeployVercelDiscoverOpts, runDeployVercelDiscover } from './vercel';
 
@@ -66,7 +66,8 @@ export async function realVercelDiscoverIo(devMode: boolean): Promise<DeployVerc
         ? { ok: true, orgId: resolved.context.orgId, client: resolved.context.client }
         : { ok: false, code: resolved.code, message: resolved.message };
     },
-    getSecret: getVercelTargetSecretFromStore,
+    // Discovery only reads Vercel: the import-side token, like Dokploy's discovery.
+    getSecret: vercelConnectorSecret,
     // Names only: the client drops any value a response carries.
     vercel: (token) => createVercelClient(token, { dropValues: true }),
     github: realGithub,

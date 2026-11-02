@@ -743,18 +743,21 @@ function preferredProjectId(plan: DiscoveryPlan, project: string | undefined): s
 }
 
 /**
+ * The real system-store read for the import direction: `_CONNECTOR_VERCEL_TOKEN`,
+ * borrowing from `_TARGET_VERCEL_TOKEN` (the deploy side) the same way Dokploy's does.
+ * Also what `capy deploy vercel --discover` reads, since discovery only reads Vercel.
+ */
+export async function vercelConnectorSecret(name: string, opts: VercelSystemStoreCallOptions): Promise<string | null> {
+  const { getDirectionalConnectorSecret } = await import('../../system/systemStore');
+  return getDirectionalConnectorSecret(name, VERCEL_TARGET_SECRET_NAME, {
+    ...opts,
+    missingWithFallbackCode: ERROR_CODES.VERCEL_CONNECTOR_KEY_MISSING,
+  });
+}
+
+/**
  * The `capy connect vercel` production instance — the only place this file
  * wires the org system store for real (every other construction, including
  * every test, gets the safe env-only default — see `VercelConnectorDeps`).
  */
-export const vercelConnector: ConnectorModule = createVercelConnector({
-  getConnectorSecret: async (name, opts) => {
-    // Import's own direction: `_CONNECTOR_VERCEL_TOKEN`, borrowing from
-    // `_TARGET_VERCEL_TOKEN` (the deploy side) the same way Dokploy's does.
-    const { getDirectionalConnectorSecret } = await import('../../system/systemStore');
-    return getDirectionalConnectorSecret(name, VERCEL_TARGET_SECRET_NAME, {
-      ...opts,
-      missingWithFallbackCode: ERROR_CODES.VERCEL_CONNECTOR_KEY_MISSING,
-    });
-  },
-});
+export const vercelConnector: ConnectorModule = createVercelConnector({ getConnectorSecret: vercelConnectorSecret });

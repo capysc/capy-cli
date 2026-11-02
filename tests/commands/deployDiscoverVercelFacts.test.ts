@@ -285,11 +285,11 @@ describe('facts: no value is read, asked for, printed or sent', () => {
 });
 
 describe('facts: the token', () => {
-  test('is read from the org system store, by the target key name, and never asked for', async () => {
+  test('is read from the org system store, by the connector key name (discovery only reads), and never asked for', async () => {
     const { world } = await facts();
     expect(world.getSecret).toHaveBeenCalledTimes(1);
     const [name, opts] = world.getSecret.mock.calls[0] as [string, Record<string, unknown>];
-    expect(name).toBe('_TARGET_VERCEL_TOKEN');
+    expect(name).toBe('_CONNECTOR_VERCEL_TOKEN');
     expect(opts).toMatchObject({ interactive: false, orgId: 'org_1' });
   });
 
@@ -299,16 +299,16 @@ describe('facts: the token', () => {
     expect(exitCode).toBe(1);
     expect(body).toMatchObject({ ok: false, code: 'VERCEL_TOKEN_MISSING' });
     expect(body.link.url).toContain('vercel.com');
-    expect(body.remedy).toContain('_TARGET_VERCEL_TOKEN');
+    expect(body.remedy).toContain('_CONNECTOR_VERCEL_TOKEN');
     expect(world.fetchMock).not.toHaveBeenCalled();
     expect(world.capy.getOrgRepos).not.toHaveBeenCalled();
     expect(world.github.getDefaultBranches).not.toHaveBeenCalled();
   });
 
   test('a store that refuses with a code is that code, with the same help', async () => {
-    const world = makeVercelWorld({ io: { getSecret: (async () => Promise.reject(Object.assign(new Error('x'), { code: 'VERCEL_TARGET_KEY_MISSING' }))) as never } });
+    const world = makeVercelWorld({ io: { getSecret: (async () => Promise.reject(Object.assign(new Error('x'), { code: 'VERCEL_CONNECTOR_KEY_MISSING' }))) as never } });
     const { body } = await facts(world);
-    expect(body).toMatchObject({ ok: false, code: 'VERCEL_TARGET_KEY_MISSING' });
+    expect(body).toMatchObject({ ok: false, code: 'VERCEL_CONNECTOR_KEY_MISSING' });
     expect(body.link).toBeDefined();
     expect(body.remedy).toBeDefined();
     expect(world.fetchMock).not.toHaveBeenCalled();
@@ -327,7 +327,7 @@ describe('facts: the token', () => {
     expect(exitCode).toBe(1);
     expect(body).toMatchObject({ ok: false, code: 'VERCEL_AUTH_FAILED' });
     expect(body.link.url).toContain('vercel.com');
-    expect(body.remedy).toContain('_TARGET_VERCEL_TOKEN');
+    expect(body.remedy).toContain('_CONNECTOR_VERCEL_TOKEN');
     expect(JSON.stringify(body)).not.toContain(VERCEL_TOKEN);
     expect(world.capy.getOrgRepos).not.toHaveBeenCalled();
   });

@@ -39,7 +39,14 @@ import {
   VercelTeam,
   mapVercelApiError,
 } from '../../deploy/vercelApi';
-import { GetVercelStoreSecret, describeVercelTokenProblem, resolveVercelTargetToken, vercelTargetKeyHelp } from '../../deploy/vercelTargetApi';
+import {
+  DEFAULT_VERCEL_TOKEN_ENV,
+  VERCEL_CONNECTOR_SECRET_NAME,
+  describeVercelTokenProblem,
+  resolveVercelToken,
+} from '../../deploy/vercelApi';
+import { keyHelpFields, vercelKeyHelp } from '../../deploy/keyHelp';
+import type { GetVercelStoreSecret } from '../../deploy/vercelTargetApi';
 import { ERROR_CODES } from '../../types/index';
 import { runPool } from '../../utils/pool';
 import { GITHUB_HOST } from '../secretsSet';
@@ -209,7 +216,7 @@ async function scanProject(client: VercelClient, project: VercelProject, team: S
 function vercelFailure(err: unknown): DeployDiscoverResult {
   const mapped = mapVercelApiError(err);
   // A rejected token says where to get another.
-  const help = err instanceof VercelApiError && err.code === 'unauthorized' ? vercelTargetKeyHelp() : {};
+  const help = err instanceof VercelApiError && err.code === 'unauthorized' ? vercelTokenHelp() : {};
   return refuse(mapped.code, mapped.message, help);
 }
 
@@ -365,19 +372,28 @@ export const VERCEL_KIND: KindOverrides = {
 
 // ── The command ──────────────────────────────────────────────────────────────
 
-/** The token, never asked for: the system store (`_TARGET_VERCEL_TOKEN`, or the connector token it refers to), then `$VERCEL_TOKEN`. */
+/** Where to get a Vercel token, for discovery's refusals: the import-side name, since discovery only reads. */
+function vercelTokenHelp(): { link: { label: string; url: string }; remedy: string } {
+  return keyHelpFields(vercelKeyHelp(VERCEL_CONNECTOR_SECRET_NAME));
+}
+
+/**
+ * The token, never asked for: discovery only reads Vercel, so it uses the
+ * import-side token (`_CONNECTOR_VERCEL_TOKEN`), as Dokploy's discovery does,
+ * then `$VERCEL_TOKEN`.
+ */
 async function vercelClient(io: DeployVercelDiscoverIo, orgId: string): Promise<Step<VercelClient>> {
-  const resolved = await resolveVercelTargetToken({
+  const resolved = await resolveVercelToken({
     env: io.env,
     // Never a prompt: a missing token is a coded refusal that says where to get it.
     interactive: false,
     orgId,
     devMode: io.devMode,
-    getSecret: io.getSecret,
+    getConnectorSecret: io.getSecret,
   });
   if (!resolved.ok) {
-    const { reason, hint } = describeVercelTokenProblem(resolved.code);
-    return stop(refuse(resolved.code, `${reason}.`, { hint, ...vercelTargetKeyHelp() }));
+    const { reason, hint } = describeVercelTokenProblem(resolved.code, DEFAULT_VERCEL_TOKEN_ENV);
+    return stop(refuse(resolved.code, `${reason}.`, { hint, ...vercelTokenHelp() }));
   }
   return done(io.vercel(resolved.value));
 }
