@@ -24,13 +24,12 @@
  * Every refusal for a missing or rejected token carries the Vercel token page
  * (`link`) and what to do (`remedy`), with the team's slug when `--team` names it.
  *
- * Deploy targets: like Dokploy, a target is OFFERED only after a single
- * import, only interactively (never under `--json`, `--dry-run`, or
- * non-interactive). Discovery never saves one by itself.
+ * "Connect is for retrieval, target is for deploy": this connector imports
+ * values and NEVER creates, offers or writes a deploy target.
+ * `capy deploy vercel --discover` is what creates targets, and it pushes no values.
  */
 import { join } from 'node:path';
 import { syncFolder, type FolderSync, type GateOptions } from '../../sync/gate';
-import { TargetConfig } from '../../deploy/adapter';
 import { classifyImportCandidates } from '../../deploy/dokployApi';
 import {
   DEFAULT_VERCEL_TOKEN_ENV,
@@ -79,7 +78,6 @@ import {
   DiscoveryContext,
   DiscoveryOutcome,
   DiscoveryPlan,
-  DiscoveryDeployTarget,
   DiscoveryFolderResult,
   DiscoveryPlanFolder,
   applyCollisionResolutions,
@@ -298,102 +296,6 @@ function discoveryConfirmMessage(folders: readonly DiscoveryPlanFolder[], overwr
   return [header, ...rows].join('\n');
 }
 
-// ── Deploy-target offer ─────────────────────────────────────────────────────
-
-function uniqueTargetName(existing: readonly TargetConfig[], base: string): string {
-  const names = new Set(existing.map((t) => t.name));
-  const numbered = (n: number): string => (names.has(`${base}-${n}`) ? numbered(n + 1) : `${base}-${n}`);
-  return names.has(base) ? numbered(2) : base;
-}
-
-/** The name a new `vercel-<environment>` target for this project + environment gets; `null` when one already exists. */
-function newTargetName(allTargets: readonly TargetConfig[], projectId: string, environmentName: string): string | null {
-  const already = allTargets.some((t) => {
-    const o = t.options as { projectId?: string; vercelEnv?: string };
-    return t.kind === 'vercel' && o.projectId === projectId && o.vercelEnv === environmentName;
-  });
-  return already ? null : uniqueTargetName(allTargets, `vercel-${environmentName}`);
-}
-
-interface TargetArgs {
-  importedNames: readonly string[];
-  project: { id: string; name: string; productionBranch?: string };
-  teamId: string | undefined;
-  environment: VercelEnvironmentInfo;
-  allTargets: readonly TargetConfig[];
-}
-
-/**
- * The `vercel-<environment>` deploy target for the SAME project + environment
- * an import just read — API mode, all-branches vars (no `gitBranch`), CI mode,
- * `gitBaseBranch` the project's production branch for `production`. `null`
- * when nothing was imported or the project + environment already has a target.
- * The one definition both the interactive offer and `--targets` save.
- */
-function buildDeployTarget(args: TargetArgs): TargetConfig | null {
-  if (args.importedNames.length === 0) return null;
-  const name = newTargetName(args.allTargets, args.project.id, args.environment.name);
-  if (name === null) return null;
-  return {
-    name,
-    kind: 'vercel',
-    branch: args.environment.name,
-    vars: [...args.importedNames],
-    mode: 'ci',
-    ...(args.environment.name === 'production' && args.project.productionBranch ? { gitBaseBranch: args.project.productionBranch } : {}),
-    options: {
-      projectDir: '.',
-      vercelEnv: args.environment.name,
-      projectId: args.project.id,
-      ...(args.teamId ? { teamId: args.teamId } : {}),
-      ...(args.environment.customEnvironmentId ? { customEnvironmentId: args.environment.customEnvironmentId } : {}),
-    },
-  };
-}
-
-interface TargetOfferArgs extends TargetArgs {
-  promptable: boolean;
-  dir: string;
-  confirm: (message: string, defaultValue: boolean) => Promise<boolean>;
-}
-
-/**
- * After a successful single import, offer to save a Vercel deploy target for
- * the SAME project + environment. Only asked interactively; non-interactive,
- * `--json` and `--dry-run` never ask and never save (`--targets` is the way to
- * save one without asking).
- */
-async function maybeOfferDeployTarget(args: TargetOfferArgs): Promise<boolean> {
-  if (args.importedNames.length === 0 || !args.promptable) return false;
-  const target = buildDeployTarget(args);
-  if (!target) return false;
-
-  // COPY-FLAG: new user-facing string, minimal/neutral wording.
-  const yes = await args.confirm(
-    `Save a Vercel deploy target for ${args.project.name} (${args.environment.name}), so \`capy deploy\` can ship the runtime pair to it?`,
-    false,
-  );
-  if (!yes) return false;
-
-  const { upsertTarget } = await import('../../deploy/config');
-  upsertTarget(args.dir, target);
-  return true;
-}
-
-/**
- * `--targets`: the target this import would write, and where — planned here,
- * saved by `writeImportOutcome` once the import itself is written (never under
- * a dry run, which only reports it).
- */
-function planTargetsOutcome(
-  args: TargetArgs & { dir: string; dryRun: boolean },
-): Pick<Extract<ImportOutcome, { ok: true }>, 'deployTarget' | 'deployTargetToWrite'> {
-  const target = buildDeployTarget(args);
-  if (!target) return {};
-  const deployTarget = { name: target.name, environment: args.environment.name, written: !args.dryRun };
-  return args.dryRun ? { deployTarget } : { deployTarget, deployTargetToWrite: { dir: args.dir, target } };
-}
-
 // ── Connector ────────────────────────────────────────────────────────────────
 
 export function createVercelConnector(deps: VercelConnectorDeps = {}): ConnectorModule {
@@ -507,26 +409,6 @@ export function createVercelConnector(deps: VercelConnectorDeps = {}): Connector
     return { ok: true, project: { id: found.project.id, name: found.project.name, ...(productionBranch ? { productionBranch } : {}) } };
   };
 
-  /** `--targets` only: the target this import writes (dry run: would write). Nothing when the flag is off. */
-  const plannedTargets = async (
-    opts: ConnectOpts,
-    source: SourceRead,
-    importedNames: readonly string[],
-    dryRun: boolean,
-  ): Promise<Pick<Extract<ImportOutcome, { ok: true }>, 'deployTarget' | 'deployTargetToWrite'>> => {
-    if (!opts.targets) return {};
-    const dir = opts.projectDir ?? cwd();
-    return planTargetsOutcome({
-      importedNames,
-      project: source.project,
-      teamId: source.teamId,
-      environment: source.environment,
-      allTargets: await listTargetsAt(dir),
-      dir,
-      dryRun,
-    });
-  };
-
   /** `--overwrite`'s own run: plan from Vercel's FULL readable set (never `--var`-restricted), confirm, return the outcome for the caller to write. */
   const runOverwriteImport = async (a: {
     ctx: ResolvedContext;
@@ -552,7 +434,7 @@ export function createVercelConnector(deps: VercelConnectorDeps = {}): Connector
       if (promptable && !opts.yes) {
         const proceed = await confirm(overwriteConfirmMessage(plan), false);
         if (!proceed) {
-          return { ok: true, source: importSource, imported: [], cleared: [], replacedNames: [], unchanged: plan.unchanged, skipped: [], warnings, deployTargetSaved: false };
+          return { ok: true, source: importSource, imported: [], cleared: [], replacedNames: [], unchanged: plan.unchanged, skipped: [], warnings };
         }
       } else if (!promptable && !opts.yes) {
         // COPY-FLAG: new user-facing string, minimal/neutral wording.
@@ -578,8 +460,6 @@ export function createVercelConnector(deps: VercelConnectorDeps = {}): Connector
       // overwrite leaves them alone, and saying so is the point of the list.
       skipped: [...source.skipped, ...values.value.empty].map(toImportSkip),
       warnings,
-      deployTargetSaved: false,
-      ...(await plannedTargets(opts, source, [...written.map((w) => w.varName), ...plan.unchanged], dryRun)),
     };
   };
 
@@ -636,24 +516,6 @@ export function createVercelConnector(deps: VercelConnectorDeps = {}): Connector
       ...conflictSkipped,
     ];
 
-    const importedNames = [...imported.map((i) => i.varName), ...unchanged];
-    const dir = opts.projectDir ?? cwd();
-    // `--targets` writes without asking; otherwise the target is only offered, and only interactively.
-    const planned = await plannedTargets(opts, source, importedNames, dryRun);
-    const deployTargetSaved =
-      !dryRun &&
-      !opts.targets &&
-      (await maybeOfferDeployTarget({
-        importedNames,
-        project: source.project,
-        teamId: source.teamId,
-        environment: source.environment,
-        allTargets: await listTargetsAt(dir),
-        promptable,
-        dir,
-        confirm,
-      }));
-
     return {
       ok: true,
       source: importSource,
@@ -662,24 +524,8 @@ export function createVercelConnector(deps: VercelConnectorDeps = {}): Connector
       unchangedEntries,
       skipped,
       warnings: truncationWarnings(source),
-      deployTargetSaved,
-      ...planned,
       ...(dryRun ? { wouldAsk } : {}),
     };
-  };
-
-  /** `--targets` under `--dry-run`: the target each plan environment would get, by folder. Names only. */
-  const plannedTargetsFor = async (folders: readonly DiscoveryPlanFolder[]): Promise<readonly DiscoveryDeployTarget[]> => {
-    const perFolder = await Promise.all(
-      folders.map(async (f) => {
-        const existing = await listTargetsAt(f.folder ? join(f.repoDir, f.folder) : f.repoDir);
-        return orderEnvironments(f.environments).flatMap((e): readonly DiscoveryDeployTarget[] => {
-          const name = e.variableCount > 0 ? newTargetName(existing, e.serviceId, e.environmentName) : null;
-          return name === null ? [] : [{ repoDir: f.repoDir, folder: f.folder, branch: e.environmentName, name, written: false }];
-        });
-      }),
-    );
-    return perFolder.flat();
   };
 
   /** Everything after the client exists: resolve the team, build the plan, apply it. */
@@ -728,11 +574,8 @@ export function createVercelConnector(deps: VercelConnectorDeps = {}): Connector
 
     if (dryRun) {
       // A dry run never asks for a branch name either; the DEFAULT is what it previews.
-      // `--targets`: the targets it would write are listed, and their file is part of the previewed commit.
-      const targets = opts.targets ? await plannedTargetsFor(plan.folders) : [];
-      const hasTargets = (folder: DiscoveryPlanFolder): boolean => targets.some((t) => t.repoDir === folder.repoDir && t.folder === folder.folder);
-      const commits = commitPreviewForFolders(plan.folders, defaultDiscoveryCommitBranchName(new Date(), 'vercel'), VERCEL_COMMIT_MESSAGE, hasTargets);
-      return { ok: true, dryRun: true, plan, ...(commits.length > 0 ? { commits } : {}), ...(opts.targets ? { deployTargets: targets } : {}) };
+      const commits = commitPreviewForFolders(plan.folders, defaultDiscoveryCommitBranchName(new Date(), 'vercel'), VERCEL_COMMIT_MESSAGE);
+      return { ok: true, dryRun: true, plan, ...(commits.length > 0 ? { commits } : {}) };
     }
 
     // `--project` under `--discover` is the collision-winner hint (an id or a name), not an import source.
@@ -772,7 +615,7 @@ export function createVercelConnector(deps: VercelConnectorDeps = {}): Connector
     // "discovery made this change" from "already dirty before the run".
     const beforeStatusByRepo = new Map(
       [...new Set(resolvedFolders.map((f) => f.repoDir))].map((repoDir) => {
-        const paths = resolvedFolders.filter((f) => f.repoDir === repoDir).flatMap((f) => discoveryCommitPathsFor(f.folder, { deployConfig: !!opts.targets }));
+        const paths = resolvedFolders.filter((f) => f.repoDir === repoDir).flatMap((f) => discoveryCommitPathsFor(f.folder));
         return [repoDir, snapshotPathStatus(repoDir, paths)] as const;
       }),
     );
@@ -798,8 +641,6 @@ export function createVercelConnector(deps: VercelConnectorDeps = {}): Connector
         vercelTeam: { id: team.teamId },
         environment: env.environmentName,
         tokenEnv,
-        projectDir: folderPath,
-        ...(opts.targets ? { targets: true } : {}),
       }),
       askExistingOrNewProject,
       askProjectName: askDiscoveryProjectName,
@@ -807,9 +648,7 @@ export function createVercelConnector(deps: VercelConnectorDeps = {}): Connector
       sameRunNameCollisions,
     });
     const applied = await runDiscoverySequences(resolvedFolders, { overwrite: !!opts.overwrite }, sequenceDeps);
-    // `--targets`: a folder that wrote a deploy target commits its `.capy/deploy.json` with its keep.lock.
-    const wroteTarget = (folder: DiscoveryFolderResult): boolean => folder.environments.some((e) => e.outcome.deployTarget?.written === true);
-    const commits = commitForAppliedRepos(applied, beforeStatusByRepo, commitBranchName, VERCEL_COMMIT_MESSAGE, wroteTarget);
+    const commits = commitForAppliedRepos(applied, beforeStatusByRepo, commitBranchName, VERCEL_COMMIT_MESSAGE);
     return { ok: true, dryRun: false, plan, applied, ...(commits.length > 0 ? { commits } : {}) };
   };
 
@@ -865,12 +704,6 @@ export function createVercelConnector(deps: VercelConnectorDeps = {}): Connector
 function withTokenHelp<T extends ImportOutcome | DiscoveryOutcome>(outcome: T, opts: ConnectOpts): T {
   if (outcome.ok || outcome.link || outcome.code !== ERROR_CODES.VERCEL_AUTH_FAILED) return outcome;
   return { ...outcome, ...keyHelpFields(vercelKeyHelp(VERCEL_CONNECTOR_SECRET_NAME, { team: opts.team })) } as T;
-}
-
-
-async function listTargetsAt(dir: string): Promise<readonly TargetConfig[]> {
-  const { listTargets } = await import('../../deploy/config');
-  return listTargets(dir);
 }
 
 const toImportSkip = (s: VercelSkippedRecord): ImportSkip => ({ name: s.name, code: s.reason, ...(s.gitBranch ? { gitBranch: s.gitBranch } : {}) });

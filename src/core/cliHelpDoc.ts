@@ -11,7 +11,7 @@
  */
 import type { Argument, Command, Option } from 'commander';
 import { ERROR_CODES } from '../types/index';
-import { DEPLOY_DOKPLOY_PLAN_SCHEMA } from '../commands/deployDiscover/schema';
+import { DEPLOY_DOKPLOY_PLAN_SCHEMA, DEPLOY_VERCEL_PLAN_SCHEMA } from '../commands/deployDiscover/schema';
 
 export interface CliArgumentDoc {
   name: string;
@@ -66,7 +66,7 @@ export interface CliHelpDoc {
   name: string;
   version: string;
   commands: CliCommandDoc[];
-  /** JSON Schemas of the files commands read, by name (`deploy_dokploy_plan`). */
+  /** JSON Schemas of the files commands read, by name (`deploy_dokploy_plan`, `deploy_vercel_plan`). */
   schemas: Record<string, unknown>;
   errorCodes: string[];
   conventions: {
@@ -124,9 +124,14 @@ export const DRY_RUN_COMMANDS: ReadonlySet<string> = new Set([
 /** The JSON Schemas published in `capy help --json`. */
 export const HELP_SCHEMAS: Readonly<Record<string, unknown>> = {
   deploy_dokploy_plan: DEPLOY_DOKPLOY_PLAN_SCHEMA,
+  deploy_vercel_plan: DEPLOY_VERCEL_PLAN_SCHEMA,
 };
 
-/** Modes that are flags of a command rather than sub-commands, by command path. */
+/**
+ * Modes that are flags of a command rather than sub-commands, by command path.
+ * `capy deploy vercel --discover` is the same mode with another target: it is not listed
+ * separately, and its plan schema is published under `schemas.deploy_vercel_plan`.
+ */
 export const COMMAND_MODES: Readonly<Record<string, readonly CliModeDoc[]>> = {
   deploy: [
     {

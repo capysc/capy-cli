@@ -128,9 +128,9 @@ capy deploy [target] [options]
 | `--env-name <name>` | gh-actions: env name when --scope env |  |
 | `--no-deploy` | write and verify the target, but skip the platform deploy/redeploy (target mode) |  |
 | `--json` | describe the route (unanswered stops + any known branch problem) as JSON instead of travelling it |  |
-| `--discover` | dokploy: find the services that match Capy projects and print JSON (never prompts) |  |
-| `--plan <file>` | dokploy --discover: the plan file to check (see schemas.deploy_dokploy_plan in `capy help --json`) |  |
-| `--confirm <plan_id>` | dokploy --discover: write the plan that --dry-run printed (one PR per repo) |  |
+| `--discover` | dokploy/vercel: find the services that match Capy projects and print JSON (never prompts) |  |
+| `--plan <file>` | dokploy/vercel --discover: the plan file to check (see schemas.deploy_dokploy_plan and schemas.deploy_vercel_plan in `capy help --json`) |  |
+| `--confirm <plan_id>` | dokploy/vercel --discover: write the plan that --dry-run printed (one PR per repo) |  |
 | `--base-url <url>` | dokploy --discover: the Dokploy dashboard URL (else the org system variable _CONNECTOR_DOKPLOY_BASE_URL) |  |
 | `--resolve <NAME=pinned|local|remote|delete>` | answer a difference from Capy: pinned, local, remote or delete; NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict) | `[]` |
 | `--conflict <conflict_id>` | the conflict_id a conflict returned: binds --resolve to what was seen |  |
@@ -732,7 +732,6 @@ capy connect [provider] [options]
 | `--project <project>` | vercel import: Vercel project id or name (under --discover: the project that wins a mapping collision) |  |
 | `--team <team>` | vercel import/discover: Vercel team slug or id (default: the token's only team) |  |
 | `--json` | emit machine-readable JSON instead of the human UI (import connectors) |  |
-| `--targets` | Also write a Vercel deploy target for each imported environment |  |
 | `--dry-run` | dokploy import/discover: preview the plan only — resolve settings + read Dokploy, write/push nothing |  |
 | `--discover` | dokploy/vercel: find every Dokploy service / Vercel project matching a repo under cwd, instead of one named --application/--compose/--project |  |
 | `-y, --yes` | dokploy import/discover: skip the confirmation prompt (import: --overwrite's clear/replace/import ask) — discover never prompts and needs --yes to write |  |
@@ -831,6 +830,72 @@ JSON Schemas of the files commands read, as published under `schemas` in `capy h
             "type": "string",
             "minLength": 1,
             "description": "git branch the Dokploy service tracks (the CI deploy PR base)"
+          },
+          "vars": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+            },
+            "description": "Variable names the target delivers; each must exist on the Capy branch"
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+### `deploy_vercel_plan`
+
+```json
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "capy deploy vercel --discover plan",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "entries"
+  ],
+  "properties": {
+    "version": {
+      "const": 1
+    },
+    "entries": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "project_id",
+          "branch",
+          "service_id",
+          "git_branch",
+          "vars"
+        ],
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Capy project id"
+          },
+          "branch": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Capy branch the target ships from"
+          },
+          "service_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Vercel environment id from the discovery facts (a project plus one of its environments)"
+          },
+          "git_branch": {
+            "type": "string",
+            "minLength": 1,
+            "description": "git branch the Vercel project deploys from (the CI deploy PR base)"
           },
           "vars": {
             "type": "array",
@@ -955,6 +1020,8 @@ Every refusal carries a stable `code` — branch on it, never on message text.
 - `VERCEL_OPTIONS_INVALID`
 - `VERCEL_SPLIT_NOT_RESTORED`
 - `VERCEL_URL_INVALID`
+- `VERCEL_PROJECT_NOT_GITHUB`
+- `VERCEL_ENV_LIST_TRUNCATED`
 - `EDIT_NEEDS_TTY`
 - `EDIT_STDIN_LOCAL_ONLY`
 - `STDIN_EMPTY`

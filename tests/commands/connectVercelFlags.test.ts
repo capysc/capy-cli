@@ -2,7 +2,7 @@
  * The `capy connect vercel` flags, through the real CLI program:
  *   - `--create-token` and `--token-expires-days` are gone — an unknown option
  *     gets the CLI's normal refusal (exit 1), and neither is in `--help`;
- *   - `--targets` exists, with its approved help line.
+ *   - `--targets` is gone too: connect writes no deploy target (`capy deploy vercel --discover` does).
  *
  * Spawns `src/index.ts` with an empty HOME, so nothing on this machine is read.
  */
@@ -35,12 +35,17 @@ describe('capy connect vercel — flags', () => {
     expect(r.stdout).toBe('');
   });
 
-  test('--help lists --targets with its help line, and neither removed flag', () => {
+  test('--targets is an unknown option too: connect imports values and writes no deploy target', () => {
+    const r = capy(['connect', 'vercel', '--targets']);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('--targets');
+    expect(r.stdout).toBe('');
+  });
+
+  test('--help lists none of the removed flags', () => {
     const r = capy(['connect', '--help']);
     expect(r.status).toBe(0);
-    expect(r.stdout).toContain('--targets');
-    // the help wraps lines to the terminal width: compare with whitespace collapsed
-    expect(r.stdout.replace(/\s+/g, ' ')).toContain('--targets Also write a Vercel deploy target for each imported environment');
+    expect(r.stdout).not.toContain('--targets');
     expect(r.stdout).not.toContain('--create-token');
     expect(r.stdout).not.toContain('--token-expires-days');
   });

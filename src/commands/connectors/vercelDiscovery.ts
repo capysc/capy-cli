@@ -208,7 +208,6 @@ function envReport(e: Extract<DiscoveryFolderResult, { ok: true }>['environments
     branchCreated: e.branchCreated,
     overwrote: e.overwrote,
     imported: e.outcome.imported.map((i) => i.varName),
-    ...(e.outcome.deployTarget ? { deployTarget: e.outcome.deployTarget } : {}),
     ...(e.outcome.replacedNames ? { replacedNames: e.outcome.replacedNames } : {}),
     ...(e.outcome.cleared ? { cleared: e.outcome.cleared } : {}),
     unchanged: e.outcome.unchanged,
@@ -254,17 +253,6 @@ function appliedReport(applied: readonly DiscoveryFolderResult[]) {
   );
 }
 
-/** `--targets`: every deploy target by folder and name — written (a real run) or, under `--dry-run`, planned. */
-function deployTargetsReport(outcome: Extract<DiscoveryOutcome, { ok: true }>) {
-  const written = (outcome.applied ?? []).flatMap((f) =>
-    f.environments.flatMap((e) =>
-      e.outcome.deployTarget ? [{ folder: f.folder || '.', branch: e.environmentName, name: e.outcome.deployTarget.name, written: e.outcome.deployTarget.written }] : [],
-    ),
-  );
-  const planned = (outcome.deployTargets ?? []).map((t) => ({ folder: t.folder || '.', branch: t.branch, name: t.name, written: t.written }));
-  return [...planned, ...written];
-}
-
 function commitsReport(commits: NonNullable<Extract<DiscoveryOutcome, { ok: true }>['commits']>) {
   return commits.map((c) =>
     c.ok
@@ -305,13 +293,12 @@ export function reportVercelDiscovery(
         plan,
         ...(applied ? { applied } : {}),
         ...(commits ? { commits } : {}),
-        ...(opts.targets ? { deployTargets: deployTargetsReport(outcome) } : {}),
       }),
     );
     return { linked };
   }
 
-  const lines = [...humanLines(outcome, plan, applied, commits), ...(opts.targets ? targetLines(deployTargetsReport(outcome)) : [])];
+  const lines = humanLines(outcome, plan, applied, commits);
   lines.forEach((l) => console.log(l));
   return { linked };
 }
@@ -366,16 +353,6 @@ function appliedLines(outcome: Extract<DiscoveryOutcome, { ok: true }>, applied:
     }),
     ...(f.ok ? (f.activeBranch ? [`    folder is on branch ${f.activeBranch}`] : []) : [`    ✗ ${f.code}: ${f.message}`]),
   ]);
-}
-
-// COPY-FLAG: new user-facing string, minimal/neutral wording.
-function targetLines(targets: ReturnType<typeof deployTargetsReport>): readonly string[] {
-  if (targets.length === 0) return [];
-  return [
-    '  Deploy targets:',
-    ...targets.map((t) => `    ${t.folder}: ${t.written ? 'wrote' : 'would write'} ${t.name} (${t.branch})`),
-    '',
-  ];
 }
 
 // COPY-FLAG: report lines mirror Dokploy's discovery report word for word, with Vercel substituted; nothing new invented.

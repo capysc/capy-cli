@@ -282,9 +282,6 @@ export class ConnectCommand {
           skipped: outcome.skipped,
           warnings: outcome.warnings,
           pushed,
-          ...(outcome.deployTargetSaved === undefined ? {} : { deployTargetSaved: outcome.deployTargetSaved }),
-          // `--targets` only: the deploy target by folder and name (`written: false` under --dry-run).
-          ...(outcome.deployTarget ? { deployTargets: [{ folder: '.', ...outcome.deployTarget }] } : {}),
         }),
       );
       return { linked: wrote };
@@ -328,13 +325,6 @@ export class ConnectCommand {
     }
     for (const w of outcome.warnings) {
       console.log(`  ⚠ ${w.code}: ${w.names.join(', ')}`);
-    }
-    if (outcome.deployTargetSaved) {
-      console.log(`  Saved a ${label} deploy target.`);
-    }
-    if (outcome.deployTarget) {
-      // COPY-FLAG: new user-facing string, minimal/neutral wording.
-      console.log(`  ${outcome.deployTarget.written ? 'Wrote' : 'Would write'} deploy target ${outcome.deployTarget.name}.`);
     }
     console.log('');
     return { linked: wrote };

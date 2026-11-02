@@ -1,5 +1,4 @@
 import { ConnectorMetadata } from '../../types/index';
-import type { TargetConfig } from '../../deploy/adapter';
 import type { Blocked } from '../../ui/screens/contract';
 import type { DokployImportSource } from '../../deploy/dokployApi';
 import type { VercelImportSource } from '../../deploy/vercelApi';
@@ -183,26 +182,6 @@ export interface ConnectOpts {
    * project again.
    */
   vercelProject?: { id: string; name: string; productionBranch?: string };
-  /**
-   * Vercel import only: the folder a saved deploy target's `.capy/deploy.json`
-   * belongs in. Set INTERNALLY by discovery (each folder has its own); a plain
-   * import uses the current directory.
-   */
-  projectDir?: string;
-  /**
-   * Vercel only (flag `--targets`): also write a Vercel deploy target for each
-   * environment that imports, without asking — in non-interactive and `--json`
-   * runs too. Under `--dry-run` the targets are listed, never written.
-   */
-  targets?: boolean;
-}
-
-/** A deploy target `--targets` wrote (`written`), or under `--dry-run` would write. Names only. */
-export interface DeployTargetReport {
-  name: string;
-  /** The Vercel environment (= the Capy branch) the target ships to. */
-  environment: string;
-  written: boolean;
 }
 
 export interface RotateOpts {
@@ -294,16 +273,6 @@ export type ImportOutcome =
       unchanged: readonly string[];
       skipped: readonly ImportSkip[];
       warnings: readonly ImportWarning[];
-      /** Vercel `--targets` only. */
-      deployTargetSaved?: boolean;
-      /** Vercel `--targets` only: the deploy target this import wrote (dry run: would write). Absent when none applies. */
-      deployTarget?: DeployTargetReport;
-      /**
-       * Vercel `--targets` only, internal: the target for `writeImportOutcome`
-       * to save into `dir`'s `.capy/deploy.json` once the import itself is
-       * written — so a failed write leaves no target behind. Never set under a dry run.
-       */
-      deployTargetToWrite?: { dir: string; target: TargetConfig };
       /**
        * Dokploy import only: names with a different local value that a real
        * (non-dry-run) run would have prompted about. Only populated under

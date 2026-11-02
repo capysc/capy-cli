@@ -382,9 +382,9 @@ const deploy = program
   .option('--no-deploy', 'write and verify the target, but skip the platform deploy/redeploy (target mode)')
   .option('--json', 'describe the route (unanswered stops + any known branch problem) as JSON instead of travelling it')
   // COPY-FLAG: the option descriptions of `deploy <target> --discover` are minimal and neutral.
-  .option('--discover', 'dokploy: find the services that match Capy projects and print JSON (never prompts)')
-  .option('--plan <file>', 'dokploy --discover: the plan file to check (see schemas.deploy_dokploy_plan in `capy help --json`)')
-  .option('--confirm <plan_id>', 'dokploy --discover: write the plan that --dry-run printed (one PR per repo)')
+  .option('--discover', 'dokploy/vercel: find the services that match Capy projects and print JSON (never prompts)')
+  .option('--plan <file>', 'dokploy/vercel --discover: the plan file to check (see schemas.deploy_dokploy_plan and schemas.deploy_vercel_plan in `capy help --json`)')
+  .option('--confirm <plan_id>', 'dokploy/vercel --discover: write the plan that --dry-run printed (one PR per repo)')
   .option('--base-url <url>', 'dokploy --discover: the Dokploy dashboard URL (else the org system variable _CONNECTOR_DOKPLOY_BASE_URL)')
   .addOption(resolveOption())
   .addOption(conflictOption())
@@ -1059,7 +1059,6 @@ program
   .option('--project <project>', 'vercel import: Vercel project id or name (under --discover: the project that wins a mapping collision)')
   .option('--team <team>', 'vercel import/discover: Vercel team slug or id (default: the token\'s only team)')
   .option('--json', 'emit machine-readable JSON instead of the human UI (import connectors)')
-  .option('--targets', 'Also write a Vercel deploy target for each imported environment') // COPY-FLAG
   .option(
     '--dry-run',
     'dokploy import/discover: preview the plan only — resolve settings + read Dokploy, write/push nothing',
@@ -1114,7 +1113,6 @@ program
       environment: options.environment,
       project: options.project,
       team: options.team,
-      targets: options.targets === true,
       conflictFlags: rawConflictFlagsOf(command),
     });
   });

@@ -23,6 +23,7 @@ import { createHash } from 'crypto';
 import type { OrgRepoLink } from '../../service/serviceClient';
 import { sortedCopy } from '../../deploy/dokployApi';
 import { PLAN_SCHEMA_REF } from './schema';
+import type { KindOverrides, SchemaRef } from './kind';
 import {
   CapyProjectFacts,
   ExistingTarget,
@@ -85,7 +86,8 @@ export interface Proposal {
   /** The Capy branch. */
   readonly branch: string;
   readonly git_branch: string;
-  readonly target: ProposalTarget;
+  /** Dokploy: a `ProposalTarget`. Another provider shows its own shape. */
+  readonly target: ProposalTarget | Readonly<Record<string, unknown>>;
   readonly evidence: {
     readonly repo_match: boolean;
     readonly path_match: boolean;
@@ -140,7 +142,7 @@ export interface ProjectOut {
 export type NextStep =
   | { readonly action: 'review'; readonly proposal_ids: readonly string[] }
   | { readonly action: 'resolve'; readonly service_ids: readonly string[] }
-  | { readonly action: 'write_plan'; readonly schema: typeof PLAN_SCHEMA_REF }
+  | { readonly action: 'write_plan'; readonly schema: SchemaRef }
   | { readonly run: string };
 
 export interface Notice {
@@ -149,20 +151,24 @@ export interface Notice {
 }
 
 export interface DeployDiscovery {
-  readonly base_url: string;
+  /** Dokploy. Another provider puts its own header fields here instead (`DiscoveryInput.header`). */
+  readonly base_url?: string;
+  readonly teams?: readonly unknown[];
   readonly services: readonly ServiceFacts[];
   readonly projects: readonly ProjectOut[];
   readonly proposals: readonly Proposal[];
   readonly already_configured: readonly AlreadyConfigured[];
   readonly unresolved: readonly Unresolved[];
   readonly next_steps: readonly NextStep[];
-  readonly plan_schema_ref: typeof PLAN_SCHEMA_REF;
+  readonly plan_schema_ref: SchemaRef;
   readonly notices: readonly Notice[];
 }
 
 /** Everything discovery reads, already read. */
 export interface DiscoveryInput {
   readonly baseUrl: string;
+  /** Replaces `base_url` in the document, for a provider that has none. Absent: `{ base_url }`. */
+  readonly header?: Readonly<Record<string, unknown>>;
   readonly services: readonly ServiceFacts[];
   readonly projects: ReadonlyMap<string, CapyProjectFacts>;
   /** By `repoKey`: the repo's default branch. Absent / `null`: not known. */
@@ -303,10 +309,14 @@ function forProject(
   service: ServiceFacts,
   project: CapyProjectFacts,
   matched: Matched,
+  kind?: KindOverrides,
 ): ForProject {
   const repo = service.repo as RepoOut;
   const defaultBranch = input.defaultBranches[repoKey(repo)];
-  const choice = chooseCapyBranch(service.branch, defaultBranch, service.environment, project.branches);
+  const choice =
+    kind === undefined
+      ? chooseCapyBranch(service.branch, defaultBranch, service.environment, project.branches)
+      : kind.chooseCapyBranch(service, defaultBranch, project.branches);
   if (choice === null || service.branch === null) {
     return {
       kind: 'unresolved',
@@ -319,14 +329,15 @@ function forProject(
     };
   }
   const gitBranch = service.branch;
-  const existing = configuredTarget(input.existingTargets[project.project_id] ?? [], service.service_id, choice.branch);
+  const projectTargets = input.existingTargets[project.project_id] ?? [];
+  const existing = kind === undefined ? configuredTarget(projectTargets, service.service_id, choice.branch) : kind.configured(projectTargets, service, choice.branch);
   if (existing !== undefined) {
     return {
       kind: 'configured',
       configured: { project_id: project.project_id, branch: choice.branch, service_id: service.service_id, target_name: existing.name },
     };
   }
-  const conflict = conflictingTarget(input.existingTargets[project.project_id] ?? [], service.service_id, choice.branch);
+  const conflict = kind === undefined ? conflictingTarget(projectTargets, service.service_id, choice.branch) : kind.conflicting(projectTargets, service, choice.branch);
   const projectNames = project.var_names_by_branch[choice.branch] ?? [];
   const overlap = overlapOf(service.env_var_names, projectNames);
   const vars = sharedNames(service.env_var_names, projectNames);
@@ -336,7 +347,7 @@ function forProject(
     project_id: project.project_id,
     branch: choice.branch,
     git_branch: gitBranch,
-    target: targetOf(input.baseUrl, service, choice.branch, gitBranch, vars),
+    target: kind === undefined ? targetOf(input.baseUrl, service, choice.branch, gitBranch, vars) : kind.proposalTarget(service, choice.branch, gitBranch, vars),
     evidence: {
       repo_match: true,
       path_match: matched.exactPath,
@@ -360,11 +371,11 @@ interface ServiceResult {
   readonly unresolved: readonly Unresolved[];
 }
 
-function resolveService(input: DiscoveryInput, service: ServiceFacts, links: readonly OrgRepoLink[]): ServiceResult {
+function resolveService(input: DiscoveryInput, service: ServiceFacts, links: readonly OrgRepoLink[], kind?: KindOverrides): ServiceResult {
   const match = matchService(service, links, input.projects);
   if (match.kind === 'unresolved') return { drafts: [], configured: [], unresolved: [match.unresolved] };
   const { matched } = match;
-  const perProject = matched.projects.map((project) => forProject(input, service, project, matched));
+  const perProject = matched.projects.map((project) => forProject(input, service, project, matched, kind));
   const ambiguous: readonly Unresolved[] =
     matched.projects.length > 1
       ? [
@@ -403,14 +414,14 @@ function withCompeting(drafts: readonly Draft[]): readonly Proposal[] {
 const needsReview = (p: Proposal): boolean =>
   p.confidence.project === 'needs_review' || p.confidence.branch === 'needs_review' || p.confidence.vars === 'needs_review';
 
-function nextStepsOf(proposals: readonly Proposal[], unresolved: readonly Unresolved[]): readonly NextStep[] {
+function nextStepsOf(proposals: readonly Proposal[], unresolved: readonly Unresolved[], kind?: KindOverrides): readonly NextStep[] {
   const review = proposals.filter(needsReview).map((p) => p.proposal_id);
   const unresolvedServices = uniqueSorted(unresolved.flatMap((u) => (u.service_id === undefined ? [] : [u.service_id])));
   return [
     ...(review.length > 0 ? [{ action: 'review' as const, proposal_ids: review }] : []),
     ...(unresolvedServices.length > 0 ? [{ action: 'resolve' as const, service_ids: unresolvedServices }] : []),
-    { action: 'write_plan' as const, schema: PLAN_SCHEMA_REF },
-    { run: 'capy deploy dokploy --discover --plan <file> --dry-run' },
+    { action: 'write_plan' as const, schema: kind?.schemaRef ?? PLAN_SCHEMA_REF },
+    { run: `${kind?.command ?? 'capy deploy dokploy --discover'} --plan <file> --dry-run` },
   ];
 }
 
@@ -428,13 +439,13 @@ function projectOut(project: CapyProjectFacts, input: DiscoveryInput): ProjectOu
 }
 
 /** The whole discovery document. Pure. */
-export function buildDeployDiscovery(input: DiscoveryInput): DeployDiscovery {
+export function buildDeployDiscovery(input: DiscoveryInput, kind?: KindOverrides): DeployDiscovery {
   const links = [...input.projects.values()].flatMap((p) => p.links);
-  const results = input.services.map((service) => resolveService(input, service, links));
+  const results = input.services.map((service) => resolveService(input, service, links, kind));
   const proposals = withCompeting(results.flatMap((r) => r.drafts));
   const unresolved = results.flatMap((r) => r.unresolved);
   return {
-    base_url: input.baseUrl,
+    ...(input.header ?? { base_url: input.baseUrl }),
     services: input.services,
     projects: sortedCopy(
       [...input.projects.values()].filter((p) => p.links.length > 0).map((p) => projectOut(p, input)),
@@ -443,8 +454,8 @@ export function buildDeployDiscovery(input: DiscoveryInput): DeployDiscovery {
     proposals,
     already_configured: results.flatMap((r) => r.configured),
     unresolved,
-    next_steps: nextStepsOf(proposals, unresolved),
-    plan_schema_ref: PLAN_SCHEMA_REF,
+    next_steps: nextStepsOf(proposals, unresolved, kind),
+    plan_schema_ref: kind?.schemaRef ?? PLAN_SCHEMA_REF,
     notices: input.notices ?? [],
   };
 }

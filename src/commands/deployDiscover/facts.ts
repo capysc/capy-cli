@@ -57,7 +57,7 @@ export interface RepoOut {
   readonly name: string;
 }
 
-export interface ServiceFacts {
+export interface DokployServiceFacts {
   readonly service_id: string;
   readonly kind: 'application' | 'compose';
   readonly name: string;
@@ -71,6 +71,48 @@ export interface ServiceFacts {
   readonly env_var_names: readonly string[];
 }
 
+/** A Vercel environment of a project that holds variables (CAP-696): one deploy target is one of these. */
+export interface VercelServiceFacts {
+  /** `<project id>:<environment>`; see `vercelServiceId`. Opaque to the caller: copy it into a plan. */
+  readonly service_id: string;
+  readonly kind: 'vercel';
+  /** The Vercel project's name. */
+  readonly name: string;
+  readonly vercel_project_id: string;
+  /** The team that owns the project; `null` for a personal-account project. */
+  readonly team: { readonly id: string; readonly slug?: string } | null;
+  /** `production`, `preview`, `development`, or a custom environment's slug. */
+  readonly environment: string;
+  readonly custom_environment_id: string | null;
+  /** A preview environment scoped to one git branch (its records carry that `gitBranch`); `null`: every preview branch. */
+  readonly git_branch_scope: string | null;
+  /** The project's root directory as Vercel holds it; `null`: the repo root. */
+  readonly root_directory: string | null;
+  readonly repo: RepoOut | null;
+  /** The project's production branch (the deploy PR base); `null` when Vercel names none. */
+  readonly branch: string | null;
+  /** The REPO-RELATIVE folder of the project; `null` when it has no repo. */
+  readonly path: string | null;
+  /** Names only: never a value. */
+  readonly env_var_names: readonly string[];
+}
+
+/** What matching, planning and writing read from a service. */
+export type ServiceFacts = DokployServiceFacts | VercelServiceFacts;
+
+const VERCEL_STANDARD_ENVS: readonly string[] = ['production', 'preview', 'development'];
+
+/**
+ * The service id of a Vercel project + environment: `<project id>:production`,
+ * `<project id>:preview`, `<project id>:preview@<git branch>` (a preview scoped
+ * to one branch), `<project id>:custom:<slug>`. The same id is read back off an
+ * existing target's options, so "already configured" is a plain comparison.
+ */
+export function vercelServiceId(projectId: string, vercelEnv: string, gitBranch?: string | null): string {
+  const env = VERCEL_STANDARD_ENVS.includes(vercelEnv) ? vercelEnv : `custom:${vercelEnv}`;
+  return `${projectId}:${env}${vercelEnv === 'preview' && gitBranch ? `@${gitBranch}` : ''}`;
+}
+
 /** The NAMES in a Dokploy env text (the Capy-managed block and Capy's own runtime pair left out). The parsed values are dropped on the spot. */
 export function envVarNamesOf(rawEnv: string | null): readonly string[] {
   return uniqueSorted(listImportableEntries(rawEnv).map((entry) => entry.name));
@@ -82,7 +124,7 @@ export function envVarNamesOf(rawEnv: string | null): readonly string[] {
  * (`owner`, `repository`, `branch`), the same ones `capy connect dokploy
  * --discover` already matches on.
  */
-export function serviceFactsOf(detail: ServiceDetail): ServiceFacts {
+export function serviceFactsOf(detail: ServiceDetail): DokployServiceFacts {
   const git = hasGitSource(detail);
   return {
     service_id: detail.serviceId,
@@ -163,7 +205,7 @@ export interface ExistingTarget {
   readonly name: string;
   readonly kind: string;
   readonly branch: string;
-  /** The Dokploy service the target points at (`composeId` / `applicationId`), when it is a Dokploy target. */
+  /** The service the target points at: a Dokploy `composeId` / `applicationId`, or a Vercel project + environment (`vercelServiceId`). */
   readonly service_id: string | null;
 }
 
@@ -188,7 +230,10 @@ export function parseDeployJson(content: string | null): ParsedDeployJson {
         const target = asObject(value);
         if (target === undefined) return [];
         const options = asObject(target.options) ?? {};
-        const serviceId = options.composeId ?? options.applicationId;
+        const vercelProject = target.kind === 'vercel' && typeof options.projectId === 'string' && typeof options.vercelEnv === 'string';
+        const serviceId = vercelProject
+          ? vercelServiceId(options.projectId as string, options.vercelEnv as string, typeof options.gitBranch === 'string' ? options.gitBranch : null)
+          : (options.composeId ?? options.applicationId);
         return [
           {
             name,

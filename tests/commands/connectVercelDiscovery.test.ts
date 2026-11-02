@@ -533,99 +533,7 @@ describe('connector.discover — a real run, end to end', () => {
     );
   }, 30_000);
 
-  test('--targets --yes: each environment that imports gets its vercel-<environment> target (no prompt, non-interactive), and `.capy/deploy.json` is IN the local discovery commit — never pushed', async () => {
-    await withIsolatedGlobalDir(() =>
-      withExitCodeRestored(() =>
-        inRepo(async (root) => {
-          const { ctx, mainBranch, mainHead } = await prepareRealRun(root, 'org_v_targets');
-          const confirm = mock(async () => true);
-          const run = await captureConsole(() => connectorFor(root, e2eData(), { confirm }).connector.discover!(ctx, discoverOpts({ yes: true, targets: true })));
-          const outcome = run.result;
-          expect(outcome.ok).toBe(true);
-          if (!outcome.ok) return;
-
-          // the targets, written into the folder's own `.capy/deploy.json`, in the shape the interactive offer writes
-          const byName = Object.fromEntries(listTargets(root).map((t) => [t.name, t]));
-          expect(Object.keys(byName).toSorted()).toEqual(['vercel-production', 'vercel-staging']);
-          expect(byName['vercel-production']).toEqual({
-            name: 'vercel-production',
-            kind: 'vercel',
-            branch: 'production',
-            vars: ['A', 'SHARED'],
-            mode: 'ci',
-            gitBaseBranch: 'main',
-            options: { projectDir: '.', vercelEnv: 'production', projectId: 'prj_web', teamId: 'team_acme' },
-          });
-          expect(byName['vercel-staging']).toEqual({
-            name: 'vercel-staging',
-            kind: 'vercel',
-            branch: 'staging',
-            vars: ['B', 'SHARED'],
-            mode: 'ci',
-            options: { projectDir: '.', vercelEnv: 'staging', projectId: 'prj_web', teamId: 'team_acme', customEnvironmentId: 'c_stage' },
-          });
-          expect(confirm.mock.calls.length).toBe(0);
-
-          // reported per environment (by name), never a value
-          const folder = outcome.applied?.[0];
-          expect(folder?.ok && folder.environments.map((e) => [e.environmentName, e.outcome.deployTarget])).toEqual([
-            ['staging', { name: 'vercel-staging', environment: 'staging', written: true }],
-            ['production', { name: 'vercel-production', environment: 'production', written: true }],
-          ]);
-
-          // the local discovery commit carries `.capy/deploy.json` beside keep.lock — on its own branch, never pushed
-          const commit = outcome.commits?.[0];
-          expect(commit).toMatchObject({ ok: true, dryRun: false });
-          if (!commit?.ok || commit.dryRun) return;
-          expect([...commit.committedFiles].toSorted()).toEqual(['.capy/deploy.json', '.gitignore', 'keep.lock']);
-          // (`.gitignore` was already committed and the run left it unchanged, so git records only the two files that changed)
-          expect(git(root, ['show', '--name-only', '--format=', commit.branch]).split('\n').filter(Boolean).toSorted()).toEqual(['.capy/deploy.json', 'keep.lock']);
-          expect(JSON.parse(git(root, ['show', `${commit.branch}:.capy/deploy.json`])).targets['vercel-production'].kind).toBe('vercel');
-          expect(git(root, ['rev-parse', mainBranch]).trim()).toBe(mainHead);
-          expect(git(root, ['status', '--porcelain', '--', '.capy/deploy.json']).trim()).toBe('');
-          const printed = [...run.stdout, ...run.stderr].join('\n');
-          [...ALL_SECRETS, 'tok_fake'].forEach((v) => expect(printed).not.toContain(v));
-        }),
-      ),
-    );
-  }, 30_000);
-
-  test('--targets with a committed, clean `.capy/deploy.json`: the new targets are added beside the existing one and the file\'s change is committed; with an UNCOMMITTED one the commit is refused (never mixed in), though the files are still written', async () => {
-    await withIsolatedGlobalDir(() =>
-      withExitCodeRestored(() =>
-        inRepo(async (root) => {
-          const prior = { name: 'mine', kind: 'cf-worker', branch: 'production', vars: [], options: {} };
-          const clean = await prepareRealRun(root, 'org_v_clean_deploy');
-          upsertTarget(root, prior);
-          git(root, ['add', '.capy/deploy.json']);
-          git(root, ['commit', '-q', '-m', 'add deploy.json']);
-          const cleanRun = await connectorFor(root, e2eData()).connector.discover!(clean.ctx, discoverOpts({ yes: true, targets: true }));
-          expect(cleanRun.ok).toBe(true);
-          if (!cleanRun.ok) return;
-          const commit = cleanRun.commits?.[0];
-          expect(commit).toMatchObject({ ok: true, dryRun: false });
-          if (commit?.ok && !commit.dryRun) {
-            expect(Object.keys(JSON.parse(git(root, ['show', `${commit.branch}:.capy/deploy.json`])).targets).toSorted()).toEqual(['mine', 'vercel-production', 'vercel-staging']);
-          }
-        }),
-      ),
-    );
-    await withIsolatedGlobalDir(() =>
-      withExitCodeRestored(() =>
-        inRepo(async (root) => {
-          const dirty = await prepareRealRun(root, 'org_v_dirty_deploy');
-          upsertTarget(root, { name: 'mine', kind: 'cf-worker', branch: 'production', vars: [], options: {} });
-          const dirtyRun = await connectorFor(root, e2eData()).connector.discover!(dirty.ctx, discoverOpts({ yes: true, targets: true }));
-          expect(dirtyRun.ok).toBe(true);
-          if (!dirtyRun.ok) return;
-          expect(dirtyRun.commits?.[0]).toMatchObject({ ok: false, code: 'DOKPLOY_COMMIT_WOULD_MIX' });
-          expect(Object.keys(listTargets(root).reduce((acc, t) => ({ ...acc, [t.name]: t }), {})).toSorted()).toEqual(['mine', 'vercel-production', 'vercel-staging']);
-        }),
-      ),
-    );
-  }, 30_000);
-
-  test('without --targets a run writes no deploy.json and the commit holds keep.lock and .gitignore only (unchanged behavior)', async () => {
+  test('a run writes no deploy.json (connect writes no target) and the commit holds keep.lock and .gitignore only', async () => {
     await withIsolatedGlobalDir(() =>
       withExitCodeRestored(() =>
         inRepo(async (root) => {
@@ -641,29 +549,7 @@ describe('connector.discover — a real run, end to end', () => {
     );
   }, 30_000);
 
-  test('--targets --dry-run --json: ONE pure JSON object lists every target it would write, by folder and name; nothing is written; the previewed commit names `.capy/deploy.json`', async () => {
-    await withExitCodeRestored(() =>
-      inRepo(async (root) => {
-        const { connector, fetchMock } = connectorFor(root, e2eData());
-        const run = await captureConsole(() => new ConnectCommand(false)['executeDiscovery'](connector, 'vercel', fakeDiscoveryCtx(), discoverOpts({ dryRun: true, json: true, targets: true })));
-        expect(run.stdout.length).toBe(1);
-        const out = JSON.parse(run.stdout[0]);
-        expect(out.dryRun).toBe(true);
-        expect(out.deployTargets).toEqual([
-          { folder: '.', branch: 'staging', name: 'vercel-staging', written: false },
-          { folder: '.', branch: 'production', name: 'vercel-production', written: false },
-        ]);
-        expect(out.commits[0]).toMatchObject({ ok: true, dryRun: true });
-        expect(out.commits[0].wouldCommitFiles).toContain('.capy/deploy.json');
-        expect(existsSync(join(root, '.capy', 'deploy.json'))).toBe(false);
-        expect(git(root, ['status', '--porcelain']).trim()).toBe('');
-        expect(callsOf(fetchMock).every((c) => c.method === 'GET')).toBe(true);
-        [...ALL_SECRETS, 'tok_fake'].forEach((v) => expect([...run.stdout, ...run.stderr].join('\n')).not.toContain(v));
-      }),
-    );
-  });
-
-  test('--dry-run without --targets reports no targets and previews no deploy.json', async () => {
+  test('--dry-run reports no targets and previews no deploy.json', async () => {
     await withExitCodeRestored(() =>
       inRepo(async (root) => {
         const { connector } = connectorFor(root, e2eData());
@@ -675,15 +561,4 @@ describe('connector.discover — a real run, end to end', () => {
     );
   });
 
-  test('--targets --dry-run skips a project + environment that already has a target, and numbers a name that is taken', async () => {
-    await withExitCodeRestored(() =>
-      inRepo(async (root) => {
-        upsertTarget(root, { name: 'mine', kind: 'vercel', branch: 'production', vars: [], options: { projectId: 'prj_web', vercelEnv: 'production' } });
-        upsertTarget(root, { name: 'vercel-staging', kind: 'cf-worker', branch: 'x', vars: [], options: {} });
-        const { connector } = connectorFor(root, e2eData());
-        const run = await captureConsole(() => new ConnectCommand(false)['executeDiscovery'](connector, 'vercel', fakeDiscoveryCtx(), discoverOpts({ dryRun: true, json: true, targets: true })));
-        expect(JSON.parse(run.stdout[0]).deployTargets).toEqual([{ folder: '.', branch: 'staging', name: 'vercel-staging-2', written: false }]);
-      }),
-    );
-  });
 });

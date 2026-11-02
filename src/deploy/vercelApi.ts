@@ -193,6 +193,12 @@ export interface VercelClientOptions {
   maxRetries?: number;
   /** A requested wait longer than this is refused rather than slept. Default 60 000 ms. */
   maxWaitMs?: number;
+  /**
+   * Never keep an env record's `value`: the list response may carry one for a
+   * plain record, and a caller that only needs NAMES (`capy deploy vercel
+   * --discover`) must not hold it, even in memory.
+   */
+  dropValues?: boolean;
 }
 
 export interface VercelEnvList {
@@ -224,6 +230,13 @@ const asRecord = (v: unknown): Record<string, unknown> | null =>
 const nonEmptyString = (v: unknown): string | undefined => (typeof v === 'string' && v !== '' ? v : undefined);
 
 const numberOrNull = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+
+/** A pagination cursor: a finite number (a timestamp) or a non-empty string (a continuation token), as text. */
+const cursorOf = (v: unknown): string | null => {
+  const n = numberOrNull(v);
+  if (n !== null) return String(n);
+  return typeof v === 'string' && v !== '' ? v : null;
+};
 
 function parseJson(text: string): unknown {
   try {
@@ -331,9 +344,10 @@ export function createVercelClient(token: string, options: VercelClientOptions =
         // A page with nothing new ends the walk: a server that ignores the
         // continuation parameter would otherwise be asked for page 1 forever.
         const fresh = projects.filter((p) => !seen.includes(p.id));
-        const next = Array.isArray(body) ? null : numberOrNull(asRecord(asRecord(body)?.pagination)?.next);
+        // The docs call `from` a "timestamp or continuation token" and give `next` no type: take either.
+        const next = Array.isArray(body) ? null : cursorOf(asRecord(asRecord(body)?.pagination)?.next);
         if (next === null || fresh.length === 0 || page >= MAX_PAGES) return fresh;
-        return [...fresh, ...(await collect(String(next), [...seen, ...fresh.map((p) => p.id)], page + 1))];
+        return [...fresh, ...(await collect(next, [...seen, ...fresh.map((p) => p.id)], page + 1))];
       };
       return collect(undefined, [], 1);
     },
@@ -360,7 +374,7 @@ export function createVercelClient(token: string, options: VercelClientOptions =
     async listEnvs(projectId, teamId) {
       const body = asRecord(await get(`/v10/projects/${enc(projectId)}/env`, { teamId }));
       const envs = (Array.isArray(body?.envs) ? body.envs : []).flatMap((e) => {
-        const parsed = parseEnvRecord(e);
+        const parsed = parseEnvRecord(e, options.dropValues === true);
         return parsed ? [parsed] : [];
       });
       const next = numberOrNull(asRecord(body?.pagination)?.next);
@@ -409,7 +423,7 @@ function parseTargets(raw: unknown): readonly string[] {
   return Array.isArray(raw) ? raw.filter((t): t is string => typeof t === 'string') : [];
 }
 
-function parseEnvRecord(raw: unknown): VercelEnvRecord | null {
+function parseEnvRecord(raw: unknown, dropValue: boolean = false): VercelEnvRecord | null {
   const rec = asRecord(raw);
   const id = nonEmptyString(rec?.id);
   const key = nonEmptyString(rec?.key);
@@ -427,7 +441,7 @@ function parseEnvRecord(raw: unknown): VercelEnvRecord | null {
       : [],
     ...(gitBranch ? { gitBranch } : {}),
     ...(configurationId ? { configurationId } : {}),
-    ...(typeof rec.value === 'string' ? { value: rec.value } : {}),
+    ...(!dropValue && typeof rec.value === 'string' ? { value: rec.value } : {}),
   };
 }
 

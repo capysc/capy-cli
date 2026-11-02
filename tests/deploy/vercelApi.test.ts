@@ -146,6 +146,17 @@ describe('pagination', () => {
     expect(projects.map((p) => p.name)).toEqual(['a']);
   });
 
+  test('projects: a continuation TOKEN (a string `next`) is followed as it is, not mistaken for the end', async () => {
+    const reply = (body: unknown) => ({ status: 200, ok: true, text: async () => JSON.stringify(body) });
+    const fetchMock = mock()
+      .mockResolvedValueOnce(reply({ projects: [project('prj_a', 'a')], pagination: { count: 1, next: 'tok_abc' } }))
+      .mockResolvedValueOnce(reply({ projects: [project('prj_b', 'b')], pagination: { count: 1, next: null } }));
+    const projects = await createVercelClient(TOKEN, { fetch: fetchMock as unknown as VercelFetchLike }).listProjects('team_1');
+    expect(projects.map((p) => p.id)).toEqual(['prj_a', 'prj_b']);
+    expect(new URL(callsOf(fetchMock)[1].url).searchParams.get('from')).toBe('tok_abc');
+    expect(new URL(callsOf(fetchMock)[1].url).searchParams.get('teamId')).toBe('team_1');
+  });
+
   test('teams: follows pagination.next via `until`', async () => {
     const reply = (body: unknown) => ({ status: 200, ok: true, text: async () => JSON.stringify(body) });
     const fetchMock = mock()
@@ -465,5 +476,25 @@ describe('resolveVercelToken', () => {
     expect(vercelSecretsMayPrompt(true, false)).toBe(true);
     expect(vercelSecretsMayPrompt(true, true)).toBe(false);
     expect(vercelSecretsMayPrompt(false, false)).toBe(false);
+  });
+});
+
+describe('dropValues — a client that only needs names never holds a value', () => {
+  const data = {
+    projects: {},
+    envs: { prj_1: [{ id: 'e1', key: 'A', type: 'plain', target: ['production'], listValue: 'SECRET-LIST-VALUE' }] },
+  };
+
+  test('by default the list keeps a plain record\'s value (the import needs it)', async () => {
+    const client = createVercelClient(TOKEN, { fetch: fakeVercelFetch(data) });
+    expect((await client.listEnvs('prj_1')).envs[0].value).toBe('SECRET-LIST-VALUE');
+  });
+
+  test('with dropValues no record carries a value, and the request does not ask for decrypt', async () => {
+    const fetchMock = mock(fakeVercelFetch(data));
+    const list = await createVercelClient(TOKEN, { fetch: fetchMock, dropValues: true }).listEnvs('prj_1', 'team_1');
+    expect(list.envs.map((e) => e.key)).toEqual(['A']);
+    expect(JSON.stringify(list)).not.toContain('SECRET-LIST-VALUE');
+    expect(callsOf(fetchMock).map((c) => c.url)).toEqual(['https://api.vercel.com/v10/projects/prj_1/env?teamId=team_1']);
   });
 });

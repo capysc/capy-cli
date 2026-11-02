@@ -778,6 +778,11 @@ export const ERROR_CODES = {
   VERCEL_SPLIT_NOT_RESTORED: 'VERCEL_SPLIT_NOT_RESTORED',
   /** `capy deploy`'s setup was given something that is neither a Vercel dashboard link for a project nor a project name. */
   VERCEL_URL_INVALID: 'VERCEL_URL_INVALID',
+  // `capy deploy vercel --discover`
+  /** A Vercel project has no GitHub link, so no repo can be matched; it is skipped (a notice). */
+  VERCEL_PROJECT_NOT_GITHUB: 'VERCEL_PROJECT_NOT_GITHUB',
+  /** Vercel said a project's env list has another page that this client cannot ask for; the names read may be incomplete (a notice). */
+  VERCEL_ENV_LIST_TRUNCATED: 'VERCEL_ENV_LIST_TRUNCATED',
   // --- Piped values: `<cmd> | capy edit NAME`, `<cmd> | capy add NAME` ---
   /**
    * `capy edit` with no name and no terminal. There is nothing to draw the
