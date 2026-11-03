@@ -27,6 +27,7 @@
  *    `local.key` + `key.enc` for every entry whose `user_id` matches the
  *    logged-in user.
  */
+import { prepareTransportCustody } from '../auth/pairing/transportCustody';
 import { confirmPairAccount } from './pairAccountConfirmation';
 import { resolveActiveUrl } from '../config/profileConfig';
 import { generatePairKeyPair, openPairEnvelope, parsePairEnvelope, type PairKeyPair } from '../crypto/pairCrypto';
@@ -214,7 +215,12 @@ async function pickUpPairedKeys(
     );
   }
 
-  return matching.map((entry) => {
+  // A current Transport arrives bound to its transport id; verify it and rebind it to this installation before any write.
+  const prepared = await Promise.all(matching.map((entry) => prepareTransportCustody(entry, {
+    unwrap: async (orgId, ciphertext, transportId) => (await serviceClient.coDecrypt(orgId, ciphertext, undefined, transportId)).plaintext,
+    wrap: async (orgId, innerCiphertext) => (await serviceClient.wrapOuterLayer(orgId, innerCiphertext)).ciphertext,
+  })));
+  return prepared.map((entry) => {
     writeEntry(entry, options.force === true);
     return { org_id: entry.org_id, user_id: entry.user_id };
   });
