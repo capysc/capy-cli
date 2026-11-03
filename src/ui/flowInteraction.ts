@@ -1,3 +1,4 @@
+import { FlowRuntimeError } from '../errors/flowRuntimeError';
 import { randomUUID, sign } from 'node:crypto';
 import { PassThrough } from 'node:stream';
 import { EventEmitter } from 'node:events';
@@ -103,23 +104,21 @@ export async function runWithFlowInteraction(operation: () => Promise<void>, dev
   const rootGoalMetadata: Data = descriptor.command === 'capy' && !project.initialized
     ? { goal_id: 'secrets_setup', goal_name: 'Secrets Setup' }
     : {};
-  const auth = (() => {
-    try { return new AuthService(undefined, devMode, project.userId); }
-    catch (error) {
-      if (error instanceof Error && error.message === 'AUTH_REFRESH_AUTHORITY_INDETERMINATE') throw new Error('PAIR_REQUIRED');
-      throw error;
-    }
-  })();
+  const auth = new AuthService(undefined, devMode, project.userId);
   const identity = await auth.authenticateSilent(descriptor.organizationId);
   const localRoot = identity.success && identity.user_id && identity.organization_id
     ? readLocalRoot(identity.organization_id, identity.user_id) : null;
-  if (!identity.success || !identity.user_id || !identity.organization_id || !localRoot) {
+  if (!identity.success || !identity.user_id || !identity.organization_id) {
     console.error(`flow: ${silentAuthFailureMessage(identity)}`);
-    throw new Error('PAIR_REQUIRED');
+    throw new FlowRuntimeError('PAIR_REQUIRED');
   }
-  if (descriptor.expectedUserId && identity.user_id !== descriptor.expectedUserId) throw new Error('AUTH_ACCOUNT_MISMATCH');
+  if (!localRoot) {
+    const custody = await inspectExistingFilesystemCustody({ serviceOrigin: resolveActiveUrl(devMode), userId: identity.user_id, organizationId: identity.organization_id });
+    throw new FlowRuntimeError(custody.kind === 'missing' ? 'PAIR_REQUIRED' : 'CUSTODY_VERIFICATION_FAILED');
+  }
+  if (descriptor.expectedUserId && identity.user_id !== descriptor.expectedUserId) throw new FlowRuntimeError('AUTH_ACCOUNT_MISMATCH');
   const transportToken = await auth.getValidToken();
-  if (!transportToken?.access_token) throw new Error('PAIR_REQUIRED');
+  if (!transportToken?.access_token) throw new FlowRuntimeError('PAIR_REQUIRED');
   const accessToken = async (): Promise<string> => {
     try { return (await auth.getValidToken())?.access_token ?? transportToken.access_token; }
     catch { return transportToken.access_token; }
@@ -149,18 +148,18 @@ export async function runWithFlowInteraction(operation: () => Promise<void>, dev
     };
     const response = await perform();
     const result = await response.json() as T & { readonly code?: string };
-    if (!response.ok) throw new Error(result.code ?? 'CONVERSATION_SERVICE_ERROR');
+    if (!response.ok) throw new FlowRuntimeError(result.code ?? 'CONVERSATION_SERVICE_ERROR');
     return result;
   };
   await establishStagingFlowCustody({ serviceOrigin: origin, userId: identity.user_id, organizationId: identity.organization_id,
     runtimeId, repoFingerprint: binding.repositoryFingerprint, keys, accessToken: transportToken.access_token }, {
-    inspect: inspectExistingFilesystemCustody,
+    inspect: input => inspectExistingFilesystemCustody({ ...input, expectedRoot: localRoot }),
     acknowledge: (body, token) => request<Data>('/flows/authentication/session', body, undefined, token),
   });
   const created = await request<{ readonly flow_id: string; readonly client_pubkey: string }>('/flows/conversation', signed('create', runtimeId, 'create', {
     command: descriptor.command, runtime_id: runtimeId, repo_fingerprint: binding.repositoryFingerprint, client_pubkey: keys.publicKeyB64, machine_name: binding.machineName,
   }));
-  if (created.client_pubkey !== keys.publicKeyB64) throw new Error('CONVERSATION_BINDING_MISMATCH');
+  if (created.client_pubkey !== keys.publicKeyB64) throw new FlowRuntimeError('CONVERSATION_BINDING_MISMATCH');
   const flowId = created.flow_id;
   const flowBinding: FlowRecoveryBinding = {
     flow_id: flowId, runtime_id: runtimeId, origin, owner_id: identity.user_id,
@@ -190,12 +189,12 @@ export async function runWithFlowInteraction(operation: () => Promise<void>, dev
       return {'x-capy-cli-attached-at': attachedAt, 'x-capy-cli-proof': proof};
     }, accessToken);
     if (result.flow_id !== flowId || result.owner !== identity.user_id || result.runtime_id !== runtimeId
-      || result.client_pubkey !== keys.publicKeyB64 || result.repo_fingerprint !== binding.repositoryFingerprint) throw new Error('CONVERSATION_BINDING_MISMATCH');
+      || result.client_pubkey !== keys.publicKeyB64 || result.repo_fingerprint !== binding.repositoryFingerprint) throw new FlowRuntimeError('CONVERSATION_BINDING_MISMATCH');
     return result;
   };
   const waitForPage = async (): Promise<History> => {
     const result = await history(0, null);
-    if (result.state !== 'active') throw new Error('CONVERSATION_ENDED');
+    if (result.state !== 'active') throw new FlowRuntimeError(result.state === 'cancelled' ? 'FLOW_CANCELLED' : 'CONVERSATION_ENDED');
     return result.page_pubkey ? result : waitForPage();
   };
   const attached = await waitForPage();
@@ -212,7 +211,7 @@ export async function runWithFlowInteraction(operation: () => Promise<void>, dev
     const proof = signed('checkpoint-read', flowId, 'checkpoint', {}).proof as string;
     const result = await request<CheckpointResponse>(`/flows/${flowId}/checkpoint`, undefined, () => ({ 'x-capy-cli-proof': proof }));
     if (result.flow_id !== flowId || result.runtime_id !== runtimeId || result.repo_fingerprint !== binding.repositoryFingerprint || result.client_pubkey !== keys.publicKeyB64) {
-      throw new Error('CONVERSATION_BINDING_MISMATCH');
+      throw new FlowRuntimeError('CONVERSATION_BINDING_MISMATCH');
     }
     return result;
   };
@@ -227,7 +226,7 @@ export async function runWithFlowInteraction(operation: () => Promise<void>, dev
     const correlation = correlationId ?? id;
     const content = { v: 1, flow_id: flowId, id, correlation_id: correlation, type, data };
     const sealed = sealRequestEnvelope({ connectionId: `${flowId}:${id}`, clientPubkeyB64: keys.publicKeyB64, pagePubkeyB64: pageKey, payload: JSON.stringify(content) });
-    if (!sealed.ok) throw new Error('CONVERSATION_ENCRYPTION_FAILED');
+    if (!sealed.ok) throw new FlowRuntimeError('CONVERSATION_ENCRYPTION_FAILED');
     const body = signed('append', flowId, id, { v: 1, id, correlation_id: correlation, direction: 'cli_to_browser', type, envelope: sealed.ciphertextB64,
       ...((type === 'goal' || type === 'goal_completed') ? {outcome: (data.outcome as Data | undefined)?.status ?? data.status} : {}) });
     const entry = { id, type, data, envelope: sealed.ciphertextB64 };
@@ -272,11 +271,11 @@ export async function runWithFlowInteraction(operation: () => Promise<void>, dev
   const writer = consume([], new Map());
   void writer.catch(() => undefined);
   const emit = (type: MessageType, data: Data, correlation?: string): Promise<void> => new Promise((resolve, reject) => {
-    if (queue.destroyed || controller.signal.aborted) { reject(new Error('CONVERSATION_TRANSPORT_CLOSED')); return; }
+    if (queue.destroyed || controller.signal.aborted) { reject(new FlowRuntimeError('CONVERSATION_TRANSPORT_CLOSED')); return; }
     queue.write({ type, data, correlation, resolve, reject } satisfies Queued);
   });
   const snapshotJournal = (): Promise<Journal> => new Promise((resolve, reject) => {
-    if (queue.destroyed || controller.signal.aborted) { reject(new Error('CONVERSATION_TRANSPORT_CLOSED')); return; }
+    if (queue.destroyed || controller.signal.aborted) { reject(new FlowRuntimeError('CONVERSATION_TRANSPORT_CLOSED')); return; }
     queue.write({ type: 'snapshot', resolve, reject } satisfies Queued);
   });
   type CheckpointTask = Readonly<{ readonly state?: Data; readonly journal: Journal; readonly resolve: () => void; readonly reject: (reason: unknown) => void }>;
@@ -287,7 +286,7 @@ export async function runWithFlowInteraction(operation: () => Promise<void>, dev
     const body = signed('checkpoint-write', flowId, revision ?? 'null', unsigned);
     const saved = await request<CheckpointResponse>(`/flows/${flowId}/checkpoint`, body);
     if (saved.flow_id !== flowId || saved.runtime_id !== runtimeId || saved.repo_fingerprint !== binding.repositoryFingerprint || saved.client_pubkey !== keys.publicKeyB64 || typeof saved.revision !== 'string') {
-      throw new Error('CONVERSATION_BINDING_MISMATCH');
+      throw new FlowRuntimeError('CONVERSATION_BINDING_MISMATCH');
     }
     return saved;
   };
@@ -306,7 +305,7 @@ export async function runWithFlowInteraction(operation: () => Promise<void>, dev
       const envelope = sealFlowRecoveryCheckpoint(localRoot, flowBinding, {
         v: 1, page_pubkey: pageKey, journal: [...task.journal.values()], ...nextPhase,
       });
-      const saved = await checkpointWrite(expectedRevision, envelope).catch(error => error instanceof Error && error.message === 'CONVERSATION_CHECKPOINT_CONFLICT'
+      const saved = await checkpointWrite(expectedRevision, envelope).catch(error => error instanceof FlowRuntimeError && error.code === 'CONVERSATION_CHECKPOINT_CONFLICT'
         ? Promise.reject(error) : checkpointWrite(expectedRevision, envelope));
       task.resolve();
       return persistCheckpoint(saved.revision, nextPhase);
@@ -320,7 +319,7 @@ export async function runWithFlowInteraction(operation: () => Promise<void>, dev
   const checkpointWriter = persistCheckpoint(null, null);
   void checkpointWriter.catch(() => undefined);
   const enqueueCheckpoint = (state: Data | undefined, journal: Journal): Promise<void> => new Promise((resolve, reject) => {
-    if (controller.signal.aborted || checkpointQueue.destroyed) { reject(new Error('CONVERSATION_TRANSPORT_CLOSED')); return; }
+    if (controller.signal.aborted || checkpointQueue.destroyed) { reject(new FlowRuntimeError('CONVERSATION_TRANSPORT_CLOSED')); return; }
     checkpointQueue.write({ ...(state === undefined ? {} : { state }), journal, resolve, reject } satisfies CheckpointTask);
   });
   const saveCheckpoint = async (state: Data): Promise<void> => enqueueCheckpoint(state, await snapshotJournal());
@@ -339,14 +338,14 @@ export async function runWithFlowInteraction(operation: () => Promise<void>, dev
     for (const message of result.messages) {
       if (message.direction !== 'browser_to_cli') continue;
       const opened = openEnvelope({ ciphertextB64: message.envelope, connectionId: `${flowId}:${message.id}`, keypair: keys });
-      if (!opened.ok) throw new Error('CONVERSATION_DECRYPTION_FAILED');
+      if (!opened.ok) throw new FlowRuntimeError('CONVERSATION_DECRYPTION_FAILED');
       const content = JSON.parse(opened.plaintext) as { readonly v: number; readonly flow_id: string; readonly id: string; readonly correlation_id: string; readonly type: string; readonly data: Data };
-      if (content.v !== 1 || content.flow_id !== flowId || content.id !== message.id || content.correlation_id !== message.correlation_id || content.type !== message.type) throw new Error('CONVERSATION_BINDING_MISMATCH');
+      if (content.v !== 1 || content.flow_id !== flowId || content.id !== message.id || content.correlation_id !== message.correlation_id || content.type !== message.type) throw new FlowRuntimeError('CONVERSATION_BINDING_MISMATCH');
       if (message.type === 'ping') await emit('pong', { message: 'CLI is running.' }, message.correlation_id);
       else if (message.type === 'answer') incoming.emit(message.correlation_id, content.data);
     }
     if (result.state !== 'active') {
-      const error = new Error('CONVERSATION_ENDED');
+      const error = new FlowRuntimeError(result.state === 'cancelled' ? 'FLOW_CANCELLED' : 'CONVERSATION_ENDED');
       incoming.emit('failure', error);
       controller.abort(error);
       return;
@@ -386,6 +385,7 @@ export async function runWithFlowInteraction(operation: () => Promise<void>, dev
     decide: payload => typeof payload.value === 'boolean' ? { value: payload.value } : { error: 'Choose yes or no.' },
   }, goalMetadata, onPromptEmitted)) === true;
   const interaction: Interaction = {
+    binding: { userId: identity.user_id, organizationId: identity.organization_id },
     output: event => emit('output', { ...event, ...rootGoalMetadata, ...(currentInteractionInvocation() ? { invocation: currentInteractionInvocation() } : {}) }),
     progress: event => emit('progress', { ...event, ...rootGoalMetadata, ...(currentInteractionInvocation() ? { invocation: currentInteractionInvocation() } : {}) }),
     prompt: question => ask(question, rootGoalMetadata),
@@ -447,13 +447,13 @@ export async function runWithFlowInteraction(operation: () => Promise<void>, dev
             return persisted.map(message => {
               if (message.direction === 'cli_to_browser') {
                 const entry = journal.get(message.id);
-                if (!entry || entry.type !== message.type || entry.envelope !== message.envelope) throw new Error('CONVERSATION_BINDING_MISMATCH');
+                if (!entry || entry.type !== message.type || entry.envelope !== message.envelope) throw new FlowRuntimeError('CONVERSATION_BINDING_MISMATCH');
                 return { id: message.id, type: message.type, data: entry.data };
               }
               const opened = openEnvelope({ ciphertextB64: message.envelope, connectionId: `${flowId}:${message.id}`, keypair: keys });
-              if (!opened.ok) throw new Error('CONVERSATION_DECRYPTION_FAILED');
+              if (!opened.ok) throw new FlowRuntimeError('CONVERSATION_DECRYPTION_FAILED');
               const content = JSON.parse(opened.plaintext) as { readonly v: number; readonly flow_id: string; readonly id: string; readonly correlation_id: string; readonly type: string; readonly data: Data };
-              if (content.v !== 1 || content.flow_id !== flowId || content.id !== message.id || content.correlation_id !== message.correlation_id || content.type !== message.type) throw new Error('CONVERSATION_BINDING_MISMATCH');
+              if (content.v !== 1 || content.flow_id !== flowId || content.id !== message.id || content.correlation_id !== message.correlation_id || content.type !== message.type) throw new FlowRuntimeError('CONVERSATION_BINDING_MISMATCH');
               return { id: message.id, type: message.type, data: content.data };
             });
           },
@@ -472,9 +472,9 @@ export async function runWithFlowInteraction(operation: () => Promise<void>, dev
           attachment: { command: executable, args: ['flow', '--id', flowId, '--json'], protocol: 'capy.flow.agent.v1' },
           instructions: [
             'Keep this original CLI process running. Attach from the same repository and authenticated account.',
-            'If your host supports subagents, delegate this entire Project Setup handoff to one dedicated worker. Give it the repository path, flow_id, attachment command/protocol, requests, approval requirements and these instructions. The worker owns analysis, plan submission, waiting for approval, authorized application, verification and completion in this same flow.',
-            'The parent retains ownership: keep the original process alive, track the worker and use bounded waits until a terminal result or an explicit blocker. Continue monitoring during unrelated user discussion. Do not start a second worker or duplicate attachment for the same work; resume the existing worker after an interruption and inspect status/history before continuing.',
-            'If subagents are unavailable or cannot remain active, perform the same work directly with bounded reads. A URL, empty read, timeout, submitted plan or dispatched worker is not completion. Do not claim background monitoring unless a worker is actually running.',
+            'Keep one active host reader and dispatcher attached to this Project Setup handoff. Perform analysis, plan submission, waiting for browser approval, authorized application, verification and completion in this same flow. Delegate only when the user or applicable host instructions explicitly authorize it.',
+            'The initiating host retains ownership: keep the original process alive and use bounded waits until a terminal result or an explicit blocker. Continue monitoring during unrelated user discussion. Do not duplicate attachments; after an interruption inspect status/history before continuing.',
+            'A URL, empty read, timeout, submitted plan or dispatched worker is not completion. Continue bounded reads and dispatch available events. Do not claim background monitoring unless an actual reader remains active.',
             'Send the status and read requests below to inspect current state/history. Analyze repository boundaries and submodules, stack and package managers, run commands, environment loading, services and deployment configuration. Never disclose secret values.',
             'Post structured analysis, then a concrete plan with files, changes, reasons and checks. Wait for its plan-decision in Keep.',
             'After yes, request begin_apply with the returned plan_id and plan_hash. Apply only after receiving application_id; never repeat an application already started.',
@@ -527,24 +527,27 @@ const recoveryCheckpoint = (value: Data): RecoveryCheckpoint | null => {
 
 /** Reconnects the encrypted project-setup handoff without replaying the root command. */
 export const runResumedFlowInteraction = async (flowId: string, devMode: boolean, abandon = false): Promise<void> => {
-  if (!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/iu.test(flowId)) throw new Error('FLOW_RESUME_INVALID');
+  if (!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/iu.test(flowId)) throw new FlowRuntimeError('FLOW_RESUME_INVALID');
   const project = await new ProjectManager().detectProjectState();
   const auth = new AuthService(undefined, devMode, project.userId);
-  const identity = await auth.authenticateSilent();
+  const identity = await auth.authenticateSilent(project.organizationId);
   const root = identity.success && identity.user_id && identity.organization_id ? readLocalRoot(identity.organization_id, identity.user_id) : null;
-  if (!identity.success || !identity.user_id || !identity.organization_id || !root) throw new Error('PAIR_REQUIRED');
+  if (!identity.success || !identity.user_id || !identity.organization_id || !root) {
+    console.error(`flow: ${silentAuthFailureMessage(identity)}`);
+    throw new FlowRuntimeError('PAIR_REQUIRED');
+  }
   const origin = resolveActiveUrl(devMode);
   const runIdentity = resolveInitRunIdentity();
   const bootstrap = loadFlowRecoveryBootstrap(root, {
     flow_id: flowId, origin, owner_id: identity.user_id, organization_id: identity.organization_id, repo_fingerprint: runIdentity.repositoryFingerprint,
   });
-  if (!bootstrap) throw new Error('FLOW_RECOVERY_NOT_FOUND');
+  if (!bootstrap) throw new FlowRuntimeError('FLOW_RECOVERY_NOT_FOUND');
   const binding = bootstrap.binding;
   const keys = bootstrap.keys;
   const controller = new AbortController();
   const token = async (): Promise<string> => {
     const current = await auth.getValidToken();
-    if (!current?.access_token || current.user_id !== identity.user_id) throw new Error('PAIR_REQUIRED');
+    if (!current?.access_token || current.user_id !== identity.user_id) throw new FlowRuntimeError('PAIR_REQUIRED');
     return current.access_token;
   };
   const signed = (method: string, id: string, body: Data): Data => ({ ...body,
@@ -552,13 +555,13 @@ export const runResumedFlowInteraction = async (flowId: string, devMode: boolean
   const request = async <T>(path: string, body?: Data, headers: Readonly<Record<string, string>> = {}, tokenOverride?: string): Promise<T> => {
     const response = await fetch(`${origin}${path}`, { method: body ? 'POST' : 'GET', headers: { Authorization: `Bearer ${tokenOverride ?? await token()}`, 'Content-Type': 'application/json', ...headers }, ...(body ? { body: JSON.stringify(body) } : {}), signal: AbortSignal.any([controller.signal, AbortSignal.timeout(35_000)]) });
     const result = await response.json() as T & { readonly code?: string };
-    if (!response.ok) throw new Error(result.code ?? 'CONVERSATION_SERVICE_ERROR');
+    if (!response.ok) throw new FlowRuntimeError(result.code ?? 'CONVERSATION_SERVICE_ERROR');
     return result;
   };
   const resumed = await request<Readonly<{ readonly flow_id: string; readonly state: string; readonly cli_attached: boolean; readonly page_pubkey: string | null; readonly cursor: number; readonly expires_at: string; readonly lease_id: string }>>(
     `/flows/${flowId}/resume`, signed('resume', 'resume', { runtime_id: binding.runtime_id, repo_fingerprint: binding.repo_fingerprint }),
   );
-  if (resumed.flow_id !== flowId || resumed.state !== 'active' || !resumed.cli_attached || typeof resumed.lease_id !== 'string') throw new Error('FLOW_RESUME_UNAVAILABLE');
+  if (resumed.flow_id !== flowId || resumed.state !== 'active' || !resumed.cli_attached || typeof resumed.lease_id !== 'string') throw new FlowRuntimeError('FLOW_RESUME_UNAVAILABLE');
   const leaseId = resumed.lease_id;
   if (abandon) {
     await request(`/flows/${flowId}/abandon`, signed('abandon', 'abandon', { lease_id: leaseId }));
@@ -572,23 +575,23 @@ export const runResumedFlowInteraction = async (flowId: string, devMode: boolean
     const result = await request<ResumeHistory>(`/flows/${flowId}/messages?after=${after}&after_page_pubkey=${encodeURIComponent(pageKey ?? 'null')}&wait_ms=${waitMs}`, undefined, {
       'x-capy-cli-attached-at': attachedAt, 'x-capy-cli-proof': proof, 'x-capy-cli-lease-id': leaseId,
     }, tokenOverride);
-    if (result.flow_id !== flowId || result.owner !== identity.user_id || result.runtime_id !== binding.runtime_id || result.repo_fingerprint !== binding.repo_fingerprint || result.client_pubkey !== binding.client_pubkey) throw new Error('CONVERSATION_BINDING_MISMATCH');
+    if (result.flow_id !== flowId || result.owner !== identity.user_id || result.runtime_id !== binding.runtime_id || result.repo_fingerprint !== binding.repo_fingerprint || result.client_pubkey !== binding.client_pubkey) throw new FlowRuntimeError('CONVERSATION_BINDING_MISMATCH');
     return result;
   };
   const attached = resumed.page_pubkey ? await history(0, resumed.page_pubkey, 0) : await history(0, null, 25_000);
-  if (attached.state !== 'active' || !attached.page_pubkey) throw new Error('CONVERSATION_ENDED');
+  if (attached.state !== 'active' || !attached.page_pubkey) throw new FlowRuntimeError(attached.state === 'cancelled' ? 'FLOW_CANCELLED' : 'CONVERSATION_ENDED');
   const checkpointProof = signed('checkpoint-read', 'checkpoint', { lease_id: leaseId }).proof as string;
   const stored = await request<Readonly<{ readonly flow_id: string; readonly runtime_id: string; readonly repo_fingerprint: string; readonly client_pubkey: string; readonly revision: string | null; readonly envelope: string | null }>>(
     `/flows/${flowId}/checkpoint`, undefined, { 'x-capy-cli-proof': checkpointProof, 'x-capy-cli-lease-id': leaseId },
   );
-  if (stored.flow_id !== flowId || stored.runtime_id !== binding.runtime_id || stored.repo_fingerprint !== binding.repo_fingerprint || stored.client_pubkey !== binding.client_pubkey || !stored.envelope) throw new Error('FLOW_RECOVERY_CHECKPOINT_UNAVAILABLE');
+  if (stored.flow_id !== flowId || stored.runtime_id !== binding.runtime_id || stored.repo_fingerprint !== binding.repo_fingerprint || stored.client_pubkey !== binding.client_pubkey || !stored.envelope) throw new FlowRuntimeError('FLOW_RECOVERY_CHECKPOINT_UNAVAILABLE');
   const recovered = recoveryCheckpoint(openFlowRecoveryCheckpoint(root, binding, stored.envelope) ?? {});
-  if (!recovered || recovered.agent_state?.terminal) throw new Error('FLOW_RECOVERY_CHECKPOINT_INVALID');
+  if (!recovered || recovered.agent_state?.terminal) throw new FlowRuntimeError('FLOW_RECOVERY_CHECKPOINT_INVALID');
   process.stdout.write(`${JSON.stringify({ ok: true, command: 'flow', flow_id: flowId, resumed: true, state: recovered.phase })}\n`);
   // The resumed runtime deliberately does not rerun ordinary CLI work. The persisted
   // agent state blocks a second application grant and lets the agent inspect status.
   const currentState = recovered.agent_state;
-  if (recovered.phase === 'agent' && !currentState) throw new Error('FLOW_RECOVERY_CHECKPOINT_INVALID');
+  if (recovered.phase === 'agent' && !currentState) throw new FlowRuntimeError('FLOW_RECOVERY_CHECKPOINT_INVALID');
   const incoming = new EventEmitter();
   type Delivery = Readonly<{ readonly type: MessageType; readonly data: Data; readonly correlation?: string; readonly resolve: () => void; readonly reject: (reason: unknown) => void }>;
   type DeliverySnapshot = Readonly<{ readonly type: 'snapshot'; readonly resolve: (journal: ReadonlyMap<string, JournalEntry>) => void; readonly reject: (reason: unknown) => void }>;
@@ -602,7 +605,7 @@ export const runResumedFlowInteraction = async (flowId: string, devMode: boolean
       ? flowTurnPayload([], { type, data }) : data;
     const content = { v: 1, flow_id: flowId, id, correlation_id: correlationId, type, data: payload };
     const sealed = sealRequestEnvelope({ connectionId: `${flowId}:${id}`, clientPubkeyB64: binding.client_pubkey, pagePubkeyB64: attached.page_pubkey!, payload: JSON.stringify(content) });
-    if (!sealed.ok) throw new Error('CONVERSATION_ENCRYPTION_FAILED');
+    if (!sealed.ok) throw new FlowRuntimeError('CONVERSATION_ENCRYPTION_FAILED');
     const unsigned = { v: 1, id, correlation_id: correlationId, direction: 'cli_to_browser', type, envelope: sealed.ciphertextB64, lease_id: leaseId,
       ...((type === 'goal' || type === 'goal_completed') ? { outcome: (payload.outcome as Data | undefined)?.status ?? payload.status } : {}) } as const;
     return { entry: { id, type, data: payload, envelope: sealed.ciphertextB64 }, body: signed('append', id, unsigned) };
@@ -625,11 +628,11 @@ export const runResumedFlowInteraction = async (flowId: string, devMode: boolean
   const deliveryWriter = consumeDeliveries(new Map(recovered.journal.map(entry => [entry.id, entry])));
   void deliveryWriter.catch(() => undefined);
   const emit = (type: MessageType, data: Data, correlation?: string): Promise<void> => new Promise((resolve, reject) => {
-    if (controller.signal.aborted || deliveries.destroyed) { reject(new Error('CONVERSATION_TRANSPORT_CLOSED')); return; }
+    if (controller.signal.aborted || deliveries.destroyed) { reject(new FlowRuntimeError('CONVERSATION_TRANSPORT_CLOSED')); return; }
     deliveries.write({ type, data, correlation, resolve, reject } satisfies Delivery);
   });
   const snapshot = (): Promise<ReadonlyMap<string, JournalEntry>> => new Promise((resolve, reject) => {
-    if (controller.signal.aborted || deliveries.destroyed) { reject(new Error('CONVERSATION_TRANSPORT_CLOSED')); return; }
+    if (controller.signal.aborted || deliveries.destroyed) { reject(new FlowRuntimeError('CONVERSATION_TRANSPORT_CLOSED')); return; }
     deliveries.write({ type: 'snapshot', resolve, reject } satisfies DeliverySnapshot);
   });
   type SavedState = Readonly<{ readonly phase?: Data; readonly journal: ReadonlyMap<string, JournalEntry>; readonly resolve: () => void; readonly reject: (error: unknown) => void }>;
@@ -645,7 +648,7 @@ export const runResumedFlowInteraction = async (flowId: string, devMode: boolean
       const envelope = sealFlowRecoveryCheckpoint(root, binding, { ...nextPhase, journal: [...save.journal.values()] });
       const unsigned = { revision, envelope, lease_id: leaseId } as const;
       const saved = await request<Readonly<{ readonly revision: string; readonly flow_id: string; readonly runtime_id: string; readonly repo_fingerprint: string; readonly client_pubkey: string }>>(`/flows/${flowId}/checkpoint`, signed('checkpoint-write', revision ?? 'null', unsigned));
-      if (saved.flow_id !== flowId || saved.runtime_id !== binding.runtime_id || saved.repo_fingerprint !== binding.repo_fingerprint || saved.client_pubkey !== binding.client_pubkey) throw new Error('CONVERSATION_BINDING_MISMATCH');
+      if (saved.flow_id !== flowId || saved.runtime_id !== binding.runtime_id || saved.repo_fingerprint !== binding.repo_fingerprint || saved.client_pubkey !== binding.client_pubkey) throw new FlowRuntimeError('CONVERSATION_BINDING_MISMATCH');
       save.resolve();
       return writeSave(saved.revision, nextPhase);
     } catch (error) { save.reject(error); incoming.emit('failure', error); controller.abort(error); throw error; }
@@ -653,7 +656,7 @@ export const runResumedFlowInteraction = async (flowId: string, devMode: boolean
   const saveWriter = writeSave(stored.revision, rawRecoveredPhase);
   void saveWriter.catch(() => undefined);
   const save = async (phase: Data | undefined, journal: ReadonlyMap<string, JournalEntry>): Promise<void> => new Promise((resolve, reject) => {
-    if (controller.signal.aborted || saves.destroyed) { reject(new Error('CONVERSATION_TRANSPORT_CLOSED')); return; }
+    if (controller.signal.aborted || saves.destroyed) { reject(new FlowRuntimeError('CONVERSATION_TRANSPORT_CLOSED')); return; }
     saves.write({ ...(phase === undefined ? {} : { phase }), journal, resolve, reject } satisfies SavedState);
   });
   const saveState = async (state: FlowAgentState): Promise<void> => {
@@ -666,13 +669,13 @@ export const runResumedFlowInteraction = async (flowId: string, devMode: boolean
     for (const message of result.messages) {
       if (message.direction !== 'browser_to_cli') continue;
       const opened = openEnvelope({ ciphertextB64: message.envelope, connectionId: `${flowId}:${message.id}`, keypair: keys });
-      if (!opened.ok) throw new Error('CONVERSATION_DECRYPTION_FAILED');
+      if (!opened.ok) throw new FlowRuntimeError('CONVERSATION_DECRYPTION_FAILED');
       const content = JSON.parse(opened.plaintext) as Readonly<{ readonly v: number; readonly flow_id: string; readonly id: string; readonly correlation_id: string; readonly type: MessageType; readonly data: Data }>;
-      if (content.v !== 1 || content.flow_id !== flowId || content.id !== message.id || content.correlation_id !== message.correlation_id || content.type !== message.type) throw new Error('CONVERSATION_BINDING_MISMATCH');
+      if (content.v !== 1 || content.flow_id !== flowId || content.id !== message.id || content.correlation_id !== message.correlation_id || content.type !== message.type) throw new FlowRuntimeError('CONVERSATION_BINDING_MISMATCH');
       if (content.type === 'answer') incoming.emit(content.correlation_id, content.data);
       if (content.type === 'ping' && cursor !== 0) await emit('pong', { message: 'CLI is running.' }, content.correlation_id);
     }
-    if (result.state !== 'active') { const error = new Error('CONVERSATION_ENDED'); incoming.emit('failure', error); controller.abort(error); return; }
+    if (result.state !== 'active') { const error = new FlowRuntimeError(result.state === 'cancelled' ? 'FLOW_CANCELLED' : 'CONVERSATION_ENDED'); incoming.emit('failure', error); controller.abort(error); return; }
     return receive(result.cursor);
   };
   // Prompts are reissued on recovery, so replaying encrypted answers from zero
@@ -705,7 +708,7 @@ export const runResumedFlowInteraction = async (flowId: string, devMode: boolean
   };
   const stateForRuntime = async (): Promise<FlowAgentState | null> => {
     if (recovered.phase === 'continuation_offer') {
-      if (!recovered.offer) throw new Error('FLOW_RECOVERY_CHECKPOINT_INVALID');
+      if (!recovered.offer) throw new FlowRuntimeError('FLOW_RECOVERY_CHECKPOINT_INVALID');
       const accepted = await askContinuation(recovered.offer, recovered.completed_goal ?? {});
       if (!accepted) {
         await emit('goal', { ...(recovered.completed_goal ?? {}), status: recovered.completed_goal ? 'succeeded' : 'skipped', result: { continuation_declined: true } });
@@ -750,14 +753,14 @@ export const runResumedFlowInteraction = async (flowId: string, devMode: boolean
           const entry = journal.get(message.id);
           // Every delivered record must have its encrypted journal entry saved
           // first. Never silently hide history if that durability invariant fails.
-          if (!entry) throw new Error('FLOW_RECOVERY_HISTORY_UNAVAILABLE');
-          if (entry.type !== message.type || entry.envelope !== message.envelope) throw new Error('CONVERSATION_BINDING_MISMATCH');
+          if (!entry) throw new FlowRuntimeError('FLOW_RECOVERY_HISTORY_UNAVAILABLE');
+          if (entry.type !== message.type || entry.envelope !== message.envelope) throw new FlowRuntimeError('CONVERSATION_BINDING_MISMATCH');
           return [{ id: message.id, type: message.type, data: entry.data }];
         }
         const opened = openEnvelope({ ciphertextB64: message.envelope, connectionId: `${flowId}:${message.id}`, keypair: keys });
-        if (!opened.ok) throw new Error('CONVERSATION_DECRYPTION_FAILED');
+        if (!opened.ok) throw new FlowRuntimeError('CONVERSATION_DECRYPTION_FAILED');
         const content = JSON.parse(opened.plaintext) as Readonly<{ readonly v: number; readonly flow_id: string; readonly id: string; readonly correlation_id: string; readonly type: MessageType; readonly data: Data }>;
-        if (content.v !== 1 || content.flow_id !== flowId || content.id !== message.id || content.correlation_id !== message.correlation_id || content.type !== message.type) throw new Error('CONVERSATION_BINDING_MISMATCH');
+        if (content.v !== 1 || content.flow_id !== flowId || content.id !== message.id || content.correlation_id !== message.correlation_id || content.type !== message.type) throw new FlowRuntimeError('CONVERSATION_BINDING_MISMATCH');
         return [{ id: message.id, type: message.type, data: content.data }];
       });
     },
@@ -775,7 +778,7 @@ export const runResumedFlowInteraction = async (flowId: string, devMode: boolean
     url: `${keepOrigin()}/flow/conversation?f=${encodeURIComponent(flowId)}`,
     attachment: { command: executable, args: ['flow', '--id', flowId, '--json'], protocol: 'capy.flow.agent.v1' },
     instructions: [
-      'Keep this resumed CLI process running and attach a single dedicated agent from the same repository and authenticated account.',
+      'Keep this resumed CLI process running and attach one active host reader and dispatcher from the same repository and authenticated account.',
       'Inspect status and history before acting. If applying is already recorded, inspect the repository and report its outcome; never request another application grant.',
       'Submit analysis and a plan, wait for approval, then request begin_apply before making changes. Completing Project Setup closes onboarding; if intentionally leaving it unaccomplished, send an explicit terminal skipped outcome with a reason.',
     ],

@@ -75,7 +75,7 @@ const realTerminalQr = await import('../../src/ui/terminalQr');
 const mockRenderTerminalQr = jest.fn();
 mock.module('../../src/ui/terminalQr', () => ({ ...realTerminalQr, renderTerminalQr: mockRenderTerminalQr }));
 
-import { pairCommand } from '../../src/commands/pairCommand';
+import { pairCommand, pairForFlow } from '../../src/commands/pairCommand';
 
 function finalResult(stdout: string): any {
   const pending = stdout.startsWith('{"status":"approval_pending",');
@@ -186,6 +186,27 @@ describe('pairCommand', () => {
     mockPickupDevicePairing.mockImplementation(async () => ({ sealed: await sealAsBrowser(buildPayload(), capturedPairPublicKey()) }));
     mockReadLocalRoot.mockReturnValue(null);
     mockRenderTerminalQr.mockReturnValue(null);
+  });
+
+  test('a host flow refuses a different account before confirmation, session installation or key writes', async () => {
+    await withCapturedIo(async () => {
+      await expect(pairForFlow({ json: true, flow: true, expectedUserId: 'user-other' })).rejects.toThrow('The signed-in account does not match this repository.');
+    });
+    expect(mockConfirmPairAccount).not.toHaveBeenCalled();
+    expect(mockInstallDeviceGrantSession).not.toHaveBeenCalled();
+    expect(mockSaveLocalRoot).not.toHaveBeenCalled();
+    expect(mockWriteOrgKeyFileRaw).not.toHaveBeenCalled();
+  });
+
+  test('a conflict in a later organization refuses all key writes', async () => {
+    const first = buildPayload().entries[0];
+    mockPickupDevicePairing.mockImplementation(async () => ({ sealed: await sealAsBrowser(buildPayload({ entries: [first, { ...first, org_id: 'org-second' }] }), capturedPairPublicKey()) }));
+    mockReadLocalRoot.mockImplementation((org: string) => org === 'org-second' ? Buffer.alloc(32, 9) : null);
+    await withCapturedIo(async () => {
+      await expect(pairForFlow({ json: true, flow: true })).rejects.toThrow('different local key');
+    });
+    expect(mockSaveLocalRoot).not.toHaveBeenCalled();
+    expect(mockWriteOrgKeyFileRaw).not.toHaveBeenCalled();
   });
 
   test('writes local.key + key.enc for every entry matching the logged-in user, and reports it under --json', async () => {

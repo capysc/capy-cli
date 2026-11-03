@@ -1,3 +1,4 @@
+import { FlowRuntimeError } from '../errors/flowRuntimeError';
 import { sign } from 'node:crypto';
 import type { ConnectionKeypair } from '../service/brokerEnvelope';
 import type { ExistingFilesystemCustody } from './pairing/existingFilesystemCustody';
@@ -16,7 +17,7 @@ export interface StagingFlowCustodyDependencies {
   readonly inspect: (input: Readonly<{ serviceOrigin: string; userId: string; organizationId: string }>) => Promise<ExistingFilesystemCustody>;
   readonly acknowledge: (body: Data, token: string) => Promise<Data>;
 }
-const refuse = (code: string): never => { throw new Error(code); };
+const refuse = (code: string): never => { throw new FlowRuntimeError(code); };
 const record = (value: unknown): Data | null => value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Data : null;
 
 /** A receipt acknowledges locally verified custody; it never transmits a root or master key. */

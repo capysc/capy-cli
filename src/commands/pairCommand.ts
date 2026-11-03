@@ -40,6 +40,10 @@ export interface PairOptions {
   readonly description?: string;
   /** This pairing starts a signup/onboarding (Keep shows its signup prompts). */
   readonly signup?: boolean;
+  /** Internal host flow integration; ordinary pair behavior remains unchanged. */
+  readonly flow?: boolean;
+  readonly expectedUserId?: string;
+  readonly organizationId?: string;
 }
 
 /** Prose/QR/progress output. Always sent to stderr under `--json` so stdout stays pure JSON; stdout in human mode otherwise. */
@@ -57,8 +61,14 @@ interface PairedOrg {
 }
 
 /** Writes one entry's `local.key` + `key.enc`, honoring the local.key conflict guard. Returns whether it was written or skipped (--force not needed, values matched). */
-function writeEntry(entry: PairingEntry, force: boolean): 'written' {
+function assertEntryCompatible(entry: PairingEntry, force: boolean): void {
+  if (typeof entry.org_id !== 'string' || typeof entry.user_id !== 'string'
+    || !/^[A-Za-z0-9_-]{1,255}$/.test(entry.org_id) || !/^[A-Za-z0-9_-]{1,255}$/.test(entry.user_id)
+    || typeof entry.k_local !== 'string' || typeof entry.key_enc !== 'string' || !entry.key_enc) {
+    throw new CapyError('The paired key files are malformed.', ERROR_CODES.INVALID_FORMAT);
+  }
   const newKLocal = Buffer.from(entry.k_local, 'base64url');
+  if (newKLocal.length !== 32 || newKLocal.toString('base64url') !== entry.k_local) throw new CapyError('The paired local key is malformed.', ERROR_CODES.INVALID_FORMAT);
   const existing = readLocalRoot(entry.org_id, entry.user_id);
   if (existing && !existing.equals(newKLocal) && !force) {
     throw new CapyError(
@@ -67,6 +77,11 @@ function writeEntry(entry: PairingEntry, force: boolean): 'written' {
       { org_id: entry.org_id },
     );
   }
+}
+
+function writeEntry(entry: PairingEntry, force: boolean): 'written' {
+  assertEntryCompatible(entry, force);
+  const newKLocal = Buffer.from(entry.k_local, 'base64url');
   saveLocalRoot(entry.org_id, newKLocal, entry.user_id);
   writeOrgKeyFileRaw(entry.org_id, entry.key_enc, entry.user_id);
   return 'written';
@@ -127,116 +142,129 @@ function printHumanPairBlock(deviceLink: string, qr: RenderedTerminalQr | null, 
   return prompt;
 }
 
+export interface PairResult {
+  readonly userId: string;
+  readonly paired: readonly PairedOrg[];
+}
+
 export async function pairCommand(options: PairOptions = {}): Promise<void> {
+  try { await pairForFlow(options); }
+  catch (error) { refuseError(error, options.json === true); }
+}
+
+export async function pairForFlow(options: PairOptions = {}): Promise<PairResult> {
   const json = options.json === true;
   const force = options.force === true;
   const devMode = options.devMode === true;
-  try {
-    // Same precedence ServiceClient's constructor uses: explicit override
-    // wins, otherwise the profile chain (CAPY_API_URL → profile → default).
-    const apiUrl = options.apiUrl || resolveActiveUrl(devMode);
+  // Same precedence ServiceClient's constructor uses: explicit override
+  // wins, otherwise the profile chain (CAPY_API_URL → profile → default).
+  const apiUrl = options.apiUrl || resolveActiveUrl(devMode);
 
-    const keyPair = generatePairKeyPair();
-    const intent = {
-      ...(options.title?.trim() ? { title: options.title.trim() } : {}),
-      ...(options.description?.trim() ? { description: options.description.trim() } : {}),
-      ...(options.signup ? { signup: true } : {}),
-    };
-    const authorize = await authorizeDevice(apiUrl, keyPair.publicKey, intent);
+  const keyPair = generatePairKeyPair();
+  const intent = {
+    ...(options.title?.trim() ? { title: options.title.trim() } : {}),
+    ...(options.description?.trim() ? { description: options.description.trim() } : {}),
+    ...(options.signup ? { signup: true } : {}),
+  };
+  const authorize = await authorizeDevice(apiUrl, keyPair.publicKey, intent);
 
-    // The QR always encodes the FULL deviceLink (fragment/query and all) —
-    // only the TEXT link below is ever masked.
-    const deviceLink = `${resolveKeepOrigin()}/device?code=${encodeURIComponent(authorize.user_code)}`;
-    const qr = renderTerminalQr(deviceLink);
+  // The QR always encodes the FULL deviceLink (fragment/query and all) —
+  // only the TEXT link below is ever masked.
+  const deviceLink = `${resolveKeepOrigin()}/device?code=${encodeURIComponent(authorize.user_code)}`;
+  const qr = renderTerminalQr(deviceLink);
 
-    // `--json`'s progress output (stderr, unmasked) is unchanged below;
-    // this is the new masked/interactive block, printed only in human mode.
-    const prompt = json ? null : printHumanPairBlock(deviceLink, qr, authorize.user_code);
-    if (json) {
-      console.log(JSON.stringify({
-        status: 'approval_pending',
-        url: deviceLink,
-        userCode: authorize.user_code,
-        ...createPairingPresentation(deviceLink, authorize.user_code, {
-          purpose: intent.description ?? intent.title ?? 'Sign in or sign up in Keep, prepare Transport, and pair this CLI.',
-          expiresInSeconds: authorize.expires_in,
-          ...(authorize.expires_at ? { expiresAt: authorize.expires_at } : {}),
-        }),
-      }));
-      announce(true, '');
-      if (qr) {
-        announce(true, qr.text);
-        if (qr.hint) announce(true, qr.hint);
-      }
-      announce(true, `  Approve on your other device: ${deviceLink}`); // COPY-FLAG
-      announce(true, `  Code: ${authorize.user_code}`); // COPY-FLAG
-      announce(true, '');
+  // `--json`'s progress output (stderr, unmasked) is unchanged below;
+  // this is the new masked/interactive block, printed only in human mode.
+  const prompt = json ? null : printHumanPairBlock(deviceLink, qr, authorize.user_code);
+  if (json) {
+    console.log(JSON.stringify({
+      status: 'approval_pending',
+      url: deviceLink,
+      userCode: authorize.user_code,
+      ...createPairingPresentation(deviceLink, authorize.user_code, {
+        purpose: intent.description ?? intent.title ?? 'Sign in or sign up in Keep, prepare Transport, and pair this CLI.',
+        expiresInSeconds: authorize.expires_in,
+        ...(options.flow ? { continueInHost: true } : {}),
+        ...(authorize.expires_at ? { expiresAt: authorize.expires_at } : {}),
+      }),
+    }));
+    announce(true, '');
+    if (qr) {
+      announce(true, qr.text);
+      if (qr.hint) announce(true, qr.hint);
     }
-
-    // The poll and the masked-link key listener (`c`/`r`/`q`) run
-    // CONCURRENTLY — the listener is event-driven (stdin 'data'), never a
-    // blocking read, so it can never delay this. `prompt.stop()` always
-    // runs once the poll settles (success OR failure), restoring raw mode
-    // and detaching the listener even if the user never pressed a key.
-    const exchange = await (async () => {
-      try {
-        return await pollDeviceToken(apiUrl, authorize.device_code, {
-          intervalMs: authorize.interval * 1000,
-          timeoutMs: authorize.expires_in * 1000,
-        });
-      } finally {
-        prompt?.stop();
-      }
-    })();
-
-    if (!await confirmPairAccount(exchange.user.email, json)) {
-      throw new CapyError(
-        'Pairing cancelled. No session or keys were installed.',
-        ERROR_CODES.AUTH_FAILED,
-      );
-    }
-
-    const authService = new AuthService(options.apiUrl, devMode);
-    const installed = await authService.installDeviceGrantSession(exchange.token, exchange.user, exchange.organizations);
-    if (!installed.organization_id) {
-      // Multi-org account with no org scoped by the device-grant token yet —
-      // resolve into one the same way every other org-context command does.
-      await authService.authenticateSilent();
-    }
-
-    const serviceClient = new ServiceClient(options.apiUrl, devMode);
-    serviceClient.setTokenProvider(() => authService.getValidToken());
-
-    const { sealed } = await serviceClient.pickupDevicePairing(authorize.device_code);
-    const envelope = parsePairEnvelope(sealed);
-    const payload = openPairEnvelope(envelope, keyPair);
-
-    const matching = payload.entries.filter((e) => e.user_id === exchange.user.id);
-    if (matching.length === 0) {
-      throw new CapyError(
-        'No keys were waiting for this account — run `capy transport` on a machine that already has them, then try again.', // COPY-FLAG
-        ERROR_CODES.PAIR_NO_KEYS,
-      );
-    }
-
-    const prepared = await Promise.all(matching.map(entry => prepareTransportCustody(entry, {
-      unwrap: async (orgId, ciphertext, transportId) => (await serviceClient.coDecrypt(orgId, ciphertext, undefined, transportId)).plaintext,
-      wrap: async (orgId, innerCiphertext) => (await serviceClient.wrapOuterLayer(orgId, innerCiphertext)).ciphertext,
-    })));
-    const paired: readonly PairedOrg[] = prepared.map((entry) => {
-      writeEntry(entry, force);
-      return { org_id: entry.org_id, user_id: entry.user_id };
-    });
-
-    if (json) {
-      console.log(JSON.stringify({ ok: true, user_id: exchange.user.id, paired }, null, 2));
-      return;
-    }
-
-    console.log('');
-    console.log(`  Paired ${paired.length} organization${paired.length === 1 ? '' : 's'} to this machine.`); // COPY-FLAG
-    console.log('');
-  } catch (err) {
-    refuseError(err, json);
+    announce(true, `  Approve on your other device: ${deviceLink}`); // COPY-FLAG
+    announce(true, `  Code: ${authorize.user_code}`); // COPY-FLAG
+    announce(true, '');
   }
+
+  // The poll and the masked-link key listener (`c`/`r`/`q`) run
+  // CONCURRENTLY — the listener is event-driven (stdin 'data'), never a
+  // blocking read, so it can never delay this. `prompt.stop()` always
+  // runs once the poll settles (success OR failure), restoring raw mode
+  // and detaching the listener even if the user never pressed a key.
+  const exchange = await (async () => {
+    try {
+      return await pollDeviceToken(apiUrl, authorize.device_code, {
+        intervalMs: authorize.interval * 1000,
+        timeoutMs: authorize.expires_in * 1000,
+      });
+    } finally {
+      prompt?.stop();
+    }
+  })();
+
+  if (options.expectedUserId && exchange.user.id !== options.expectedUserId) {
+    throw new CapyError('The signed-in account does not match this repository. No session or keys were installed.', ERROR_CODES.AUTH_FAILED);
+  }
+  if (!await confirmPairAccount(exchange.user.email, json)) {
+    throw new CapyError(
+      'Pairing cancelled. No session or keys were installed.',
+      ERROR_CODES.AUTH_FAILED,
+    );
+  }
+
+  const authService = new AuthService(options.apiUrl, devMode);
+  const installed = await authService.installDeviceGrantSession(exchange.token, exchange.user, exchange.organizations);
+  if (!installed.organization_id) {
+    // Multi-org account with no org scoped by the device-grant token yet —
+    // resolve into one the same way every other org-context command does.
+    await authService.authenticateSilent();
+  }
+
+  const serviceClient = new ServiceClient(options.apiUrl, devMode);
+  serviceClient.setTokenProvider(() => authService.getValidToken());
+
+  const { sealed } = await serviceClient.pickupDevicePairing(authorize.device_code);
+  const envelope = parsePairEnvelope(sealed);
+  const payload = openPairEnvelope(envelope, keyPair);
+
+  const matching = payload.entries.filter((e) => e.user_id === exchange.user.id && (!options.organizationId || e.org_id === options.organizationId));
+  if (matching.length === 0) {
+    throw new CapyError(
+      'No keys were waiting for this account — run `capy transport` on a machine that already has them, then try again.', // COPY-FLAG
+      ERROR_CODES.PAIR_NO_KEYS,
+    );
+  }
+
+  for (const entry of matching) assertEntryCompatible(entry, force);
+  const prepared = await Promise.all(matching.map(entry => prepareTransportCustody(entry, {
+    unwrap: async (orgId, ciphertext, transportId) => (await serviceClient.coDecrypt(orgId, ciphertext, undefined, transportId)).plaintext,
+    wrap: async (orgId, innerCiphertext) => (await serviceClient.wrapOuterLayer(orgId, innerCiphertext)).ciphertext,
+  })));
+  for (const entry of prepared) assertEntryCompatible(entry, force);
+  const paired: readonly PairedOrg[] = prepared.map((entry) => {
+    writeEntry(entry, force);
+    return { org_id: entry.org_id, user_id: entry.user_id };
+  });
+
+  if (json) {
+    console.log(JSON.stringify({ ok: true, user_id: exchange.user.id, paired }, null, 2));
+    return { userId: exchange.user.id, paired };
+  }
+
+  console.log('');
+  console.log(`  Paired ${paired.length} organization${paired.length === 1 ? '' : 's'} to this machine.`); // COPY-FLAG
+  console.log('');
+  return { userId: exchange.user.id, paired };
 }

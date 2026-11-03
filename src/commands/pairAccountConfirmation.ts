@@ -1,6 +1,13 @@
 import { CapyError, ERROR_CODES } from '../types/index';
+import { currentInteraction, prompt as interactionPrompt } from '../ui/interaction';
 
 export async function confirmPairAccount(email: string, json: boolean): Promise<boolean> {
+  if (currentInteraction()) {
+    const answer = await interactionPrompt<Readonly<{ confirmed: boolean }>>([{
+      type: 'confirm', name: 'confirmed', message: `Enable this location as ${email}?`, default: false,
+    }]);
+    return answer.confirmed === true;
+  }
   if (!process.stdin.isTTY) {
     throw new CapyError(`Account confirmation is required for ${email}. No session or keys were installed. Run capy pair in an interactive terminal.`, ERROR_CODES.AUTH_FAILED);
   }

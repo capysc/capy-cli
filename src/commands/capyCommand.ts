@@ -1,4 +1,6 @@
-import ora from '../ui/spinner';
+import ora from '../ui/flowSpinner';
+import { flowConsole as console } from '../ui/flowConsole';
+import { currentInteraction, emitInteractionGoal, prompt, commandExit } from '../ui/interaction';
 import { ProjectManager } from '../core/projectManager';
 import { FileManager } from '../files/fileManager';
 import { AuthService, silentAuthFailureMessage } from '../auth/authService';
@@ -9,7 +11,6 @@ import { debugLine } from '../ui/debug';
 import { existsSync, unlinkSync, rmSync } from 'fs';
 import { join } from 'path';
 import { execSync } from 'child_process';
-import inquirer from 'inquirer';
 import {
   CliOptions,
   Organization,
@@ -106,14 +107,14 @@ export type SyncOutcome =
   | 'stopped';
 
 export class CapyCommand {
-  private projectManager: ProjectManager;
-  private fileManager: FileManager;
-  private authService: AuthService;
-  private serviceClient: ServiceClient;
-  private syncEngine: SyncEngine;
-  private promptEngine: PromptEngine;
-  private options: CliOptions;
-  private devMode: boolean;
+  private readonly projectManager: ProjectManager;
+  private readonly fileManager: FileManager;
+  private readonly authService: AuthService;
+  private readonly serviceClient: ServiceClient;
+  private readonly syncEngine: SyncEngine;
+  private readonly promptEngine: PromptEngine;
+  private readonly options: CliOptions;
+  private readonly devMode: boolean;
 
   constructor(options: CliOptions = {}, devMode: boolean = false) {
     this.options = options;
@@ -194,11 +195,12 @@ export class CapyCommand {
           await this.initializeProjectLocal();
           return;
         }
-        await this.initializeProject();
+        const outcome = await this.initializeProject();
+        await emitInteractionGoal({ flow: 'init-wizard', goal: 'repository_onboarded', status: outcome === 'configured' ? 'succeeded' : 'skipped' });
         return;
       }
 
-      await this.syncProject(projectState);
+      const syncOutcome = await this.syncProject(projectState);
       // CAP-697: auth is established by now. Reporting never changes this command's output or exit code.
       if (!isLocalOnly() && projectState.organizationId && projectState.projectId) {
         await reportRepoLinkForCommand({
@@ -212,7 +214,9 @@ export class CapyCommand {
       }
       const { printExpiryWarnings } = await import('./connectors/shared');
       printExpiryWarnings();
+      await emitInteractionGoal({ flow: 'sync', goal: 'repository_synced', status: syncOutcome === 'stopped' ? 'skipped' : 'succeeded', result: { outcome: syncOutcome } });
     } catch (error: any) {
+      if (currentInteraction()) throw error;
       this.debugError('execute caught error', error);
       // A conflict off a terminal is the protocol's answer, not a failure: exit 3 with the payload on stdout.
       exitOnConflictRefusal(error);
@@ -304,7 +308,7 @@ export class CapyCommand {
         }
         const grey = (s: string) => `\x1b[90m${s}\x1b[0m`;
         console.log('\nNo branch is checked out in this directory yet.');
-        const { selected: pick } = await inquirer.prompt([{
+        const { selected: pick } = await prompt([{
           type: 'list',
           name: 'selected',
           message: 'Which branch do you want to use?',
@@ -364,7 +368,7 @@ export class CapyCommand {
     console.error(`\nThis usually means a previous checkout was interrupted.`);
     console.error(`Recover with: ${B(`capy checkout ${envBranch}`)} (re-sync to the branch .env actually holds)`);
     console.error(`           or: ${B(`capy checkout ${fileBranch}`)} (finish switching to the branch .capy/branch claims)\n`);
-    process.exit(1);
+    commandExit(1);
   }
 
   /**
@@ -425,11 +429,12 @@ export class CapyCommand {
   }
 
   /** First run in this directory. */
-  private async initializeProject(): Promise<void> {
-    await this.runInitialization();
+  private async initializeProject(): Promise<'configured' | 'skipped'> {
+    const outcome = await this.runInitialization();
     // The same one-time, TTY-only offer as the local-only init path above —
     // same --dry-run gating.
-    if (!this.options.dryRun) await offerAgentsSetupAfterInit();
+    if (!this.options.dryRun && !currentInteraction()) await offerAgentsSetupAfterInit();
+    return outcome;
   }
 
   /**
@@ -443,6 +448,14 @@ export class CapyCommand {
     authResult: AuthResult,
     refreshToken: string | undefined,
   ): Promise<Organization> {
+    const binding = currentInteraction()?.binding;
+    if (binding) {
+      const bound = orgs.find(org => org.id === binding.organizationId);
+      if (!bound || authResult.user_id !== binding.userId || authResult.organization_id !== binding.organizationId) {
+        throw new CapyError('The flow account or organization changed. Restart the flow.', ERROR_CODES.AUTH_FAILED);
+      }
+      return bound;
+    }
     const CREATE_NEW_ORG = '__create_new__';
     const currentOrgId = authResult.organization_id;
     const currentOrg = orgs.find(o => o.id === currentOrgId);
@@ -473,7 +486,7 @@ export class CapyCommand {
     currentOrgId: string | undefined,
     createNewOrgValue: string,
   ): Promise<string> {
-    const { orgId } = await inquirer.prompt([{
+    const { orgId } = await prompt([{
       type: 'list',
       name: 'orgId',
       message: 'Select organization for project:',
@@ -497,20 +510,21 @@ export class CapyCommand {
       orgSpinner.succeed(`Organization: ${org.name}`);
       return;
     }
-    orgSpinner.text = 'Re-authenticating...';
+    orgSpinner.stop();
+    const reauthSpinner = ora('Re-authenticating...').start();
     this.authService.clearToken();
     const reauthed = await this.authService.authenticate(org.id);
     if (!reauthed.success) {
-      orgSpinner.fail('Failed to authenticate with organization');
+      reauthSpinner.fail('Failed to authenticate with organization');
       throw new CapyError(
         reauthed.error || 'Organization authentication failed',
         ERROR_CODES.AUTH_FAILED
       );
     }
-    orgSpinner.succeed(`Organization: ${org.name}`);
+    reauthSpinner.succeed(`Organization: ${org.name}`);
   }
 
-  private async runInitialization(): Promise<void> {
+  private async runInitialization(): Promise<'configured' | 'skipped'> {
     this.debug('initializeProject start', { cwd: process.cwd() });
     console.log('Welcome to Capy\n');
 
@@ -520,7 +534,13 @@ export class CapyCommand {
 
     // Authenticate — pass org hint so session scopes to the right org
     const spinner = ora('Logging in...').start();
-    const authResult = await this.authService.authenticate(orgHint);
+    const binding = currentInteraction()?.binding;
+    const authResult = binding
+      ? await this.authService.authenticateSilent(binding.organizationId)
+      : await this.authService.authenticate(orgHint);
+    if (binding && (authResult.user_id !== binding.userId || authResult.organization_id !== binding.organizationId)) {
+      throw new CapyError('The flow account or organization changed. Restart the flow.', ERROR_CODES.AUTH_FAILED);
+    }
     this.debug('init authResult', {
       success: authResult.success,
       user_id: authResult.user_id,
@@ -574,19 +594,21 @@ export class CapyCommand {
     // "The lookup failed" and "this org has none" both end up as an empty list
     // here, and they are not the same fact: one walks the user into creating a
     // second project alongside one they already have. The rail says which.
-    const { existingProjects } = await this.listExistingProjectsOrUnavailable();
+    const { existingProjects, projectsUnavailable } = await this.listExistingProjectsOrUnavailable();
+    if (currentInteraction() && projectsUnavailable) throw new CapyError('Could not verify the organization project inventory. Retry when the service is available.', ERROR_CODES.NETWORK_ERROR);
 
     if (existingProjects.length > 0) {
       const projectChoice = await this.resolveProjectChoice(existingProjects, CREATE_NEW_PROJECT);
 
       if (projectChoice !== CREATE_NEW_PROJECT) {
         const picked = existingProjects.find(p => p.id === projectChoice)!;
+        if (!await this.approveFlowSetup(picked.name, selectedOrg.name, 'development', true)) return 'skipped';
         await this.bootstrapExistingProject(
           picked,
           selectedOrg.id,
           authResult.user_id!,
         );
-        return;
+        return 'configured';
       }
     }
 
@@ -598,6 +620,11 @@ export class CapyCommand {
     // "_system" (CAP-664), but this is the actual choke point before the
     // service is asked to create anything, so it's checked again here.
     assertProjectNameAllowed(projectName);
+
+    const flowBranchChoice = currentInteraction() ? await this.resolveInitialBranchChoice() : null;
+    const flowBranch = flowBranchChoice === null ? null : flowBranchChoice === 'other'
+      ? await this.resolveCustomBranchName() : 'development';
+    if (!await this.approveFlowSetup(projectName, selectedOrg.name, flowBranch ?? 'development', false)) return 'skipped';
 
     // Initialize project on service
     const initSpinner = ora('Creating project...').start();
@@ -634,10 +661,10 @@ export class CapyCommand {
     // one, so pick the name: default 'development', or a custom name the
     // user enters. Protection isn't asked here - branches are unprotected
     // by default and can be protected later via a dedicated action.
-    const initialBranchChoice = await this.resolveInitialBranchChoice();
-    const initialBranchName = initialBranchChoice === 'other'
+    const initialBranchChoice = flowBranch === null ? await this.resolveInitialBranchChoice() : null;
+    const initialBranchName = flowBranch ?? (initialBranchChoice === 'other'
       ? await this.resolveCustomBranchName()
-      : 'development';
+      : 'development');
     const initialBranchProtected = false;
 
     const branchSpinner = ora(`Creating branch ${initialBranchName}...`).start();
@@ -709,7 +736,7 @@ export class CapyCommand {
         if (!confirmEncrypt) {
           console.log(`\nSkipped. Your .env was not modified.`);
           console.log(`Run ${B('capy')} again from the correct project directory, or run ${B('capy push')} when ready.`);
-          return;
+          return 'skipped';
         }
 
         const syncSpinner = ora('Syncing local variables...').start();
@@ -729,6 +756,7 @@ export class CapyCommand {
           console.log(`\nRun ${B('capy push')} to share your secrets with teammates.`);
         } else {
           const syncError: any = syncResult.error;
+          if (currentInteraction()) throw syncError;
           syncSpinner.fail(`Failed to sync variables: ${syncError.message}`);
           console.log(`You can run ${B('capy')} again to retry syncing`);
         }
@@ -746,6 +774,16 @@ export class CapyCommand {
       // Install git hooks
       this.installGitHooks();
     }
+    return 'configured';
+  }
+
+  private async approveFlowSetup(project: string, organization: string, branch: string, existing: boolean): Promise<boolean> {
+    if (!currentInteraction()) return true;
+    const answer = await prompt<Readonly<{ approved: boolean }>>([{ type: 'confirm', name: 'approved', default: false,
+      message: `${existing ? 'Use' : 'Create'} ${project} in ${organization} on ${branch} and configure this repository?`,
+      presentation: { title: 'Approve repository setup', component: 'agent-plan' },
+    }]);
+    return answer.approved === true;
   }
 
   /**
@@ -777,18 +815,26 @@ export class CapyCommand {
     existingProjects: Array<{ id: string; name: string; organization_id: string }>,
     createNewProjectValue: string,
   ): Promise<string> {
-    const { projectChoice } = await inquirer.prompt([initProjectQuestion(existingProjects, createNewProjectValue)]);
+    const { projectChoice } = await prompt([initProjectQuestion(existingProjects, createNewProjectValue)]);
     return projectChoice;
   }
 
   /** Asks (via the prompt engine) for the new project's name. */
   private async resolveProjectName(defaultName: string): Promise<string> {
+    if (currentInteraction()) {
+      const answer = await prompt<Readonly<{ projectName: string }>>([{ type: 'input', name: 'projectName',
+        message: 'Project name:', default: defaultName, validate: (value: string) => {
+          if (!/^[a-zA-Z0-9-_]+$/.test(value)) return 'Use letters, numbers, hyphens or underscores.';
+          try { assertProjectNameAllowed(value); return true; } catch { return 'That project name is reserved.'; }
+        } }]);
+      return answer.projectName;
+    }
     return this.promptEngine.promptForProjectName(defaultName);
   }
 
   /** Asks whether the initial branch is 'development' or a custom name. */
   private async resolveInitialBranchChoice(): Promise<string> {
-    const { initialBranchChoice } = await inquirer.prompt([{
+    const { initialBranchChoice } = await prompt([{
       type: 'list',
       name: 'initialBranchChoice',
       message: 'What branch should this project start with?',
@@ -802,7 +848,7 @@ export class CapyCommand {
 
   /** Asks for the custom initial branch name. */
   private async resolveCustomBranchName(): Promise<string> {
-    const { branchName } = await inquirer.prompt([{
+    const { branchName } = await prompt([{
       type: 'input',
       name: 'branchName',
       message: 'Branch name:',
@@ -869,7 +915,7 @@ export class CapyCommand {
     orgName: string,
     initBranch: string,
   ): Promise<boolean> {
-    const { confirmEncrypt } = await inquirer.prompt([{
+    const { confirmEncrypt } = await prompt([{
       type: 'confirm',
       name: 'confirmEncrypt',
       message: `Encrypt these ${localVarCount} secrets and push to ${B(projectName)} (${orgName}) on ${B(initBranch)}?`,
@@ -1280,10 +1326,15 @@ export class CapyCommand {
         }
         if (refreshFailure?.reason === 'session_ended') {
           // Say why the browser is about to open instead of silently bouncing.
-          spinner.text = 'Session expired — opening your browser to sign in again...';
+          console.log('Session expired — opening your browser to sign in again...');
         }
         return this.authService.authenticate(projectState.organizationId);
       })();
+
+      const binding = currentInteraction()?.binding;
+      if (binding && (result.user_id !== binding.userId || result.organization_id !== binding.organizationId)) {
+        throw new CapyError('The flow account or organization changed. Restart the flow.', ERROR_CODES.AUTH_FAILED);
+      }
 
       this.debug('authResult', {
         success: result.success,
@@ -1727,7 +1778,7 @@ export class CapyCommand {
     );
     const { action } = this.protocol
       ? { action: PROTOCOL_ACTION }
-      : await inquirer.prompt([{
+      : await prompt([{
           type: 'list',
           name: 'action',
           message: 'What would you like to do?',

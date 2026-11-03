@@ -56,6 +56,7 @@ export type InteractionQuestion<T> = Readonly<{
  * inquirer/stdout directly.
  */
 export type Interaction = Readonly<{
+  readonly binding?: Readonly<{ userId: string; organizationId: string }>;
   readonly output: (event: InteractionOutput) => void | Promise<void>;
   readonly progress: (event: InteractionProgress) => void | Promise<void>;
   readonly prompt: <T>(question: InteractionQuestion<T>) => Promise<T | null>;
@@ -162,8 +163,12 @@ const readJsonAnswer = async <T>(
  * record. It deliberately lives outside the command so Flow can provide an
  * encrypted adapter without stdout capture or console monkey-patching.
  */
-export const createJsonLineInteraction = (input: Readable, output: Writable): Interaction => {
+export const createJsonLineInteraction = (input: Readable, output: Writable, signal?: AbortSignal): Interaction => {
   const lines = createInterface({ input, crlfDelay: Infinity });
+  const close = (): void => { lines.close(); };
+  signal?.addEventListener('abort', close, { once: true });
+  lines.once('close', () => signal?.removeEventListener('abort', close));
+  if (signal?.aborted) close();
   const iterator = lines[Symbol.asyncIterator]();
   const prompt = async <T>(question: InteractionQuestion<T>): Promise<T | null> => {
     const id = crypto.randomUUID();
@@ -206,8 +211,9 @@ const askTerminalQuestion = async (question: TerminalQuestion, answers: Terminal
   const interaction = currentInteraction();
   if (!interaction) return await inquirer.prompt([question as any], answers);
   const name = String(question.name);
-  const kind = String(question.type ?? 'input');
-  const offered = resolveSetting(question.choices, answers);
+  const kind = question.type === 'search' ? 'list' : String(question.type ?? 'input');
+  const offered = question.type === 'search' && typeof question.source === 'function'
+    ? await question.source(undefined) : resolveSetting(question.choices, answers);
   const choices = Array.isArray(offered) ? offered.flatMap((choice, index) => {
     const record = choiceRecord(choice);
     if (record?.type === 'separator') return [];

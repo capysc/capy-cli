@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { registerStagingFlowCommands } from './commands/stagingFlowCommands';
 /**
  * Dev-only entrypoint for Capy CLI.
  * Enables mock authentication for local testing.
@@ -79,10 +80,11 @@ if (!process.env.CAPY_API_URL) {
 }
 
 const program = new Command();
+registerStagingFlowCommands(program);
 
 program
-  .name('capy-dev')
-  .description('Capy CLI (DEV MODE - mock auth enabled)')
+  .name(process.env.CAPY_BIN_NAME === 'capy-staging' ? 'capy-staging' : 'capy-dev')
+  .description(process.env.CAPY_BIN_NAME === 'capy-staging' ? 'Capy CLI for staging' : 'Capy CLI (DEV MODE - mock auth enabled)')
   .version(CLI_VERSION)
   .option('--env-path <path>', 'specify custom .env file location')
   .option('-v, --verbose', 'enable detailed logging')

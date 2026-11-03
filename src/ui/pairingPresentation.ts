@@ -44,6 +44,7 @@ export const createPairingPresentation = (url: string, userCode: string, details
   purpose: string;
   expiresInSeconds: number;
   expiresAt?: string;
+  continueInHost?: boolean;
 }>) => {
   const path = join(mkdtempSync(join(tmpdir(), 'capy-pairing-')), 'pairing.png');
   writeFileSync(path, pairingQrPng(url), { mode: 0o600 });
@@ -55,7 +56,9 @@ export const createPairingPresentation = (url: string, userCode: string, details
     qrCode: { path, mimeType: 'image/png' as const },
     presentation: {
       markdown: `Purpose: ${details.purpose}\n\n![Pair with Capy](${path})\n\n${accessThrough}\n\nVerification code: ${userCode}\n\n${expiry}`,
-      instructions: 'Return the purpose, QR image, Access through link, verification code and expiry in a finished chat message immediately. End the turn and wait for the user. Keep this CLI process alive; do not run setup or additional polling commands before handing off.',
+      instructions: details.continueInHost
+        ? 'Show the purpose, QR image, Access through link, verification code and expiry immediately. Keep this process alive and continue bounded reads. Relay the account-confirmation prompt to the human and submit only their explicit answer. Do not approve it yourself. Continue through browser interaction and actual terminal completion without asking the human to say continue.'
+        : 'Return the purpose, QR image, Access through link, verification code and expiry in a finished chat message immediately. End the turn and wait for the user. Keep this CLI process alive; do not run setup or additional polling commands before handing off.',
     },
   } as const;
 };

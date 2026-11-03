@@ -12,17 +12,20 @@
 //
 // Isolated home at ~/.capy-staging so it can never touch prod ~/.capy (which
 // holds recovery-equivalent wrapped keys) or dev ~/.capy-dev. Every var is set
-// only when unset, so `CAPY_API_URL=... capy-staging ...` still overrides.
-if (!process.env.CAPY_GLOBAL_DIR_NAME) {
-  process.env.CAPY_GLOBAL_DIR_NAME = '.capy-staging';
-}
-if (!process.env.CAPY_API_URL) {
-  process.env.CAPY_API_URL = 'https://staging-api.capy.sc';
-}
-if (!process.env.CAPY_BIN_NAME) {
-  process.env.CAPY_BIN_NAME = 'capy-staging';
-}
-if (!process.env.CAPY_KEEP_ORIGIN) {
-  process.env.CAPY_KEEP_ORIGIN = 'https://staging-keep.capy.sc';
-}
+// to the staging home. Origins may target isolated local synthetic fixtures.
+const originFor = (configured, pinned) => {
+  const url = (() => {
+    try { return new URL(configured || pinned); }
+    catch { throw new Error('STAGING_FLOW_TARGET_INVALID'); }
+  })();
+  const local = ['http:', 'https:'].includes(url.protocol) && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
+  if (url.username || url.password || url.search || url.hash || url.pathname !== '/' || (!local && url.origin !== pinned)) {
+    throw new Error('STAGING_FLOW_TARGET_INVALID');
+  }
+  return url.origin;
+};
+process.env.CAPY_GLOBAL_DIR_NAME = '.capy-staging';
+process.env.CAPY_API_URL = originFor(process.env.CAPY_API_URL, 'https://staging-api.capy.sc');
+process.env.CAPY_BIN_NAME = 'capy-staging';
+process.env.CAPY_KEEP_ORIGIN = originFor(process.env.CAPY_KEEP_ORIGIN, 'https://staging-keep.capy.sc');
 require('../dist/index-dev.js');

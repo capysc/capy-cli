@@ -2,6 +2,7 @@
 // Imported first, and applied below before any other statement: the pin has to
 // land before a single Capy module reads configuration.
 import { applyProdPins, formatPinNotice } from './config/prodPins';
+import { registerStagingFlowCommands } from './commands/stagingFlowCommands';
 import { Command, Option } from 'commander';
 import { CapyCommand } from './commands/capyCommand';
 import { CliOptions } from './types/index';
@@ -62,6 +63,7 @@ const pinNotice = formatPinNotice(strippedPins);
 if (pinNotice) console.error(pinNotice);
 
 const program = new Command();
+registerStagingFlowCommands(program);
 
 program
   // Bin name is overridable so sibling wrappers (e.g. bin/capy-staging) render

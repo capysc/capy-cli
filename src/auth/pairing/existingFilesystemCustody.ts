@@ -1,5 +1,5 @@
 import { timingSafeEqual } from 'node:crypto';
-import { AuthService } from '../authService';
+import { AuthService, silentAuthFailureMessage } from '../authService';
 import { getLocalRootMode, readLocalRoot, readOrgKeyFileRaw } from '../../config/globalConfig';
 import { decryptBoundMasterKey, decryptMasterKey, masterKeyAAD } from '../../crypto/keyManager';
 import { deriveLocalInnerKey } from '../../crypto/localKeyRoot';
@@ -22,7 +22,7 @@ const defaults: ExistingFilesystemCustodyDependencies = {
   authenticate: async (origin, userId, organizationId) => {
     const auth = new AuthService(origin, false, userId);
     const identity = await auth.authenticateSilent(organizationId);
-    if (!identity.success) return null;
+    if (!identity.success) { console.error(`flow: ${silentAuthFailureMessage(identity)}`); return null; }
     const token = await auth.getValidToken();
     return token ? { userId: token.user_id, orgId: token.organization_id, accessToken: token.access_token } : null;
   },
@@ -45,7 +45,7 @@ const defaults: ExistingFilesystemCustodyDependencies = {
 
 /** Verify existing custody without writing, migrating, or transferring a key. */
 export async function inspectExistingFilesystemCustody(
-  input: Readonly<{ serviceOrigin: string; userId: string; organizationId?: string }>,
+  input: Readonly<{ serviceOrigin: string; userId: string; organizationId?: string; expectedRoot?: Buffer }>,
   dependencies: ExistingFilesystemCustodyDependencies = defaults,
 ): Promise<ExistingFilesystemCustody> {
   try {
@@ -58,6 +58,7 @@ export async function inspectExistingFilesystemCustody(
     const raw = dependencies.readKeyFile(identity.orgId, input.userId);
     if (!root && !raw) return { kind: 'missing' };
     if (!root || root.byteLength !== 32 || !raw) return { kind: 'invalid' };
+    if (input.expectedRoot && (input.expectedRoot.length !== root.length || !timingSafeEqual(input.expectedRoot, root))) return { kind: 'invalid' };
     const file = parseFilesystemCustodyFile(raw, identity.orgId);
     if (!file) return { kind: 'invalid' };
     const inner = await dependencies.unwrapOuter(input.serviceOrigin, identity, file.ciphertext, file.transportId);

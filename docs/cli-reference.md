@@ -392,6 +392,9 @@ capy pair [options]
 |---|---|---|
 | `--json` | emit machine-readable JSON instead of the human UI |  |
 | `--force` | overwrite a different local key already on this machine |  |
+| `--title <text>` | short summary of why you are pairing, shown as the Keep pairing heading (max 120 chars) |  |
+| `--description <text>` | what you will do once paired, shown under it on the Keep pairing page (max 600 chars) |  |
+| `--signup` | this pairing starts a signup/onboarding; Keep shows its signup prompts |  |
 
 JSON support: yes (`--json`)
 
