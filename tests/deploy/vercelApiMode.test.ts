@@ -148,7 +148,8 @@ describe('vercel API mode — write plan, other cases', () => {
     const { fake, adapter } = setUp({
       records: [rec({ id: 'env_prod', key: 'API_KEY', value: 'old', type: 'sensitive', target: ['production'] })],
     });
-    const result = await adapter.deploy(target({ vercelEnv: 'production' }), ctx({ API_KEY: 'new' }));
+    // Replacing a sensitive value needs a yes the first time (see vercelPlaceholderDeploy.test.ts); here it is given.
+    const result = await adapter.deploy(target({ vercelEnv: 'production' }), ctx({ API_KEY: 'new' }, { sensitiveReplace: { delivered: [], allowed: true } }));
     expect(result.ok).toBe(true);
     expect(fake.records()[0]).toMatchObject({ type: 'sensitive', value: 'new' });
     // The PATCH never sends a type, so it cannot downgrade the record.
@@ -163,7 +164,7 @@ describe('vercel API mode — write plan, other cases', () => {
     const { fake, adapter } = setUp({
       records: [rec({ id: 'env_shared', key: 'API_KEY', value: 'old', type: 'sensitive', target: ['production', 'preview'] })],
     });
-    const result = await adapter.deploy(target({ vercelEnv: 'production' }), ctx({ API_KEY: 'new' }));
+    const result = await adapter.deploy(target({ vercelEnv: 'production' }), ctx({ API_KEY: 'new' }, { sensitiveReplace: { delivered: [], allowed: true } }));
     expect(result.ok).toBe(true);
     const created = fake.records().find((r) => r.id !== 'env_shared');
     expect(created).toMatchObject({ type: 'sensitive', target: ['production'], value: 'new' });

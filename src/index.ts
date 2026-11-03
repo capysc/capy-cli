@@ -381,6 +381,7 @@ const deploy = program
   .option('--scope <scope>', 'gh-actions: "repo" or "env"')
   .option('--env-name <name>', 'gh-actions: env name when --scope env')
   .option('--no-deploy', 'write and verify the target, but skip the platform deploy/redeploy (target mode)')
+  .option('--replace-sensitive', 'vercel: allow replacing a value Vercel holds as sensitive, for the first time for a target, without asking') // COPY-FLAG
   .option('--json', 'describe the route (unanswered stops + any known branch problem) as JSON instead of travelling it')
   // COPY-FLAG: the option descriptions of `deploy <target> --discover` are minimal and neutral.
   .option('--discover', 'dokploy/vercel: find the services that match Capy projects and print JSON (never prompts)')
@@ -413,6 +414,7 @@ const deploy = program
         force: options.force,
         // commander negates `--no-deploy` onto the positive `deploy` property.
         noDeploy: options.deploy === false,
+        replaceSensitive: !!options.replaceSensitive,
         json: !!options.json,
         conflictFlags: rawConflictFlagsOf(cmd),
       });

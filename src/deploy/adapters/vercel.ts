@@ -75,7 +75,9 @@ import {
   isVercelApiMode,
   parseVercelApiOptions,
   planAll,
+  plansReplacingSensitive,
   resolveEnvScope,
+  sensitiveReplacements,
   resolveVercelTargetToken,
   sortedNames,
   verifyApplied,
@@ -84,6 +86,24 @@ import {
 } from '../vercelTargetApi';
 
 type VercelEnv = 'production' | 'preview';
+
+const KEPT_LABEL = 'kept Vercel value'; // COPY-FLAG
+
+/**
+ * The target vars that have no value in Capy yet (placeholders): never written, so Vercel keeps its own.
+ * A name that does have a value in the decrypted env is not one.
+ */
+function keptNames(config: TargetConfig, ctx: Pick<DeployContext, 'placeholders' | 'env'>): readonly string[] {
+  const placeholders = ctx.placeholders ?? [];
+  return config.vars.filter((name) => placeholders.includes(name) && !(name in ctx.env));
+}
+
+/** The step that names what was left alone, or none. */
+function keptSteps(kept: readonly string[]): readonly DeployStep[] {
+  if (kept.length === 0) return [];
+  // COPY-FLAG: names only, never a value.
+  return [{ label: KEPT_LABEL, status: 'skip', detail: `kept Vercel's value (no value in Capy yet): ${sortedNames(kept).join(', ')}` }];
+}
 
 interface VercelOptions {
   /** Directory holding the Vercel app (package.json / .vercel). Relative to root. */
@@ -544,6 +564,11 @@ async function legacyDeploy(config: TargetConfig, ctx: DeployContext): Promise<D
   const projectDir = join(ctx.cwd, opts.projectDir ?? '.');
   const scope = vercelEnv === 'preview' ? `preview · branch=${gitBranch}` : 'production';
 
+  // A var with no value in Capy yet is left alone: Vercel keeps its own. (This path cannot read what Vercel holds,
+  // so it cannot tell a sensitive value from another: the replace confirmation is API mode only.)
+  const kept = keptNames(config, ctx);
+  const pushNames = config.vars.filter((name) => !kept.includes(name));
+
   if (ctx.dryRun) {
     return {
       ok: true,
@@ -551,19 +576,21 @@ async function legacyDeploy(config: TargetConfig, ctx: DeployContext): Promise<D
         {
           label: 'set Vercel env',
           status: 'skip',
-          detail: `dry-run — would push ${config.vars.length} var(s) to ${scope}, then open the deploy PR`,
+          detail: `dry-run — would push ${pushNames.length} var(s) to ${scope}, then open the deploy PR`,
         },
+        ...keptSteps(kept),
       ],
+      ...(kept.length > 0 ? { skipped: kept } : {}),
     };
   }
 
   // Push each declared var as a plaintext Vercel Environment Variable, scoped
   // to the chosen Vercel env. Filter the decrypted branch env to the declared
   // names; fail loudly if any are missing rather than pushing a partial set.
-  const filtered: ReadonlyArray<readonly [string, string]> = config.vars
+  const filtered: ReadonlyArray<readonly [string, string]> = pushNames
     .filter((name) => name in ctx.env)
     .map((name) => [name, ctx.env[name]] as const);
-  const missing = config.vars.filter((name) => !(name in ctx.env));
+  const missing = pushNames.filter((name) => !(name in ctx.env));
   if (missing.length > 0) {
     return {
       ok: false,
@@ -604,12 +631,14 @@ async function legacyDeploy(config: TargetConfig, ctx: DeployContext): Promise<D
         status: 'ok',
         detail: `${filtered.length} var(s) pushed to ${scope}`,
       },
+      ...keptSteps(kept),
       {
         label: 'vercel build + deploy',
         status: 'skip',
         detail: 'CI mode — Vercel builds and deploys when the deploy PR merges',
       },
     ],
+    ...(kept.length > 0 ? { skipped: kept } : {}),
   };
 }
 
@@ -625,6 +654,30 @@ export interface VercelAdapterDeps {
 }
 
 const SET_ENV_LABEL = 'set Vercel env';
+const SENSITIVE_LABEL = 'replace sensitive value'; // COPY-FLAG
+
+/**
+ * The refusal (a failed step) when a plan would replace, for the first time for this target, a value Vercel holds as
+ * sensitive and nobody said yes: `--replace-sensitive`, or a person at a terminal. `undefined` when it may go on.
+ * Capy cannot read such a value, so it cannot know whether the one it holds differs. Nothing has been written yet.
+ */
+async function sensitiveReplaceRefusal(plans: readonly VarPlan[], ctx: DeployContext): Promise<DeployStep | undefined> {
+  const delivered = ctx.sensitiveReplace?.delivered ?? [];
+  const names = plansReplacingSensitive(plans).filter((name) => !delivered.includes(name));
+  if (names.length === 0 || ctx.sensitiveReplace?.allowed === true) return undefined;
+  const ask = ctx.sensitiveReplace?.ask;
+  if (ask !== undefined && (await ask(names))) return undefined;
+  return {
+    label: SENSITIVE_LABEL,
+    status: 'fail',
+    code: ERROR_CODES.VERCEL_SENSITIVE_REPLACE_UNCONFIRMED,
+    // COPY-FLAG: names only.
+    detail:
+      ask === undefined
+        ? `would replace a sensitive value in Vercel, not confirmed: ${sortedNames(names).join(', ')}. Pass --replace-sensitive to allow it.`
+        : `a sensitive value in Vercel was not replaced (not confirmed): ${sortedNames(names).join(', ')}`,
+  };
+}
 const VERIFY_LABEL = 'verify Vercel env';
 
 /** A rejected token (HTTP 401) or one without access (HTTP 403) says where to get another; any other failure adds nothing. */
@@ -734,8 +787,13 @@ export function createVercelAdapter(deps: VercelAdapterDeps = {}): DeployAdapter
     if (!listed.ok) {
       return failResult({ label: SET_ENV_LABEL, status: 'fail', code: listed.code, detail: describeVercelFailure(listed.code, listed.status).reason, ...rejectedKeyHelp(listed.code, opts.teamSlug) });
     }
-    const plan = dryRunSummary(config.vars, listed.records, scope.scope);
+    const kept = keptNames(config, ctx);
+    const pushNames = config.vars.filter((name) => !kept.includes(name));
+    const plan = dryRunSummary(pushNames, listed.records, scope.scope);
     const names = (xs: readonly string[]) => (xs.length > 0 ? ` [${sortedNames(xs).join(', ')}]` : '');
+    // The first replacement of a value Vercel holds as sensitive asks (unless this target delivered the name before).
+    const delivered = ctx.sensitiveReplace?.delivered ?? [];
+    const needsConfirmation = sensitiveReplacements(pushNames, listed.records, scope.scope).filter((name) => !delivered.includes(name));
     return {
       ok: true,
       steps: [
@@ -744,12 +802,24 @@ export function createVercelAdapter(deps: VercelAdapterDeps = {}): DeployAdapter
           status: 'skip',
           // COPY-FLAG: names and counts only.
           detail:
-            `dry-run — would push ${config.vars.length} var(s) to ${describeScope(scope.scope)}: ` +
+            `dry-run — would push ${pushNames.length} var(s) to ${describeScope(scope.scope)}: ` +
             `create ${plan.create.length}${names(plan.create)}, ` +
             `update ${plan.update.length}${names(plan.update)}, ` +
             `split from a shared record ${plan.split.length}${names(plan.split)}; then open the deploy PR`,
         },
+        ...keptSteps(kept),
+        ...(needsConfirmation.length > 0
+          ? [
+              {
+                label: SENSITIVE_LABEL,
+                status: 'skip' as const,
+                // COPY-FLAG: names only.
+                detail: `would replace a sensitive value (needs confirmation): ${sortedNames(needsConfirmation).join(', ')}`,
+              },
+            ]
+          : []),
       ],
+      ...(kept.length > 0 ? { skipped: kept } : {}),
     };
   }
 
@@ -760,7 +830,14 @@ export function createVercelAdapter(deps: VercelAdapterDeps = {}): DeployAdapter
     }
     if (ctx.dryRun) return apiDryRun(config, ctx, parsed.options);
 
-    const missing = config.vars.filter((name) => !(name in ctx.env));
+    // A var with no value in Capy yet is never written: Vercel keeps its own value. It is not "missing".
+    const kept = keptNames(config, ctx);
+    const pushNames = config.vars.filter((name) => !kept.includes(name));
+    if (pushNames.length === 0) {
+      // Nothing to write, so nothing is asked of Vercel at all.
+      return { ok: true, steps: [...keptSteps(kept)], skipped: kept };
+    }
+    const missing = pushNames.filter((name) => !(name in ctx.env));
     if (missing.length > 0) {
       return failResult({
         label: SET_ENV_LABEL,
@@ -787,8 +864,13 @@ export function createVercelAdapter(deps: VercelAdapterDeps = {}): DeployAdapter
       return failResult({ label: SET_ENV_LABEL, status: 'fail', code: listed.code, detail: describeVercelFailure(listed.code, listed.status).reason, ...rejectedKeyHelp(listed.code, parsed.options.teamSlug) });
     }
 
-    const pairs = config.vars.map((name) => [name, ctx.env[name]] as const);
+    const pairs = pushNames.map((name) => [name, ctx.env[name]] as const);
     const plans: readonly VarPlan[] = planAll(pairs, listed.records, scope.scope);
+
+    // Replacing a value Vercel holds as sensitive: the first time for this target needs a yes, before anything is written.
+    const refused = await sensitiveReplaceRefusal(plans, ctx);
+    if (refused) return failResult(refused);
+
     const applied = await applyPlans(client, plans, scope.scope);
     if (!applied.ok) {
       return failResult({
@@ -804,7 +886,7 @@ export function createVercelAdapter(deps: VercelAdapterDeps = {}): DeployAdapter
     const writeStep: DeployStep = {
       label: SET_ENV_LABEL,
       status: 'ok',
-      detail: `${config.vars.length} var(s) pushed to ${where} (${writeSummary(applied.applied)})`,
+      detail: `${pushNames.length} var(s) pushed to ${where} (${writeSummary(applied.applied)})`,
     };
     if (!verified.ok) {
       return {
@@ -823,7 +905,7 @@ export function createVercelAdapter(deps: VercelAdapterDeps = {}): DeployAdapter
     };
     return vStep.status === 'fail'
       ? { ok: false, steps: [writeStep, vStep] }
-      : { ok: true, steps: [writeStep, vStep, buildStep] };
+      : { ok: true, steps: [writeStep, ...keptSteps(kept), vStep, buildStep], ...(kept.length > 0 ? { skipped: kept } : {}) };
   }
 
   return {

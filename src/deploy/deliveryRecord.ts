@@ -16,6 +16,7 @@ import { isVercelApiMode } from './vercelTargetApi';
 import { TargetDeliveryDescriptor, VarDelivery, recordTargetDeliveries } from './targetsGate';
 import { uploadKeepOnly } from '../sync/commit';
 import type { RateInfo } from '../utils/pool';
+import type { KeepFile } from '../types/index';
 
 /**
  * Adapter-specific handle for what a target actually points at, when one is
@@ -66,6 +67,21 @@ export function deliveryFor(
     .filter((v) => valueHashes[v] !== undefined)
     .map((v) => ({ name: v, valueHash: valueHashes[v] }));
   return { delivery, values };
+}
+
+/**
+ * The target vars Capy has delivered to this target before: a delivery record with a value hash on the branch's entry.
+ * (A target that is only configured, with no push yet, has a record without one.) This is how "the first replacement
+ * of a sensitive Vercel value was confirmed" is remembered: the delivery that followed it is the record.
+ */
+export function deliveredBefore(keep: KeepFile | null | undefined, target: Pick<TargetConfig, 'name' | 'branch' | 'vars'>, adapter: Pick<DeployAdapter, 'id'>): readonly string[] {
+  return target.vars.filter((name) =>
+    (keep?.variables[name] ?? [])
+      .filter((entry) => entry.branch === target.branch)
+      .some((entry) =>
+        (entry.targets ?? []).some((t) => t.provider === adapter.id && t.target === target.name && t.deployed_value_hash !== undefined),
+      ),
+  );
 }
 
 /** What the recorder needs from the service client. */

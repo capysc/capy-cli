@@ -609,6 +609,29 @@ export function planVar(
   return { kind: 'create', name, value, type: 'encrypted' };
 }
 
+/**
+ * The record a plan would replace the value of, when Vercel holds it as sensitive. Capy cannot read such a
+ * value, so it cannot tell whether the new one differs: every deploy would replace it.
+ */
+function replacedRecord(plan: VarPlan): VercelEnvRecord | undefined {
+  if (plan.kind === 'update') return plan.record;
+  return plan.kind === 'split' ? plan.shared : undefined;
+}
+
+/** The names whose plan replaces a value Vercel holds as sensitive. */
+export function plansReplacingSensitive(plans: readonly VarPlan[]): readonly string[] {
+  return plans.filter((plan) => replacedRecord(plan)?.type === 'sensitive').map((plan) => plan.name);
+}
+
+/** Dry-run counterpart of `plansReplacingSensitive`: the names a deploy would replace a sensitive value of (names only, no values needed). */
+export function sensitiveReplacements(names: readonly string[], records: readonly VercelEnvRecord[], scope: EnvScope): readonly string[] {
+  const replaced = (name: string): VercelEnvRecord | undefined => {
+    const serving = records.filter((r) => covers(r, name, scope));
+    return serving.find((r) => envKeysOf(r).length === 1) ?? serving[0];
+  };
+  return names.filter((name) => replaced(name)?.type === 'sensitive');
+}
+
 /** `planVar` for every name, in order. */
 export function planAll(
   vars: ReadonlyArray<readonly [string, string]>,

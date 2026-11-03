@@ -34,7 +34,7 @@ JSON support: yes (`--json`)
 
 ## `capy edit`
 
-Inspect and edit secrets in an interactive TUI, or set one variable from a piped value
+Inspect and edit secrets in an interactive TUI, or set one variable from a hidden prompt or a piped value
 
 ```
 capy edit [name] [options]
@@ -42,7 +42,7 @@ capy edit [name] [options]
 
 | Option | Description | Default |
 |---|---|---|
-| `--no-push` | piped value: write .env only; do not push to Capy |  |
+| `--no-push` | with a name: write .env only; do not push to Capy |  |
 | `--json` | emit machine-readable JSON instead of the human UI (piped value) |  |
 | `--non-tty` | treat stdin as not a terminal; never prompt (agents/CI) |  |
 | `--pr` | create a PR with the keep.lock change (answers the prompt) |  |
@@ -127,6 +127,7 @@ capy deploy [target] [options]
 | `--scope <scope>` | gh-actions: "repo" or "env" |  |
 | `--env-name <name>` | gh-actions: env name when --scope env |  |
 | `--no-deploy` | write and verify the target, but skip the platform deploy/redeploy (target mode) |  |
+| `--replace-sensitive` | vercel: allow replacing a value Vercel holds as sensitive, for the first time for a target, without asking |  |
 | `--json` | describe the route (unanswered stops + any known branch problem) as JSON instead of travelling it |  |
 | `--discover` | dokploy/vercel: find the services that match Capy projects and print JSON (never prompts) |  |
 | `--plan <file>` | dokploy/vercel --discover: the plan file to check (see schemas.deploy_dokploy_plan and schemas.deploy_vercel_plan in `capy help --json`) |  |
@@ -1020,6 +1021,7 @@ Every refusal carries a stable `code` — branch on it, never on message text.
 - `VERCEL_OPTIONS_INVALID`
 - `VERCEL_SPLIT_NOT_RESTORED`
 - `VERCEL_URL_INVALID`
+- `VERCEL_SENSITIVE_REPLACE_UNCONFIRMED`
 - `VERCEL_PROJECT_NOT_GITHUB`
 - `VERCEL_ENV_LIST_TRUNCATED`
 - `EDIT_NEEDS_TTY`

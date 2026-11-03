@@ -66,6 +66,7 @@ import { SyncEngine } from '../sync/syncEngine';
 import type { AuthService } from '../auth/authService';
 import type { ServiceClient } from '../service/serviceClient';
 import { ProjectManager } from '../core/projectManager';
+import { placeholdersOnBranch } from '../core/placeholder';
 import { tmpdir } from 'os';
 import { ALL_ADAPTERS, getAdapter, listPlanned } from '../deploy/registry';
 import { detectAwsRegion, leafFor } from '../deploy/adapters/awsSsm';
@@ -93,7 +94,7 @@ import { resolveVercelTokenOnce } from '../deploy/vercelTokenOnce';
 import { resolveVercelSetup } from '../deploy/vercelSetup';
 import { isVercelApiMode } from '../deploy/vercelTargetApi';
 import type { AdapterCallContext } from '../deploy/adapter';
-import { deliveryFor, recordDeliveriesOnServer, targetRefFor } from '../deploy/deliveryRecord';
+import { deliveredBefore, deliveryFor, recordDeliveriesOnServer, targetRefFor } from '../deploy/deliveryRecord';
 import { deployPlan, unansweredDeployStops, type DeployStopId } from '../core/deployPlan';
 import {
   conflictFlagsOrExit,
@@ -156,6 +157,11 @@ export interface DeployCliOptions {
    * ships it later. `targets` are still recorded — the write happened.
    */
   noDeploy?: boolean;
+  /**
+   * `--replace-sensitive`: allow replacing a value Vercel holds as sensitive, for the first time for a target, without asking.
+   * Off a terminal this is the only yes; without it such a deploy is refused (`VERCEL_SENSITIVE_REPLACE_UNCONFIRMED`).
+   */
+  replaceSensitive?: boolean;
   /**
    * `--resolve` / `--conflict` as typed (CAP-717): they decide the conflicts between the folder, Capy and the
    * platform off a terminal. Without them such a conflict stops the deploy (exit 3, the payload on stdout).
@@ -415,6 +421,51 @@ async function loadDeploySecrets(
     console.error(`${RED('✗')} decrypt: ${err.message}`);
     return null;
   }
+}
+
+// ── Names with no value yet, and replacing a sensitive Vercel value ─────────
+
+/** The names the picker and the var-set check know on the active branch: the `.env` names, plus the placeholders (no value, but they exist). */
+function branchVarNames(cwd: string): ReadonlySet<string> {
+  const pm = new ProjectManager(cwd);
+  const branch = pm.deriveActiveBranch();
+  const placeholders = branch ? placeholdersOnBranch(pm.readKeepFile(), branch).map((p) => p.name) : [];
+  return new Set([...Object.keys(new FileManager(cwd).readEnvFile()), ...placeholders]);
+}
+
+/**
+ * What the adapter needs to leave placeholders alone and to ask before replacing a sensitive Vercel value for the first time.
+ * Read from keep.lock; the answer to the question is recorded by the delivery itself (`deliveredBefore`).
+ */
+function placeholderDeliveryContext(
+  cwd: string,
+  target: TargetConfig,
+  adapter: DeployAdapter,
+  options: DeployCliOptions,
+): Pick<DeployContext, 'placeholders' | 'sensitiveReplace'> {
+  const keep = new ProjectManager(cwd).readKeepFile();
+  const canAsk = process.stdin.isTTY === true && !options.yes && !options.json && !options.dryRun;
+  return {
+    placeholders: placeholdersOnBranch(keep, target.branch).map((p) => p.name),
+    sensitiveReplace: {
+      delivered: deliveredBefore(keep, target, adapter),
+      allowed: options.replaceSensitive === true,
+      ...(canAsk ? { ask: askToReplaceSensitive } : {}),
+    },
+  };
+}
+
+async function askToReplaceSensitive(names: readonly string[]): Promise<boolean> {
+  const ans = await inquirer.prompt([
+    {
+      type: 'confirm',
+      name: 'yes',
+      // COPY-FLAG: new user-facing string, minimal/neutral wording.
+      message: `Replace the value Vercel holds as sensitive for ${names.join(', ')}? Capy cannot read it, so it cannot tell whether it differs.`,
+      default: false,
+    },
+  ]);
+  return !!ans.yes;
 }
 
 // ── Targets recording (CAP-679) ─────────────────────────────────────────────
@@ -1415,7 +1466,7 @@ export async function runPicker(
   // off a different directory is how the picker ends up ticking a variable the
   // target does not have. Identical whenever the two agree, which is every
   // production call.
-  const branchVarSet = new Set(Object.keys(new FileManager(cwd).readEnvFile()));
+  const branchVarSet = branchVarNames(cwd);
   const branchVars = keep.variables.filter((v) => branchVarSet.has(v));
 
   // 1. Pick adapter (when not pre-selected). Real adapters are selectable;
@@ -2358,7 +2409,7 @@ async function reconcileTargetVars(
   target: TargetConfig,
   options: DeployCliOptions,
 ): Promise<StepResult<TargetConfig>> {
-  const branchVarSet = new Set(Object.keys(new FileManager(cwd).readEnvFile()));
+  const branchVarSet = branchVarNames(cwd);
   const currentVars = keep.variables.filter((v) => branchVarSet.has(v));
   // Legacy targets have no `knownVars` baseline; treat current as known so we
   // don't false-flag intentionally-unselected vars as "newly added".
@@ -2769,6 +2820,7 @@ export async function deployCommand(
     secretsOnly: mode === 'ci',
     noDeploy: !!options.noDeploy,
     cwd,
+    ...(adapter.id === 'vercel' ? placeholderDeliveryContext(cwd, target, adapter, options) : {}),
     ...adapterCallCtx,
     // A dry run's delivery stays a plain dry run (it reads nothing): the preview of conflicts was the step before.
     ...(settled.targetCheck === undefined || options.dryRun ? {} : { targetCheck: settled.targetCheck }),

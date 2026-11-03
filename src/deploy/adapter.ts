@@ -195,6 +195,21 @@ export interface DeployContext extends AdapterCallContext {
    */
   targetCheck?: TargetCheck;
   /**
+   * Names on the branch that exist with no value yet (placeholders, core/placeholder.ts). A target var in this list
+   * is never written: the platform keeps its own value. Vercel only; absent: none.
+   */
+  placeholders?: readonly string[];
+  /**
+   * Vercel API mode: replacing a value Vercel holds as sensitive. `delivered` are the target vars Capy has delivered to
+   * this target before (a delivery record in keep.lock): the first replacement of the others needs a yes.
+   * `allowed` is `--replace-sensitive`. `ask` is set only where a person can answer; it resolves the answer.
+   */
+  sensitiveReplace?: {
+    readonly delivered: readonly string[];
+    readonly allowed: boolean;
+    readonly ask?: (names: readonly string[]) => Promise<boolean>;
+  };
+  /**
    * Deliver only the names in `config.vars`, leaving every other line Capy already manages on the platform exactly
    * as it is (the batch deploy of picked variables, CAP-715). Absent: the managed block holds the target's vars.
    */
