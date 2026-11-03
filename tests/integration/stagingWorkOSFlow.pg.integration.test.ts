@@ -12,6 +12,7 @@ import { mintPageKeypairPageSide, openRequestEnvelopePageSide, sealEnvelopePageS
 
 const nativeExists = fs.existsSync;
 const nativeRead = fs.readFileSync;
+const keepRoot = process.env.CAPY_FLOW_KEEP_TEST_ROOT;
 const serviceRoot = process.env.CAPY_FLOW_HOST_TEST_SERVICE_ROOT;
 const database = process.env.DATABASE_URL;
 const configured = !!serviceRoot && !!database;
@@ -69,6 +70,15 @@ afterAll(() => { rmSync(state, { recursive: true, force: true }); });
 for (const scenario of ['success', 'reauth', 'uncertain', 'changed-target', 'cancelled'] as const) test.skipIf(!configured)(`synthetic WorkOS ${scenario} crosses the encrypted browser/runtime boundary`, async () => {
   const target = new URL(database!);
   if (!['localhost', '127.0.0.1'].includes(target.hostname) || !target.pathname.startsWith('/flow_')) throw new Error('An isolated local synthetic flow database is required.');
+  const browserFixture = keepRoot ? await (async () => {
+    const directory = join(state, `browser-${scenario}`);
+    const bundle = await Bun.build({ entrypoints:[`${keepRoot}/tests/fixtures/conversationHarness.tsx`],outdir:directory,target:'browser',
+      define:{'process.env.NODE_ENV':'"development"','process.env':'{}'},
+      plugins:[{name:'keep-fixture-alias',setup(builder){builder.onResolve({filter:/^@\//},args=>({path:Bun.resolveSync(args.path.replace('@/','./src/'),keepRoot)}));}}] });
+    if (!bundle.success) throw new Error('Keep fixture bundle failed');
+    const {chromium} = await import(`${keepRoot}/node_modules/playwright/index.mjs`);
+    return {directory,browser:await chromium.launch({headless:true})};
+  })() : null;
   const [{ default: express }, jose, auth, authentication, conversations, dbModule, drizzle] = await Promise.all([
     import(`${serviceRoot}/service/node_modules/express/index.js`),
     import(`${serviceRoot}/service/node_modules/jose/dist/browser/index.js`),
@@ -143,21 +153,48 @@ for (const scenario of ['success', 'reauth', 'uncertain', 'changed-target', 'can
     const handoff = await Promise.race([hostEvent(),running.then(result => { if (!result.ok) throw result.error; throw new Error('Flow ended before handoff'); })]);
     process.stderr.write(`fixture ${scenario}: handoff received\n`);
     const flowId = handoff.flow_id as string;
-    const page = await mintPageKeypairPageSide();
-    await request(`/flows/${flowId}/attach`, {page_pubkey:page.pagePubkeyB64});
+    const page = browserFixture ? null : await mintPageKeypairPageSide();
+    if (page) await request(`/flows/${flowId}/attach`, {page_pubkey:page.pagePubkeyB64});
+    const browserPage = browserFixture ? await browserFixture.browser.newPage({viewport:{width:480,height:640}}) : null;
+    if (browserPage && browserFixture) {
+      browserPage.setDefaultTimeout(7000);
+      await browserPage.route('http://localhost/**',async route => {
+        const url = new URL(route.request().url());
+        if (url.pathname === '/') return route.fulfill({contentType:'text/html',body:'<meta charset="utf-8"><div id="root"></div><link rel="stylesheet" href="/bundle.css"><script src="/bundle.js"></script>'});
+        if (url.pathname === '/bundle.js' || url.pathname === '/bundle.css') return route.fulfill({contentType:url.pathname.endsWith('js')?'text/javascript':'text/css',
+          body:await Bun.file(`${browserFixture.directory}/conversationHarness.${url.pathname.endsWith('js')?'js':'css'}`).text()});
+        if (url.pathname.startsWith(`/api/flow/conversation/${flowId}/`)) {
+          const response = await fetch(`${origin()}${url.pathname.replace('/api/flow/conversation/','/flows/')}${url.search}`,{
+            method:route.request().method(),headers:{Authorization:`Bearer ${bearer}`,'Content-Type':'application/json'},
+            ...(route.request().method()==='POST'?{body:route.request().postData()}:{}),signal:AbortSignal.timeout(35000)});
+          return route.fulfill({status:response.status,contentType:'application/json',body:await response.text()});
+        }
+        return route.fulfill({status:404,body:''});
+      });
+      await browserPage.goto(`http://localhost/?host&flow=${flowId}`);
+      await browserPage.getByRole('button',{name:'Yes',exact:true}).last().waitFor();
+    }
     const prompts = mock((_text: string) => undefined);
     const consume = async (after: number): Promise<void> => {
       const history = await request(`/flows/${flowId}/messages?after=${after}&wait_ms=1000`);
       for (const message of history.messages) {
         if (message.direction !== 'cli_to_browser') continue;
-        const opened = JSON.parse(await openRequestEnvelopePageSide({ciphertextB64:message.envelope,connectionId:`${flowId}:${message.id}`,clientPubkeyB64:history.client_pubkey,pagePrivateKey:page.privateKey}));
         if (message.type !== 'prompt') continue;
-        prompts(opened.data.question.text);
+        if (page) {
+          const opened = JSON.parse(await openRequestEnvelopePageSide({ciphertextB64:message.envelope,connectionId:`${flowId}:${message.id}`,clientPubkeyB64:history.client_pubkey,pagePrivateKey:page.privateKey}));
+          prompts(opened.data.question.text);
+        }
         if (scenario === 'cancelled') {
           const saved = findFlowRecoveryBootstraps(root,{origin:origin(),owner_id:owner,organization_id:organization,repo_fingerprint:fingerprint}).find(item => item.binding.flow_id === flowId)!;
           const payload = conversations.conversationProofPayload('abandon',flowId,'abandon',{});
           await request(`/flows/${flowId}/abandon`,{proof:sign('sha256',payload,saved.keys.privateKey).toString('base64')});
           return;
+        }
+        if (browserPage) {
+          const sent = browserPage.waitForResponse(response => response.request().method()==='POST' && new URL(response.url()).pathname.endsWith('/messages'));
+          await browserPage.getByRole('button',{name:'Yes',exact:true}).last().click();
+          await sent;
+          continue;
         }
         const id = randomUUID();
         const plaintext = JSON.stringify({v:1,flow_id:flowId,id,correlation_id:message.correlation_id,type:'answer',data:{value:true}});
@@ -186,7 +223,15 @@ for (const scenario of ['success', 'reauth', 'uncertain', 'changed-target', 'can
       }
     }
     expect(login.mock.calls.length).toBe(['reauth','changed-target'].includes(scenario) ? 1 : 0);
-    if (scenario === 'reauth') expect(prompts.mock.calls.map(([text]) => text)).toContain('Synthetic replacement login code');
+    if (scenario === 'reauth' && !browserPage) expect(prompts.mock.calls.map(([text]) => text)).toContain('Synthetic replacement login code');
+    if (browserPage) {
+      if (scenario === 'cancelled') await browserPage.getByText('This flow was cancelled.',{exact:false}).waitFor();
+      else await browserPage.getByText('This session has concluded. Close this window and return to your agent to resume.',{exact:true}).waitFor();
+      if (scenario === 'reauth') expect(await browserPage.locator('body').innerText()).toContain('Synthetic replacement login code');
+      expect(await browserPage.getByRole('button',{name:'Yes',exact:true}).count()).toBe(0);
+      const screenshot = process.env.CAPY_FLOW_SCREENSHOT_DIR;
+      if (screenshot) {mkdirSync(screenshot,{recursive:true});await browserPage.screenshot({path:join(screenshot,`workos-${scenario}.png`)});}
+    }
     const status = await request(`/flows/${flowId}/conversation-status?wait_ms=0`);
     expect(status.command).toBe('rotate');
     expect(status.outcome).toBe(scenario === 'success' || scenario === 'reauth' ? 'succeeded' : scenario === 'cancelled' ? null : 'failed');
@@ -198,6 +243,7 @@ for (const scenario of ['success', 'reauth', 'uncertain', 'changed-target', 'can
       await request(`/flows/${saved.binding.flow_id}/abandon`,{proof:sign('sha256',payload,saved.keys.privateKey).toString('base64')}).catch(() => undefined);
     }
     await running;
+    if (browserFixture) await browserFixture.browser.close();
     providerFetch.mockRestore(); stdout.mockRestore(); hostLines.close(); hostEvents.end();
     server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve()));
     await db.delete(dbModule.schema.flows).where(drizzle.eq(dbModule.schema.flows.userId,owner));
