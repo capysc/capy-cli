@@ -1024,6 +1024,7 @@ Every refusal carries a stable `code` — branch on it, never on message text.
 - `VERCEL_SENSITIVE_REPLACE_UNCONFIRMED`
 - `VERCEL_PROJECT_NOT_GITHUB`
 - `VERCEL_ENV_LIST_TRUNCATED`
+- `CAPY_VALUE_KEPT`
 - `EDIT_NEEDS_TTY`
 - `EDIT_STDIN_LOCAL_ONLY`
 - `STDIN_EMPTY`

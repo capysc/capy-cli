@@ -17,7 +17,8 @@ import { randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createVercelConnector } from '../../src/commands/connectors/vercel';
-import { buildVercelDiscoveryPlan, matchVercelProject } from '../../src/commands/connectors/vercelDiscovery';
+import { buildVercelDiscoveryPlan, matchVercelProject, reportVercelDiscovery } from '../../src/commands/connectors/vercelDiscovery';
+import { discoveryConfirmMessage } from '../../src/commands/connectors/vercel';
 import { findCandidateReposResult, type DiscoveryContext } from '../../src/commands/connectors/dokployDiscovery';
 import { ConnectCommand } from '../../src/commands/connectCommand';
 import { FileManager } from '../../src/files/fileManager';
@@ -233,6 +234,133 @@ describe('buildVercelDiscoveryPlan', () => {
       const web = existing.folders[0];
       expect(Object.fromEntries(web.environments.map((env) => [env.environmentName, env.branchExists]))).toEqual({ staging: false, preview: false, production: true });
     });
+  });
+});
+
+// A keep.lock whose `production` branch already holds a value for HIDDEN (hash only; the plan reads no plaintext).
+const keepWithHidden = (placeholder: boolean): KeepFile => ({
+  version: '3.0',
+  org_id: 'o',
+  project_id: 'proj_x',
+  project_name: 'widgets',
+  variables: {
+    HIDDEN: [
+      {
+        resource_id: 'r_hidden',
+        branch: 'production',
+        value_hash: placeholder ? '' : 'hash-of-a-real-value',
+        ...(placeholder ? { placeholder: { provider: 'vercel', reason: 'sensitive_unreadable' } } : {}),
+      },
+    ],
+  },
+});
+
+describe('buildVercelDiscoveryPlan — names Vercel will not return where Capy has a value are kept', () => {
+  test('a name with a value on that branch moves from skipped to kept; the counts follow; other environments are unchanged', async () => {
+    await inRepo(async (root) => {
+      const client = createVercelClient('tok', { fetch: fakeVercelFetch(planData()) });
+      const keep = keepWithHidden(false);
+      const plan = await buildVercelDiscoveryPlan(client, 'team_acme', findCandidateReposResult(root).repos, { peekLocalKeep: () => keep, listServerBranches: async () => [{ name: 'production' }] });
+      const web = plan.folders[0];
+      const prod = web.environments.find((env) => env.environmentName === 'production')!;
+      expect(prod.kept).toEqual([{ name: 'HIDDEN', code: 'CAPY_VALUE_KEPT', reason: 'sensitive_unreadable' }]);
+      expect(prod.skipped).toEqual([]);
+      expect([prod.variableCount, prod.skippedCount]).toEqual([2, 0]);
+      const preview = web.environments.find((env) => env.environmentName === 'preview')!;
+      expect(preview.kept).toBeUndefined();
+      expect(preview.skippedCount).toBe(1);
+    });
+  });
+
+  test('a placeholder (no value) on that branch is not kept: it stays in the unreadable list as before', async () => {
+    await inRepo(async (root) => {
+      const client = createVercelClient('tok', { fetch: fakeVercelFetch(planData()) });
+      const keep = keepWithHidden(true);
+      const plan = await buildVercelDiscoveryPlan(client, 'team_acme', findCandidateReposResult(root).repos, { peekLocalKeep: () => keep, listServerBranches: async () => [{ name: 'production' }] });
+      const prod = plan.folders[0].environments.find((env) => env.environmentName === 'production')!;
+      expect(prod.kept).toBeUndefined();
+      expect([prod.skippedCount, prod.skipped]).toEqual([1, [{ name: 'HIDDEN', code: 'sensitive_unreadable' }]]);
+    });
+  });
+
+  test('the confirm message counts them as kept, not skipped', async () => {
+    await inRepo(async (root) => {
+      const client = createVercelClient('tok', { fetch: fakeVercelFetch(planData()) });
+      const keep = keepWithHidden(false);
+      const plan = await buildVercelDiscoveryPlan(client, 'team_acme', findCandidateReposResult(root).repos, { peekLocalKeep: () => keep, listServerBranches: async () => [{ name: 'production' }] });
+      const message = discoveryConfirmMessage(plan.folders, false);
+      expect(message).toContain('(2 var(s), 0 skipped, 1 kept)');
+      expect(message).toContain('(1 var(s), 1 skipped)'); // preview: no kept suffix when there are none
+    });
+  });
+
+  test('--dry-run --json and the human preview show kept (names, code, reason), never a value', async () => {
+    await withExitCodeRestored(() =>
+      inRepo(async (root) => {
+        writeFileSync(join(root, 'keep.lock'), JSON.stringify(keepWithHidden(false)));
+        const { connector } = connectorFor(root, planData());
+        const json = await captureConsole(() => new ConnectCommand(false)['executeDiscovery'](connector, 'vercel', fakeDiscoveryCtx(), discoverOpts({ dryRun: true, json: true })));
+        const out = JSON.parse(json.stdout[0]);
+        const web = out.plan.folders.find((f: { vercelProjectId: string }) => f.vercelProjectId === 'prj_web');
+        const prod = web.environments.find((env: { branch: string }) => env.branch === 'production');
+        expect(prod).toMatchObject({ variableCount: 2, skippedCount: 0, keptCount: 1, kept: [{ name: 'HIDDEN', code: 'CAPY_VALUE_KEPT', reason: 'sensitive_unreadable' }], skipped: {} });
+
+        const human = await captureConsole(() => new ConnectCommand(false)['executeDiscovery'](connector, 'vercel', fakeDiscoveryCtx(), discoverOpts({ dryRun: true })));
+        const text = human.stdout.join('\n');
+        expect(text).toContain('2 var(s), 0 skipped, 1 kept');
+        expect(text).toContain('kept (Capy value untouched): HIDDEN (sensitive_unreadable)');
+        expect(text).not.toContain('skipped sensitive_unreadable: HIDDEN');
+        ALL_SECRETS.forEach((v) => expect([...json.stdout, ...text].join('\n')).not.toContain(v));
+      }),
+    );
+  });
+});
+
+describe('reportVercelDiscovery — the applied per-environment result carries kept', () => {
+  const outcomeWithKept = {
+    ok: true as const,
+    dryRun: false,
+    plan: { folders: [], collisions: [], unmatched: [], unreadableRepos: [], allEnvironmentNames: [] },
+    applied: [
+      {
+        ok: true as const,
+        repoDir: '/r',
+        folder: '',
+        projectCreated: false,
+        activeBranch: 'production',
+        environments: [
+          {
+            environmentName: 'production',
+            branchCreated: false,
+            overwrote: false,
+            outcome: {
+              ok: true as const,
+              imported: [],
+              unchanged: [],
+              skipped: [],
+              placeholders: [],
+              kept: [{ name: 'HIDDEN', code: ERROR_CODES.CAPY_VALUE_KEPT, reason: 'sensitive_unreadable' }],
+              warnings: [],
+            },
+          },
+        ],
+      },
+    ],
+  } as unknown as Parameters<typeof reportVercelDiscovery>[0];
+
+  test('--json: kept sits beside placeholders, and it is not a change (nothing linked)', async () => {
+    const run = await captureConsole(async () => reportVercelDiscovery(outcomeWithKept, { json: true } as ConnectOpts, 'vercel'));
+    const env0 = JSON.parse(run.stdout[0]).applied[0].environments[0];
+    expect(env0.kept).toEqual([{ name: 'HIDDEN', code: 'CAPY_VALUE_KEPT', reason: 'sensitive_unreadable' }]);
+    expect(env0.skipped).toEqual([]);
+    expect(run.result.linked).toBe(false);
+  });
+
+  test('human: the per-environment line counts kept and names them', async () => {
+    const run = await captureConsole(async () => reportVercelDiscovery(outcomeWithKept, {} as ConnectOpts, 'vercel'));
+    const text = run.stdout.join('\n');
+    expect(text).toContain('imported 0, unchanged 0, skipped 0, kept 1');
+    expect(text).toContain('kept (Capy value untouched): HIDDEN');
   });
 });
 

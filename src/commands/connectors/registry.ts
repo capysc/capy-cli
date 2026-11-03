@@ -260,6 +260,16 @@ export interface ImportPlaceholder {
   provider: string;
 }
 
+/**
+ * A name the provider has but will not give back, where Capy already has a value: the Capy value was
+ * left untouched. `code` is the stable `CAPY_VALUE_KEPT`; `reason` is the provider's own reason code.
+ */
+export interface ImportKept {
+  name: string;
+  code: string;
+  reason: string;
+}
+
 /** A non-blocking heads-up about the import, grouped by code like `DeployWarning`. */
 export interface ImportWarning {
   code: string;
@@ -288,6 +298,11 @@ export type ImportOutcome =
        * as a placeholder on the branch; none is in `skipped`. Absent when there are none.
        */
       placeholders?: readonly ImportPlaceholder[];
+      /**
+       * Vercel import only: names Vercel holds but will not give back, where Capy already has a value. The value is
+       * left untouched; none of these is in `skipped` or `placeholders`. Absent when there are none.
+       */
+      kept?: readonly ImportKept[];
       warnings: readonly ImportWarning[];
       /**
        * Dokploy import only: names with a different local value that a real

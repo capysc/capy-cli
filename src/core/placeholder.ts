@@ -34,6 +34,11 @@ export function placeholdersOnBranch(keep: KeepFile | null | undefined, branch: 
   });
 }
 
+/** True when `name` holds a real value (a non-empty hash, no placeholder flag) on `branch` in this keep.lock. */
+export function hasValueOnBranch(keep: KeepFile | null | undefined, name: string, branch: string): boolean {
+  return hasValue(keep?.variables[name]?.find((e) => e.branch === branch));
+}
+
 /** True when the entry holds a real value (a non-empty hash). */
 const hasValue = (entry: KeepVariableEntry | undefined): boolean => entry !== undefined && entry.value_hash !== '' && entry.placeholder === undefined;
 
@@ -132,6 +137,11 @@ export function placeholderEnvNoteVariants(name: string): readonly string[] {
 /** Placeholders as reported (human and JSON): the name and the stable code, nothing else. */
 export function placeholdersReport(placeholders: ReadonlyArray<{ readonly name: string; readonly code: string }>): ReadonlyArray<{ name: string; code: string }> {
   return placeholders.map(({ name, code }) => ({ name, code }));
+}
+
+/** Kept names as reported (human and JSON): the name, the stable code and the provider's reason, nothing else. */
+export function keptReport(kept: ReadonlyArray<{ readonly name: string; readonly code: string; readonly reason: string }>): ReadonlyArray<{ name: string; code: string; reason: string }> {
+  return kept.map(({ name, code, reason }) => ({ name, code, reason }));
 }
 
 /**

@@ -25,15 +25,17 @@
  */
 import { existsSync } from 'node:fs';
 import { sortedCopy } from '../../deploy/dokployApi';
-import { placeholdersReport } from '../../core/placeholder';
+import { hasValueOnBranch, keptReport, placeholdersReport } from '../../core/placeholder';
 import { join } from 'node:path';
 import {
   VercelClient,
   VercelProject,
   VercelEnvironmentPlan,
+  PLACEHOLDER_SKIP_REASONS,
   buildEnvironmentPlans,
   groupSkipped,
 } from '../../deploy/vercelApi';
+import { ERROR_CODES, type KeepFile } from '../../types/index';
 import {
   CandidateRepo,
   DiscoveryFolderResult,
@@ -132,6 +134,27 @@ async function readProjectPlans(
   }, Promise.resolve([]));
 }
 
+type PlanEnvDraft = Omit<DiscoveryPlanEnv, 'branchExists' | 'willAutoOverwrite'>;
+
+/**
+ * Moves the names Vercel will not give back out of `skipped` into `kept` when the folder's local keep.lock
+ * already holds a value for them on this environment's branch (the import leaves that value alone).
+ */
+function withKeptSplit(localKeep: KeepFile | null): (e: PlanEnvDraft) => PlanEnvDraft {
+  return (e) => {
+    const isKept = (s: { name: string; code: string }): boolean =>
+      PLACEHOLDER_SKIP_REASONS.some((r) => r === s.code) && hasValueOnBranch(localKeep, s.name, e.environmentName);
+    const skipped = e.skipped ?? [];
+    const keptRecords = skipped.filter(isKept);
+    if (keptRecords.length === 0) return e;
+    const kept = keptRecords
+      .filter((s, i) => keptRecords.findIndex((o) => o.name === s.name) === i)
+      .map((s) => ({ name: s.name, code: ERROR_CODES.CAPY_VALUE_KEPT, reason: s.code }));
+    const remaining = skipped.filter((s) => !isKept(s));
+    return { ...e, skipped: remaining, skippedCount: remaining.length, kept };
+  };
+}
+
 async function toPlanFolder(
   pp: ProjectPlan,
   environmentFilter: ReadonlySet<string> | undefined,
@@ -144,7 +167,7 @@ async function toPlanFolder(
   const initialized = !!localKeep;
   const serverBranchNames = localKeep ? new Set((await peek.listServerBranches(localKeep.project_id)).map((b) => b.name)) : null;
   const firstName = orderEnvironments(envs)[0]?.environmentName;
-  const environments: readonly DiscoveryPlanEnv[] = envs.map((e) => {
+  const environments: readonly DiscoveryPlanEnv[] = envs.map(withKeptSplit(localKeep)).map((e) => {
     const branchExists = serverBranchNames ? serverBranchNames.has(e.environmentName) : undefined;
     const willCreateBranch = branchExists === false || !initialized;
     const willAutoOverwrite = willCreateBranch && !(!initialized && firstName === e.environmentName);
@@ -214,6 +237,7 @@ function envReport(e: Extract<DiscoveryFolderResult, { ok: true }>['environments
     unchanged: e.outcome.unchanged,
     skipped: e.outcome.skipped,
     ...(e.outcome.placeholders ? { placeholders: placeholdersReport(e.outcome.placeholders) } : {}),
+    ...(e.outcome.kept ? { kept: keptReport(e.outcome.kept) } : {}),
     warnings: e.outcome.warnings,
   };
 }
@@ -232,6 +256,7 @@ function planReport(plan: DiscoveryPlan) {
         branch: e.environmentName,
         variableCount: e.variableCount,
         skippedCount: e.skippedCount,
+        ...(e.kept && e.kept.length > 0 ? { keptCount: e.kept.length, kept: keptReport(e.kept) } : {}),
         skipped: groupSkipped((e.skipped ?? []).map((s) => ({ name: s.name, reason: s.code, ...(s.gitBranch ? { gitBranch: s.gitBranch } : {}) }))),
         ...(e.branchExists !== undefined ? { branchExists: e.branchExists } : {}),
         willAutoOverwrite: e.willAutoOverwrite,
@@ -325,7 +350,8 @@ function humanLines(
     ...plan.folders.flatMap((f) => [
       `  ${B(f.folder)}  (${f.vercelProject})${f.initialized ? '' : ' — capy (init)'}`,
       ...f.environments.flatMap((e) => [
-        `    ${e.branchExists === true ? 'checkout' : 'checkout -b'} ${e.branch}: ${e.variableCount} var(s), ${e.skippedCount} skipped${e.willAutoOverwrite ? ' [auto-overwrite]' : ''}`,
+        `    ${e.branchExists === true ? 'checkout' : 'checkout -b'} ${e.branch}: ${e.variableCount} var(s), ${e.skippedCount} skipped${e.keptCount ? `, ${e.keptCount} kept` : ''}${e.willAutoOverwrite ? ' [auto-overwrite]' : ''}`, // COPY-FLAG: new user-facing string, minimal/neutral wording.
+        ...(e.kept ? [`      kept (Capy value untouched): ${e.kept.map((k) => `${k.name} (${k.reason})`).join(', ')}`] : []), // COPY-FLAG: new user-facing string, minimal/neutral wording.
         ...Object.entries(e.skipped).map(
           ([reason, items]) => `      skipped ${reason}: ${items.map((i) => (i.gitBranch ? `${i.name} (${i.gitBranch})` : i.name)).join(', ')}`,
         ),
@@ -350,12 +376,15 @@ function appliedLines(outcome: Extract<DiscoveryOutcome, { ok: true }>, applied:
     ...f.environments.flatMap((e) => {
       const clearedCount = e.cleared?.length ?? 0;
       const placeholderNames = (e.placeholders ?? []).map((p) => p.name);
+      const keptNames = (e.kept ?? []).map((k) => k.name);
       return [
         `    ${e.branch}${e.branchCreated ? ' (new branch)' : ''}${e.overwrote ? ' (--overwrite)' : ''}: ` +
           `imported ${e.imported.length}, unchanged ${e.unchanged.length}, skipped ${e.skipped.length}` +
           (placeholderNames.length > 0 ? `, no value yet ${placeholderNames.length}` : '') + // COPY-FLAG
+          (keptNames.length > 0 ? `, kept ${keptNames.length}` : '') + // COPY-FLAG
           (clearedCount > 0 ? `, cleared ${clearedCount}` : ''),
         ...(placeholderNames.length > 0 ? [`      no value yet: ${placeholderNames.join(', ')}`] : []), // COPY-FLAG
+        ...(keptNames.length > 0 ? [`      kept (Capy value untouched): ${keptNames.join(', ')}`] : []), // COPY-FLAG
       ];
     }),
     ...(f.ok ? (f.activeBranch ? [`    folder is on branch ${f.activeBranch}`] : []) : [`    ✗ ${f.code}: ${f.message}`]),

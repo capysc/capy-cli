@@ -104,10 +104,42 @@ describe('import: what becomes a placeholder, in every environment', () => {
     expect(codes(out.placeholders)).toEqual({ CUSTOM_SENS: 'sensitive_unreadable' });
   });
 
-  test('a name that already has a value here keeps it: it is a skip, not a placeholder', async () => {
+  test('a name that already has a value here keeps it: it is reported as kept, not skipped, and not a placeholder', async () => {
     const out = okOutcome(await connector().import!(ctxWith('production', { SENS: 'mine-already' }), BASE_OPTS));
     expect(out.placeholders).toEqual([]);
-    expect(codes(out.skipped)).toEqual({ SENS: 'sensitive_unreadable', GENUINELY_EMPTY: 'empty_value' });
+    expect(out.kept).toEqual([{ name: 'SENS', code: 'CAPY_VALUE_KEPT', reason: 'sensitive_unreadable' }]);
+    expect(codes(out.skipped)).toEqual({ GENUINELY_EMPTY: 'empty_value' });
+    // the value is untouched: nothing is imported, cleared or replaced for it
+    expect(out.imported.map((i) => i.varName)).toEqual(['PLAIN']);
+    expect(out.cleared).toBeUndefined();
+    expect(out.unchangedEntries ?? []).toEqual([]);
+  });
+
+  test('a value_not_decrypted name with a local value is kept too, with its own reason', async () => {
+    const out = okOutcome(await connector().import!(ctxWith('development', { HIDDEN: 'mine-already', SENS: 'also-mine' }), BASE_OPTS));
+    expect(out.placeholders).toEqual([]);
+    expect(out.kept).toEqual([
+      { name: 'SENS', code: 'CAPY_VALUE_KEPT', reason: 'sensitive_unreadable' },
+      { name: 'HIDDEN', code: 'CAPY_VALUE_KEPT', reason: 'value_not_decrypted' },
+    ]);
+    expect(out.skipped).toEqual([]);
+    expect(out.imported.map((i) => i.varName)).toEqual(['PLAIN']);
+  });
+
+  test('a legacy secret with a local value is kept', async () => {
+    const out = okOutcome(await connector().import!(ctxWith('preview', { OLD: 'mine-already' }), BASE_OPTS));
+    expect(out.kept).toEqual([{ name: 'OLD', code: 'CAPY_VALUE_KEPT', reason: 'legacy_secret_unreadable' }]);
+    expect(codes(out.placeholders)).toEqual({ SENS: 'sensitive_unreadable' });
+  });
+
+  test('--var keeps only the in-scope names', async () => {
+    const out = okOutcome(await connector().import!(ctxWith('development', { HIDDEN: 'h', SENS: 's' }), { ...BASE_OPTS, var: 'HIDDEN' }));
+    expect(out.kept?.map((k) => k.name)).toEqual(['HIDDEN']);
+  });
+
+  test('no kept list entries when nothing has a local value', async () => {
+    const out = okOutcome(await connector().import!(ctxWith('production'), BASE_OPTS));
+    expect(out.kept).toEqual([]);
   });
 
   test('--var restricts the placeholders to the named variables', async () => {
@@ -119,7 +151,17 @@ describe('import: what becomes a placeholder, in every environment', () => {
     const out = okOutcome(await connector().import!(ctxWith('development', { SENS: 'mine-already' }), { ...BASE_OPTS, overwrite: true, yes: true }));
     expect(codes(out.placeholders)).toEqual({ HIDDEN: 'value_not_decrypted' });
     expect(out.cleared).toEqual([]);
-    expect(codes(out.skipped)).toEqual({ SENS: 'sensitive_unreadable' });
+    expect(out.kept).toEqual([{ name: 'SENS', code: 'CAPY_VALUE_KEPT', reason: 'sensitive_unreadable' }]);
+    expect(out.skipped).toEqual([]);
+    expect(out.imported.map((i) => i.varName)).toEqual(['PLAIN']);
+  });
+
+  test('--overwrite --yes: a value_not_decrypted name with a local value is kept, never cleared, not skipped', async () => {
+    const out = okOutcome(await connector().import!(ctxWith('development', { HIDDEN: 'mine-already', STALE: 'gone-from-vercel' }), { ...BASE_OPTS, overwrite: true, yes: true }));
+    expect(out.kept).toEqual([{ name: 'HIDDEN', code: 'CAPY_VALUE_KEPT', reason: 'value_not_decrypted' }]);
+    expect(codes(out.placeholders)).toEqual({ SENS: 'sensitive_unreadable' });
+    expect(out.cleared).toEqual(['STALE']);
+    expect(out.skipped).toEqual([]);
   });
 
   test('no value is read for a sensitive record, and none is in the outcome', async () => {
@@ -225,6 +267,72 @@ describe('import end to end (real FileManager, real report)', () => {
         withTempDir('capy-vercel-ph-dry', async (dir) => {
           const { stdout } = await importInto(dir, 'production', { json: true, dryRun: true });
           expect(JSON.parse(stdout[0])).toMatchObject({ dryRun: true, placeholders: [{ name: 'SENS', code: 'sensitive_unreadable' }] });
+          expect(existsSync(join(dir, '.env'))).toBe(false);
+          expect(existsSync(join(dir, '.capy', 'keep.lock'))).toBe(false);
+        }),
+      ),
+    );
+  });
+
+  test('--json: a name with a local value is under kept (code and reason), not skipped or a placeholder, and its value is untouched', async () => {
+    await withIsolatedGlobalDir(() =>
+      withExitCodeRestored(() =>
+        withTempDir('capy-vercel-kept-json', async (dir) => {
+          const { stdout } = await importInto(dir, 'production', { json: true }, undefined, { SENS: 'mine-already' });
+          expect(stdout).toHaveLength(1);
+          const parsed = JSON.parse(stdout[0]);
+          expect(parsed.kept).toEqual([{ name: 'SENS', code: 'CAPY_VALUE_KEPT', reason: 'sensitive_unreadable' }]);
+          expect(parsed.placeholders).toEqual([]);
+          expect(parsed.skipped).toEqual([{ name: 'GENUINELY_EMPTY', code: 'empty_value' }]);
+          expect(parsed.imported).toEqual(['PLAIN']);
+          // SENS is not a placeholder (no flag, no comment) and its Capy value is still the one it had
+          expect(placeholderOf(readKeep(dir), 'SENS', 'production')).toBeUndefined();
+          expect(readFileSync(join(dir, '.env'), 'utf-8')).not.toContain(SENS_NOTE);
+          expect(new FileManager(dir).readEncryptedEnvFile(PROJECT_KEY)).toEqual({ SENS: 'mine-already', PLAIN: SENTINEL.plain });
+          const everything = [...stdout, readFileSync(join(dir, '.capy', 'keep.lock'), 'utf-8')].join('\n');
+          Object.values(SENTINEL).forEach((s) => expect(everything).not.toContain(s));
+        }),
+      ),
+    );
+  });
+
+  test('human output: one neutral line for the kept names, and they are not listed as skipped', async () => {
+    await withIsolatedGlobalDir(() =>
+      withTempDir('capy-vercel-kept-human', async (dir) => {
+        const { stdout } = await importInto(dir, 'development', {}, undefined, { SENS: 'mine', HIDDEN: 'mine-too' });
+        const text = stdout.join('\n');
+        expect(text).toContain('Kept the Capy value for 2 name(s) Vercel will not return: SENS (sensitive_unreadable), HIDDEN (value_not_decrypted)');
+        expect(text).not.toContain('Skipped: SENS');
+        expect(text).not.toContain('Skipped: HIDDEN');
+        expect(text).not.toContain('with no value yet');
+      }),
+    );
+  });
+
+  test('--overwrite --json: the kept list is there, and the kept name is neither cleared nor skipped', async () => {
+    await withIsolatedGlobalDir(() =>
+      withExitCodeRestored(() =>
+        withTempDir('capy-vercel-kept-overwrite', async (dir) => {
+          const { stdout } = await importInto(dir, 'production', { json: true, overwrite: true, yes: true }, undefined, { SENS: 'mine-already' });
+          const parsed = JSON.parse(stdout[0]);
+          expect(parsed.kept).toEqual([{ name: 'SENS', code: 'CAPY_VALUE_KEPT', reason: 'sensitive_unreadable' }]);
+          expect(parsed.cleared ?? []).not.toContain('SENS');
+          expect(parsed.skipped.map((s: { name: string }) => s.name)).not.toContain('SENS');
+          expect(parsed.placeholders).toEqual([]);
+        }),
+      ),
+    );
+  });
+
+  test('--dry-run shows kept (JSON and human) and writes nothing', async () => {
+    await withIsolatedGlobalDir(() =>
+      withExitCodeRestored(() =>
+        withTempDir('capy-vercel-kept-dry', async (dir) => {
+          const json = await importInto(dir, 'production', { json: true, dryRun: true }, undefined, { SENS: 'mine-already' });
+          expect(JSON.parse(json.stdout[0])).toMatchObject({ dryRun: true, kept: [{ name: 'SENS', code: 'CAPY_VALUE_KEPT', reason: 'sensitive_unreadable' }], placeholders: [] });
+          expect(JSON.parse(json.stdout[0]).skipped.map((s: { name: string }) => s.name)).not.toContain('SENS');
+          const human = await importInto(dir, 'production', { dryRun: true }, undefined, { SENS: 'mine-already' });
+          expect(human.stdout.join('\n')).toContain('Kept the Capy value for 1 name(s) Vercel will not return: SENS (sensitive_unreadable)');
           expect(existsSync(join(dir, '.env'))).toBe(false);
           expect(existsSync(join(dir, '.capy', 'keep.lock'))).toBe(false);
         }),

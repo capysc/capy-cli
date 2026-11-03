@@ -598,6 +598,12 @@ export interface DiscoveryPlanEnv {
    */
   skipped?: ReadonlyArray<{ name: string; code: string; gitBranch?: string }>;
   /**
+   * Vercel plan only: names Vercel will not give back where this environment's branch already holds a Capy
+   * value (known from the local keep.lock). The value stays untouched, so they are not in `skipped` or counted
+   * in `skippedCount`. A branch the run will create is not known yet: its unreadable names stay in `skipped`.
+   */
+  kept?: ReadonlyArray<{ name: string; code: string; reason: string }>;
+  /**
    * PREVIEW ONLY, and only known when `DiscoveryPlanFolder.initialized` —
    * whether this environment's branch already exists on the server, i.e.
    * whether the sequence's checkout step will be `capy checkout <branch>`

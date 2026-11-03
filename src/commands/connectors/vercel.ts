@@ -25,7 +25,8 @@
  * `value_not_decrypted`) is not skipped: it becomes a PLACEHOLDER on the Capy
  * branch of every environment it is in. A placeholder is a flag on the
  * variable's keep.lock entry, with no value (`core/placeholder.ts`). A name
- * that already has a value in Capy keeps it and is reported as skipped.
+ * that already has a value in Capy keeps it, untouched, and is reported in
+ * `kept` (code `CAPY_VALUE_KEPT`), not in `skipped`.
  *
  * Every refusal for a missing or rejected token carries the Vercel token page
  * (`link`) and what to do (`remedy`), with the team's slug when `--team` names it.
@@ -77,6 +78,7 @@ import {
   ConnectorModule,
   ConnectResult,
   ImportOutcome,
+  ImportKept,
   ImportPlaceholder,
   ImportSkip,
   ImportWarning,
@@ -316,7 +318,10 @@ function overwriteConfirmMessage(plan: OverwritePlan): string {
 }
 
 // COPY-FLAG: new user-facing string, minimal/neutral wording.
-function discoveryConfirmMessage(folders: readonly DiscoveryPlanFolder[], overwrite: boolean, environmentFilter?: readonly string[]): string {
+const keptNote = (kept: readonly unknown[] | undefined): string => (kept && kept.length > 0 ? `, ${kept.length} kept` : '');
+
+// COPY-FLAG: new user-facing string, minimal/neutral wording.
+export function discoveryConfirmMessage(folders: readonly DiscoveryPlanFolder[], overwrite: boolean, environmentFilter?: readonly string[]): string {
   const totalSteps = folders.reduce((n, f) => n + f.environments.length, 0);
   const filterNote = environmentFilter && environmentFilter.length > 0 ? ` (--environment ${environmentFilter.join(',')})` : '';
   const header = `Run ${totalSteps} step(s) across ${folders.length} folder(s) from Vercel${overwrite ? ' (--overwrite)' : ''}${filterNote}?`;
@@ -325,7 +330,7 @@ function discoveryConfirmMessage(folders: readonly DiscoveryPlanFolder[], overwr
     ...orderEnvironments(f.environments).map((e) => {
       const checkoutCmd = e.branchExists === true ? `capy checkout ${e.environmentName}` : `capy checkout -b ${e.environmentName}`;
       const importCmd = `capy connect vercel --project ${e.serviceId} --environment ${e.environmentName}${overwrite || e.willAutoOverwrite ? ' --overwrite' : ''}`;
-      return `    ${checkoutCmd} && ${importCmd}  (${e.variableCount} var(s), ${e.skippedCount} skipped)${e.willAutoOverwrite && !overwrite ? ' [auto-overwrite]' : ''}`;
+      return `    ${checkoutCmd} && ${importCmd}  (${e.variableCount} var(s), ${e.skippedCount} skipped${keptNote(e.kept)})${e.willAutoOverwrite && !overwrite ? ' [auto-overwrite]' : ''}`;
     }),
   ]);
   return [header, ...rows].join('\n');
@@ -536,8 +541,8 @@ export function createVercelConnector(deps: VercelConnectorDeps = {}): Connector
     const entryFor = (name: string, value: string) => importedEntry(recordByName.get(name)!, name, value, source, createdAtSec, importedAt);
     const written = [...plan.toImport, ...plan.toReplace].map(({ name, value }) => entryFor(name, value));
     const unchangedEntries = plan.unchanged.map((name) => entryFor(name, fullCandidates.find((c) => c.name === name)!.value));
-    // A name Vercel will not give back, with no value here, is a placeholder; one that has a local value keeps it and is reported as skipped.
-    const split = splitPlaceholders(unreadable, new Set([...Object.keys(ctx.localPlaintext), ...fullCandidates.map((c) => c.name)]));
+    // A name Vercel will not give back, with no value here, is a placeholder; one that has a local value keeps it and is reported as kept.
+    const split = splitPlaceholders(unreadable, new Set(Object.keys(ctx.localPlaintext)), new Set(fullCandidates.map((c) => c.name)));
     return {
       ok: true,
       source: importSource,
@@ -546,10 +551,11 @@ export function createVercelConnector(deps: VercelConnectorDeps = {}): Connector
       replacedNames: plan.toReplace.map((e) => e.name),
       unchanged: plan.unchanged,
       unchangedEntries,
-      // The names Vercel has but will not show are reported here too: an
-      // overwrite leaves them alone, and saying so is the point of the list.
+      // The names Vercel has but will not show are reported too (`kept`, or
+      // `placeholders` when Capy has no value): an overwrite leaves them alone.
       skipped: split.skips.map(toImportSkip),
       placeholders: split.placeholders,
+      kept: split.kept,
       warnings,
     };
   };
@@ -602,10 +608,11 @@ export function createVercelConnector(deps: VercelConnectorDeps = {}): Connector
     const unchangedEntries = dryRun ? [] : unchanged.map((name) => entryFor(name, selected.find((c) => c.name === name)!.value));
 
     const inScope = (name: string): boolean => !restrict || restrict.includes(name);
-    // A name Vercel will not give back, with no value here, is a placeholder on this branch; one that has a value keeps it.
+    // A name Vercel will not give back, with no value here, is a placeholder on this branch; one that has a value keeps it and is reported as kept.
     const split = splitPlaceholders(
       [...source.skipped, ...values.value.empty, ...values.value.undecrypted].filter((s) => inScope(s.name)),
-      new Set([...Object.keys(ctx.localPlaintext), ...candidates.map((c) => c.name)]),
+      new Set(Object.keys(ctx.localPlaintext)),
+      new Set(candidates.map((c) => c.name)),
     );
     const skipped: readonly ImportSkip[] = [...split.skips.map(toImportSkip), ...conflictSkipped];
 
@@ -617,6 +624,7 @@ export function createVercelConnector(deps: VercelConnectorDeps = {}): Connector
       unchangedEntries,
       skipped,
       placeholders: split.placeholders,
+      kept: split.kept,
       warnings: truncationWarnings(source),
       ...(dryRun ? { wouldAsk } : {}),
     };
@@ -799,22 +807,32 @@ function storeRefusalCode(err: unknown): string {
 }
 
 /**
- * Splits what Vercel would not give back: a name whose reason is "has a value, not readable" and that has no
- * value in Capy becomes a placeholder; everything else stays a skip. `valued` is every name that has (or is
- * being given) a value here.
+ * Splits what Vercel would not give back. A name whose reason is "has a value, not readable" is:
+ *   - a placeholder, when Capy has no value for it;
+ *   - kept (the Capy value is left untouched), when Capy has one and it is not being replaced;
+ * everything else stays a skip. `local` is every name with a value in Capy; `importing` is every name that is
+ * being given a value by this run (a name in both is not "kept": its value is not guaranteed to stay).
  */
 function splitPlaceholders(
   unreadable: readonly VercelSkippedRecord[],
-  valued: ReadonlySet<string>,
-): { placeholders: readonly ImportPlaceholder[]; skips: readonly VercelSkippedRecord[] } {
-  const isPlaceholder = (s: VercelSkippedRecord): boolean => isPlaceholderReason(s.reason) && !valued.has(s.name);
+  local: ReadonlySet<string>,
+  importing: ReadonlySet<string>,
+): { placeholders: readonly ImportPlaceholder[]; kept: readonly ImportKept[]; skips: readonly VercelSkippedRecord[] } {
+  const outcomeOf = (s: VercelSkippedRecord): 'placeholder' | 'kept' | 'skip' => {
+    if (!isPlaceholderReason(s.reason)) return 'skip';
+    if (importing.has(s.name)) return 'skip';
+    return local.has(s.name) ? 'kept' : 'placeholder';
+  };
   const firstOfName = (s: VercelSkippedRecord, i: number, all: readonly VercelSkippedRecord[]): boolean => all.findIndex((o) => o.name === s.name) === i;
+  const inGroup = (group: 'placeholder' | 'kept' | 'skip') => unreadable.filter((s) => outcomeOf(s) === group);
   return {
-    placeholders: unreadable
-      .filter(isPlaceholder)
+    placeholders: inGroup('placeholder')
       .filter(firstOfName)
       .map((s): ImportPlaceholder => ({ name: s.name, code: s.reason, provider: 'vercel' })),
-    skips: unreadable.filter((s) => !isPlaceholder(s)),
+    kept: inGroup('kept')
+      .filter(firstOfName)
+      .map((s): ImportKept => ({ name: s.name, code: ERROR_CODES.CAPY_VALUE_KEPT, reason: s.reason })),
+    skips: inGroup('skip'),
   };
 }
 
