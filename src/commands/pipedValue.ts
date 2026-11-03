@@ -159,6 +159,7 @@ export function refusePiped(json: boolean, code: string, error: string): never {
 /** Why each interactive path cannot preview. Minimal and neutral. */
 export const DRY_RUN_UNSUPPORTED_MESSAGES = {
   edit: "--dry-run isn't available in the interactive editor. Pipe a value with capy edit NAME --dry-run.", // COPY-FLAG
+  editPrompt: "--dry-run isn't available for an interactive edit. Pipe a value with: <cmd> | capy edit NAME --dry-run", // COPY-FLAG
   add: "--dry-run isn't available for an interactive add. Pipe a value with: <cmd> | capy add NAME --dry-run", // COPY-FLAG
   remove: "--dry-run isn't available at the confirmation prompt. Add --yes, --json or --non-tty to preview.", // COPY-FLAG
 } as const;

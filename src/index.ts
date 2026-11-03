@@ -133,9 +133,9 @@ program
 
 program
   .command('edit [name]')
-  // COPY-FLAG — minimal-neutral; names the two modes.
-  .description('Inspect and edit secrets in an interactive TUI, or set one variable from a piped value')
-  .option('--no-push', 'piped value: write .env only; do not push to Capy')
+  // COPY-FLAG — minimal-neutral; names the three modes.
+  .description('Inspect and edit secrets in an interactive TUI, or set one variable from a hidden prompt or a piped value')
+  .option('--no-push', 'with a name: write .env only; do not push to Capy') // COPY-FLAG
   .option('--json', 'emit machine-readable JSON instead of the human UI (piped value)')
   .option('--non-tty', 'treat stdin as not a terminal; never prompt (agents/CI)')
   .option('--pr', 'create a PR with the keep.lock change (answers the prompt)') // COPY-FLAG
@@ -145,6 +145,7 @@ program
     'after',
     // COPY-FLAG
     '\n' +
+      'With a name on a terminal, asks for the value (hidden) and sets that variable, like: capy add NAME --force\n' +
       'With a name and a piped value, sets that one variable. The value is read from stdin only:\n' +
       '  <cmd> | capy edit NAME --json\n',
   )
