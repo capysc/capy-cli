@@ -6,7 +6,8 @@ import { AuthService, silentAuthFailureMessage } from '../auth/authService';
 import { resolveInitRunIdentity } from '../auth/initRunIdentity';
 import { resolveActiveUrl } from '../config/profileConfig';
 import { readLocalRoot } from '../config/globalConfig';
-import { establishStagingFlowCustody, inspectStagingFlowCustody } from '../auth/stagingFlowCustody';
+import { establishStagingFlowCustody } from '../auth/stagingFlowCustody';
+import { inspectExistingFilesystemCustody } from '../auth/pairing/existingFilesystemCustody';
 import { resolveKeepOrigin as keepOrigin } from '../config/keepOrigin';
 import { mintConnectionKeypair, openEnvelope, sealRequestEnvelope } from '../service/brokerEnvelope';
 import { runWithInteraction, currentInteractionInvocation, type Interaction, type InteractionPresentation, type InteractionQuestion } from './interaction';
@@ -153,7 +154,7 @@ export async function runWithFlowInteraction(operation: () => Promise<void>, dev
   };
   await establishStagingFlowCustody({ serviceOrigin: origin, userId: identity.user_id, organizationId: identity.organization_id,
     runtimeId, repoFingerprint: binding.repositoryFingerprint, keys, accessToken: transportToken.access_token }, {
-    inspect: inspectStagingFlowCustody,
+    inspect: inspectExistingFilesystemCustody,
     acknowledge: (body, token) => request<Data>('/flows/authentication/session', body, undefined, token),
   });
   const created = await request<{ readonly flow_id: string; readonly client_pubkey: string }>('/flows/conversation', signed('create', runtimeId, 'create', {

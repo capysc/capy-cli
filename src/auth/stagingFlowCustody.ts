@@ -1,6 +1,6 @@
 import { sign } from 'node:crypto';
 import type { ConnectionKeypair } from '../service/brokerEnvelope';
-import { inspectExistingFilesystemCustody, type ExistingFilesystemCustody } from './pairing/existingFilesystemCustody';
+import type { ExistingFilesystemCustody } from './pairing/existingFilesystemCustody';
 
 type Data = Readonly<Record<string, unknown>>;
 export interface StagingFlowCustodyInput {
@@ -45,4 +45,3 @@ export async function establishStagingFlowCustody(
   return { flowId: response.flow_id, expiresAt: response.expires_at };
 }
 
-export const inspectStagingFlowCustody = inspectExistingFilesystemCustody;
