@@ -34,7 +34,7 @@ JSON support: yes (`--json`)
 
 ## `capy edit`
 
-Inspect and edit secrets in an interactive TUI, or set one variable from a hidden prompt or a piped value
+Inspect and edit secrets in an interactive TUI, or set one variable from a piped value
 
 ```
 capy edit [name] [options]
@@ -42,7 +42,7 @@ capy edit [name] [options]
 
 | Option | Description | Default |
 |---|---|---|
-| `--no-push` | with a name: write .env only; do not push to Capy |  |
+| `--no-push` | piped value: write .env only; do not push to Capy |  |
 | `--json` | emit machine-readable JSON instead of the human UI (piped value) |  |
 | `--non-tty` | treat stdin as not a terminal; never prompt (agents/CI) |  |
 | `--pr` | create a PR with the keep.lock change (answers the prompt) |  |
