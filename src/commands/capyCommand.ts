@@ -1320,7 +1320,7 @@ export class CapyCommand {
         }
         // A command that runs this as its first step and has no one to sign in (piped, --json, an agent) is told why instead
         // of being sent to a browser.
-        if (this.options.silentAuthOnly === true) {
+        if (this.options.silentAuthOnly === true || currentInteraction()) {
           spinner.fail('Authentication failed');
           throw new CapyError(silentAuthFailureMessage(silentAny), ERROR_CODES.AUTH_FAILED);
         }

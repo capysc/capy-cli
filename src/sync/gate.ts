@@ -20,6 +20,7 @@
  */
 import { existsSync } from 'fs';
 import { isInteractive } from '../ui/interactive';
+import { currentInteraction, ExitPromptError } from '../ui/interaction';
 import {
   exitOnConflictRefusal,
   hasConflictFlags,
@@ -176,6 +177,7 @@ export async function syncFolder(dir: string, opts: GateOptions = {}, runner: Sy
 
 /** The gate stopped (the person cancelled or chose "Continue working"): the command ends here, exit 0, nothing written. */
 export function stopWithNothingWritten(): never {
+  if (currentInteraction()) throw new ExitPromptError('Stopped. Nothing was written.');
   console.error('Stopped. Nothing was written.'); // COPY-FLAG
   return process.exit(0);
 }
@@ -201,6 +203,7 @@ async function failedSync(err: unknown, opts: GateOptions): Promise<never> {
 export async function gateFirst(opts: GateOptions = {}, runner: SyncRunner = runBareCapy): Promise<void> {
   const done = await outcomeOf(syncUntilInSync(opts, runner));
   if (!done.ok) {
+    if (currentInteraction()) throw done.error;
     exitOnConflictRefusal(done.error);
     return failedSync(done.error, opts);
   }

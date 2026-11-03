@@ -11,7 +11,7 @@ import { establishStagingFlowCustody } from '../auth/stagingFlowCustody';
 import { inspectExistingFilesystemCustody } from '../auth/pairing/existingFilesystemCustody';
 import { resolveKeepOrigin as keepOrigin } from '../config/keepOrigin';
 import { mintConnectionKeypair, openEnvelope, sealRequestEnvelope } from '../service/brokerEnvelope';
-import { runWithInteraction, currentInteractionInvocation, type Interaction, type InteractionPresentation, type InteractionQuestion } from './interaction';
+import { runWithInteraction, currentInteractionInvocation, ExitPromptError, type Interaction, type InteractionPresentation, type InteractionQuestion } from './interaction';
 import { attachFlowAgentRuntime, initialFlowAgentState, type FlowAgentState, type FlowGoal, type FlowNextOffer } from './flowAgentBridge';
 import { loadFlowRecoveryBootstrap, openFlowRecoveryCheckpoint, saveFlowRecoveryBootstrap, sealFlowRecoveryCheckpoint, type FlowRecoveryBinding } from './flowRecoveryStore';
 
@@ -106,17 +106,17 @@ export async function runWithFlowInteraction(operation: () => Promise<void>, dev
     : {};
   const auth = new AuthService(undefined, devMode, project.userId);
   const identity = await auth.authenticateSilent(descriptor.organizationId);
-  const localRoot = identity.success && identity.user_id && identity.organization_id
-    ? readLocalRoot(identity.organization_id, identity.user_id) : null;
   if (!identity.success || !identity.user_id || !identity.organization_id) {
     console.error(`flow: ${silentAuthFailureMessage(identity)}`);
     throw new FlowRuntimeError('PAIR_REQUIRED');
   }
+  if (descriptor.expectedUserId && identity.user_id !== descriptor.expectedUserId) throw new FlowRuntimeError('AUTH_ACCOUNT_MISMATCH');
+  if (descriptor.organizationId && identity.organization_id !== descriptor.organizationId) throw new FlowRuntimeError('AUTH_ORGANIZATION_MISMATCH');
+  const localRoot = readLocalRoot(identity.organization_id, identity.user_id);
   if (!localRoot) {
     const custody = await inspectExistingFilesystemCustody({ serviceOrigin: resolveActiveUrl(devMode), userId: identity.user_id, organizationId: identity.organization_id });
     throw new FlowRuntimeError(custody.kind === 'missing' ? 'PAIR_REQUIRED' : 'CUSTODY_VERIFICATION_FAILED');
   }
-  if (descriptor.expectedUserId && identity.user_id !== descriptor.expectedUserId) throw new FlowRuntimeError('AUTH_ACCOUNT_MISMATCH');
   const transportToken = await auth.getValidToken();
   if (!transportToken?.access_token) throw new FlowRuntimeError('PAIR_REQUIRED');
   const accessToken = async (): Promise<string> => {
@@ -385,6 +385,7 @@ export async function runWithFlowInteraction(operation: () => Promise<void>, dev
     decide: payload => typeof payload.value === 'boolean' ? { value: payload.value } : { error: 'Choose yes or no.' },
   }, goalMetadata, onPromptEmitted)) === true;
   const interaction: Interaction = {
+    signal: controller.signal,
     binding: { userId: identity.user_id, organizationId: identity.organization_id },
     output: event => emit('output', { ...event, ...rootGoalMetadata, ...(currentInteractionInvocation() ? { invocation: currentInteractionInvocation() } : {}) }),
     progress: event => emit('progress', { ...event, ...rootGoalMetadata, ...(currentInteractionInvocation() ? { invocation: currentInteractionInvocation() } : {}) }),
@@ -404,7 +405,7 @@ export async function runWithFlowInteraction(operation: () => Promise<void>, dev
           ? error.code : 'COMMAND_FAILED';
         const message = error instanceof Error ? error.message : 'The CLI command failed.';
         try {
-          await emit('goal', { status: 'failed', code, message, ...rootGoalMetadata });
+          await emit('goal', { status: error instanceof ExitPromptError ? 'cancelled' : 'failed', code, message, ...rootGoalMetadata });
         } catch {
           // Preserve the original command failure if delivery is unavailable.
         }

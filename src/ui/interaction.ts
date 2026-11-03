@@ -56,6 +56,7 @@ export type InteractionQuestion<T> = Readonly<{
  * inquirer/stdout directly.
  */
 export type Interaction = Readonly<{
+  readonly signal?: AbortSignal;
   readonly binding?: Readonly<{ userId: string; organizationId: string }>;
   readonly output: (event: InteractionOutput) => void | Promise<void>;
   readonly progress: (event: InteractionProgress) => void | Promise<void>;
@@ -185,6 +186,7 @@ export const createJsonLineInteraction = (input: Readable, output: Writable, sig
 
 type TerminalQuestion = Readonly<Record<string, unknown>> & Readonly<{ readonly presentation?: InteractionPresentation }>;
 export class ExitPromptError extends Error {
+  readonly code = 'FLOW_CANCELLED';
   readonly name = 'ExitPromptError';
 }
 /** Fatal command failures must escape per-item batch catches. */

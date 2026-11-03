@@ -6,7 +6,10 @@
  * --non-tty or run with a piped/closed stdin; both must resolve every choice
  * from flags or fail fast — never render a picker that EOFs to a silent cancel.
  */
+import { currentInteraction } from './interaction';
+
 export function isInteractive(nonTty?: boolean): boolean {
+  if (currentInteraction()) return true;
   if (nonTty) return false;
   return process.stdin.isTTY === true;
 }

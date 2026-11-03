@@ -1,3 +1,6 @@
+import { RotateCommand } from '../commands/rotateCommand';
+import { listManagedKeys } from '../commands/connectors/shared';
+import type { KeepFile } from '../types';
 import { CapyCommand } from '../commands/capyCommand';
 import { pairForFlow } from '../commands/pairCommand';
 import { ProjectManager } from '../core/projectManager';
@@ -5,7 +8,7 @@ import { resolveActiveUrl, isLocalOnly } from '../config/profileConfig';
 import { resolveKeepOrigin } from '../config/keepOrigin';
 import { FlowRuntimeError } from '../errors/flowRuntimeError';
 import { runWithFlowInteraction } from './flowInteraction';
-import { createJsonLineInteraction, runWithInteraction } from './interaction';
+import { createJsonLineInteraction, runWithInteraction, currentInteraction, emitInteractionGoal } from './interaction';
 import { resolveInitRunIdentity } from '../auth/initRunIdentity';
 import { withStagingRepositoryLease } from '../auth/stagingRepositoryLease';
 
@@ -26,19 +29,57 @@ export function assertStagingFlowEnvironment(): void {
   assertStagingFlowTargets(resolveActiveUrl(true), resolveKeepOrigin());
 }
 
+type StagingOperation = Readonly<{
+  command: 'capy' | 'rotate';
+  continuationTool: 'capy_onboard_continue' | 'capy_rotate_continue';
+  operation: () => Promise<void>;
+}>;
+
 export async function runStagingFlow(): Promise<void> {
-  assertStagingFlowEnvironment();
-  return withStagingRepositoryLease(resolveInitRunIdentity().repositoryRoot, runStagingFlowWithLease);
+  return runStagingOperation({ command: 'capy', continuationTool: 'capy_onboard_continue',
+    operation: () => new CapyCommand({ silentAuthOnly: true, protocol: false }, true).execute() });
 }
 
-async function runStagingFlowWithLease(): Promise<void> {
+export function stagingWorkOSRotationTargets(keep: KeepFile | null, branch: string | null, variable: string | undefined, all: boolean): readonly string[] {
+  if (!keep || !branch) throw new FlowRuntimeError('ROTATE_FLOW_PROJECT_REQUIRED');
+  if (all && variable) throw new FlowRuntimeError('ROTATE_FLOW_TARGET_AMBIGUOUS');
+  if (!all && !variable) throw new FlowRuntimeError('ROTATE_FLOW_TARGET_REQUIRED');
+  const targets = listManagedKeys(keep, branch).filter(target => all || target.varName === variable);
+  if (targets.length === 0) throw new FlowRuntimeError('ROTATE_FLOW_MANAGED_TARGET_REQUIRED');
+  if (targets.some(target => target.connector.provider !== 'workos')) throw new FlowRuntimeError('ROTATE_FLOW_PROVIDER_UNSUPPORTED');
+  if (targets.some(target => target.connector.source === 'client-id')) throw new FlowRuntimeError('ROTATE_FLOW_TARGET_NOT_ROTATABLE');
+  return targets.map(target => target.varName);
+}
+
+export async function runStagingRotateFlow(variable: string | undefined, options: Readonly<{ all?: boolean; noPush?: boolean }> = {}): Promise<void> {
+  assertStagingFlowEnvironment();
+  const manager = new ProjectManager();
+  stagingWorkOSRotationTargets(manager.readKeepFile(), manager.deriveActiveBranch(), variable, options.all === true);
+  return runStagingOperation({ command: 'rotate', continuationTool: 'capy_rotate_continue', operation: async () => {
+    const interaction = currentInteraction();
+    if (!interaction) throw new FlowRuntimeError('FLOW_INTERACTION_REQUIRED');
+    // Sync and custody are prerequisites. Only the real rotation/push/deploy
+    // result may terminate the initiating request.
+    const names = await runWithInteraction({ ...interaction, goal: async () => undefined },
+      () => new RotateCommand(true).execute(variable, { ...options, allowedProviders: ['workos'] }));
+    await emitInteractionGoal({ flow: 'rotate', goal: 'credentials_rotated', status: names.length > 0 ? 'succeeded' : 'skipped',
+      result: { variables: names, delivery: options.noPush ? 'local_only' : 'rotation_pipeline' } });
+  } });
+}
+
+async function runStagingOperation(descriptor: StagingOperation): Promise<void> {
+  assertStagingFlowEnvironment();
+  return withStagingRepositoryLease(resolveInitRunIdentity().repositoryRoot, () => runStagingOperationWithLease(descriptor));
+}
+
+async function runStagingOperationWithLease(descriptor: StagingOperation): Promise<void> {
   const manager = new ProjectManager();
   const project = await manager.detectProjectState();
   const expectedUserId = project.initialized ? project.userId : undefined;
   const organizationId = project.initialized ? project.organizationId : undefined;
   const execute = (organization = organizationId, owner = expectedUserId): Promise<void> => runWithFlowInteraction(
-    () => new CapyCommand({ silentAuthOnly: true, protocol: false }, true).execute(), true,
-    { command: 'capy', continuationTool: 'capy_onboard_continue', organizationId: organization, expectedUserId: owner },
+    descriptor.operation, true,
+    { command: descriptor.command, continuationTool: descriptor.continuationTool, organizationId: organization, expectedUserId: owner },
   );
   try { await execute(); }
   catch (error) {
@@ -47,8 +88,10 @@ async function runStagingFlowWithLease(): Promise<void> {
     const paired = await (async () => {
       try {
         return await runWithInteraction(createJsonLineInteraction(process.stdin, process.stdout, controller.signal), () => pairForFlow({
-          json: true, flow: true, signup: true, devMode: true, expectedUserId, organizationId,
-          title: 'Set up this project', description: 'Sign in, protect or reuse Transport, and enable this location before reviewing project setup.',
+          json: true, flow: true, signup: descriptor.command === 'capy', devMode: true, expectedUserId, organizationId,
+          ...(descriptor.command === 'capy'
+            ? { title: 'Set up this project', description: 'Sign in, protect or reuse Transport, and enable this location before reviewing project setup.' }
+            : { title: 'Rotate project credentials', description: 'Sign in and reuse your current custody before reviewing WorkOS credential rotation.' }),
         }));
       } finally { controller.abort(); }
     })();

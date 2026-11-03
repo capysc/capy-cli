@@ -7,6 +7,8 @@ import { commitGated, type GateOptions } from '../../sync/gate';
 import { KeepFile, ConnectorMetadata, CapyError, ERROR_CODES, AuthResult } from '../../types/index';
 import type { ImportOutcome } from './registry';
 import { reportRepoLinkForCommand, type RepoLinkWarning } from '../../core/repoLinkReporter';
+import { currentInteraction } from '../../ui/interaction';
+import { flowConsole as console } from '../../ui/flowConsole';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -38,7 +40,8 @@ export interface ResolvedContext {
  */
 export type ContextRefusal = (code: string, message: string) => never;
 
-const exitWithMessage: ContextRefusal = (_code, message) => {
+const exitWithMessage: ContextRefusal = (code, message) => {
+  if (currentInteraction()) throw new CapyError(message, code);
   console.error(message);
   process.exit(1);
 };
@@ -50,6 +53,7 @@ const exitWithMessage: ContextRefusal = (_code, message) => {
  */
 async function authenticateForOrg(authService: AuthService, orgId: string, interactive: boolean): Promise<AuthResult> {
   const forOrg = await authService.authenticateSilent(orgId);
+  if (currentInteraction()) return forOrg;
   if (forOrg.success) return forOrg;
   const anyOrg = await authService.authenticateSilent();
   if (anyOrg.success || !interactive) return anyOrg;
@@ -85,6 +89,8 @@ export async function resolveContext(
     return refuse(ERROR_CODES.NO_KEEP_FILE, `No keep.lock found. Run ${B('capy')} to initialize.`);
   }
   const orgId = projectState.organizationId;
+  const binding = currentInteraction()?.binding;
+  if (binding && binding.organizationId !== orgId) throw new CapyError('The flow organization does not match this repository.', ERROR_CODES.AUTH_FAILED);
   const projectId = projectState.projectId;
   const branch = projectState.activeBranch;
   if (!branch) {
@@ -102,14 +108,17 @@ export async function resolveContext(
   const serviceClient = new ServiceClient(opts.apiUrl, devMode);
   serviceClient.setTokenProvider(() => authService.getValidToken());
 
-  const authResult = await authenticateForOrg(authService, orgId, opts.interactive !== false);
+  const authResult = await authenticateForOrg(authService, orgId, opts.interactive !== false && !binding);
+  if (binding && authResult.success && (authResult.user_id !== binding.userId || authResult.organization_id !== binding.organizationId)) {
+    throw new CapyError('The flow account or organization changed. Restart the flow.', ERROR_CODES.AUTH_FAILED);
+  }
   if (!authResult.success || !authResult.user_id) {
     // A silent-only caller gets the reason and the remedy (chosen from the
     // failure's code inside `silentAuthFailureMessage`); everyone else keeps the
     // sentence they have always had.
     return refuse(
       ERROR_CODES.AUTH_FAILED,
-      opts.interactive === false ? silentAuthFailureMessage(authResult) : 'Authentication failed',
+      opts.interactive === false || binding ? silentAuthFailureMessage(authResult) : 'Authentication failed',
     );
   }
   const userId = authResult.user_id;
@@ -170,6 +179,7 @@ async function resolveProjectKeyOrRefuse(args: {
       wrapOuterLayer: (oid, pt) => serviceClient.wrapOuterLayer(oid, pt).then((r) => r.ciphertext),
     });
   } catch (err: any) {
+    if (currentInteraction()) throw err;
     if (refuse) {
       return err instanceof CapyError
         ? refuse(err.code, err.message)
@@ -395,11 +405,13 @@ export function listManagedKeys(
 
 /** All variables with an entry on `branch`, sorted. Both managed and unmanaged. */
 export function listAllVarsOnBranch(keep: KeepFile, branch: string): string[] {
-  // The filter result is a fresh array, so sorting it is construction (no `toSorted` below ES2023).
   return Object.entries(keep.variables)
     .filter(([, entries]) => entries.some((e) => e.branch === branch))
     .map(([varName]) => varName)
-    .sort();
+    .reduce<string[]>((ordered, name) => {
+      const index = ordered.findIndex(existing => name < existing);
+      return index < 0 ? [...ordered, name] : [...ordered.slice(0, index), name, ...ordered.slice(index)];
+    }, []);
 }
 
 /** `abc…xyz`-style snippet of a credential value; never plaintext. */

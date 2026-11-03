@@ -22,6 +22,9 @@ FAIL=0
 
 # Files that use mock.module() — must run in isolation
 ISOLATED_FILES=(
+  tests/integration/stagingWorkOSFlow.pg.integration.test.ts
+  tests/auth/stagingFlowIdentity.test.ts
+  tests/commands/stagingRotateCommand.test.ts
   tests/service/coDecryptContext.test.ts
   tests/integration/stagingFlowHost.pg.integration.test.ts
   tests/commands/stagingCapyCommand.test.ts

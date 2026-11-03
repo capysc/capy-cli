@@ -21,6 +21,16 @@ export function registerStagingFlowCommands(program: Command): void {
       await runStagingFlow();
     }));
 
+  program.command('rotate-flow [variable]', { hidden })
+    .description('Run the staging WorkOS rotation browser flow')
+    .option('--all', 'rotate all managed WorkOS keys on the active branch')
+    .option('--no-push', 'rotate locally without pushing or deploying')
+    .option('--json', 'emit flow handoffs and host events as JSON')
+    .action(async (variable, options) => stagingFlowAction(async () => {
+      const { runStagingRotateFlow } = await import('../ui/stagingFlow');
+      await runStagingRotateFlow(variable, { all: options.all === true, noPush: options.push === false });
+    }));
+
   program.command('flow', { hidden })
     .description('Attach to an active staging flow or reconnect its supported checkpoint')
     .requiredOption('--id <flow-id>', 'the exact flow to attach')
