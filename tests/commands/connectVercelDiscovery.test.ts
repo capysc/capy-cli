@@ -507,7 +507,8 @@ describe('connector.discover — a real run, end to end', () => {
           // each imported entry's connector metadata names the project, team and environment
           const stagingEntry = folder.environments.find((env) => env.environmentName === 'staging')!.outcome.imported.find((i) => i.varName === 'B')!.entry;
           expect(stagingEntry).toMatchObject({ provider: 'vercel', vercel_project_id: 'prj_web', vercel_project: 'web', team_id: 'team_acme', environment: 'staging', env_id: 's1' });
-          expect(outcome.applied?.[0].ok && (outcome.applied[0].environments[1].outcome.skipped)).toEqual([{ name: 'HIDDEN', code: 'sensitive_unreadable' }]);
+          expect(outcome.applied?.[0].ok && (outcome.applied[0].environments[1].outcome.skipped)).toEqual([]);
+          expect(outcome.applied?.[0].ok && (outcome.applied[0].environments[1].outcome.placeholders)).toEqual([{ name: 'HIDDEN', code: 'sensitive_unreadable', provider: 'vercel' }]);
 
           // the local discovery commit: its own branch, the Vercel message, never pushed
           expect(outcome.commits?.[0]).toMatchObject({ ok: true, dryRun: false });

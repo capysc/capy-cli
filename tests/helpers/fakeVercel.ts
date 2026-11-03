@@ -28,6 +28,8 @@ export interface FakeVercelData {
   custom?: Readonly<Record<string, ReadonlyArray<{ id: string; slug: string }>>>;
   /** Per-id decrypted values, keyed by env record id. A missing key = Vercel returned no `value`. */
   values?: Readonly<Record<string, string>>;
+  /** Env record ids whose per-id answer says `decrypted: false` (Vercel would not decrypt the value, e.g. a role that cannot read production values). */
+  undecrypted?: readonly string[];
   /** Project list page size, to exercise pagination. */
   pageSize?: number;
   /** Set `pagination.next` on the env list, to exercise the truncation warning. */
@@ -109,7 +111,7 @@ export function fakeVercelFetch(data: FakeVercelData): VercelFetchLike {
       if (!rec) return json({ error: { code: 'not_found', message: 'nope' } }, 404);
       const value = data.values?.[envId];
       const { listValue: _omit, ...meta } = rec;
-      return json({ ...meta, decrypted: true, ...(value === undefined ? {} : { value }) });
+      return json({ ...meta, decrypted: !(data.undecrypted ?? []).includes(envId), ...(value === undefined ? {} : { value }) });
     }
     throw new Error(`fakeVercel: unexpected path ${path}`);
   }) as VercelFetchLike;

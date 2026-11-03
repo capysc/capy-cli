@@ -25,6 +25,7 @@
  */
 import { existsSync } from 'node:fs';
 import { sortedCopy } from '../../deploy/dokployApi';
+import { placeholdersReport } from '../../core/placeholder';
 import { join } from 'node:path';
 import {
   VercelClient,
@@ -212,6 +213,7 @@ function envReport(e: Extract<DiscoveryFolderResult, { ok: true }>['environments
     ...(e.outcome.cleared ? { cleared: e.outcome.cleared } : {}),
     unchanged: e.outcome.unchanged,
     skipped: e.outcome.skipped,
+    ...(e.outcome.placeholders ? { placeholders: placeholdersReport(e.outcome.placeholders) } : {}),
     warnings: e.outcome.warnings,
   };
 }
@@ -278,7 +280,9 @@ export function reportVercelDiscovery(
   const commits = outcome.commits ? commitsReport(outcome.commits) : undefined;
   const linked =
     !!outcome.applied &&
-    outcome.applied.some((f) => f.environments.some((e) => e.outcome.imported.length > 0 || (e.outcome.cleared?.length ?? 0) > 0));
+    outcome.applied.some((f) =>
+      f.environments.some((e) => e.outcome.imported.length > 0 || (e.outcome.cleared?.length ?? 0) > 0 || (e.outcome.placeholders?.length ?? 0) > 0),
+    );
   // One folder failing still lets the others run, but the run as a whole did
   // not fully succeed — CI watching the exit code must see that.
   if (outcome.applied?.some((f) => !f.ok)) process.exitCode = 1;
@@ -343,13 +347,16 @@ function appliedLines(outcome: Extract<DiscoveryOutcome, { ok: true }>, applied:
   if (!applied) return [];
   return applied.flatMap((f) => [
     `  ${B(f.folder)}${f.ok && f.projectCreated ? ' (new project)' : ''}`,
-    ...f.environments.map((e) => {
+    ...f.environments.flatMap((e) => {
       const clearedCount = e.cleared?.length ?? 0;
-      return (
+      const placeholderNames = (e.placeholders ?? []).map((p) => p.name);
+      return [
         `    ${e.branch}${e.branchCreated ? ' (new branch)' : ''}${e.overwrote ? ' (--overwrite)' : ''}: ` +
-        `imported ${e.imported.length}, unchanged ${e.unchanged.length}, skipped ${e.skipped.length}` +
-        (clearedCount > 0 ? `, cleared ${clearedCount}` : '')
-      );
+          `imported ${e.imported.length}, unchanged ${e.unchanged.length}, skipped ${e.skipped.length}` +
+          (placeholderNames.length > 0 ? `, no value yet ${placeholderNames.length}` : '') + // COPY-FLAG
+          (clearedCount > 0 ? `, cleared ${clearedCount}` : ''),
+        ...(placeholderNames.length > 0 ? [`      no value yet: ${placeholderNames.join(', ')}`] : []), // COPY-FLAG
+      ];
     }),
     ...(f.ok ? (f.activeBranch ? [`    folder is on branch ${f.activeBranch}`] : []) : [`    ✗ ${f.code}: ${f.message}`]),
   ]);

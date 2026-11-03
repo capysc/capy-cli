@@ -1197,3 +1197,16 @@ describe('CAP-679 rendering: "+N" survives truncation, INTEGRATIONS overflow, po
     expect(stripAnsiForTest(frame)).not.toMatch(/\[[a-z-]+\]/); // no `[provider]` label anywhere
   });
 });
+
+describe('a row with no value yet', () => {
+  test('the list says "no value yet" beside the name; a row with a value does not', () => {
+    const frame = stripAnsiForTest(render(initialSecretsScreenState([row({ name: 'EMPTY', value_hash: '' }), row({ name: 'FULL', value_hash: 'abc' })]), 100, 20));
+    expect(frame.split('\n').find((l) => l.includes('EMPTY'))).toContain('no value yet');
+    expect(frame.split('\n').find((l) => l.includes('FULL'))).not.toContain('no value yet');
+  });
+
+  test('the details view names the command that sets one, where the value would be', () => {
+    const frame = stripAnsiForTest(render(handleKey(initialSecretsScreenState([row({ name: 'EMPTY', value_hash: '' })]), ENTER).state, 100, 30));
+    expect(frame).toContain('no value yet — set it with: capy edit EMPTY');
+  });
+});

@@ -157,6 +157,16 @@ export interface TargetDelivery {
   superseded_deploy_ids?: readonly string[];
 }
 
+/**
+ * Why a variable has no value yet. `provider` is the import connector that could not
+ * read it; `reason` is that connector's own stable skip code (e.g. `sensitive_unreadable`).
+ * Both are codes, never sentences.
+ */
+export interface PlaceholderMarker {
+  provider: string;
+  reason: string;
+}
+
 /** v3 keep.lock variable entry — per-branch value hashes */
 export interface KeepVariableEntry {
   resource_id: string;
@@ -172,6 +182,13 @@ export interface KeepVariableEntry {
   changed_at?: string;
   /** Set when this variable was provisioned by `capy connect <provider>`. */
   connector?: ConnectorMetadata;
+  /**
+   * Set when the name exists on this branch but has NO value yet: the source it was
+   * imported from would not give the value back. `value_hash` is '' and the blob holds
+   * no line for it. A real value written for this branch removes the field.
+   * See `core/placeholder.ts`.
+   */
+  placeholder?: PlaceholderMarker;
   /**
    * Every `capy deploy` target this variable has been delivered to (CAP-679).
    * Optional and additive — absent on every entry written before this field
@@ -778,6 +795,11 @@ export const ERROR_CODES = {
   VERCEL_SPLIT_NOT_RESTORED: 'VERCEL_SPLIT_NOT_RESTORED',
   /** `capy deploy`'s setup was given something that is neither a Vercel dashboard link for a project nor a project name. */
   VERCEL_URL_INVALID: 'VERCEL_URL_INVALID',
+  /**
+   * A deploy would replace a value Vercel holds as sensitive (Capy cannot read it, so cannot tell whether it differs) for the first time
+   * for this target, and it was not confirmed: no terminal to ask on, and no `--replace-sensitive`; or the answer was no. Nothing was written.
+   */
+  VERCEL_SENSITIVE_REPLACE_UNCONFIRMED: 'VERCEL_SENSITIVE_REPLACE_UNCONFIRMED',
   // `capy deploy vercel --discover`
   /** A Vercel project has no GitHub link, so no repo can be matched; it is skipped (a notice). */
   VERCEL_PROJECT_NOT_GITHUB: 'VERCEL_PROJECT_NOT_GITHUB',

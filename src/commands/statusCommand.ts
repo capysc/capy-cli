@@ -8,6 +8,8 @@ import { CapyError, ERROR_CODES, KeepFile } from '../types/index';
 import { fetchSecretsWithCache, readSecretsLocal } from '../config/globalConfig';
 import { isLocalOnly } from '../config/profileConfig';
 import { resolveLocalProjectKey } from '../core/localUnlock';
+import { pinnedHashes } from '../sync/commit';
+import { placeholdersOnBranch, placeholderSetCommand } from '../core/placeholder';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -210,12 +212,9 @@ export class StatusCommand {
     const branchLabel = branch;
 
     // Build pinned hashes from keep.lock for active branch
-    const pinned: Record<string, string> = Object.fromEntries(
-      Object.entries(keep.variables).flatMap(([varName, entries]) => {
-        const entry = entries.find(e => e.branch === branch);
-        return entry ? [[varName, entry.value_hash] as const] : [];
-      }),
-    );
+    // A placeholder pins no value, so it is never compared; it is listed on its own.
+    const pinned = pinnedHashes(keep, branch);
+    const placeholders = placeholdersOnBranch(keep, branch).map((p) => p.name);
 
     // Build local hashes from .env. Two facts, deliberately separate: the
     // sentence a person reads, and the verdict the report branches on.
@@ -260,6 +259,8 @@ export class StatusCommand {
       remoteMatchesPinned: !showRemote,
       remoteFailure: remoteFailure ?? null,
       diffs,
+      // Names with no value yet (see `capy list`); they are not differences.
+      placeholders,
     };
 
     if (opts.json) {
@@ -279,6 +280,11 @@ export class StatusCommand {
     // Full output
     console.log(`${B('capy')}: ${keep.project_name} (${branchLabel})`);
     console.log('');
+    if (placeholders.length > 0) {
+      // COPY-FLAG: new user-facing string, minimal/neutral wording.
+      console.log(`  No value yet: ${placeholders.join(', ')}. Set one with: ${placeholderSetCommand('NAME')}`);
+      console.log('');
+    }
 
     if (diffs.length === 0) {
       console.log(`> ${totalSecrets} secret${totalSecrets !== 1 ? 's' : ''} match pinned branch.`);

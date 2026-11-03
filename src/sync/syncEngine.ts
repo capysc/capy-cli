@@ -9,6 +9,7 @@ import {
   KeepVariableEntry,
   SyncState,
 } from '../types/index';
+import { withoutPlaceholder } from '../core/placeholder';
 
 export class SyncEngine {
   /**
@@ -144,8 +145,11 @@ export class SyncEngine {
         // Preserve any extra fields on the existing entry (e.g. `connector`
         // metadata set by `capy connect`). Without the spread, every sync
         // would clobber them.
+        // A value is being written, so the name is no longer a placeholder (core/placeholder.ts).
+        const found: Partial<KeepVariableEntry> = idx >= 0 ? entries[idx] : {};
+        const existing = data.value_hash && idx >= 0 ? withoutPlaceholder(entries[idx]) : found;
         const entry: KeepVariableEntry = {
-          ...(idx >= 0 ? entries[idx] : {}),
+          ...existing,
           resource_id: data.resource_id,
           value_hash: data.value_hash || '',
           branch: targetBranch,

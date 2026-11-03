@@ -190,14 +190,16 @@ describe('vercel import — environment mapping and skips', () => {
     expect(callsOf(fetchMock).some((c) => c.url.includes('/env/env_1'))).toBe(false);
   });
 
-  test('skipped names carry stable reasons: sensitive, system, legacy secret, empty value', async () => {
+  test('skipped names carry stable reasons: system, empty value; sensitive and legacy secret are placeholders, not skips', async () => {
     const { connector } = makeConnector();
     const out = okOutcome(await connector.import!(ctxWith({ branch: 'production' }), BASE_OPTS));
     expect(Object.fromEntries(out.skipped.map((s) => [s.name, s.code]))).toEqual({
-      SENS: 'sensitive_unreadable',
       SYS: 'vercel_system',
-      OLD: 'legacy_secret_unreadable',
       EMPTY_ENC: 'empty_value',
+    });
+    expect(Object.fromEntries((out.placeholders ?? []).map((p) => [p.name, p.code]))).toEqual({
+      SENS: 'sensitive_unreadable',
+      OLD: 'legacy_secret_unreadable',
     });
     expect(out.imported.map((i) => i.varName)).not.toContain('EMPTY_ENC');
   });
@@ -443,7 +445,7 @@ describe('vercel import — end to end through ConnectCommand.executeImport', ()
             imported: ['PLAIN_PROD', 'ENC_ALL'],
             source: { kind: 'vercel', projectId: 'prj_web', environment: 'production' },
           });
-          expect(parsed.skipped).toContainEqual({ name: 'SENS', code: 'sensitive_unreadable' });
+          expect(parsed.placeholders).toContainEqual({ name: 'SENS', code: 'sensitive_unreadable' });
 
           // the property: decrypting what landed on disk gives Vercel's values
           const decrypted = new FileManager(dir).readEncryptedEnvFile(PROJECT_KEY);

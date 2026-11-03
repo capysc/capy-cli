@@ -17,9 +17,15 @@
  * custom environment's slug. One Vercel record that targets several
  * environments counts in each. What is NOT imported is reported by stable
  * reason, names only: `git_branch_scoped` (a preview record scoped to one git
- * branch — it is not an all-branches preview var), `sensitive_unreadable`,
- * `legacy_secret_unreadable`, `vercel_system`, `unsupported_type`,
- * `duplicate_key`, `empty_value`.
+ * branch — it is not an all-branches preview var), `vercel_system`,
+ * `unsupported_type`, `duplicate_key`, `empty_value`.
+ *
+ * A value Vercel has but will not give back (`sensitive_unreadable`,
+ * `legacy_secret_unreadable`, or a value route answer with `decrypted: false`,
+ * `value_not_decrypted`) is not skipped: it becomes a PLACEHOLDER on the Capy
+ * branch of every environment it is in. A placeholder is a flag on the
+ * variable's keep.lock entry, with no value (`core/placeholder.ts`). A name
+ * that already has a value in Capy keeps it and is reported as skipped.
  *
  * Every refusal for a missing or rejected token carries the Vercel token page
  * (`link`) and what to do (`remedy`), with the team's slug when `--team` names it.
@@ -47,6 +53,7 @@ import {
   VercelTeam,
   VercelTokenSource,
   availableEnvironments,
+  isPlaceholderReason,
   buildEnvironmentPlans,
   createVercelClient,
   describeVercelTokenProblem,
@@ -70,6 +77,7 @@ import {
   ConnectorModule,
   ConnectResult,
   ImportOutcome,
+  ImportPlaceholder,
   ImportSkip,
   ImportWarning,
   RotateResult,
@@ -504,7 +512,8 @@ export function createVercelConnector(deps: VercelConnectorDeps = {}): Connector
     const fullCandidates = values.value.entries.map((e) => ({ name: e.record.key, value: e.value }));
     // A name Vercel HAS but will not show us (sensitive, scoped, empty, …) is
     // never cleared locally just because it is unreadable.
-    const protectedNames = [...source.skipped, ...values.value.empty].map((s) => s.name);
+    const unreadable = [...source.skipped, ...values.value.empty, ...values.value.undecrypted];
+    const protectedNames = unreadable.map((s) => s.name);
     const plan = computeOverwritePlan(fullCandidates, protectedNames, ctx.localPlaintext);
     const warnings = truncationWarnings(source);
 
@@ -527,6 +536,8 @@ export function createVercelConnector(deps: VercelConnectorDeps = {}): Connector
     const entryFor = (name: string, value: string) => importedEntry(recordByName.get(name)!, name, value, source, createdAtSec, importedAt);
     const written = [...plan.toImport, ...plan.toReplace].map(({ name, value }) => entryFor(name, value));
     const unchangedEntries = plan.unchanged.map((name) => entryFor(name, fullCandidates.find((c) => c.name === name)!.value));
+    // A name Vercel will not give back, with no value here, is a placeholder; one that has a local value keeps it and is reported as skipped.
+    const split = splitPlaceholders(unreadable, new Set([...Object.keys(ctx.localPlaintext), ...fullCandidates.map((c) => c.name)]));
     return {
       ok: true,
       source: importSource,
@@ -537,7 +548,8 @@ export function createVercelConnector(deps: VercelConnectorDeps = {}): Connector
       unchangedEntries,
       // The names Vercel has but will not show are reported here too: an
       // overwrite leaves them alone, and saying so is the point of the list.
-      skipped: [...source.skipped, ...values.value.empty].map(toImportSkip),
+      skipped: split.skips.map(toImportSkip),
+      placeholders: split.placeholders,
       warnings,
     };
   };
@@ -590,10 +602,12 @@ export function createVercelConnector(deps: VercelConnectorDeps = {}): Connector
     const unchangedEntries = dryRun ? [] : unchanged.map((name) => entryFor(name, selected.find((c) => c.name === name)!.value));
 
     const inScope = (name: string): boolean => !restrict || restrict.includes(name);
-    const skipped: readonly ImportSkip[] = [
-      ...[...source.skipped, ...values.value.empty].filter((s) => inScope(s.name)).map(toImportSkip),
-      ...conflictSkipped,
-    ];
+    // A name Vercel will not give back, with no value here, is a placeholder on this branch; one that has a value keeps it.
+    const split = splitPlaceholders(
+      [...source.skipped, ...values.value.empty, ...values.value.undecrypted].filter((s) => inScope(s.name)),
+      new Set([...Object.keys(ctx.localPlaintext), ...candidates.map((c) => c.name)]),
+    );
+    const skipped: readonly ImportSkip[] = [...split.skips.map(toImportSkip), ...conflictSkipped];
 
     return {
       ok: true,
@@ -602,6 +616,7 @@ export function createVercelConnector(deps: VercelConnectorDeps = {}): Connector
       unchanged,
       unchangedEntries,
       skipped,
+      placeholders: split.placeholders,
       warnings: truncationWarnings(source),
       ...(dryRun ? { wouldAsk } : {}),
     };
@@ -781,6 +796,26 @@ function isTokenProblem(code: string): boolean {
 function storeRefusalCode(err: unknown): string {
   const code = (err as { code?: unknown } | null)?.code;
   return typeof code === 'string' ? code : ERROR_CODES.VERCEL_TOKEN_MISSING;
+}
+
+/**
+ * Splits what Vercel would not give back: a name whose reason is "has a value, not readable" and that has no
+ * value in Capy becomes a placeholder; everything else stays a skip. `valued` is every name that has (or is
+ * being given) a value here.
+ */
+function splitPlaceholders(
+  unreadable: readonly VercelSkippedRecord[],
+  valued: ReadonlySet<string>,
+): { placeholders: readonly ImportPlaceholder[]; skips: readonly VercelSkippedRecord[] } {
+  const isPlaceholder = (s: VercelSkippedRecord): boolean => isPlaceholderReason(s.reason) && !valued.has(s.name);
+  const firstOfName = (s: VercelSkippedRecord, i: number, all: readonly VercelSkippedRecord[]): boolean => all.findIndex((o) => o.name === s.name) === i;
+  return {
+    placeholders: unreadable
+      .filter(isPlaceholder)
+      .filter(firstOfName)
+      .map((s): ImportPlaceholder => ({ name: s.name, code: s.reason, provider: 'vercel' })),
+    skips: unreadable.filter((s) => !isPlaceholder(s)),
+  };
 }
 
 const toImportSkip = (s: VercelSkippedRecord): ImportSkip => ({ name: s.name, code: s.reason, ...(s.gitBranch ? { gitBranch: s.gitBranch } : {}) });

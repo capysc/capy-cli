@@ -1,4 +1,5 @@
 import { resolveContext, writeAndSync, writeImportOutcome, ResolvedContext } from './connectors/shared';
+import { placeholderSetCommand, placeholdersReport } from '../core/placeholder';
 import { listProviders, loadProvider, ConnectFailure, ConnectOpts, ConnectorModule } from './connectors/registry';
 import { formatKeyHelp } from '../deploy/keyHelp';
 import { EXIT_NEEDS_INPUT, isInteractive } from '../ui/interactive';
@@ -263,7 +264,8 @@ export class ConnectCommand {
     const { wrote } = await writeImportOutcome(ctx, outcome, { push: !opts.noPush, dryRun });
     const pushed = !opts.noPush && wrote;
     const cleared = outcome.cleared ?? [];
-    const hasChange = outcome.imported.length > 0 || cleared.length > 0;
+    const placeholders = outcome.placeholders ?? [];
+    const hasChange = outcome.imported.length > 0 || cleared.length > 0 || placeholders.length > 0;
 
     if (opts.json) {
       console.log(
@@ -280,6 +282,8 @@ export class ConnectCommand {
           unchanged: outcome.unchanged,
           ...(outcome.wouldAsk ? { wouldAsk: outcome.wouldAsk } : {}),
           skipped: outcome.skipped,
+          // Names Vercel has but will not give back: recorded with no value (names and codes only).
+          ...(outcome.placeholders ? { placeholders: placeholdersReport(outcome.placeholders) } : {}),
           warnings: outcome.warnings,
           pushed,
         }),
@@ -304,7 +308,7 @@ export class ConnectCommand {
           `  ✓ Imported ${outcome.imported.map((e) => B(e.varName)).join(', ')} from ${label}` +
             `${pushed ? ' and pushed' : ' (not pushed)'}.`,
         );
-      } else {
+      } else if (cleared.length > 0) {
         console.log(`  ✓ Cleared from ${label}${pushed ? ' and pushed' : ' (not pushed)'}.`);
       }
       if (cleared.length > 0) {
@@ -319,6 +323,11 @@ export class ConnectCommand {
     }
     if (outcome.wouldAsk && outcome.wouldAsk.length > 0) {
       console.log(`  Conflicts (would ask): ${outcome.wouldAsk.join(', ')}`);
+    }
+    if (placeholders.length > 0) {
+      // COPY-FLAG: new user-facing string, minimal/neutral wording.
+      console.log(`  ${dryRun ? 'Would record' : 'Recorded'} with no value yet: ${placeholders.map((p) => `${p.name} (${p.code})`).join(', ')}`);
+      console.log(`  Set one with: ${placeholderSetCommand('NAME')}`); // COPY-FLAG
     }
     if (outcome.skipped.length > 0) {
       console.log(`  Skipped: ${outcome.skipped.map((s) => `${s.name} (${s.code})`).join(', ')}`);
@@ -406,6 +415,7 @@ export class ConnectCommand {
               ...(e.outcome.cleared ? { cleared: e.outcome.cleared } : {}),
               unchanged: e.outcome.unchanged,
               skipped: e.outcome.skipped,
+              ...(e.outcome.placeholders ? { placeholders: placeholdersReport(e.outcome.placeholders) } : {}),
               warnings: e.outcome.warnings,
             })),
           }
@@ -426,6 +436,7 @@ export class ConnectCommand {
               ...(e.outcome.cleared ? { cleared: e.outcome.cleared } : {}),
               unchanged: e.outcome.unchanged,
               skipped: e.outcome.skipped,
+              ...(e.outcome.placeholders ? { placeholders: placeholdersReport(e.outcome.placeholders) } : {}),
               warnings: e.outcome.warnings,
             })),
           },
@@ -440,7 +451,7 @@ export class ConnectCommand {
     const linked =
       !!outcome.applied &&
       outcome.applied.some((f) =>
-        f.environments.some((e) => e.outcome.imported.length > 0 || (e.outcome.cleared?.length ?? 0) > 0),
+        f.environments.some((e) => e.outcome.imported.length > 0 || (e.outcome.cleared?.length ?? 0) > 0 || (e.outcome.placeholders?.length ?? 0) > 0),
       );
     // A per-folder failure still lets the OTHER folders' steps run (see
     // `runDiscoverySequences`) — but the run as a whole did not fully

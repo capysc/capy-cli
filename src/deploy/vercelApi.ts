@@ -273,9 +273,23 @@ export interface VercelClient {
   getProject(idOrName: string, teamId?: string): Promise<VercelProject>;
   listCustomEnvironments(projectId: string, teamId?: string): Promise<readonly VercelCustomEnvironment[]>;
   listEnvs(projectId: string, teamId?: string): Promise<VercelEnvList>;
-  /** The decrypted value of one env record, or `undefined` when Vercel returned none. */
-  getEnvValue(projectId: string, envId: string, teamId?: string): Promise<string | undefined>;
+  /**
+   * The decrypted value of one env record, `undefined` when Vercel returned none, or
+   * `{ decrypted: false }` when Vercel says it did not decrypt the value (its structured
+   * `decrypted: false` field; never judged by the value's text).
+   */
+  getEnvValue(projectId: string, envId: string, teamId?: string): Promise<VercelEnvValue>;
 }
+
+/** Vercel answered the per-id route but did not decrypt the value (for instance a role that cannot read production values). */
+export interface VercelUndecryptedValue {
+  readonly decrypted: false;
+}
+
+/** What the per-id value route gave back: the value, nothing, or "not decrypted". */
+export type VercelEnvValue = string | undefined | VercelUndecryptedValue;
+
+export const isUndecrypted = (value: VercelEnvValue): value is VercelUndecryptedValue => typeof value === 'object';
 
 const DEFAULT_MAX_RETRIES = 3;
 const DEFAULT_MAX_WAIT_MS = 60_000;
@@ -442,6 +456,7 @@ export function createVercelClient(token: string, options: VercelClientOptions =
 
     async getEnvValue(projectId, envId, teamId) {
       const body = asRecord(await get(`/v1/projects/${enc(projectId)}/env/${enc(envId)}`, { kind: 'project_envs', project: projectId }, { teamId }));
+      if (body?.decrypted === false) return { decrypted: false };
       return typeof body?.value === 'string' ? body.value : undefined;
     },
   };
@@ -697,7 +712,17 @@ export type VercelSkipReason =
   | 'legacy_secret_unreadable'
   | 'unsupported_type'
   | 'duplicate_key'
-  | 'empty_value';
+  | 'empty_value'
+  /** Vercel returned the value route's answer with `decrypted: false`: it would not give the value back. */
+  | 'value_not_decrypted';
+
+/**
+ * The reasons that mean "Vercel has this value and will not give it back". Each becomes a placeholder
+ * on its Capy branch (core/placeholder.ts); every other reason stays a skip.
+ */
+export const PLACEHOLDER_SKIP_REASONS: readonly VercelSkipReason[] = ['sensitive_unreadable', 'legacy_secret_unreadable', 'value_not_decrypted'];
+
+export const isPlaceholderReason = (reason: VercelSkipReason): boolean => PLACEHOLDER_SKIP_REASONS.includes(reason);
 
 export interface VercelSkippedRecord {
   name: string;
@@ -723,10 +748,12 @@ export function availableEnvironments(custom: readonly VercelCustomEnvironment[]
 
 function skipReasonFor(rec: VercelEnvRecord, kind: VercelEnvironmentKind): VercelSkipReason | null {
   if (rec.type === 'system') return 'vercel_system';
+  const known = rec.type === 'plain' || rec.type === 'encrypted' || rec.type === 'sensitive' || rec.type === 'secret';
+  if (!known) return 'unsupported_type';
+  // A preview record scoped to one branch of the repo is out of scope whatever its type: it is never a placeholder on the all-branches preview.
+  if (kind === 'preview' && rec.gitBranch) return 'git_branch_scoped';
   if (rec.type === 'sensitive') return 'sensitive_unreadable';
   if (rec.type === 'secret') return 'legacy_secret_unreadable';
-  if (rec.type !== 'plain' && rec.type !== 'encrypted') return 'unsupported_type';
-  if (kind === 'preview' && rec.gitBranch) return 'git_branch_scoped';
   return null;
 }
 
@@ -776,6 +803,8 @@ export interface ResolvedEnvValues {
   entries: ReadonlyArray<{ record: VercelEnvRecord; value: string }>;
   /** Records that came back empty/absent although typed readable — never imported as empty strings. */
   empty: readonly VercelSkippedRecord[];
+  /** Records Vercel would not decrypt (`decrypted: false`): they have a value Capy cannot read, so they are placeholders, not empty. */
+  undecrypted: readonly VercelSkippedRecord[];
 }
 
 /**
@@ -791,7 +820,7 @@ export async function resolveEnvValues(
   teamId: string | undefined,
   records: readonly VercelEnvRecord[],
 ): Promise<ResolvedEnvValues> {
-  const fetched = await records.reduce<Promise<ReadonlyArray<{ record: VercelEnvRecord; value: string | undefined }>>>(
+  const fetched = await records.reduce<Promise<ReadonlyArray<{ record: VercelEnvRecord; value: VercelEnvValue }>>>(
     async (accPromise, record) => {
       const acc = await accPromise;
       const value =
@@ -803,9 +832,12 @@ export async function resolveEnvValues(
     Promise.resolve([]),
   );
   return {
-    entries: fetched.flatMap(({ record, value }) => (value === undefined || value === '' ? [] : [{ record, value }])),
+    entries: fetched.flatMap(({ record, value }) => (value === undefined || value === '' || isUndecrypted(value) ? [] : [{ record, value }])),
     empty: fetched.flatMap(({ record, value }): readonly VercelSkippedRecord[] =>
       value === undefined || value === '' ? [{ name: record.key, reason: 'empty_value' }] : [],
+    ),
+    undecrypted: fetched.flatMap(({ record, value }): readonly VercelSkippedRecord[] =>
+      isUndecrypted(value) ? [{ name: record.key, reason: 'value_not_decrypted' }] : [],
     ),
   };
 }

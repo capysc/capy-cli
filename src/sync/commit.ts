@@ -27,6 +27,7 @@ import type { ProjectManager } from '../core/projectManager';
 import type { ServiceClient } from '../service/serviceClient';
 import { CapyError, ERROR_CODES, KeepFile, setSyncKeepHash } from '../types/index';
 import { hashValue } from './compareSecrets';
+import { placeholderOf } from '../core/placeholder';
 import { SyncEngine } from './syncEngine';
 import type { RateInfo } from '../utils/pool';
 
@@ -61,7 +62,8 @@ export function pinnedHashes(keep: KeepFile | null | undefined, branch: string):
   return Object.fromEntries(
     Object.entries(keep?.variables ?? {}).flatMap(([name, entries]) => {
       const entry = entries.find((e) => e.branch === branch);
-      return entry ? ([[name, entry.value_hash]] as const) : [];
+      // A placeholder pins no value: it is neither compared, restored nor dropped with the pinned names.
+      return entry && entry.placeholder === undefined ? ([[name, entry.value_hash]] as const) : [];
     }),
   );
 }
@@ -243,6 +245,11 @@ export const envBlobOf = (lines: Readonly<Record<string, string>>): string =>
     .map(([name, line]) => `${name}=${line}`)
     .join('\n');
 
+/** The names `changes` removes that are placeholders on `branch` (and are not being given a value in the same change). */
+function removedPlaceholders(keep: KeepFile, branch: string, changes: Changes): readonly string[] {
+  return changes.remove.filter((name) => !has(changes.set, name) && placeholderOf(keep, name, branch) !== undefined);
+}
+
 /** `keep` with this branch's slice rebuilt from `env`: every name set, every other pinned name dropped. */
 export function keepForEnv(keep: KeepFile, branch: string, env: Readonly<Record<string, string>>): KeepFile {
   const stale = Object.keys(pinnedHashes(keep, branch)).filter((name) => !has(env, name));
@@ -325,9 +332,11 @@ export async function uploadChanges(input: UploadInput): Promise<Uploaded> {
     changes,
     encryptLine: (name, value) => `capy:${resourceIdOf(name)}:${Encryptor.encrypt(value, projectKey)}`,
   });
-  const changed = keepWithChanges(latestKeep, branch, applied.written, applied.removed, resourceIdOf);
+  // A name that is only a placeholder has no blob line to remove, but removing it still drops its entry.
+  const removed = [...applied.removed, ...removedPlaceholders(latestKeep, branch, changes)];
+  const changed = keepWithChanges(latestKeep, branch, applied.written, removed, resourceIdOf);
   const keep = transformKeep ? transformKeep(changed) : changed;
-  const base = { snapshot, keep, lines: applied.lines, env: applied.env, written: Object.keys(applied.written), removed: applied.removed };
+  const base = { snapshot, keep, lines: applied.lines, env: applied.env, written: Object.keys(applied.written), removed };
   const readRate = 'rate' in read && read.rate !== undefined ? { read: read.rate } : {};
   if (keep === latestKeep) return { ...base, result: undefined, rates: readRate };
 
@@ -491,7 +500,7 @@ function commitLocalCopy(ctx: FolderContext, changes: Changes, transformKeep: Fo
   const lines = Object.fromEntries(
     Object.entries(env).map(([name, value]) => [name, `capy:${deriveResourceId(ctx.branch, name)}:${Encryptor.encrypt(value, ctx.projectKey)}`]),
   );
-  const rebuilt = keepForEnv(ctx.keep, ctx.branch, env);
+  const rebuilt = keepWithChanges(keepForEnv(ctx.keep, ctx.branch, env), ctx.branch, {}, removedPlaceholders(ctx.keep, ctx.branch, changes), (name) => deriveResourceId(ctx.branch, name));
   const keep = transformKeep ? transformKeep(rebuilt) : rebuilt;
   return {
     env,
@@ -537,7 +546,7 @@ export async function commitFolder(ctx: FolderContext, changes: Changes, opts: F
 
   writeKeepCache(ctx.orgId, ctx.projectId, done.cacheHash, envBlobOf(done.lines));
   ctx.fileManager.writeKeepFile(done.adopted);
-  ctx.fileManager.writeEncryptedEnvFile({ ...done.env }, ctx.projectKey, undefined, done.adopted, ctx.branch);
+  ctx.fileManager.writeEncryptedEnvFile({ ...done.env }, ctx.projectKey, undefined, done.adopted, ctx.branch, done.removed);
 
   const existingSyncState = ctx.pm.readSyncState();
   ctx.fileManager.writeSyncState({

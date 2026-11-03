@@ -25,6 +25,7 @@ import { CANCELLED_NOTHING, DRY_RUN_LABEL } from '../commands/secretsSetText';
 import type { RunProgress } from '../commands/secretsSet';
 import { clipLine } from './pickerTable';
 import { BEHIND_LABEL, DEPLOYED_LABEL, NO_TARGET_LABEL, TARGET_STATUS_HEADING, formatSecretRowStatus, locationState, secretRowStatus } from '../core/deployStatus';
+import { NO_VALUE_YET, noValueYetLine } from '../core/placeholder';
 import { statusBadge, statusColor } from './statusBadge';
 import {
   EditEffect,
@@ -1002,7 +1003,9 @@ export function render(state: SecretsScreenState, termWidth: number, termHeight:
     // empty query carries no reasons anyway, but this also guards
     // `matchActive` for callers that ever hand in a non-empty `reasons`
     // alongside a cleared query).
-    const tag = matchActive && reasons.length > 0 ? `${ACCENT}[${reasons[0]}]${RESET}` : '';
+    const matchTag = matchActive && reasons.length > 0 ? `${ACCENT}[${reasons[0]}]${RESET}` : '';
+    // A row with no value yet says so beside its name (a search-match tag takes the place when one is active).
+    const tag = matchTag !== '' || row.value_hash !== '' ? matchTag : `${DIM}${NO_VALUE_YET}${RESET}`;
     const nameCell = buildNameCell(pointer + row.name, tag, nameW);
     const middleCell = pad(formatMiddleCell(row, state.column, middleW), middleW);
     const updatedCell = pad(formatUpdatedCell(row), updatedW);
@@ -1099,7 +1102,7 @@ function buildPopupLines(row: SecretIndexRow, popup: PopupState, width: number):
     '',
     `${indent}${inner}${BOLD}${truncate(row.name, contentWidth)}${RESET}`,
     '',
-    field('value', renderValueLine(popup.value, popup.revealed, popup.panOffset, valueWidth)),
+    field('value', row.value_hash === '' ? noValueYetLine(row.name) : renderValueLine(popup.value, popup.revealed, popup.panOffset, valueWidth)),
     field('updated', formatUpdatedCell(row)),
     field(TARGET_STATUS_HEADING.toLowerCase(), secretRowStatusBadge(row)),
     '',

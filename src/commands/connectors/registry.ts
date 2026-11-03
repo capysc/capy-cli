@@ -249,6 +249,17 @@ export interface ImportSkip {
   gitBranch?: string;
 }
 
+/**
+ * A name the provider has but will not give back, recorded as a placeholder on the branch: it exists
+ * in Capy with no value until one is set (core/placeholder.ts). `code` is the provider's stable
+ * reason code; `provider` is the connector that could not read it.
+ */
+export interface ImportPlaceholder {
+  name: string;
+  code: string;
+  provider: string;
+}
+
 /** A non-blocking heads-up about the import, grouped by code like `DeployWarning`. */
 export interface ImportWarning {
   code: string;
@@ -272,6 +283,11 @@ export type ImportOutcome =
       imported: readonly ImportedVarEntry[];
       unchanged: readonly string[];
       skipped: readonly ImportSkip[];
+      /**
+       * Vercel import only: names Vercel holds but will not give back. `writeImportOutcome` records each
+       * as a placeholder on the branch; none is in `skipped`. Absent when there are none.
+       */
+      placeholders?: readonly ImportPlaceholder[];
       warnings: readonly ImportWarning[];
       /**
        * Dokploy import only: names with a different local value that a real
