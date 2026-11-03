@@ -21,7 +21,7 @@ afterAll(() => {
 import {
   defaultAskExistingOrNewProject,
   DISCOVERY_NEW_PROJECT,
-} from '../../src/commands/connectors/dokploy';
+} from '../../src/commands/connectors/discoverySteps';
 import {
   orderProjectsForPicker,
   vercelProjectQuestion,

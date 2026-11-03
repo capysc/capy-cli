@@ -808,6 +808,45 @@ export const ERROR_CODES = {
   // --- Import connectors ---
   /** `capy connect vercel`: Vercel will not return this name's value, and Capy already has one. The Capy value was left untouched (reported, not an error). */
   CAPY_VALUE_KEPT: 'CAPY_VALUE_KEPT',
+  // --- Connector discovery, any provider (`capy connect <provider> --discover`) ---
+  // One per step a folder's run can stop on. Every provider but Dokploy reports these;
+  // Dokploy keeps its own `DOKPLOY_*` spellings of the same steps.
+  /** The folder's upload failed for a reason other than a stale base. That folder's run stopped; the other folders still ran. */
+  CONNECTOR_PUSH_FAILED: 'CONNECTOR_PUSH_FAILED',
+  /** Non-interactive run without `--yes`: the folder has no keep.lock, and a person has to initialize it. */
+  CONNECTOR_FOLDER_NOT_INITIALIZED: 'CONNECTOR_FOLDER_NOT_INITIALIZED',
+  /** The org's project list could not be read, so a new project is not offered blind. */
+  CONNECTOR_PROJECT_LOOKUP_FAILED: 'CONNECTOR_PROJECT_LOOKUP_FAILED',
+  /** Non-interactive `--yes`: a project with the default name already exists (in the org, or created earlier in the same run). */
+  CONNECTOR_PROJECT_NAME_EXISTS: 'CONNECTOR_PROJECT_NAME_EXISTS',
+  /** The picked project is not in this org. */
+  CONNECTOR_PROJECT_NOT_FOUND: 'CONNECTOR_PROJECT_NOT_FOUND',
+  /** Creating or bootstrapping the folder's project failed. */
+  CONNECTOR_INIT_FAILED: 'CONNECTOR_INIT_FAILED',
+  /** The new project's name is over the length limit. Nothing was created. */
+  CONNECTOR_PROJECT_NAME_TOO_LONG: 'CONNECTOR_PROJECT_NAME_TOO_LONG',
+  /** The project key could not be resolved for the folder. */
+  CONNECTOR_KEY_RESOLUTION_FAILED: 'CONNECTOR_KEY_RESOLUTION_FAILED',
+  /** The folder has an uncommitted or unpushed change; nothing was written into it. */
+  CONNECTOR_FOLDER_DIRTY: 'CONNECTOR_FOLDER_DIRTY',
+  /** The branch is protected (invite-only). */
+  CONNECTOR_BRANCH_PROTECTED: 'CONNECTOR_BRANCH_PROTECTED',
+  /** The folder has no keep.lock, or is not on a branch after checkout. */
+  CONNECTOR_KEEP_MISSING: 'CONNECTOR_KEEP_MISSING',
+  /** Switching the folder onto the branch failed. */
+  CONNECTOR_CHECKOUT_FAILED: 'CONNECTOR_CHECKOUT_FAILED',
+  /** git refused to read a repo's remote (for example "dubious ownership"); the repo is reported, not silently treated as unmatched. */
+  CONNECTOR_REMOTE_UNREADABLE: 'CONNECTOR_REMOTE_UNREADABLE',
+  /** The discovery commit was refused: a path it would commit already had uncommitted changes before the run. */
+  CONNECTOR_COMMIT_WOULD_MIX: 'CONNECTOR_COMMIT_WOULD_MIX',
+  /** The discovery commit was refused: the branch name is not a valid git branch name. */
+  CONNECTOR_COMMIT_BRANCH_INVALID: 'CONNECTOR_COMMIT_BRANCH_INVALID',
+  /** The discovery commit was refused: the branch name is already taken. */
+  CONNECTOR_COMMIT_BRANCH_EXISTS: 'CONNECTOR_COMMIT_BRANCH_EXISTS',
+  /** The discovery commit was refused: the repo has no git identity (user.name / user.email). */
+  CONNECTOR_GIT_IDENTITY_MISSING: 'CONNECTOR_GIT_IDENTITY_MISSING',
+  /** The discovery commit failed in git and was rolled back. */
+  CONNECTOR_COMMIT_FAILED: 'CONNECTOR_COMMIT_FAILED',
   // --- Piped values: `<cmd> | capy edit NAME`, `<cmd> | capy add NAME` ---
   /**
    * `capy edit` with no name and no terminal. There is nothing to draw the

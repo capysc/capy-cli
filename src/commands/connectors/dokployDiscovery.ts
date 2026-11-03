@@ -26,7 +26,7 @@
  * clear/replace/import plan itself, and it never touches Dokploy vars past
  * what `--compose`/`--application`'s own single-service import (below, and
  * in `dokploy.ts`) already does. The only new behaviour that import gained
- * for this is `--overwrite` (see `dokploy.ts#computeOverwritePlan`) — a
+ * for this is `--overwrite` (see `discoverySteps.ts#computeOverwritePlan`) — a
  * flag usable standalone too, not something discovery invented for itself.
  * Discovery DOES decide, per step, whether to pass `--overwrite`
  * automatically — see "Auto-overwrite", below — but the actual clear/
@@ -122,6 +122,7 @@ import type { ConnectFailure, ImportOutcome } from './registry';
 import type { FolderSync } from '../../sync/gate';
 import type { ConflictPayload } from '../../sync/conflicts';
 import type { DiscoveryCommitOutcome } from '../../git/discoveryCommit';
+import { DOKPLOY_DISCOVERY_CODES, type DiscoveryCodes } from './discoveryCodes';
 
 /**
  * The context `capy connect dokploy --discover` runs with — deliberately
@@ -256,8 +257,8 @@ export interface CandidateRepo {
 
 export interface DiscoveryRemoteReadError {
   repoDir: string;
-  /** Stable refusal code — branch on this, never on `message`. */
-  code: 'DOKPLOY_REMOTE_UNREADABLE';
+  /** Stable refusal code — branch on this, never on `message`. `DOKPLOY_REMOTE_UNREADABLE` for Dokploy, `CONNECTOR_REMOTE_UNREADABLE` for the other providers. */
+  code: string;
   /** git's own stderr (or a fallback naming its exit code) — for display only. */
   message: string;
 }
@@ -276,10 +277,10 @@ export interface CandidateReposResult {
  * defect a live sandbox run hit: git's "dubious ownership" refusal made
  * every single service come back `no_remote_match`).
  */
-export function findCandidateReposResult(cwd: string): CandidateReposResult {
+export function findCandidateReposResult(cwd: string, codes: Pick<DiscoveryCodes, 'remoteUnreadable'> = DOKPLOY_DISCOVERY_CODES): CandidateReposResult {
   const self = probeRepoDir(cwd);
   if (self.kind === 'unreadable') {
-    return { repos: [], unreadable: [{ repoDir: cwd, code: 'DOKPLOY_REMOTE_UNREADABLE', message: self.message }] };
+    return { repos: [], unreadable: [{ repoDir: cwd, code: codes.remoteUnreadable, message: self.message }] };
   }
   if (self.kind === 'ok') {
     const remote = readOriginRemote(self.repoRoot);
@@ -293,7 +294,7 @@ export function findCandidateReposResult(cwd: string): CandidateReposResult {
       return remote ? [{ repoDir: probe.repoRoot, remote }] : [];
     }),
     unreadable: childProbes.flatMap(({ dir, probe }) =>
-      probe.kind === 'unreadable' ? [{ repoDir: dir, code: 'DOKPLOY_REMOTE_UNREADABLE' as const, message: probe.message }] : [],
+      probe.kind === 'unreadable' ? [{ repoDir: dir, code: codes.remoteUnreadable, message: probe.message }] : [],
     ),
   };
 }
@@ -1024,7 +1025,7 @@ export function orderEnvironments<T extends { environmentName: string }>(environ
  * ever call `process.exit`: a multi-folder run must be able to abort ONE
  * folder on a coded failure and continue with the next, which the CLI's own
  * command classes (`CapyCommand`, `CheckoutCommand`) cannot do as they
- * stand today (see `dokploy.ts`'s own doc on `buildRealDiscoverySequenceDeps`
+ * stand today (see `discoverySteps.ts`'s own doc on `buildRealDiscoverySequenceDeps`
  * for exactly where this deviates from literally invoking those classes, and
  * why).
  */

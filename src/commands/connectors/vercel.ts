@@ -35,7 +35,6 @@
  * values and NEVER creates, offers or writes a deploy target.
  * `capy deploy vercel --discover` is what creates targets, and it pushes no values.
  */
-import { join } from 'node:path';
 import { syncFolder, type FolderSync, type GateOptions } from '../../sync/gate';
 import { classifyImportCandidates } from '../../deploy/dokployApi';
 import {
@@ -90,7 +89,6 @@ import {
   DiscoveryContext,
   DiscoveryOutcome,
   DiscoveryPlan,
-  DiscoveryFolderResult,
   DiscoveryPlanFolder,
   applyCollisionResolutions,
   findCandidateReposResult,
@@ -98,6 +96,7 @@ import {
   resolveCollisions,
   runDiscoverySequences,
 } from './dokployDiscovery';
+import { CONNECTOR_DISCOVERY_CODES } from './discoveryCodes';
 import {
   ExistingProjectsSnapshot,
   buildRealDiscoverySequenceDeps,
@@ -113,7 +112,7 @@ import {
   defaultPickCollisionWinner,
   discoveryCommitPathsFor,
   peekLocalKeepForFolder,
-} from './dokploy';
+} from './discoverySteps';
 import { buildVercelDiscoveryPlan, reportVercelDiscovery } from './vercelDiscovery';
 import { VERCEL_CONNECTOR_SECRET_NAME } from '../../deploy/vercelApi';
 
@@ -644,7 +643,7 @@ export function createVercelConnector(deps: VercelConnectorDeps = {}): Connector
     const team = await chooseTeam(client, opts, promptable, true);
     if (!team.ok) return team;
 
-    const scan = findCandidateReposResult(cwd());
+    const scan = findCandidateReposResult(cwd(), CONNECTOR_DISCOVERY_CODES);
     const environmentFilter = parseVarList(opts.environment) ?? undefined;
     const built = await guard(() =>
       buildVercelDiscoveryPlan(
@@ -677,7 +676,7 @@ export function createVercelConnector(deps: VercelConnectorDeps = {}): Connector
 
     if (dryRun) {
       // A dry run never asks for a branch name either; the DEFAULT is what it previews.
-      const commits = commitPreviewForFolders(plan.folders, defaultDiscoveryCommitBranchName(new Date(), 'vercel'), VERCEL_COMMIT_MESSAGE);
+      const commits = commitPreviewForFolders(plan.folders, defaultDiscoveryCommitBranchName(new Date(), 'vercel'), CONNECTOR_DISCOVERY_CODES, VERCEL_COMMIT_MESSAGE);
       return { ok: true, dryRun: true, plan, ...(commits.length > 0 ? { commits } : {}) };
     }
 
@@ -733,8 +732,7 @@ export function createVercelConnector(deps: VercelConnectorDeps = {}): Connector
       interactive: promptable,
       json: !!opts.json,
       yes: !!opts.yes,
-      baseUrl: '',
-      tokenEnv,
+      codes: CONNECTOR_DISCOVERY_CODES,
       // Discovery never prompts: a folder that differs from Capy is reported (its rows and `conflict_id`), not asked.
       gate: { devMode: opts.devMode, json: true, nonTty: true, conflictFlags: opts.conflictFlags },
       syncFolder: deps.syncFolder ?? syncFolder,
@@ -751,7 +749,7 @@ export function createVercelConnector(deps: VercelConnectorDeps = {}): Connector
       sameRunNameCollisions,
     });
     const applied = await runDiscoverySequences(resolvedFolders, { overwrite: !!opts.overwrite }, sequenceDeps);
-    const commits = commitForAppliedRepos(applied, beforeStatusByRepo, commitBranchName, VERCEL_COMMIT_MESSAGE);
+    const commits = commitForAppliedRepos(applied, beforeStatusByRepo, commitBranchName, CONNECTOR_DISCOVERY_CODES, VERCEL_COMMIT_MESSAGE);
     return { ok: true, dryRun: false, plan, applied, ...(commits.length > 0 ? { commits } : {}) };
   };
 

@@ -240,10 +240,21 @@ export function keepWithChanges(
   return removed.length === 0 ? merged : dropBranchEntries(merged, branch, removed);
 }
 
+/**
+ * What a branch with no variables is stored as. The blob is one `NAME=capy:<id>:<ciphertext>` line per variable, so a
+ * branch with none would be an empty string, and the service refuses an empty `env_blob` (it answers 400 to `!env_blob`).
+ * A branch can have none and still need a save: an import whose names are all placeholders, a `--overwrite` that clears
+ * the last name. A comment line is a non-empty blob that every reader (`dotenv` parse) reads as no variables; there is
+ * no per-variable ciphertext to put in it, because there is no variable.
+ */
+export const EMPTY_ENV_BLOB = '# capy: no variables';
+
 export const envBlobOf = (lines: Readonly<Record<string, string>>): string =>
-  Object.entries(lines)
-    .map(([name, line]) => `${name}=${line}`)
-    .join('\n');
+  Object.keys(lines).length === 0
+    ? EMPTY_ENV_BLOB
+    : Object.entries(lines)
+        .map(([name, line]) => `${name}=${line}`)
+        .join('\n');
 
 /** The names `changes` removes that are placeholders on `branch` (and are not being given a value in the same change). */
 function removedPlaceholders(keep: KeepFile, branch: string, changes: Changes): readonly string[] {
