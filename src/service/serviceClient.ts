@@ -15,6 +15,8 @@ import { Encryptor } from '../crypto/encryptor';
 import { deriveResourceId } from '../crypto/resourceId';
 import { debug } from '../ui/debug';
 import type { RateInfo } from '../utils/pool';
+import { readOrgKeyFileRaw } from '../config/globalConfig';
+import { storedTransportId } from '../auth/pairing/filesystemCustodyFile';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -833,7 +835,14 @@ export class ServiceClient {
   }
 
   async coDecrypt(orgId: string, ciphertext: string, notAfter?: number, transportId?: string): Promise<{ plaintext: string }> {
-    return this.request('POST', `/orgs/${orgId}/co-decrypt`, { ciphertext, ...(notAfter !== undefined ? { not_after: notAfter } : {}), ...(transportId === undefined ? {} : { transport_id: transportId }) });
+    const context = await (async (): Promise<string | undefined> => {
+      if (transportId !== undefined || notAfter !== undefined || !this.tokenProvider) return transportId;
+      const identity = await this.tokenProvider();
+      if (!identity || identity.organization_id !== orgId) return undefined;
+      if (!/^[A-Za-z0-9_-]{1,255}$/.test(orgId) || !/^[A-Za-z0-9_-]{1,255}$/.test(identity.user_id)) throw new CapyError('The stored custody identity is invalid.', ERROR_CODES.INVALID_FORMAT);
+      return storedTransportId(readOrgKeyFileRaw(orgId, identity.user_id), orgId, ciphertext);
+    })();
+    return this.request('POST', `/orgs/${orgId}/co-decrypt`, { ciphertext, ...(notAfter !== undefined ? { not_after: notAfter } : {}), ...(context === undefined ? {} : { transport_id: context }) });
   }
 
   // --- Basic pairing (CAP-684, docs/basic-pair.md) ---

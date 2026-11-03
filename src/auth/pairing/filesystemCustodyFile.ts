@@ -1,3 +1,5 @@
+import { FlowRuntimeError } from '../../errors/flowRuntimeError';
+
 export interface FilesystemCustodyFile {
   readonly ciphertext: string;
   readonly transportId?: string;
@@ -16,4 +18,16 @@ export function parseFilesystemCustodyFile(raw: string, orgId: string): Filesyst
     return typeof file.transport_id === 'string' && UUID.test(file.transport_id)
       ? { ciphertext: file.encrypted_master_key, transportId: file.transport_id } : null;
   } catch { return null; }
+}
+
+/** Infer row context only for the exact encrypted file being opened, never an unrelated ciphertext. */
+export function storedTransportId(raw: string | null, orgId: string, ciphertext: string): string | undefined {
+  if (!raw) return undefined;
+  const value: unknown = (() => { try { return JSON.parse(raw); } catch { return null; } })();
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const record = value as Readonly<Record<string, unknown>>;
+  if (record.encrypted_master_key !== ciphertext || !Object.hasOwn(record, 'transport_id')) return undefined;
+  const parsed = parseFilesystemCustodyFile(raw, orgId);
+  if (!parsed?.transportId) throw new FlowRuntimeError('CUSTODY_FILE_INVALID');
+  return parsed.transportId;
 }
