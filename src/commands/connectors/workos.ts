@@ -1346,7 +1346,12 @@ async function createReplacement(
     }
     const creation = await createKey(token, plan.target.environmentId, plan.applicationId, rotationKeyName())
       .then(created => ({ ok: true as const, created })).catch((error: unknown) => ({ ok: false as const, error }));
-    if (!creation.ok) return recover(creation.error, recovered, plan);
+    if (!creation.ok) {
+      currentInteraction()?.signal?.throwIfAborted();
+      if (creation.error instanceof WorkOSAuthenticationError) return recover(creation.error, recovered, plan);
+      if (creation.error instanceof InteractionCommandError) throw creation.error;
+      throw new InteractionCommandError('ROTATE_WORKOS_CREATE_UNCERTAIN', 'WorkOS may have created the replacement key, but its response was unavailable. Check the WorkOS dashboard before starting a fresh rotation; this creation will not be replayed.');
+    }
     if (!creation.created) throw new InteractionCommandError('ROTATE_WORKOS_CREATE_FAILED', 'WorkOS did not return a replacement key. Check the WorkOS dashboard before retrying.');
     return { ...plan, token, created: creation.created };
   };

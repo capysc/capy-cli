@@ -180,7 +180,10 @@ for (const scenario of ['success', 'reauth', 'uncertain', 'changed-target', 'can
       expect(calls.mock.calls.some(([name]) => name === 'expireKey')).toBe(false);
       if (!result.ok && scenario === 'changed-target') expect(result.error.code).toBe('ROTATE_WORKOS_TARGET_CHANGED');
       if (!result.ok && scenario === 'cancelled') expect(result.error.code).toBe('FLOW_CANCELLED');
-      if (scenario === 'uncertain') expect(calls.mock.calls.filter(([name]) => name === 'createKey')).toHaveLength(1);
+      if (scenario === 'uncertain') {
+        if (!result.ok) expect(result.error.code).toBe('ROTATE_WORKOS_CREATE_UNCERTAIN');
+        expect(calls.mock.calls.filter(([name]) => name === 'createKey')).toHaveLength(1);
+      }
     }
     expect(login.mock.calls.length).toBe(['reauth','changed-target'].includes(scenario) ? 1 : 0);
     if (scenario === 'reauth') expect(prompts.mock.calls.map(([text]) => text)).toContain('Synthetic replacement login code');

@@ -163,6 +163,7 @@ describe('WorkOS authentication recovery stays inside the rotation', () => {
   test('a network failure cannot replay a potentially successful creation', () => {
     const result = run('network-failure');
     expect(result.result.ok).toBe(false);
+    expect(result.result.code).toBe('ROTATE_WORKOS_CREATE_UNCERTAIN');
     expect(result.logins).toBe(0);
     expect(result.names.filter((name: string) => name === 'createKey')).toHaveLength(1);
     expect(result.expiry).toBeNull();
