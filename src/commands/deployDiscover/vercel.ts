@@ -31,7 +31,6 @@
 import { posix } from 'node:path';
 import type { TargetConfig } from '../../deploy/adapter';
 import {
-  VercelApiError,
   VercelClient,
   VercelCustomEnvironment,
   VercelEnvRecord,
@@ -214,10 +213,9 @@ async function scanProject(client: VercelClient, project: VercelProject, team: S
 }
 
 function vercelFailure(err: unknown): DeployDiscoverResult {
-  const mapped = mapVercelApiError(err);
-  // A rejected token says where to get another.
-  const help = err instanceof VercelApiError && err.code === 'unauthorized' ? vercelTokenHelp() : {};
-  return refuse(mapped.code, mapped.message, help);
+  const { code, message, link, remedy } = mapVercelApiError(err, { discovery: true });
+  // A rejected token, or one without access, says where to get another and what to do.
+  return refuse(code, message, { ...(link ? { link } : {}), ...(remedy ? { remedy } : {}) });
 }
 
 interface VercelWorld {

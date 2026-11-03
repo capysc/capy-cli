@@ -356,7 +356,7 @@ export async function resolveVercelSetup(
     if (verified.kind === 'unverified') {
       // COPY-FLAG: minimal neutral wording.
       console.log(`  ${DIM(`Could not verify against Vercel (${verified.code}) — saving as entered.`)}`);
-      if (verified.code === ERROR_CODES.VERCEL_AUTH_FAILED) printTokenInstructions(verified.scope.teamSlug ?? linkTeam);
+      if (verified.code === ERROR_CODES.VERCEL_AUTH_FAILED || verified.code === ERROR_CODES.VERCEL_NO_ACCESS) printTokenInstructions(verified.scope.teamSlug ?? linkTeam);
       return savedAsEntered(input, verified.scope);
     }
 

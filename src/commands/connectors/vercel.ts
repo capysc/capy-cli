@@ -45,6 +45,7 @@ import {
   VercelSkippedRecord,
   VercelSystemStoreCallOptions,
   VercelTeam,
+  VercelTokenSource,
   availableEnvironments,
   buildEnvironmentPlans,
   createVercelClient,
@@ -56,7 +57,8 @@ import {
   resolveVercelToken,
   vercelSecretsMayPrompt,
 } from '../../deploy/vercelApi';
-import { keyHelpFields, teamSlugOf, vercelKeyHelp } from '../../deploy/keyHelp';
+import { formatKeyHelp, keyHelpFields, teamSlugOf, vercelKeyHelp, vercelTokenProblemHelp } from '../../deploy/keyHelp';
+import { createInterface } from 'node:readline';
 import { ConnectorMetadata, ERROR_CODES } from '../../types/index';
 import { isInteractive } from '../../ui/interactive';
 import { listOrgProjectsOrUnavailable } from '../capyCommand';
@@ -173,6 +175,30 @@ export interface VercelConnectorDeps {
    * singleton wires the real `system/systemStore.ts` lookup.
    */
   getConnectorSecret?: (name: string, opts: VercelSystemStoreCallOptions) => Promise<string | null>;
+  /**
+   * Asks for a NEW value of the system store entry (hidden input) and saves it
+   * over the old one. Absent (the default): a rejected token only shows the
+   * steps and stops; the exported `vercelConnector` singleton wires the real one.
+   */
+  replaceConnectorSecret?: (name: string, opts: VercelSystemStoreCallOptions) => Promise<string | null>;
+  /** Waits for the person to press Enter; `false` when they abort (Ctrl-C). Used only when `replaceConnectorSecret` is set. */
+  waitForEnter?: () => Promise<boolean>;
+}
+
+/** Waits for Enter on the terminal. Ctrl-C (or a closed input) is `false`. */
+function defaultWaitForEnter(): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    const rl = createInterface({ input: process.stdin, output: process.stderr });
+    rl.once('SIGINT', () => {
+      rl.close();
+      resolve(false);
+    });
+    rl.once('close', () => resolve(false));
+    rl.question('', () => {
+      resolve(true);
+      rl.close();
+    });
+  });
 }
 
 // ── Connector entry (keep.lock metadata) ────────────────────────────────────
@@ -214,11 +240,12 @@ interface SourceRead {
   truncated: boolean;
 }
 
-async function guard<T>(fn: () => Promise<T>): Promise<{ ok: true; value: T } | Failure> {
+/** Runs a Vercel read; a failure becomes a coded refusal. `discovery` makes a 403 on the team or project list say discovery needs a token scoped to the whole team. */
+async function guard<T>(fn: () => Promise<T>, discovery: boolean = false): Promise<{ ok: true; value: T } | Failure> {
   try {
     return { ok: true, value: await fn() };
   } catch (err) {
-    return { ok: false, ...mapVercelApiError(err) };
+    return { ok: false, ...mapVercelApiError(err, { discovery }) };
   }
 }
 
@@ -319,7 +346,7 @@ export function createVercelConnector(deps: VercelConnectorDeps = {}): Connector
     orgId: string,
     opts: ConnectOpts,
     interactive: boolean,
-  ): Promise<{ ok: true; client: VercelClient; tokenEnv: string } | Failure> => {
+  ): Promise<{ ok: true; client: VercelClient; tokenEnv: string; tokenSource: VercelTokenSource } | Failure> => {
     const tokenEnv = opts.tokenEnv?.trim() || DEFAULT_VERCEL_TOKEN_ENV;
     // `--json` and `--dry-run` each suppress ONLY the system store's hidden
     // prompt: a raw terminal prompt must not be interleaved with machine
@@ -341,8 +368,59 @@ export function createVercelConnector(deps: VercelConnectorDeps = {}): Connector
     return {
       ok: true,
       tokenEnv,
+      tokenSource: resolved.source,
       client: createVercelClient(resolved.value, { fetch: deps.fetch, sleep: deps.sleep }),
     };
+  };
+
+  /** Whether a rejected token can be replaced right here: a person at a terminal, a store-held token, and the means to ask. */
+  const canReplaceToken = (opts: ConnectOpts, interactive: boolean, tokenSource: VercelTokenSource): boolean =>
+    !!deps.replaceConnectorSecret &&
+    tokenSource === 'system' &&
+    vercelSecretsMayPrompt(interactive, !!opts.json || !!opts.dryRun);
+
+  /**
+   * A token problem stops the run. At a terminal: say why and list the two
+   * steps, wait for Enter, ask for a new token (saved over the old one) and
+   * run again from the token step. One press, one retry: a token that fails
+   * again shows the steps again and waits again. Anywhere else (or Ctrl-C):
+   * the same coded refusal, with the steps in `remedy`.
+   */
+  const withTokenRecovery = async <T extends ImportOutcome | DiscoveryOutcome>(
+    orgId: string,
+    opts: ConnectOpts,
+    interactive: boolean,
+    run: (opened: { client: VercelClient; tokenEnv: string }) => Promise<T>,
+  ): Promise<T> => {
+    const opened = await openClient(orgId, opts, interactive);
+    if (!opened.ok) return opened as T;
+    const outcome = await run(opened);
+    if (outcome.ok || !isTokenProblem(outcome.code) || !canReplaceToken(opts, interactive, opened.tokenSource)) return outcome;
+
+    // The reason line is the refusal's own message; the two steps are approved copy.
+    console.error(`\n  ${outcome.message}`);
+    console.error(formatKeyHelp(vercelTokenProblemHelp(VERCEL_CONNECTOR_SECRET_NAME, { pressEnter: true })));
+    if (!(await (deps.waitForEnter ?? defaultWaitForEnter)())) return outcome;
+
+    const replaced = await replaceToken(orgId, opts);
+    if (!replaced.ok) return replaced as T;
+    return withTokenRecovery(orgId, opts, interactive, run);
+  };
+
+  /** The store's hidden prompt for a new token. A refusal (not an admin, …) is returned with its own code; an empty answer saves nothing and stops. */
+  const replaceToken = async (orgId: string, opts: ConnectOpts): Promise<{ ok: true } | Failure> => {
+    try {
+      const saved = await deps.replaceConnectorSecret!(VERCEL_CONNECTOR_SECRET_NAME, {
+        orgId,
+        interactive: true,
+        devMode: opts.devMode,
+        ...(teamSlugOf(opts.team) ? { helpTeam: teamSlugOf(opts.team) } : {}),
+      });
+      // COPY-FLAG: new user-facing string, minimal/neutral wording.
+      return saved ? { ok: true } : { ok: false, code: ERROR_CODES.VERCEL_TOKEN_MISSING, message: 'No token was entered. Nothing was changed.' };
+    } catch (err) {
+      return { ok: false, code: storeRefusalCode(err), message: err instanceof Error ? err.message : String(err) };
+    }
   };
 
   /** Team scope: `--team`, the token's only team, a pick (only when this run can ask), or a coded refusal. */
@@ -350,8 +428,9 @@ export function createVercelConnector(deps: VercelConnectorDeps = {}): Connector
     client: VercelClient,
     opts: ConnectOpts,
     promptable: boolean,
+    discovery: boolean = false,
   ): Promise<{ ok: true; teamId: string | undefined; teamSlug?: string } | Failure> => {
-    const teams = await guard(() => client.listTeams());
+    const teams = await guard(() => client.listTeams(), discovery);
     if (!teams.ok) return teams;
     const team = await resolveTeam(teams.value, opts.team, promptable ? pickTeam : null);
     return team;
@@ -539,7 +618,7 @@ export function createVercelConnector(deps: VercelConnectorDeps = {}): Connector
     const dryRun = !!opts.dryRun;
     const promptable = interactive && !opts.json;
 
-    const team = await chooseTeam(client, opts, promptable);
+    const team = await chooseTeam(client, opts, promptable, true);
     if (!team.ok) return team;
 
     const scan = findCandidateReposResult(cwd());
@@ -552,6 +631,7 @@ export function createVercelConnector(deps: VercelConnectorDeps = {}): Connector
         { peekLocalKeep: peekLocalKeepForFolder, listServerBranches: (projectId) => ctx.serviceClient.listBranches(projectId) },
         environmentFilter,
       ),
+      true,
     );
     if (!built.ok) return built;
     const plan: DiscoveryPlan = {
@@ -670,11 +750,7 @@ export function createVercelConnector(deps: VercelConnectorDeps = {}): Connector
     async import(ctx: ResolvedContext, opts: ConnectOpts): Promise<ImportOutcome> {
       const interactive = isInteractive(opts.nonTty);
 
-      const opened = await openClient(ctx.orgId, opts, interactive);
-      if (!opened.ok) return opened;
-
-      const outcome = await importFrom(ctx, opts, opened.client, interactive);
-      return withTokenHelp(outcome, opts);
+      return withTokenRecovery(ctx.orgId, opts, interactive, (opened) => importFrom(ctx, opts, opened.client, interactive));
     },
 
     /**
@@ -686,11 +762,7 @@ export function createVercelConnector(deps: VercelConnectorDeps = {}): Connector
     async discover(ctx: DiscoveryContext, opts: ConnectOpts): Promise<DiscoveryOutcome> {
       const interactive = isInteractive(opts.nonTty);
 
-      const opened = await openClient(ctx.orgId, opts, interactive);
-      if (!opened.ok) return opened;
-
-      const outcome = await discoverFrom(ctx, opts, opened.client, opened.tokenEnv, interactive);
-      return withTokenHelp(outcome, opts);
+      return withTokenRecovery(ctx.orgId, opts, interactive, (opened) => discoverFrom(ctx, opts, opened.client, opened.tokenEnv, interactive));
     },
 
     reportDiscovery: reportVercelDiscovery,
@@ -700,10 +772,15 @@ export function createVercelConnector(deps: VercelConnectorDeps = {}): Connector
 
 // ── small helpers ───────────────────────────────────────────────────────────
 
-/** A token Vercel rejected: say where to get another. (A missing token already carries it, from `openClient`.) */
-function withTokenHelp<T extends ImportOutcome | DiscoveryOutcome>(outcome: T, opts: ConnectOpts): T {
-  if (outcome.ok || outcome.link || outcome.code !== ERROR_CODES.VERCEL_AUTH_FAILED) return outcome;
-  return { ...outcome, ...keyHelpFields(vercelKeyHelp(VERCEL_CONNECTOR_SECRET_NAME, { team: opts.team })) } as T;
+/** A token problem the person can fix with a new token: rejected (401), or valid without access (403). */
+function isTokenProblem(code: string): boolean {
+  return code === ERROR_CODES.VERCEL_AUTH_FAILED || code === ERROR_CODES.VERCEL_NO_ACCESS;
+}
+
+/** A typed store error (`CapyError`-shaped: `{code: string}`) as its code, never its text. */
+function storeRefusalCode(err: unknown): string {
+  const code = (err as { code?: unknown } | null)?.code;
+  return typeof code === 'string' ? code : ERROR_CODES.VERCEL_TOKEN_MISSING;
 }
 
 const toImportSkip = (s: VercelSkippedRecord): ImportSkip => ({ name: s.name, code: s.reason, ...(s.gitBranch ? { gitBranch: s.gitBranch } : {}) });
@@ -755,9 +832,18 @@ export async function vercelConnectorSecret(name: string, opts: VercelSystemStor
   });
 }
 
+/** The real store prompt that replaces `_CONNECTOR_VERCEL_TOKEN` with a new token (owners/admins only). */
+export async function vercelReplaceConnectorSecret(name: string, opts: VercelSystemStoreCallOptions): Promise<string | null> {
+  const { replaceConnectorSecret } = await import('../../system/systemStore');
+  return replaceConnectorSecret(name, opts);
+}
+
 /**
  * The `capy connect vercel` production instance — the only place this file
  * wires the org system store for real (every other construction, including
  * every test, gets the safe env-only default — see `VercelConnectorDeps`).
  */
-export const vercelConnector: ConnectorModule = createVercelConnector({ getConnectorSecret: vercelConnectorSecret });
+export const vercelConnector: ConnectorModule = createVercelConnector({
+  getConnectorSecret: vercelConnectorSecret,
+  replaceConnectorSecret: vercelReplaceConnectorSecret,
+});

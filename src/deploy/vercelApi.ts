@@ -43,6 +43,7 @@
  */
 import { ERROR_CODES } from '../types/index';
 import { sortedCopy } from './dokployApi';
+import { keyHelpFields, vercelTokenProblemHelp } from './keyHelp';
 
 // ── Names ────────────────────────────────────────────────────────────────────
 
@@ -118,17 +119,30 @@ export interface VercelImportSource {
 export type VercelErrorCode =
   | 'unreachable'
   | 'unauthorized'
+  | 'forbidden'
   | 'not_found'
   | 'bad_request'
   | 'rate_limited'
   | 'server_error'
   | 'bad_response';
 
+/**
+ * What a request was reading, set by the client method that made it. A 403
+ * carries it so the refusal can name what the token could not access: it is a
+ * structured field, never parsed out of a message.
+ */
+export type VercelResource =
+  | { readonly kind: 'teams' }
+  | { readonly kind: 'projects' }
+  | { readonly kind: 'project'; readonly project: string }
+  | { readonly kind: 'project_envs'; readonly project: string };
+
 export class VercelApiError extends Error {
   constructor(
     public readonly code: VercelErrorCode,
     public readonly status: number | null,
     message: string,
+    public readonly resource?: VercelResource,
   ) {
     super(message);
     this.name = 'VercelApiError';
@@ -136,22 +150,67 @@ export class VercelApiError extends Error {
 }
 
 function codeForStatus(status: number): VercelErrorCode {
-  if (status === 401 || status === 403) return 'unauthorized';
+  if (status === 401) return 'unauthorized';
+  if (status === 403) return 'forbidden';
   if (status === 404) return 'not_found';
   if (status === 429) return 'rate_limited';
   if (status >= 400 && status < 500) return 'bad_request';
   return 'server_error';
 }
 
+/** A failed Vercel call as a refusal: a stable code and a message, plus where to get a better token when the token is the problem. */
+export interface MappedVercelError {
+  code: string;
+  message: string;
+  link?: { label: string; url: string };
+  remedy?: string;
+}
+
+export interface MapVercelApiErrorOptions {
+  /** Discovery reads every team and project: a 403 on those lists says the token must cover the whole team. */
+  discovery?: boolean;
+}
+
+function deniedResource(resource: VercelResource | undefined): string {
+  if (!resource) return 'the request';
+  if (resource.kind === 'teams') return 'the team list';
+  if (resource.kind === 'projects') return 'the project list';
+  if (resource.kind === 'project') return `project ${resource.project}`;
+  return `the environment variables of project ${resource.project}`;
+}
+
+function forbiddenMessage(err: VercelApiError, discovery: boolean): string {
+  // COPY-FLAG: new user-facing string, minimal/neutral wording.
+  const denied = `Vercel denied access to ${deniedResource(err.resource)} (HTTP ${err.status}).`;
+  const kind = err.resource?.kind;
+  if (discovery && (kind === 'teams' || kind === 'projects')) {
+    // COPY-FLAG: new user-facing string, minimal/neutral wording.
+    return `${denied} Discovery needs a token scoped to the whole team.`;
+  }
+  return denied;
+}
+
 /**
  * A failed Vercel call as a stable refusal code + message. Never a value.
- * Branches on the typed error's `code`, never on its text.
+ * Branches on the typed error's `code`, never on its text. A token problem
+ * (401 rejected, 403 no access) carries the token page and the two steps.
  */
-export function mapVercelApiError(err: unknown): { code: string; message: string } {
+export function mapVercelApiError(err: unknown, options: MapVercelApiErrorOptions = {}): MappedVercelError {
   if (err instanceof VercelApiError) {
     if (err.code === 'unauthorized') {
-      // COPY-FLAG: new user-facing string, minimal/neutral wording.
-      return { code: ERROR_CODES.VERCEL_AUTH_FAILED, message: `Vercel rejected the token (HTTP ${err.status}).` };
+      return {
+        code: ERROR_CODES.VERCEL_AUTH_FAILED,
+        // COPY-FLAG: new user-facing string, minimal/neutral wording.
+        message: `Vercel rejected the token (HTTP ${err.status}).`,
+        ...keyHelpFields(vercelTokenProblemHelp(VERCEL_CONNECTOR_SECRET_NAME)),
+      };
+    }
+    if (err.code === 'forbidden') {
+      return {
+        code: ERROR_CODES.VERCEL_NO_ACCESS,
+        message: forbiddenMessage(err, options.discovery === true),
+        ...keyHelpFields(vercelTokenProblemHelp(VERCEL_CONNECTOR_SECRET_NAME)),
+      };
     }
     if (err.code === 'rate_limited') {
       return { code: ERROR_CODES.VERCEL_RATE_LIMITED, message: err.message };
@@ -286,7 +345,7 @@ export function createVercelClient(token: string, options: VercelClientOptions =
     return `${base}${path}${qs ? `?${qs}` : ''}`;
   };
 
-  const attempt = async (url: string, retriesLeft: number): Promise<unknown> => {
+  const attempt = async (url: string, retriesLeft: number, resource: VercelResource): Promise<unknown> => {
     const res = await fetchImpl(url, {
       method: 'GET',
       headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
@@ -303,24 +362,24 @@ export function createVercelClient(token: string, options: VercelClientOptions =
         throw new VercelApiError('rate_limited', 429, 'Vercel rate limit reached; try again later.');
       }
       await sleep(waitMs);
-      return attempt(url, retriesLeft - 1);
+      return attempt(url, retriesLeft - 1, resource);
     }
     if (!res.ok) {
       // COPY-FLAG: new user-facing string, minimal/neutral wording.
-      throw new VercelApiError(codeForStatus(res.status), res.status, `Vercel returned HTTP ${res.status}.`);
+      throw new VercelApiError(codeForStatus(res.status), res.status, `Vercel returned HTTP ${res.status}.`, resource);
     }
     return parseJson(text);
   };
 
-  const get = (path: string, query: Readonly<Record<string, string | undefined>> = {}): Promise<unknown> =>
-    attempt(urlFor(path, query), maxRetries);
+  const get = (path: string, resource: VercelResource, query: Readonly<Record<string, string | undefined>> = {}): Promise<unknown> =>
+    attempt(urlFor(path, query), maxRetries, resource);
 
   const enc = encodeURIComponent;
 
   return {
     async listTeams() {
       const collect = async (until: string | undefined, seen: readonly string[], page: number): Promise<readonly VercelTeam[]> => {
-        const body = asRecord(await get('/v2/teams', { limit: PAGE_LIMIT, until }));
+        const body = asRecord(await get('/v2/teams', { kind: 'teams' }, { limit: PAGE_LIMIT, until }));
         const teams = (Array.isArray(body?.teams) ? body.teams : []).flatMap((t) => {
           const parsed = parseTeam(t);
           return parsed ? [parsed] : [];
@@ -335,7 +394,7 @@ export function createVercelClient(token: string, options: VercelClientOptions =
 
     async listProjects(teamId) {
       const collect = async (from: string | undefined, seen: readonly string[], page: number): Promise<readonly VercelProject[]> => {
-        const body = await get('/v10/projects', { limit: PAGE_LIMIT, from, teamId });
+        const body = await get('/v10/projects', { kind: 'projects' }, { limit: PAGE_LIMIT, from, teamId });
         const list = Array.isArray(body) ? body : asRecord(body)?.projects;
         const projects = (Array.isArray(list) ? list : []).flatMap((p) => {
           const parsed = parseProject(p);
@@ -353,7 +412,7 @@ export function createVercelClient(token: string, options: VercelClientOptions =
     },
 
     async getProject(idOrName, teamId) {
-      const parsed = parseProject(await get(`/v9/projects/${enc(idOrName)}`, { teamId }));
+      const parsed = parseProject(await get(`/v9/projects/${enc(idOrName)}`, { kind: 'project', project: idOrName }, { teamId }));
       if (!parsed) {
         // COPY-FLAG: new user-facing string, minimal/neutral wording.
         throw new VercelApiError('bad_response', null, 'Vercel returned a project this client cannot read.');
@@ -362,7 +421,7 @@ export function createVercelClient(token: string, options: VercelClientOptions =
     },
 
     async listCustomEnvironments(projectId, teamId) {
-      const body = asRecord(await get(`/v9/projects/${enc(projectId)}/custom-environments`, { teamId }));
+      const body = asRecord(await get(`/v9/projects/${enc(projectId)}/custom-environments`, { kind: 'project_envs', project: projectId }, { teamId }));
       return (Array.isArray(body?.environments) ? body.environments : []).flatMap((e) => {
         const rec = asRecord(e);
         const id = nonEmptyString(rec?.id);
@@ -372,7 +431,7 @@ export function createVercelClient(token: string, options: VercelClientOptions =
     },
 
     async listEnvs(projectId, teamId) {
-      const body = asRecord(await get(`/v10/projects/${enc(projectId)}/env`, { teamId }));
+      const body = asRecord(await get(`/v10/projects/${enc(projectId)}/env`, { kind: 'project_envs', project: projectId }, { teamId }));
       const envs = (Array.isArray(body?.envs) ? body.envs : []).flatMap((e) => {
         const parsed = parseEnvRecord(e, options.dropValues === true);
         return parsed ? [parsed] : [];
@@ -382,7 +441,7 @@ export function createVercelClient(token: string, options: VercelClientOptions =
     },
 
     async getEnvValue(projectId, envId, teamId) {
-      const body = asRecord(await get(`/v1/projects/${enc(projectId)}/env/${enc(envId)}`, { teamId }));
+      const body = asRecord(await get(`/v1/projects/${enc(projectId)}/env/${enc(envId)}`, { kind: 'project_envs', project: projectId }, { teamId }));
       return typeof body?.value === 'string' ? body.value : undefined;
     },
   };

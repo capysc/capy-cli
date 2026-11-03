@@ -69,6 +69,28 @@ export function vercelKeyHelp(secretName: string, opts: KeyHelpOptions = {}): Ke
   };
 }
 
+export interface TokenProblemHelpOptions {
+  /** True when the run waits for Enter to replace the token right here; the second step then says so. */
+  pressEnter?: boolean;
+}
+
+/**
+ * What to do when a Vercel token stops a run (rejected, or valid but without
+ * access): two numbered steps. `remedy` is both, one per line.
+ */
+export function vercelTokenProblemHelp(secretName: string, opts: TokenProblemHelpOptions = {}): KeyHelp {
+  // Approved wording.
+  const first = `1) Create a token with team access at ${VERCEL_TOKEN_PAGE_URL}`;
+  // Approved wording.
+  const second = `2) Run capy system set ${secretName}${opts.pressEnter ? ' (or press enter to continue)' : ''}`;
+  return {
+    // COPY-FLAG: new user-facing string, minimal/neutral wording.
+    link: { label: 'Vercel token page', url: VERCEL_TOKEN_PAGE_URL },
+    remedy: `${first}\n${second}`,
+    lines: [first, second],
+  };
+}
+
 /** The Dokploy page that makes API keys: inside the user's own Dokploy when its address is known, else the docs. */
 export function dokployKeyPage(baseUrl: string | undefined): { label: string; url: string } {
   const base = baseUrl?.trim().replace(/\/+$/, '');

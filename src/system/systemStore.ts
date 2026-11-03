@@ -417,6 +417,46 @@ function printKeyHelpBeforePrompt(name: string, helpBaseUrl: string | undefined,
 }
 
 /**
+ * The hidden prompt for one secret, then the save, then one line saying it was
+ * saved (the name only, never the value). The line goes to stderr with the key
+ * help, so it never mixes with machine output. An empty answer saves nothing.
+ */
+async function promptAndSaveSecret(
+  ctx: SystemStoreContext,
+  name: string,
+  help: { baseUrl: string | undefined; team: string | undefined },
+): Promise<string | null> {
+  printKeyHelpBeforePrompt(name, help.baseUrl, help.team);
+
+  const { value } = await inquirer.prompt([
+    {
+      type: 'password',
+      name: 'value',
+      message: `Enter a value for ${name}:`, // COPY-FLAG
+      mask: '*',
+    },
+  ]);
+  const trimmed = typeof value === 'string' ? value.trim() : '';
+  if (!trimmed) return null;
+
+  await commitSystemStore(ctx, setting(name, trimmed));
+  process.stderr.write(`Saved ${name} in the org system store.\n`); // COPY-FLAG
+  return trimmed;
+}
+
+/**
+ * Asks for a NEW value of a connector's secret (hidden input) and saves it
+ * over the stored one, through the same save path as the first-use prompt.
+ * Opening the store requires org owner/admin: anyone else gets the store's own
+ * coded refusal. Returns `null` when nothing was entered (nothing is saved).
+ */
+export async function replaceConnectorSecret(name: string, opts: GetConnectorSecretOptions): Promise<string | null> {
+  assertValidConnectorName(name);
+  const ctx = await openSystemStoreContext(opts);
+  return promptAndSaveSecret(ctx, name, { baseUrl: opts.helpBaseUrl, team: opts.helpTeam });
+}
+
+/**
  * Returns a connector's secret, prompting to collect and save it when it's
  * missing and the caller can ask a human.
  *
@@ -433,21 +473,7 @@ export async function getConnectorSecret(name: string, opts: GetConnectorSecretO
   if (existing !== null) return existing;
   if (!opts.interactive) return null;
 
-  printKeyHelpBeforePrompt(name, opts.helpBaseUrl, opts.helpTeam);
-
-  const { value } = await inquirer.prompt([
-    {
-      type: 'password',
-      name: 'value',
-      message: `Enter a value for ${name}:`, // COPY-FLAG
-      mask: '*',
-    },
-  ]);
-  const trimmed = typeof value === 'string' ? value.trim() : '';
-  if (!trimmed) return null;
-
-  await commitSystemStore(ctx, setting(name, trimmed));
-  return trimmed;
+  return promptAndSaveSecret(ctx, name, { baseUrl: opts.helpBaseUrl, team: opts.helpTeam });
 }
 
 export interface GetDirectionalSecretOptions {
@@ -555,19 +581,5 @@ export async function getDirectionalConnectorSecret(
     // else "add new" — fall through to the same prompt case 2 uses.
   }
 
-  printKeyHelpBeforePrompt(primaryName, opts.helpBaseUrl, opts.helpTeam);
-
-  const { value } = await inquirer.prompt([
-    {
-      type: 'password',
-      name: 'value',
-      message: `Enter a value for ${primaryName}:`, // COPY-FLAG
-      mask: '*',
-    },
-  ]);
-  const trimmed = typeof value === 'string' ? value.trim() : '';
-  if (!trimmed) return null;
-
-  await commitSystemStore(ctx, setting(primaryName, trimmed));
-  return trimmed;
+  return promptAndSaveSecret(ctx, primaryName, { baseUrl: opts.helpBaseUrl, team: opts.helpTeam });
 }

@@ -32,7 +32,7 @@ function printFailure(outcome: ConnectFailure, json: boolean): void {
   // The refusal says what is still needed, as flags: print each hint beside it.
   (outcome.unanswered ?? []).forEach((u) => console.error(`  ${u.flag}: ${u.hint}`));
   console.error('');
-  if (outcome.remedy) console.error(formatKeyHelp({ remedy: outcome.remedy }) + '\n');
+  if (outcome.remedy) console.error(formatKeyHelp({ remedy: outcome.remedy, lines: outcome.remedy.split('\n') }) + '\n');
 }
 
 /** A refusal that only a flag (or a person) can answer exits `EXIT_NEEDS_INPUT`, so an agent branches on it; every other refusal exits 1. */

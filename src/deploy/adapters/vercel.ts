@@ -80,6 +80,7 @@ import {
   sortedNames,
   verifyApplied,
   vercelTargetKeyHelp,
+  vercelTargetTokenProblemHelp,
 } from '../vercelTargetApi';
 
 type VercelEnv = 'production' | 'preview';
@@ -626,9 +627,11 @@ export interface VercelAdapterDeps {
 const SET_ENV_LABEL = 'set Vercel env';
 const VERIFY_LABEL = 'verify Vercel env';
 
-/** A rejected token (HTTP 401) says where to get another; any other failure adds nothing. */
+/** A rejected token (HTTP 401) or one without access (HTTP 403) says where to get another; any other failure adds nothing. */
 function rejectedKeyHelp(code: string, team: string | undefined): { link?: { label: string; url: string }; remedy?: string } {
-  return code === ERROR_CODES.VERCEL_TOKEN_REJECTED ? vercelTargetKeyHelp(team) : {};
+  if (code === ERROR_CODES.VERCEL_TOKEN_REJECTED) return vercelTargetKeyHelp(team);
+  if (code === ERROR_CODES.VERCEL_NO_ACCESS) return vercelTargetTokenProblemHelp();
+  return {};
 }
 
 function failResult(step: DeployStep): DeployResult {

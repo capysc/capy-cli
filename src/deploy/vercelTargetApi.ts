@@ -41,7 +41,7 @@
  */
 import { createHash } from 'crypto';
 import { ERROR_CODES, ErrorCode } from '../types/index';
-import { keyHelpFields, vercelKeyHelp } from './keyHelp';
+import { keyHelpFields, vercelKeyHelp, vercelTokenProblemHelp } from './keyHelp';
 
 // ── Token: system store, same shape as Dokploy's ───────────────────────────
 
@@ -154,6 +154,11 @@ export async function resolveVercelTargetToken(
 /** Where to get the deploy-side Vercel token: the `link` + `remedy` fields of a key refusal. */
 export function vercelTargetKeyHelp(team?: string): { link: { label: string; url: string }; remedy: string } {
   return keyHelpFields(vercelKeyHelp(VERCEL_TARGET_SECRET_NAME, { team }));
+}
+
+/** The two steps for a deploy token that is valid but has no access: the token page and `capy system set` for the deploy-side name. */
+export function vercelTargetTokenProblemHelp(): { link: { label: string; url: string }; remedy: string } {
+  return keyHelpFields(vercelTokenProblemHelp(VERCEL_TARGET_SECRET_NAME));
 }
 
 /** A token refusal as a printable reason + hint. Names only, never a value. */
@@ -823,7 +828,7 @@ export function describeVercelFailure(
   }
   if (code === ERROR_CODES.VERCEL_NO_ACCESS) {
     // COPY-FLAG
-    return { reason: `the Vercel token has no access to this project${http}` };
+    return { reason: `the Vercel token has no access to this project${http}`, ...vercelTargetTokenProblemHelp() };
   }
   if (code === ERROR_CODES.VERCEL_PROJECT_NOT_FOUND) {
     // COPY-FLAG

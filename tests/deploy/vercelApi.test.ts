@@ -228,11 +228,52 @@ describe('rate limits — 429', () => {
 describe('errors map to stable codes and never carry the token', () => {
   const status = (s: number): VercelFetchLike => async () => ({ status: s, ok: false, text: async () => JSON.stringify({ error: { message: TOKEN } }) });
 
-  test('401/403 → VERCEL_AUTH_FAILED', async () => {
-    for (const s of [401, 403]) {
-      const err = await createVercelClient(TOKEN, { fetch: status(s) }).listTeams().catch((e: unknown) => e);
-      expect(mapVercelApiError(err).code).toBe(ERROR_CODES.VERCEL_AUTH_FAILED);
-    }
+  const STEPS = [
+    '1) Create a token with team access at https://vercel.com/account/settings/tokens',
+    '2) Run capy system set _CONNECTOR_VERCEL_TOKEN',
+  ].join('\n');
+
+  test('401 → VERCEL_AUTH_FAILED, with the token page and the two steps', async () => {
+    const err = await createVercelClient(TOKEN, { fetch: status(401) }).listTeams().catch((e: unknown) => e);
+    expect(mapVercelApiError(err)).toMatchObject({
+      code: ERROR_CODES.VERCEL_AUTH_FAILED,
+      message: 'Vercel rejected the token (HTTP 401).',
+      link: { url: 'https://vercel.com/account/settings/tokens' },
+      remedy: STEPS,
+    });
+  });
+
+  test('403 → VERCEL_NO_ACCESS, naming what could not be accessed, with the same two steps', async () => {
+    const client = createVercelClient(TOKEN, { fetch: status(403) });
+    const caught = (p: Promise<unknown>) => p.catch((e: unknown) => e);
+    const cases: ReadonlyArray<readonly [string, unknown, string]> = [
+      ['teams', await caught(client.listTeams()), 'the team list'],
+      ['projects', await caught(client.listProjects('team_a')), 'the project list'],
+      ['project', await caught(client.getProject('web', 'team_a')), 'project web'],
+      ['custom environments', await caught(client.listCustomEnvironments('prj_web', 'team_a')), 'the environment variables of project prj_web'],
+      ['envs', await caught(client.listEnvs('prj_web', 'team_a')), 'the environment variables of project prj_web'],
+      ['env value', await caught(client.getEnvValue('prj_web', 'env_1', 'team_a')), 'the environment variables of project prj_web'],
+    ];
+    cases.forEach(([, err, denied]) => {
+      const mapped = mapVercelApiError(err);
+      expect(mapped.code).toBe(ERROR_CODES.VERCEL_NO_ACCESS);
+      expect(mapped.message).toBe(`Vercel denied access to ${denied} (HTTP 403).`);
+      expect(mapped.link?.url).toBe('https://vercel.com/account/settings/tokens');
+      expect(mapped.remedy).toBe(STEPS);
+      expect(`${mapped.message}${mapped.remedy}`).not.toContain(TOKEN);
+    });
+  });
+
+  test('403 under discovery on the team or project list: discovery needs a token scoped to the whole team', async () => {
+    const client = createVercelClient(TOKEN, { fetch: status(403) });
+    const teams = mapVercelApiError(await client.listTeams().catch((e: unknown) => e), { discovery: true });
+    const projects = mapVercelApiError(await client.listProjects().catch((e: unknown) => e), { discovery: true });
+    expect(teams.code).toBe(ERROR_CODES.VERCEL_NO_ACCESS);
+    expect(teams.message).toBe('Vercel denied access to the team list (HTTP 403). Discovery needs a token scoped to the whole team.');
+    expect(projects.message).toBe('Vercel denied access to the project list (HTTP 403). Discovery needs a token scoped to the whole team.');
+    // a project's own variables: the plain message, even under discovery
+    const envs = mapVercelApiError(await client.listEnvs('prj_web').catch((e: unknown) => e), { discovery: true });
+    expect(envs.message).toBe('Vercel denied access to the environment variables of project prj_web (HTTP 403).');
   });
 
   test('404 → not_found; 500 → VERCEL_API_ERROR; neither message contains the token', async () => {

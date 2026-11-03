@@ -739,7 +739,7 @@ export const ERROR_CODES = {
   VERCEL_TOKEN_MISSING: 'VERCEL_TOKEN_MISSING',
   /** `_CONNECTOR_VERCEL_TOKEN` is absent, `_TARGET_VERCEL_TOKEN` holds a token, and there is no TTY to ask which to use. */
   VERCEL_CONNECTOR_KEY_MISSING: 'VERCEL_CONNECTOR_KEY_MISSING',
-  /** Vercel answered 401/403 to the token. */
+  /** Vercel answered 401 to the token: it is invalid or expired. */
   VERCEL_AUTH_FAILED: 'VERCEL_AUTH_FAILED',
   /** Any other failed or unreadable Vercel response. */
   VERCEL_API_ERROR: 'VERCEL_API_ERROR',
@@ -766,7 +766,7 @@ export const ERROR_CODES = {
   VERCEL_TARGET_KEY_MISSING: 'VERCEL_TARGET_KEY_MISSING',
   /** Vercel answered 401: the token is not valid. */
   VERCEL_TOKEN_REJECTED: 'VERCEL_TOKEN_REJECTED',
-  /** Vercel answered 403: the token has no access to this project or team. */
+  /** Vercel answered 403: the token is valid but cannot access what was asked for (the team list, a project, or a project's environment variables). */
   VERCEL_NO_ACCESS: 'VERCEL_NO_ACCESS',
   /** The request never got an answer from Vercel. */
   VERCEL_NETWORK_ERROR: 'VERCEL_NETWORK_ERROR',
