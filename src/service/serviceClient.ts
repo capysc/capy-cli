@@ -832,8 +832,8 @@ export class ServiceClient {
     return this.request('POST', `/orgs/${orgId}/wrap`, { plaintext, ...(notAfter !== undefined ? { not_after: notAfter } : {}) });
   }
 
-  async coDecrypt(orgId: string, ciphertext: string, notAfter?: number): Promise<{ plaintext: string }> {
-    return this.request('POST', `/orgs/${orgId}/co-decrypt`, { ciphertext, ...(notAfter !== undefined ? { not_after: notAfter } : {}) });
+  async coDecrypt(orgId: string, ciphertext: string, notAfter?: number, transportId?: string): Promise<{ plaintext: string }> {
+    return this.request('POST', `/orgs/${orgId}/co-decrypt`, { ciphertext, ...(notAfter !== undefined ? { not_after: notAfter } : {}), ...(transportId === undefined ? {} : { transport_id: transportId }) });
   }
 
   // --- Basic pairing (CAP-684, docs/basic-pair.md) ---

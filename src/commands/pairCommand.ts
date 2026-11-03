@@ -12,6 +12,7 @@
  *    payload with the key pair from step 1, and write `local.key` +
  *    `key.enc` for every entry whose `user_id` matches the logged-in user.
  */
+import { prepareTransportCustody } from '../auth/pairing/transportCustody';
 import { confirmPairAccount } from './pairAccountConfirmation';
 import { resolveActiveUrl } from '../config/profileConfig';
 import { resolveKeepOrigin } from '../config/keepOrigin';
@@ -51,8 +52,8 @@ function announce(json: boolean, line: string): void {
 }
 
 interface PairedOrg {
-  org_id: string;
-  user_id: string;
+  readonly org_id: string;
+  readonly user_id: string;
 }
 
 /** Writes one entry's `local.key` + `key.enc`, honoring the local.key conflict guard. Returns whether it was written or skipped (--force not needed, values matched). */
@@ -218,7 +219,11 @@ export async function pairCommand(options: PairOptions = {}): Promise<void> {
       );
     }
 
-    const paired: PairedOrg[] = matching.map((entry) => {
+    const prepared = await Promise.all(matching.map(entry => prepareTransportCustody(entry, {
+      unwrap: async (orgId, ciphertext, transportId) => (await serviceClient.coDecrypt(orgId, ciphertext, undefined, transportId)).plaintext,
+      wrap: async (orgId, innerCiphertext) => (await serviceClient.wrapOuterLayer(orgId, innerCiphertext)).ciphertext,
+    })));
+    const paired: readonly PairedOrg[] = prepared.map((entry) => {
       writeEntry(entry, force);
       return { org_id: entry.org_id, user_id: entry.user_id };
     });

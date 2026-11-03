@@ -14,6 +14,8 @@
  */
 import { mock, jest, describe, test, expect, beforeEach, spyOn } from 'bun:test';
 import { webcrypto } from 'crypto';
+import { encryptMasterKey, masterKeyAAD } from '../../src/crypto/keyManager';
+import { deriveLocalInnerKey } from '../../src/crypto/localKeyRoot';
 import { CapyError, ERROR_CODES } from '../../src/types/index';
 import { PAIR_AAD, type PairEnvelope } from '../../src/crypto/pairCrypto';
 import type { PairingPayload } from '../../src/crypto/pairingPayload';
@@ -43,10 +45,14 @@ mock.module('../../src/auth/authService', () => ({
 
 const mockSetTokenProvider = jest.fn();
 const mockPickupDevicePairing = jest.fn();
+const mockCoDecryptTransport = jest.fn();
+const mockWrapInstalledCustody = jest.fn();
 mock.module('../../src/service/serviceClient', () => ({
   ServiceClient: jest.fn().mockImplementation(() => ({
     setTokenProvider: mockSetTokenProvider,
     pickupDevicePairing: mockPickupDevicePairing,
+    coDecrypt: mockCoDecryptTransport,
+    wrapOuterLayer: mockWrapInstalledCustody,
   })),
 }));
 
@@ -386,4 +392,37 @@ describe('pairCommand', () => {
     const parsed = finalResult(stdout);
     expect(parsed.code).toBe('INVALID_FORMAT');
   });
+  test('installs current staging Transport custody only after real envelope and inner AEAD verification', async () => {
+    const root = Buffer.alloc(32, 6);
+    const transportId = '11111111-1111-4111-8111-111111111111';
+    const inner = encryptMasterKey(Buffer.alloc(32, 8), deriveLocalInnerKey(root), masterKeyAAD(EXCHANGE_USER.id, 'org-123'));
+    const keyFile = { version: '2.0', org_id: 'org-123', encrypted_master_key: 'transport-outer', wrapping_method: 'local_root', transport_id: transportId };
+    const payload: PairingPayload = { v: 1, entries: [{ org_id: 'org-123', user_id: EXCHANGE_USER.id, k_local: root.toString('base64url'), key_enc: JSON.stringify(keyFile) }] };
+    mockPickupDevicePairing.mockImplementation(async () => ({ sealed: await sealAsBrowser(payload, capturedPairPublicKey()) }));
+    mockCoDecryptTransport.mockResolvedValue({ plaintext: inner });
+    mockWrapInstalledCustody.mockResolvedValue({ ciphertext: 'installation-outer' });
+    const io = await withCapturedIo(() => pairCommand({ json: true }));
+    expect(finalResult(io.stdout).ok).toBe(true);
+    expect(mockCoDecryptTransport).toHaveBeenCalledWith('org-123', 'transport-outer', undefined, transportId);
+    expect(mockWrapInstalledCustody).toHaveBeenCalledWith('org-123', inner);
+    expect(mockSaveLocalRoot).toHaveBeenCalledWith('org-123', root, EXCHANGE_USER.id);
+    const written = JSON.parse(mockWriteOrgKeyFileRaw.mock.calls[0][1]);
+    expect(written.encrypted_master_key).toBe('installation-outer');
+    expect(written).not.toHaveProperty('transport_id');
+  });
+
+  test('a current Transport with the wrong inner key cannot write any key file', async () => {
+    const payload: PairingPayload = { v: 1, entries: [{ org_id: 'org-123', user_id: EXCHANGE_USER.id, k_local: Buffer.alloc(32, 6).toString('base64url'),
+      key_enc: JSON.stringify({ version: '2.0', org_id: 'org-123', encrypted_master_key: 'transport-outer', wrapping_method: 'local_root', transport_id: '11111111-1111-4111-8111-111111111111' }) }] };
+    mockPickupDevicePairing.mockImplementation(async () => ({ sealed: await sealAsBrowser(payload, capturedPairPublicKey()) }));
+    mockCoDecryptTransport.mockResolvedValue({ plaintext: encryptMasterKey(Buffer.alloc(32, 8), deriveLocalInnerKey(Buffer.alloc(32, 1)), masterKeyAAD(EXCHANGE_USER.id, 'org-123')) });
+    const io = await withCapturedIo(async () => {
+      await expect(pairCommand({ json: true })).rejects.toThrow();
+    });
+    expect(finalResult(io.stdout).code).toBe('DECRYPT_KEY_MISMATCH');
+    expect(mockWrapInstalledCustody).not.toHaveBeenCalled();
+    expect(mockSaveLocalRoot).not.toHaveBeenCalled();
+    expect(mockWriteOrgKeyFileRaw).not.toHaveBeenCalled();
+  });
+
 });
