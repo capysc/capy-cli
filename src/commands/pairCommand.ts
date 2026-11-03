@@ -18,7 +18,7 @@ import { resolveActiveUrl } from '../config/profileConfig';
 import { resolveKeepOrigin } from '../config/keepOrigin';
 import { generatePairKeyPair, openPairEnvelope, parsePairEnvelope } from '../crypto/pairCrypto';
 import { authorizeDevice, pollDeviceToken } from '../auth/deviceGrant';
-import { AuthService } from '../auth/authService';
+import { AuthService, silentAuthFailureMessage } from '../auth/authService';
 import { ServiceClient } from '../service/serviceClient';
 import { readLocalRoot, saveLocalRoot, writeOrgKeyFileRaw } from '../config/globalConfig';
 import { renderTerminalQr, type RenderedTerminalQr } from '../ui/terminalQr';
@@ -248,10 +248,23 @@ export async function pairForFlow(options: PairOptions = {}): Promise<PairResult
   }
 
   for (const entry of matching) assertEntryCompatible(entry, force);
-  const prepared = await Promise.all(matching.map(entry => prepareTransportCustody(entry, {
-    unwrap: async (orgId, ciphertext, transportId) => (await serviceClient.coDecrypt(orgId, ciphertext, undefined, transportId)).plaintext,
-    wrap: async (orgId, innerCiphertext) => (await serviceClient.wrapOuterLayer(orgId, innerCiphertext)).ciphertext,
-  })));
+  // Scope one organization at a time; a default grant scope may differ from
+  // the Transport the human selected, and concurrent scope changes would race.
+  const prepared = await matching.reduce<Promise<readonly Readonly<PairingEntry>[]>>(async (previous, entry) => {
+    const completed = await previous;
+    const value = await prepareTransportCustody(entry, {
+      unwrap: async (orgId, ciphertext, transportId) => {
+        const scoped = await authService.authenticateSilent(orgId);
+        if (!scoped.success) throw new CapyError(silentAuthFailureMessage(scoped), ERROR_CODES.AUTH_FAILED);
+        if (scoped.user_id !== exchange.user.id || scoped.organization_id !== orgId) {
+          throw new CapyError('The selected Transport account or organization could not be verified.', ERROR_CODES.AUTH_FAILED);
+        }
+        return (await serviceClient.coDecrypt(orgId, ciphertext, undefined, transportId)).plaintext;
+      },
+      wrap: async (orgId, innerCiphertext) => (await serviceClient.wrapOuterLayer(orgId, innerCiphertext)).ciphertext,
+    });
+    return [...completed, value];
+  }, Promise.resolve([]));
   for (const entry of prepared) assertEntryCompatible(entry, force);
   const paired: readonly PairedOrg[] = prepared.map((entry) => {
     writeEntry(entry, force);
