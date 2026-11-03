@@ -18,6 +18,7 @@ import { resolveActiveUrl } from '../config/profileConfig';
 import { resolveKeepOrigin } from '../config/keepOrigin';
 import { generatePairKeyPair, openPairEnvelope, parsePairEnvelope } from '../crypto/pairCrypto';
 import { authorizeDevice, pollDeviceToken } from '../auth/deviceGrant';
+import { deviceGrantTokenAfterConfirmation } from '../auth/deviceGrantTokenLifetime';
 import { AuthService, silentAuthFailureMessage } from '../auth/authService';
 import { ServiceClient } from '../service/serviceClient';
 import { readLocalRoot, saveLocalRoot, writeOrgKeyFileRaw } from '../config/globalConfig';
@@ -214,6 +215,7 @@ export async function pairForFlow(options: PairOptions = {}): Promise<PairResult
     }
   })();
 
+  const exchangeReceivedAt = Date.now();
   if (options.expectedUserId && exchange.user.id !== options.expectedUserId) {
     throw new CapyError('The signed-in account does not match this repository. No session or keys were installed.', ERROR_CODES.AUTH_FAILED);
   }
@@ -225,7 +227,9 @@ export async function pairForFlow(options: PairOptions = {}): Promise<PairResult
   }
 
   const authService = new AuthService(options.apiUrl, devMode);
-  const installed = await authService.installDeviceGrantSession(exchange.token, exchange.user, exchange.organizations);
+  const installed = await authService.installDeviceGrantSession(
+    deviceGrantTokenAfterConfirmation(exchange.token, exchangeReceivedAt), exchange.user, exchange.organizations,
+  );
   if (!installed.organization_id) {
     // Multi-org account with no org scoped by the device-grant token yet —
     // resolve into one the same way every other org-context command does.

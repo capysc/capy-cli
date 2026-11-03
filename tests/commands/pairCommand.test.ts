@@ -199,6 +199,19 @@ describe('pairCommand', () => {
     expect(mockWriteOrgKeyFileRaw).not.toHaveBeenCalled();
   });
 
+  test('waiting for explicit account approval does not extend the received token lifetime', async () => {
+    const clock = spyOn(Date, 'now').mockReturnValue(1_000_000);
+    mockConfirmPairAccount.mockImplementation(async () => {
+      clock.mockReturnValue(1_120_000);
+      return true;
+    });
+    try {
+      await withCapturedIo(() => pairForFlow({ json: true, flow: true }));
+      expect(mockInstallDeviceGrantSession.mock.calls[0][0].expires_in).toBe(480);
+      expect(mockInstallDeviceGrantSession.mock.calls[0][1].email).toBe(EXCHANGE_USER.email);
+    } finally { clock.mockRestore(); }
+  });
+
   test('a conflict in a later organization refuses all key writes', async () => {
     const first = buildPayload().entries[0];
     mockPickupDevicePairing.mockImplementation(async () => ({ sealed: await sealAsBrowser(buildPayload({ entries: [first, { ...first, org_id: 'org-second' }] }), capturedPairPublicKey()) }));
