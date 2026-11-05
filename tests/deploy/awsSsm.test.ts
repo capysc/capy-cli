@@ -239,16 +239,28 @@ describe('awsSsm — deploy (no AWS calls)', () => {
   });
 
   test('a partially-missing declared set skips the missing vars (does not fail the filter)', async () => {
-    const r = await awsSsmAdapter.deploy(baseTarget(), {
-      env: { DATABASE_URL: 'postgres://x' }, // WORKOS_API_KEY absent
-      dryRun: false,
-      cwd: ROOT,
+    const spawnFixture = childProcess.spawn;
+    const identityProbe = spyOn(childProcess, 'spawn').mockImplementation((command, args) => {
+      expect(command).toBe('aws');
+      expect(args).toEqual(['sts', 'get-caller-identity', '--output', 'json', '--region', 'us-east-1']);
+      // Stop after filtering with a local fixture; never contact AWS or write parameters.
+      return spawnFixture(process.execPath, ['-e', 'process.exit(1)'], { stdio: ['pipe', 'pipe', 'pipe'] });
     });
-    // Filter passes: deploys DATABASE_URL, skips WORKOS_API_KEY with a note.
-    // (The deploy then proceeds past the filter to the AWS calls.)
-    expect(r.steps[0].status).toBe('ok');
-    expect(r.steps[0].detail).toContain('skipped');
-    expect(r.steps[0].detail).toContain('WORKOS_API_KEY');
+    try {
+      const r = await awsSsmAdapter.deploy(baseTarget(), {
+        env: { DATABASE_URL: 'postgres://x' }, // WORKOS_API_KEY absent
+        dryRun: false,
+        cwd: ROOT,
+      });
+      expect(r.steps[0].status).toBe('ok');
+      expect(r.steps[0].detail).toContain('skipped');
+      expect(r.steps[0].detail).toContain('WORKOS_API_KEY');
+      expect(r.steps[1].label).toBe('aws sts get-caller-identity');
+      expect(r.steps[1].status).toBe('fail');
+      expect(identityProbe).toHaveBeenCalledTimes(1);
+    } finally {
+      identityProbe.mockRestore();
+    }
   });
 });
 
