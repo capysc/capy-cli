@@ -414,3 +414,54 @@ describe('surfaces', () => {
     });
   });
 });
+
+// ── one variable's value route answers 404: that name is a placeholder, the rest still import ──
+
+const GONE_ENV = env({ id: 'e_gone', key: 'GONE', type: 'encrypted', target: ['production'], listValue: 'opaque' });
+const GONE_DATA = (status: number): FakeVercelData => ({
+  ...DATA,
+  envs: { prj_web: [...ENVS, GONE_ENV] },
+  valueStatus: { e_gone: status },
+});
+
+describe('import: a 404 on one variable\'s value route', () => {
+  test('production: the 404 name is a placeholder with reason value_not_found; the other names import', async () => {
+    const out = okOutcome(await connector(GONE_DATA(404)).import!(ctxWith('production'), BASE_OPTS));
+    expect(codes(out.placeholders)).toEqual({ SENS: 'sensitive_unreadable', GONE: 'value_not_found' });
+    expect(out.imported.map((i) => i.varName)).toEqual(['PLAIN']);
+    expect(codes(out.skipped)).toEqual({ GENUINELY_EMPTY: 'empty_value' });
+  });
+
+  test('--overwrite --yes: the 404 name is a placeholder and is never cleared when it has a local value', async () => {
+    const out = okOutcome(await connector(GONE_DATA(404)).import!(ctxWith('production'), { ...BASE_OPTS, overwrite: true, yes: true }));
+    expect(codes(out.placeholders)).toEqual({ SENS: 'sensitive_unreadable', GONE: 'value_not_found' });
+    const kept = okOutcome(await connector(GONE_DATA(404)).import!(ctxWith('production', { GONE: 'mine-already' }), { ...BASE_OPTS, overwrite: true, yes: true }));
+    expect(kept.kept).toEqual([{ name: 'GONE', code: 'CAPY_VALUE_KEPT', reason: 'value_not_found' }]);
+    expect(kept.cleared).toEqual([]);
+  });
+
+  test('--json: the 404 name is in placeholders with its reason; keep.lock holds a flag, no value', async () => {
+    await withIsolatedGlobalDir(() =>
+      withExitCodeRestored(() =>
+        withTempDir('capy-vercel-ph-404', async (dir) => {
+          const { stdout } = await captureConsole(() =>
+            new ConnectCommand(false)['executeImport'](connector(GONE_DATA(404)), 'vercel', realCtx(dir, 'production'), { ...BASE_OPTS, noPush: true, json: true }),
+          );
+          const parsed = JSON.parse(stdout[0]);
+          expect(parsed.placeholders).toEqual([
+            { name: 'SENS', code: 'sensitive_unreadable' },
+            { name: 'GONE', code: 'value_not_found' },
+          ]);
+          expect(parsed.imported).toEqual(['PLAIN']);
+          expect(placeholderOf(readKeep(dir), 'GONE', 'production')).toEqual({ provider: 'vercel', reason: 'value_not_found' });
+        }),
+      ),
+    );
+  });
+
+  test('a 500 on the same route still fails the run, with the Vercel error code', async () => {
+    const out = await connector(GONE_DATA(500)).import!(ctxWith('production'), BASE_OPTS);
+    expect(out.ok).toBe(false);
+    expect(out.ok === false && out.code).toBe('VERCEL_API_ERROR');
+  });
+});

@@ -15,6 +15,7 @@ import {
   VERCEL_CONNECTOR_SECRET_NAME,
   VERCEL_TARGET_SECRET_NAME,
   VercelApiError,
+  isPlaceholderReason,
   buildEnvironmentPlans,
   createVercelClient,
   groupSkipped,
@@ -467,6 +468,38 @@ describe('resolveEnvValues', () => {
       ['ABSENT', 'empty_value'],
       ['PLAIN_EMPTY', 'empty_value'],
     ]);
+  });
+});
+
+describe('resolveEnvValues: a failed value read for one record', () => {
+  const records = [
+    rec({ id: 'e1', key: 'A', type: 'encrypted' }),
+    rec({ id: 'e2', key: 'B', type: 'encrypted' }),
+    rec({ id: 'e3', key: 'C', type: 'encrypted' }),
+  ];
+
+  test('a 404 on one record becomes value_not_found; the others resolve normally and all are asked for', async () => {
+    const getEnvValue = mock(async (_p: string, envId: string, _t?: string) => {
+      if (envId === 'e2') throw new VercelApiError('not_found', 404, 'Vercel returned HTTP 404.');
+      return `decrypted-${envId}`;
+    });
+    const r = await resolveEnvValues({ getEnvValue }, 'prj', undefined, records);
+    expect(getEnvValue.mock.calls.map(([, envId]) => envId)).toEqual(['e1', 'e2', 'e3']);
+    expect(r.entries.map((e) => [e.record.key, e.value])).toEqual([
+      ['A', 'decrypted-e1'],
+      ['C', 'decrypted-e3'],
+    ]);
+    expect(r.notFound).toEqual([{ name: 'B', reason: 'value_not_found' }]);
+    expect(r.empty).toEqual([]);
+    expect(r.undecrypted).toEqual([]);
+    expect(isPlaceholderReason('value_not_found')).toBe(true);
+  });
+
+  test('a 500 still throws, as does a non-VercelApiError', async () => {
+    const serverError = { getEnvValue: async () => { throw new VercelApiError('server_error', 500, 'Vercel returned HTTP 500.'); } };
+    await expect(resolveEnvValues(serverError, 'prj', undefined, records)).rejects.toMatchObject({ code: 'server_error', status: 500 });
+    const plain = { getEnvValue: async () => { throw new Error('boom'); } };
+    await expect(resolveEnvValues(plain, 'prj', undefined, records)).rejects.toThrow('boom');
   });
 });
 

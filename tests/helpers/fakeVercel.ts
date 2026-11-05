@@ -30,6 +30,8 @@ export interface FakeVercelData {
   values?: Readonly<Record<string, string>>;
   /** Env record ids whose per-id answer says `decrypted: false` (Vercel would not decrypt the value, e.g. a role that cannot read production values). */
   undecrypted?: readonly string[];
+  /** Env record ids whose per-id value route answers with this HTTP status instead of a value (e.g. 404 or 500). */
+  valueStatus?: Readonly<Record<string, number>>;
   /** Project list page size, to exercise pagination. */
   pageSize?: number;
   /** Set `pagination.next` on the env list, to exercise the truncation warning. */
@@ -107,6 +109,8 @@ export function fakeVercelFetch(data: FakeVercelData): VercelFetchLike {
     if (envValueRoute) {
       const projectId = decodeURIComponent(envValueRoute[1]);
       const envId = decodeURIComponent(envValueRoute[2]);
+      const forcedStatus = data.valueStatus?.[envId];
+      if (forcedStatus !== undefined) return json({ error: { code: 'forced', message: 'forced' } }, forcedStatus);
       const rec = (data.envs[projectId] ?? []).find((e) => e.id === envId);
       if (!rec) return json({ error: { code: 'not_found', message: 'nope' } }, 404);
       const value = data.values?.[envId];

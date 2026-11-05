@@ -714,13 +714,20 @@ export type VercelSkipReason =
   | 'duplicate_key'
   | 'empty_value'
   /** Vercel returned the value route's answer with `decrypted: false`: it would not give the value back. */
-  | 'value_not_decrypted';
+  | 'value_not_decrypted'
+  /** Vercel answered the value route for this one record with HTTP 404: the record is listed but its value is not there to read. */
+  | 'value_not_found';
 
 /**
  * The reasons that mean "Vercel has this value and will not give it back". Each becomes a placeholder
  * on its Capy branch (core/placeholder.ts); every other reason stays a skip.
  */
-export const PLACEHOLDER_SKIP_REASONS: readonly VercelSkipReason[] = ['sensitive_unreadable', 'legacy_secret_unreadable', 'value_not_decrypted'];
+export const PLACEHOLDER_SKIP_REASONS: readonly VercelSkipReason[] = [
+  'sensitive_unreadable',
+  'legacy_secret_unreadable',
+  'value_not_decrypted',
+  'value_not_found',
+];
 
 export const isPlaceholderReason = (reason: VercelSkipReason): boolean => PLACEHOLDER_SKIP_REASONS.includes(reason);
 
@@ -805,6 +812,30 @@ export interface ResolvedEnvValues {
   empty: readonly VercelSkippedRecord[];
   /** Records Vercel would not decrypt (`decrypted: false`): they have a value Capy cannot read, so they are placeholders, not empty. */
   undecrypted: readonly VercelSkippedRecord[];
+  /** Records whose per-id value route answered HTTP 404: the run goes on without them, and they are placeholders like `undecrypted`. */
+  notFound: readonly VercelSkippedRecord[];
+}
+
+/** One record's value read: a value (or none, or "not decrypted"), or the route's 404 for that record. */
+type FetchedValue = { readonly record: VercelEnvRecord; readonly value: VercelEnvValue } | { readonly record: VercelEnvRecord; readonly notFound: true };
+
+/** The structured signal for "Vercel has no value route answer for this id": a Vercel 404, by class and status, never by message. */
+const isValueNotFound = (err: unknown): boolean => err instanceof VercelApiError && (err.status === 404 || err.code === 'not_found');
+
+/** Reads one record's value; a 404 on the per-id route is that record's outcome, every other failure still throws. */
+async function fetchOneValue(
+  client: Pick<VercelClient, 'getEnvValue'>,
+  projectId: string,
+  teamId: string | undefined,
+  record: VercelEnvRecord,
+): Promise<FetchedValue> {
+  if (record.type === 'plain' && record.value !== undefined) return { record, value: record.value };
+  try {
+    return { record, value: await client.getEnvValue(projectId, record.id, teamId) };
+  } catch (err) {
+    if (isValueNotFound(err)) return { record, notFound: true };
+    throw err;
+  }
 }
 
 /**
@@ -820,17 +851,11 @@ export async function resolveEnvValues(
   teamId: string | undefined,
   records: readonly VercelEnvRecord[],
 ): Promise<ResolvedEnvValues> {
-  const fetched = await records.reduce<Promise<ReadonlyArray<{ record: VercelEnvRecord; value: VercelEnvValue }>>>(
-    async (accPromise, record) => {
-      const acc = await accPromise;
-      const value =
-        record.type === 'plain' && record.value !== undefined
-          ? record.value
-          : await client.getEnvValue(projectId, record.id, teamId);
-      return [...acc, { record, value }];
-    },
-    Promise.resolve([]),
-  );
+  const all = await records.reduce<Promise<readonly FetchedValue[]>>(async (accPromise, record) => {
+    const acc = await accPromise;
+    return [...acc, await fetchOneValue(client, projectId, teamId, record)];
+  }, Promise.resolve([]));
+  const fetched = all.flatMap((f): ReadonlyArray<{ record: VercelEnvRecord; value: VercelEnvValue }> => ('notFound' in f ? [] : [f]));
   return {
     entries: fetched.flatMap(({ record, value }) => (value === undefined || value === '' || isUndecrypted(value) ? [] : [{ record, value }])),
     empty: fetched.flatMap(({ record, value }): readonly VercelSkippedRecord[] =>
@@ -839,6 +864,7 @@ export async function resolveEnvValues(
     undecrypted: fetched.flatMap(({ record, value }): readonly VercelSkippedRecord[] =>
       isUndecrypted(value) ? [{ name: record.key, reason: 'value_not_decrypted' }] : [],
     ),
+    notFound: all.flatMap((f): readonly VercelSkippedRecord[] => ('notFound' in f ? [{ name: f.record.key, reason: 'value_not_found' }] : [])),
   };
 }
 

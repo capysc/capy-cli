@@ -22,7 +22,8 @@
  *
  * A value Vercel has but will not give back (`sensitive_unreadable`,
  * `legacy_secret_unreadable`, or a value route answer with `decrypted: false`,
- * `value_not_decrypted`) is not skipped: it becomes a PLACEHOLDER on the Capy
+ * `value_not_decrypted`, or a 404 on that one
+ * record's value route, `value_not_found`) is not skipped: it becomes a PLACEHOLDER on the Capy
  * branch of every environment it is in. A placeholder is a flag on the
  * variable's keep.lock entry, with no value (`core/placeholder.ts`). A name
  * that already has a value in Capy keeps it, untouched, and is reported in
@@ -516,7 +517,7 @@ export function createVercelConnector(deps: VercelConnectorDeps = {}): Connector
     const fullCandidates = values.value.entries.map((e) => ({ name: e.record.key, value: e.value }));
     // A name Vercel HAS but will not show us (sensitive, scoped, empty, …) is
     // never cleared locally just because it is unreadable.
-    const unreadable = [...source.skipped, ...values.value.empty, ...values.value.undecrypted];
+    const unreadable = [...source.skipped, ...values.value.empty, ...values.value.undecrypted, ...values.value.notFound];
     const protectedNames = unreadable.map((s) => s.name);
     const plan = computeOverwritePlan(fullCandidates, protectedNames, ctx.localPlaintext);
     const warnings = truncationWarnings(source);
@@ -609,7 +610,7 @@ export function createVercelConnector(deps: VercelConnectorDeps = {}): Connector
     const inScope = (name: string): boolean => !restrict || restrict.includes(name);
     // A name Vercel will not give back, with no value here, is a placeholder on this branch; one that has a value keeps it and is reported as kept.
     const split = splitPlaceholders(
-      [...source.skipped, ...values.value.empty, ...values.value.undecrypted].filter((s) => inScope(s.name)),
+      [...source.skipped, ...values.value.empty, ...values.value.undecrypted, ...values.value.notFound].filter((s) => inScope(s.name)),
       new Set(Object.keys(ctx.localPlaintext)),
       new Set(candidates.map((c) => c.name)),
     );
