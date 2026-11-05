@@ -1,8 +1,9 @@
-import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
+import { describe, test, expect, beforeEach, afterEach, spyOn } from 'bun:test';
 import { mkdirSync, writeFileSync, rmSync, existsSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { spawnSync } from 'child_process';
+import * as childProcess from 'child_process';
 import {
   awsSsmAdapter,
   leafFor,
@@ -86,6 +87,20 @@ describe('awsSsm — name mapping', () => {
 });
 
 describe('awsSsm — detect', () => {
+  // Terraform detection must not depend on the runner's AWS installation or profile.
+  const detectFixture = async () => {
+    const regionProbe = spyOn(childProcess, 'spawnSync').mockImplementation((command, args) => {
+      expect(command).toBe('aws');
+      expect(args).toEqual(['configure', 'get', 'region']);
+      return { pid: 0, output: [null, 'us-east-1\n', ''], stdout: 'us-east-1\n', stderr: '', status: 0, signal: null };
+    });
+    try {
+      return await awsSsmAdapter.detect(ROOT);
+    } finally {
+      regionProbe.mockRestore();
+    }
+  };
+
   test('infers prefix + kebab naming from literal tf parameter names', async () => {
     mkdirSync(join(ROOT, 'infra'), { recursive: true });
     writeFileSync(
@@ -99,7 +114,8 @@ data "aws_ssm_parameter" "workos_api_key" {
 }
 `,
     );
-    const r = await awsSsmAdapter.detect(ROOT);
+    const r = await detectFixture();
+    expect(r.options?.region).toBe('us-east-1');
     expect(r.options?.pathPrefix).toBe('/capy/prod/');
     expect(r.options?.naming).toBe('kebab');
     expect(r.summary).toContain('2 aws_ssm_parameter');
@@ -118,7 +134,7 @@ data "aws_ssm_parameter" "workos_api_key" {
 }
 `,
     );
-    const r = await awsSsmAdapter.detect(ROOT);
+    const r = await detectFixture();
     expect(r.options?.pathPrefix).toBeUndefined();
     expect(r.options?.naming).toBe('kebab');
   });
@@ -132,14 +148,14 @@ data "aws_ssm_parameter" "db" {
 }
 `,
     );
-    const r = await awsSsmAdapter.detect(ROOT);
+    const r = await detectFixture();
     expect(r.options?.naming).toBe('verbatim');
     expect(r.options?.pathPrefix).toBe('/myapp/');
   });
 
   test('returns empty when no tf files mention aws_ssm_parameter', async () => {
     writeFileSync(join(ROOT, 'main.tf'), `resource "aws_s3_bucket" "b" {}`);
-    const r = await awsSsmAdapter.detect(ROOT);
+    const r = await detectFixture();
     expect(r.options).toBeUndefined();
     expect(r.summary).toBeUndefined();
   });
