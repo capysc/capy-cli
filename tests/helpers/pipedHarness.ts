@@ -10,6 +10,8 @@
  *   POST /orgs/:org/wrap         identity
  *   POST /secrets/:project       answers like the real one, or 500 once `failPushes()` was called
  *   GET  /secrets/:project?branch=  the branch fixture if set, else what was pushed (404 before any push)
+ *   GET  /projects, GET .../deploy-tokens, DELETE .../projects/:id, POST .../projects/:id/restore   the project lifecycle (CAP-729)
+ *   every route that names the project, once `markProjectDeleted()` was called: 410 PROJECT_DELETED
  *
  * Every request it receives is appended to a log file (and the push-failure
  * switch is a flag file) rather than held in a mutable variable, so tests can
@@ -81,6 +83,8 @@ export interface Harness {
   setBranchData(project: string, branch: string, body: unknown): void;
   /** Makes the mock answer `GET /projects/:project/branches` with these branches (without it: 404, like an unknown project). */
   setBranches(project: string, branches: readonly { readonly id: string; readonly name: string; readonly is_protected: boolean }[]): void;
+  /** From now on every route that takes this project's id answers 410 `PROJECT_DELETED`, like the service does for a deleted project (CAP-729). */
+  markProjectDeleted(): void;
   /** How `PUT /orgs/:org/projects/:project/repos` answers: `ok`, `mismatch` (other repos known), `500`, or `hang` (never). Default `ok`. */
   setRepoPutMode(mode: 'ok' | 'mismatch' | '500' | 'hang'): void;
   /** The `PUT .../repos` requests the mock has received (parsed bodies). */
@@ -186,6 +190,21 @@ async function startMockService(requestLog: string, failFlag: string, root: stri
     };
     const fixture = (name: string): unknown | undefined =>
       existsSync(join(root, name)) ? JSON.parse(readFileSync(join(root, name), 'utf8')) : undefined;
+    // CAP-729: a deleted project answers 410 on every route that takes its id (the org-level lifecycle routes stay reachable).
+    const lifecycleRoute = /^\/orgs\/[^/]+\/projects\/[^/]+(\/restore)?$/.test(path.split('?')[0]) && req.method !== 'PUT';
+    if (existsSync(join(root, 'project-deleted')) && path.includes(PROJECT_ID) && !lifecycleRoute) {
+      return send(410, { error: 'This project was deleted', code: 'PROJECT_DELETED' });
+    }
+    if (req.method === 'GET' && /^\/projects(\?.*)?$/.test(path)) {
+      return send(200, { projects: [{ id: PROJECT_ID, name: 'piped-test', organization_id: ORG_ID }] });
+    }
+    if (req.method === 'GET' && /^\/orgs\/[^/]+\/projects\/[^/]+\/deploy-tokens$/.test(path)) return send(200, { tokens: [] });
+    if (req.method === 'DELETE' && /^\/orgs\/[^/]+\/projects\/[^/]+$/.test(path)) {
+      return send(200, { ok: true, project: { id: PROJECT_ID, name: 'piped-test', deleted_at: '2026-11-06T00:00:00.000Z' }, live_deploy_tokens: [] });
+    }
+    if (req.method === 'POST' && /^\/orgs\/[^/]+\/projects\/[^/]+\/restore$/.test(path)) {
+      return send(200, { ok: true, project: { id: PROJECT_ID, name: 'piped-test' } });
+    }
     if (req.method === 'GET' && /^\/orgs\/[^/]+\/secrets$/.test(path)) {
       const body = fixture('secrets-index.json');
       return body === undefined ? send(404, { error: 'no index fixture' }) : send(200, body);
@@ -298,6 +317,7 @@ export async function createHarness(): Promise<Harness> {
     setOrgRepos: (body) => writeFileSync(join(root, 'org-repos.json'), JSON.stringify(body)),
     setBranchData: (projectId, branch, body) => writeFileSync(join(root, `branch-${projectId}-${branch}.json`), JSON.stringify(body)),
     setBranches: (projectId, branches) => writeFileSync(join(root, `branches-${projectId}.json`), JSON.stringify({ branches })),
+    markProjectDeleted: () => writeFileSync(join(root, 'project-deleted'), '1'),
     setRepoPutMode: (mode) => writeFileSync(join(root, 'repo-put-mode'), mode),
     repoPuts: () =>
       requests()

@@ -36,6 +36,29 @@ export interface DeleteProjectOpts extends ProjectLifecycleOpts {
   dryRun?: boolean;
 }
 
+/** What commander hands an action's `command`: only the merged view is needed. */
+interface CommandWithGlobals {
+  optsWithGlobals(): Record<string, unknown>;
+}
+
+/**
+ * The options of `delete-project` / `restore-project` as typed, wherever commander put them.
+ *
+ * A flag that the program or `org` also defines (`--force`, `--non-tty`, `--dry-run`) is taken by that outer command
+ * and never reaches the subcommand's own options, so reading `options.force` there is always undefined. The merged view
+ * has every one of them; `--yes` and `--json` come out of it the same way, so a later outer flag of that name cannot shadow them.
+ */
+export function lifecycleOptsFrom(command: CommandWithGlobals): DeleteProjectOpts {
+  const merged = command.optsWithGlobals();
+  return {
+    force: merged.force === true,
+    yes: merged.yes === true,
+    nonTty: merged.nonTty === true,
+    json: merged.json === true,
+    dryRun: merged.dryRun === true,
+  };
+}
+
 interface ProjectRef {
   id: string;
   name: string;

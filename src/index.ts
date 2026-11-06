@@ -409,9 +409,9 @@ const deploy = program
         yes: options.yes ?? merged.yes,
         dryRun: options.dryRun ?? merged.dryRun,
         edit: options.edit,
-        // Deploy-level flag only — the global `-f/--force` means "re-encrypt",
-        // a different thing, so it must NOT be merged in here.
-        force: options.force,
+        // `--force` is also the program's `-f/--force` ("re-encrypt"), and commander gives
+        // that flag to the program, never to `deploy`: only the merged view carries it.
+        force: options.force ?? merged.force,
         // commander negates `--no-deploy` onto the positive `deploy` property.
         noDeploy: options.deploy === false,
         replaceSensitive: !!options.replaceSensitive,
@@ -435,7 +435,7 @@ const deploy = program
       scope: options.scope,
       envName: options.envName,
       yes: !!options.yes,
-      force: !!options.force,
+      force: !!(options.force ?? merged.force),
       json: !!options.json,
       dryRun: (options.dryRun ?? merged.dryRun) === true,
       conflictFlags: rawConflictFlagsOf(cmd),
@@ -788,17 +788,11 @@ orgCmd
   .option('--yes', 'skip the confirmation question')
   .option('--non-tty', 'treat stdin as not a terminal: refuse unless --yes is passed') // COPY-FLAG
   .option('--json', 'emit machine-readable JSON instead of the human UI')
-  .action(async (ref: string, options: any, command: any) => {
+  .action(async (ref: string, _options: any, command: any) => {
     assertNotLocalOnly('org delete-project');
-    const { deleteProjectCommand } = await import('./commands/projectLifecycleCommand');
-    await deleteProjectCommand(ref, {
-      force: options.force === true,
-      yes: options.yes === true,
-      nonTty: options.nonTty === true,
-      json: options.json === true,
-      // The program-level `--dry-run`, wherever it was typed.
-      dryRun: command.optsWithGlobals().dryRun === true,
-    });
+    const { deleteProjectCommand, lifecycleOptsFrom } = await import('./commands/projectLifecycleCommand');
+    // Read from the merged view: the program's `-f/--force` and `org`'s `--non-tty` take those flags before this command sees them.
+    await deleteProjectCommand(ref, lifecycleOptsFrom(command));
   });
 
 orgCmd
@@ -807,14 +801,11 @@ orgCmd
   .option('--yes', 'skip the confirmation question')
   .option('--non-tty', 'treat stdin as not a terminal: refuse unless --yes is passed') // COPY-FLAG
   .option('--json', 'emit machine-readable JSON instead of the human UI')
-  .action(async (ref: string, options: any) => {
+  .action(async (ref: string, _options: any, command: any) => {
     assertNotLocalOnly('org restore-project');
-    const { restoreProjectCommand } = await import('./commands/projectLifecycleCommand');
-    await restoreProjectCommand(ref, {
-      yes: options.yes === true,
-      nonTty: options.nonTty === true,
-      json: options.json === true,
-    });
+    const { restoreProjectCommand, lifecycleOptsFrom } = await import('./commands/projectLifecycleCommand');
+    const { yes, nonTty, json } = lifecycleOptsFrom(command);
+    await restoreProjectCommand(ref, { yes, nonTty, json });
   });
 
 orgCmd
@@ -822,11 +813,12 @@ orgCmd
   .description('List projects in the active organization; --deleted also lists deleted ones (owners only)') // COPY-FLAG
   .option('--deleted', 'also list deleted projects, marked as deleted, with the date') // COPY-FLAG
   .option('--json', 'emit machine-readable JSON instead of the human UI')
-  .action(async (options: any) => {
+  .action(async (_options: any, command: any) => {
     assertNotLocalOnly('org projects');
     const { ProjectsCommand } = await import('./commands/projectsCommand');
     const cmd = new ProjectsCommand();
-    await cmd.execute({ json: options.json, deleted: options.deleted === true });
+    const merged = command.optsWithGlobals();
+    await cmd.execute({ json: merged.json, deleted: merged.deleted === true });
   });
 
 program

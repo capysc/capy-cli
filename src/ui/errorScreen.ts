@@ -1,7 +1,6 @@
-import { readFileSync } from 'fs';
-import { join } from 'path';
 import { CapyError, ERROR_CODES } from '../types/index';
 import { isMembershipRevokedError } from '../errors/membershipRevoked';
+import { keepLockProject } from '../errors/projectDeleted';
 
 const grey = (s: string) => `\x1b[90m${s}\x1b[0m`;
 const bold = (s: string) => `\x1b[1m${s}\x1b[0m`;
@@ -214,19 +213,6 @@ function renderProjectNotFound(ctx: ErrorContext): string {
     '',
   ];
   return lines.filter(l => l !== '').join('\n') + '\n';
-}
-
-/** The project this folder's keep.lock points at. Read only, never written; `undefined` when there is no readable keep.lock. */
-function keepLockProject(dir: string): { name?: string; id?: string } | undefined {
-  try {
-    const raw = JSON.parse(readFileSync(join(dir, 'keep.lock'), 'utf-8'));
-    return {
-      name: typeof raw?.project_name === 'string' ? raw.project_name : undefined,
-      id: typeof raw?.project_id === 'string' ? raw.project_id : undefined,
-    };
-  } catch {
-    return undefined;
-  }
 }
 
 /**
