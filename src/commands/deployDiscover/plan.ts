@@ -108,9 +108,9 @@ const PLAN_DOMAIN = 'capy:deploy-dokploy:plan:v1';
  * with. Opaque, and the same for the same plan however its entries or vars
  * were ordered. It carries no value: a plan has none.
  */
-export function planIdOf(plan: Plan, baseUrl: string): string {
+export function planIdOf(plan: Plan, baseUrl: string, domain: string = PLAN_DOMAIN): string {
   const canonical = JSON.stringify({ base_url: baseUrl, version: plan.version, entries: plan.entries });
-  return createHash('sha256').update(`${PLAN_DOMAIN}\u0000${canonical}`).digest('hex').slice(0, 16);
+  return createHash('sha256').update(`${domain}\u0000${canonical}`).digest('hex').slice(0, 16);
 }
 
 /** First four characters and an ellipsis, so a person can tell services apart at a glance. */
@@ -119,7 +119,7 @@ const shortId = (id: string): string => (id.length > 8 ? `${id.slice(0, 4)}…` 
 /** One line a person reads. The agent relays these verbatim. */
 export function summaryLine(args: {
   readonly project_name: string;
-  readonly kind: 'application' | 'compose';
+  readonly kind: string;
   readonly entry: PlanEntry;
 }): string {
   const { project_name, kind, entry } = args;

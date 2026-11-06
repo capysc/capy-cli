@@ -133,9 +133,9 @@ program
 
 program
   .command('edit [name]')
-  // COPY-FLAG — minimal-neutral; names the two modes.
-  .description('Inspect and edit secrets in an interactive TUI, or set one variable from a piped value')
-  .option('--no-push', 'piped value: write .env only; do not push to Capy')
+  // COPY-FLAG — minimal-neutral; names the three modes.
+  .description('Inspect and edit secrets in an interactive TUI, or set one variable from a hidden prompt or a piped value')
+  .option('--no-push', 'with a name: write .env only; do not push to Capy') // COPY-FLAG
   .option('--json', 'emit machine-readable JSON instead of the human UI (piped value)')
   .option('--non-tty', 'treat stdin as not a terminal; never prompt (agents/CI)')
   .option('--pr', 'create a PR with the keep.lock change (answers the prompt)') // COPY-FLAG
@@ -145,6 +145,7 @@ program
     'after',
     // COPY-FLAG
     '\n' +
+      'With a name on a terminal, asks for the value (hidden) and sets that variable, like: capy add NAME --force\n' +
       'With a name and a piped value, sets that one variable. The value is read from stdin only:\n' +
       '  <cmd> | capy edit NAME --json\n',
   )
@@ -380,11 +381,12 @@ const deploy = program
   .option('--scope <scope>', 'gh-actions: "repo" or "env"')
   .option('--env-name <name>', 'gh-actions: env name when --scope env')
   .option('--no-deploy', 'write and verify the target, but skip the platform deploy/redeploy (target mode)')
+  .option('--replace-sensitive', 'vercel: allow replacing a value Vercel holds as sensitive, for the first time for a target, without asking') // COPY-FLAG
   .option('--json', 'describe the route (unanswered stops + any known branch problem) as JSON instead of travelling it')
   // COPY-FLAG: the option descriptions of `deploy <target> --discover` are minimal and neutral.
-  .option('--discover', 'dokploy: find the services that match Capy projects and print JSON (never prompts)')
-  .option('--plan <file>', 'dokploy --discover: the plan file to check (see schemas.deploy_dokploy_plan in `capy help --json`)')
-  .option('--confirm <plan_id>', 'dokploy --discover: write the plan that --dry-run printed (one PR per repo)')
+  .option('--discover', 'dokploy/vercel: find the services that match Capy projects and print JSON (never prompts)')
+  .option('--plan <file>', 'dokploy/vercel --discover: the plan file to check (see schemas.deploy_dokploy_plan and schemas.deploy_vercel_plan in `capy help --json`)')
+  .option('--confirm <plan_id>', 'dokploy/vercel --discover: write the plan that --dry-run printed (one PR per repo)')
   .option('--base-url <url>', 'dokploy --discover: the Dokploy dashboard URL (else the org system variable _CONNECTOR_DOKPLOY_BASE_URL)')
   .addOption(resolveOption())
   .addOption(conflictOption())
@@ -412,6 +414,7 @@ const deploy = program
         force: options.force,
         // commander negates `--no-deploy` onto the positive `deploy` property.
         noDeploy: options.deploy === false,
+        replaceSensitive: !!options.replaceSensitive,
         json: !!options.json,
         conflictFlags: rawConflictFlagsOf(cmd),
       });
@@ -1055,7 +1058,9 @@ program
   .option('--base-url <url>', 'dokploy import: dashboard URL')
   .option('--application <id>', 'dokploy import: Application id (mutually exclusive with --compose)')
   .option('--compose <id>', 'dokploy import: Compose service id (mutually exclusive with --application)')
-  .option('--token-env <name>', 'dokploy import: env var holding the API token')
+  .option('--token-env <name>', 'dokploy/vercel import: env var holding the API token')
+  .option('--project <project>', 'vercel import: Vercel project id or name (under --discover: the project that wins a mapping collision)')
+  .option('--team <team>', 'vercel import/discover: Vercel team slug or id (default: the token\'s only team)')
   .option('--json', 'emit machine-readable JSON instead of the human UI (import connectors)')
   .option(
     '--dry-run',
@@ -1063,7 +1068,7 @@ program
   )
   .option(
     '--discover',
-    'dokploy: find every Dokploy service matching a repo under cwd, instead of one named --application/--compose',
+    'dokploy/vercel: find every Dokploy service / Vercel project matching a repo under cwd, instead of one named --application/--compose/--project',
   )
   .option(
     '-y, --yes',
@@ -1076,7 +1081,7 @@ program
   )
   .option(
     '--environment <names>',
-    'dokploy discover: restrict the plan to these Dokploy environment names, comma-separated (e.g. staging,preview)',
+    'dokploy/vercel discover: restrict the plan to these environment names, comma-separated (e.g. staging,preview); vercel import: which Vercel environment to read (default: the current branch\'s name)',
   )
   .addOption(resolveOption())
   .addOption(conflictOption())
@@ -1109,6 +1114,8 @@ program
       yes: options.yes === true,
       overwrite: options.overwrite === true,
       environment: options.environment,
+      project: options.project,
+      team: options.team,
       conflictFlags: rawConflictFlagsOf(command),
     });
   });

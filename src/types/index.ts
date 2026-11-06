@@ -93,6 +93,16 @@ export interface ConnectorMetadata {
    * availability rule as `dokploy_project`.
    */
   environment?: string;
+  /** Vercel import only (CAP-696): the Vercel project's id. */
+  vercel_project_id?: string;
+  /** Vercel import only (CAP-696): the Vercel project's name. */
+  vercel_project?: string;
+  /** Vercel import only (CAP-696): the Vercel team id; absent for a personal-account project. */
+  team_id?: string;
+  /** Vercel import only (CAP-696): the id of the Vercel env record the value came from (`environment`, above, names the Vercel environment). */
+  env_id?: string;
+  /** Vercel import only (CAP-696): the integration configuration id on the env record, when Vercel set one. */
+  configuration_id?: string;
 }
 
 /**
@@ -147,6 +157,16 @@ export interface TargetDelivery {
   superseded_deploy_ids?: readonly string[];
 }
 
+/**
+ * Why a variable has no value yet. `provider` is the import connector that could not
+ * read it; `reason` is that connector's own stable skip code (e.g. `sensitive_unreadable`).
+ * Both are codes, never sentences.
+ */
+export interface PlaceholderMarker {
+  provider: string;
+  reason: string;
+}
+
 /** v3 keep.lock variable entry — per-branch value hashes */
 export interface KeepVariableEntry {
   resource_id: string;
@@ -162,6 +182,13 @@ export interface KeepVariableEntry {
   changed_at?: string;
   /** Set when this variable was provisioned by `capy connect <provider>`. */
   connector?: ConnectorMetadata;
+  /**
+   * Set when the name exists on this branch but has NO value yet: the source it was
+   * imported from would not give the value back. `value_hash` is '' and the blob holds
+   * no line for it. A real value written for this branch removes the field.
+   * See `core/placeholder.ts`.
+   */
+  placeholder?: PlaceholderMarker;
   /**
    * Every `capy deploy` target this variable has been delivered to (CAP-679).
    * Optional and additive — absent on every entry written before this field
@@ -724,6 +751,104 @@ export const ERROR_CODES = {
    * to clean it up manually.
    */
   DEPLOY_TOKEN_UNTRACKED: 'DEPLOY_TOKEN_UNTRACKED',
+  // CAP-696 Vercel import
+  /** No Vercel token anywhere and no way to ask — import (`_CONNECTOR_VERCEL_TOKEN`, `--token-env`, `$VERCEL_TOKEN`) or API-mode deploy (`_TARGET_VERCEL_TOKEN`, `$VERCEL_TOKEN`). */
+  VERCEL_TOKEN_MISSING: 'VERCEL_TOKEN_MISSING',
+  /** `_CONNECTOR_VERCEL_TOKEN` is absent, `_TARGET_VERCEL_TOKEN` holds a token, and there is no TTY to ask which to use. */
+  VERCEL_CONNECTOR_KEY_MISSING: 'VERCEL_CONNECTOR_KEY_MISSING',
+  /** Vercel answered 401 to the token: it is invalid or expired. */
+  VERCEL_AUTH_FAILED: 'VERCEL_AUTH_FAILED',
+  /** Any other failed or unreadable Vercel response. */
+  VERCEL_API_ERROR: 'VERCEL_API_ERROR',
+  /** Vercel kept answering 429 after the bounded retries, or asked for a wait longer than the cap. */
+  VERCEL_RATE_LIMITED: 'VERCEL_RATE_LIMITED',
+  /** The token sees several teams and no `--team` was given, and this run cannot ask. */
+  VERCEL_TEAM_REQUIRED: 'VERCEL_TEAM_REQUIRED',
+  /** `--team` matched none of the teams the token sees. */
+  VERCEL_TEAM_NOT_FOUND: 'VERCEL_TEAM_NOT_FOUND',
+  /** Single import with no `--project`, and this run cannot ask. */
+  VERCEL_PROJECT_REQUIRED: 'VERCEL_PROJECT_REQUIRED',
+  /** `--project` names no project Vercel can see. */
+  VERCEL_PROJECT_NOT_FOUND: 'VERCEL_PROJECT_NOT_FOUND',
+  /** Single import: the current Capy branch is not a Vercel environment of the project, and no `--environment` was given. */
+  VERCEL_ENVIRONMENT_REQUIRED: 'VERCEL_ENVIRONMENT_REQUIRED',
+  /** `--environment` names no environment of the project (single import), or none the plan has (discover). */
+  VERCEL_ENVIRONMENT_NOT_FOUND: 'VERCEL_ENVIRONMENT_NOT_FOUND',
+  /** A real write needs a yes (`--yes`) and this run cannot ask. */
+  VERCEL_CONFIRMATION_REQUIRED: 'VERCEL_CONFIRMATION_REQUIRED',
+  /** Several Vercel projects map to the same repo, folder and branch, and this run cannot ask which wins. */
+  VERCEL_MAPPING_COLLISION: 'VERCEL_MAPPING_COLLISION',
+  // CAP-696 Vercel target (codes not already above)
+  /** `_TARGET_VERCEL_TOKEN` is absent but `_CONNECTOR_VERCEL_TOKEN` holds one, and there is no TTY to choose. */
+  VERCEL_TARGET_KEY_MISSING: 'VERCEL_TARGET_KEY_MISSING',
+  /** Vercel answered 401: the token is not valid. */
+  VERCEL_TOKEN_REJECTED: 'VERCEL_TOKEN_REJECTED',
+  /** Vercel answered 403: the token is valid but cannot access what was asked for (the team list, a project, or a project's environment variables). */
+  VERCEL_NO_ACCESS: 'VERCEL_NO_ACCESS',
+  /** The request never got an answer from Vercel. */
+  VERCEL_NETWORK_ERROR: 'VERCEL_NETWORK_ERROR',
+  /** After writing, the value Vercel holds hashes differently from the one sent. */
+  VERCEL_VERIFY_MISMATCH: 'VERCEL_VERIFY_MISMATCH',
+  /** The API-mode target's options are incomplete or malformed. */
+  VERCEL_OPTIONS_INVALID: 'VERCEL_OPTIONS_INVALID',
+  /** A shared record had this environment removed, but creating its replacement failed and the removal could not be undone. */
+  VERCEL_SPLIT_NOT_RESTORED: 'VERCEL_SPLIT_NOT_RESTORED',
+  /** `capy deploy`'s setup was given something that is neither a Vercel dashboard link for a project nor a project name. */
+  VERCEL_URL_INVALID: 'VERCEL_URL_INVALID',
+  /**
+   * A deploy would replace a value Vercel holds as sensitive (Capy cannot read it, so cannot tell whether it differs) for the first time
+   * for this target, and it was not confirmed: no terminal to ask on, and no `--replace-sensitive`; or the answer was no. Nothing was written.
+   */
+  VERCEL_SENSITIVE_REPLACE_UNCONFIRMED: 'VERCEL_SENSITIVE_REPLACE_UNCONFIRMED',
+  // `capy deploy vercel --discover`
+  /** A Vercel project has no GitHub link, so no repo can be matched; it is skipped (a notice). */
+  VERCEL_PROJECT_NOT_GITHUB: 'VERCEL_PROJECT_NOT_GITHUB',
+  /** Vercel said a project's env list has another page that this client cannot ask for; the names read may be incomplete (a notice). */
+  VERCEL_ENV_LIST_TRUNCATED: 'VERCEL_ENV_LIST_TRUNCATED',
+  /** Vercel's recent preview deployments of a project could not be read (the call failed, or the token cannot see them); that project's preview branch is judged without them (a notice). Discovery goes on. */
+  VERCEL_PREVIEW_DEPLOYMENTS_UNAVAILABLE: 'VERCEL_PREVIEW_DEPLOYMENTS_UNAVAILABLE',
+  // --- Import connectors ---
+  /** `capy connect vercel`: Vercel will not return this name's value, and Capy already has one. The Capy value was left untouched (reported, not an error). */
+  CAPY_VALUE_KEPT: 'CAPY_VALUE_KEPT',
+  // --- Connector discovery, any provider (`capy connect <provider> --discover`) ---
+  // One per step a folder's run can stop on. Every provider but Dokploy reports these;
+  // Dokploy keeps its own `DOKPLOY_*` spellings of the same steps.
+  /** The folder's upload failed for a reason other than a stale base. That folder's run stopped; the other folders still ran. */
+  CONNECTOR_PUSH_FAILED: 'CONNECTOR_PUSH_FAILED',
+  /** Non-interactive run without `--yes`: the folder has no keep.lock, and a person has to initialize it. */
+  CONNECTOR_FOLDER_NOT_INITIALIZED: 'CONNECTOR_FOLDER_NOT_INITIALIZED',
+  /** The org's project list could not be read, so a new project is not offered blind. */
+  CONNECTOR_PROJECT_LOOKUP_FAILED: 'CONNECTOR_PROJECT_LOOKUP_FAILED',
+  /** Non-interactive `--yes`: a project with the default name already exists (in the org, or created earlier in the same run). */
+  CONNECTOR_PROJECT_NAME_EXISTS: 'CONNECTOR_PROJECT_NAME_EXISTS',
+  /** The picked project is not in this org. */
+  CONNECTOR_PROJECT_NOT_FOUND: 'CONNECTOR_PROJECT_NOT_FOUND',
+  /** Creating or bootstrapping the folder's project failed. */
+  CONNECTOR_INIT_FAILED: 'CONNECTOR_INIT_FAILED',
+  /** The new project's name is over the length limit. Nothing was created. */
+  CONNECTOR_PROJECT_NAME_TOO_LONG: 'CONNECTOR_PROJECT_NAME_TOO_LONG',
+  /** The project key could not be resolved for the folder. */
+  CONNECTOR_KEY_RESOLUTION_FAILED: 'CONNECTOR_KEY_RESOLUTION_FAILED',
+  /** The folder has an uncommitted or unpushed change; nothing was written into it. */
+  CONNECTOR_FOLDER_DIRTY: 'CONNECTOR_FOLDER_DIRTY',
+  /** The branch is protected (invite-only). */
+  CONNECTOR_BRANCH_PROTECTED: 'CONNECTOR_BRANCH_PROTECTED',
+  /** The folder has no keep.lock, or is not on a branch after checkout. */
+  CONNECTOR_KEEP_MISSING: 'CONNECTOR_KEEP_MISSING',
+  /** Switching the folder onto the branch failed. */
+  CONNECTOR_CHECKOUT_FAILED: 'CONNECTOR_CHECKOUT_FAILED',
+  /** git refused to read a repo's remote (for example "dubious ownership"); the repo is reported, not silently treated as unmatched. */
+  CONNECTOR_REMOTE_UNREADABLE: 'CONNECTOR_REMOTE_UNREADABLE',
+  /** The discovery commit was refused: a path it would commit already had uncommitted changes before the run. */
+  CONNECTOR_COMMIT_WOULD_MIX: 'CONNECTOR_COMMIT_WOULD_MIX',
+  /** The discovery commit was refused: the branch name is not a valid git branch name. */
+  CONNECTOR_COMMIT_BRANCH_INVALID: 'CONNECTOR_COMMIT_BRANCH_INVALID',
+  /** The discovery commit was refused: the branch name is already taken. */
+  CONNECTOR_COMMIT_BRANCH_EXISTS: 'CONNECTOR_COMMIT_BRANCH_EXISTS',
+  /** The discovery commit was refused: the repo has no git identity (user.name / user.email). */
+  CONNECTOR_GIT_IDENTITY_MISSING: 'CONNECTOR_GIT_IDENTITY_MISSING',
+  /** The discovery commit failed in git and was rolled back. */
+  CONNECTOR_COMMIT_FAILED: 'CONNECTOR_COMMIT_FAILED',
   // --- Piped values: `<cmd> | capy edit NAME`, `<cmd> | capy add NAME` ---
   /**
    * `capy edit` with no name and no terminal. There is nothing to draw the

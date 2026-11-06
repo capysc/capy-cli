@@ -43,6 +43,7 @@ import { hashValue } from '../../src/commands/statusCommand';
 import { Encryptor } from '../../src/crypto/encryptor';
 import { SyncEngine } from '../../src/sync/syncEngine';
 import { fakeCapyServer } from '../helpers/fakeCapyServer';
+import { EMPTY_ENV_BLOB } from '../../src/sync/commit';
 import { FileManager } from '../../src/files/fileManager';
 import { ProjectManager } from '../../src/core/projectManager';
 import { upsertTarget } from '../../src/deploy/config';
@@ -291,7 +292,8 @@ describe('removeAndSync', () => {
       await removeAndSync(ctx, ['ONLY_ONE']);
 
       expect(server.pushSecrets.mock.calls.length).toBe(1);
-      expect(server.pushSecrets.mock.calls[0][2]).toBe('');
+      // A branch with no variables is stored as a comment line: the service refuses an empty env_blob.
+      expect(server.pushSecrets.mock.calls[0][2]).toBe(EMPTY_ENV_BLOB);
       const pushedKeep = JSON.parse(server.pushSecrets.mock.calls[0][1] as string) as KeepFile;
       expect(Object.keys(pushedKeep.variables)).toEqual([]);
     });

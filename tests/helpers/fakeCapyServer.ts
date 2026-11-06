@@ -149,6 +149,10 @@ export function fakeCapyServer(opts: FakeServerOpts = {}) {
 
   const pushSecrets = mock(async (projectId: string, keepFile: string, envBlob: string, branch: string, _onRate?: unknown, baseKeepHash?: string) => {
     const call: PushCall = { projectId, keepFile, envBlob, branch, baseKeepHash };
+    // The real service's first check (service/src/routes/secrets.ts): an empty keep_file or env_blob is a 400, not a save.
+    if (!keepFile || !envBlob) {
+      throw new CapyError('keep_file and env_blob are required', ERROR_CODES.SERVICE_ERROR, { status: 400 });
+    }
     const before = stateNow();
     tape(call);
     if (staleAgainst(before, call)) {

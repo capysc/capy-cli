@@ -663,6 +663,8 @@ export interface DokploySystemStoreCallOptions {
   interactive: boolean;
   devMode?: boolean;
   apiUrl?: string;
+  /** The Dokploy dashboard URL, so the prompt can link to the page that makes the key. Absent = the docs link. */
+  helpBaseUrl?: string;
 }
 
 export interface ResolveDokployApiKeyDeps {
@@ -718,6 +720,8 @@ export interface ResolveDokployApiKeyOptions {
   orgId?: string;
   devMode?: boolean;
   apiUrl?: string;
+  /** The Dokploy dashboard URL, passed to the store so the key prompt can link to the page that makes the key. */
+  helpBaseUrl?: string;
   deps?: ResolveDokployApiKeyDeps;
   /**
    * Which system store entry to ask for (CAP-679 follow-up: deploy and
@@ -771,6 +775,7 @@ export async function resolveDokployApiKey(
       interactive: opts.interactive,
       devMode: opts.devMode,
       apiUrl: opts.apiUrl,
+      ...(opts.helpBaseUrl ? { helpBaseUrl: opts.helpBaseUrl } : {}),
     },
     opts.storeName ?? DOKPLOY_CONNECTOR_SECRET_NAME,
   );
@@ -1796,6 +1801,8 @@ export async function classifyImportCandidates(
     interactive: boolean;
     /** Names only — never the value on either side. */
     confirm: (message: string, defaultValue: boolean) => Promise<boolean>;
+    /** The provider the value comes from, for the replace prompt. Default `Dokploy` — every existing caller's wording is unchanged. */
+    providerLabel?: string;
   },
 ): Promise<ImportClassified> {
   return candidates.reduce<Promise<ImportClassified>>(async (accPromise, e) => {
@@ -1813,7 +1820,7 @@ export async function classifyImportCandidates(
     if (opts.interactive) {
       // COPY-FLAG: new user-facing string, minimal/neutral wording.
       const replace = await opts.confirm(
-        `${e.name} is already set locally with a different value. Replace it with the Dokploy value?`,
+        `${e.name} is already set locally with a different value. Replace it with the ${opts.providerLabel ?? 'Dokploy'} value?`,
         false,
       );
       return replace

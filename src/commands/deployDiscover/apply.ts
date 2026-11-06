@@ -20,7 +20,8 @@ import { ERROR_CODES } from '../../types/index';
 import type { TargetConfig } from '../../deploy/adapter';
 import type { GithubApi, RepoRef } from '../../deploy/githubApi';
 import { codeForApiFailure, openFilesPullRequest, resolveDefaultBase } from '../keepLockPr';
-import { ExistingTarget, ParsedDeployJson, byText, configuredTarget, parseDeployJson, uniqueSorted } from './facts';
+import { ExistingTarget, ParsedDeployJson, ServiceFacts, byText, configuredTarget, parseDeployJson, uniqueSorted } from './facts';
+import type { KindOverrides } from './kind';
 import { TargetToWrite, uniqueName } from './evaluate';
 import { sortedCopy } from '../../deploy/dokployApi';
 
@@ -58,6 +59,8 @@ export interface ApplyResult {
 export interface ApplyDeps {
   readonly github: GithubApi | undefined;
   readonly branchName: () => string;
+  /** The provider's overrides; absent: Dokploy. */
+  readonly kind?: KindOverrides;
 }
 
 const repoLabel = (repo: RepoRef): string => `${repo.owner}/${repo.name}`;
@@ -72,8 +75,7 @@ export function mergeDeployJson(parsed: Extract<ParsedDeployJson, { ok: true }>,
 
 interface WrittenTarget {
   readonly target: TargetConfig;
-  readonly serviceKind: 'application' | 'compose';
-  readonly serviceId: string;
+  readonly service: ServiceFacts;
 }
 
 interface FilePlan {
@@ -90,26 +92,28 @@ async function planFile(
   base: string,
   path: string,
   targets: readonly TargetToWrite[],
+  kind?: KindOverrides,
 ): Promise<{ readonly ok: true; readonly plan: FilePlan } | { readonly ok: false; readonly code: string }> {
+  const configured = (existing: readonly ExistingTarget[], t: TargetToWrite): ExistingTarget | undefined =>
+    kind === undefined ? configuredTarget(existing, t.service.service_id, t.entry.branch) : kind.configured(existing, t.service, t.entry.branch);
   const read = await github.getFile(repo, path, base);
   if (!read.ok) return { ok: false, code: codeForApiFailure(read, ERROR_CODES.KEEP_PR_READ_FAILED) };
   const parsed = parseDeployJson(read.value);
   if (!parsed.ok) return { ok: false, code: ERROR_CODES.KEEP_PR_READ_FAILED };
   const already = targets.flatMap((t): AppliedAlready[] => {
-    const hit = configuredTarget(parsed.targets, t.service.service_id, t.entry.branch);
+    const hit = configured(parsed.targets, t);
     return hit === undefined
       ? []
       : [{ repo: repoLabel(repo), path, branch: t.entry.branch, service_id: t.service.service_id, target_name: hit.name }];
   });
-  const fresh = targets.filter((t) => configuredTarget(parsed.targets, t.service.service_id, t.entry.branch) === undefined);
+  const fresh = targets.filter((t) => configured(parsed.targets, t) === undefined);
   const named = fresh.reduce<readonly WrittenTarget[]>((acc, t) => {
     const taken = new Set([...parsed.targets.map((x: ExistingTarget) => x.name), ...acc.map((x) => x.target.name)]);
     return [
       ...acc,
       {
         target: { ...t.target, name: uniqueName(t.target.name, taken) },
-        serviceKind: t.service.kind,
-        serviceId: t.service.service_id,
+        service: t.service,
       },
     ];
   }, []);
@@ -125,19 +129,21 @@ async function planFile(
 }
 
 // COPY-FLAG: new user-facing strings (the commit message and the PR body), names and ids only.
-function wording(repo: RepoRef, files: readonly FilePlan[]) {
+function wording(repo: RepoRef, files: readonly FilePlan[], kind?: KindOverrides) {
+  const title = kind?.pr.title ?? PR_TITLE;
   const lines = files.flatMap((f) =>
-    f.written.map(
-      (w) =>
-        `- \`${w.target.name}\` in \`${f.path}\`: Capy branch \`${w.target.branch}\`, Dokploy ${w.serviceKind} \`${w.serviceId}\`, git branch \`${w.target.gitBaseBranch ?? ''}\``,
+    f.written.map((w) =>
+      kind !== undefined
+        ? kind.pr.line({ target: w.target, path: f.path, service: w.service })
+        : `- \`${w.target.name}\` in \`${f.path}\`: Capy branch \`${w.target.branch}\`, Dokploy ${w.service.kind} \`${w.service.service_id}\`, git branch \`${w.target.gitBaseBranch ?? ''}\``,
     ),
   );
   const names = files.flatMap((f) => f.written.map((w) => w.target.name));
   return {
-    commitMessage: [PR_TITLE, '', `Targets: ${names.join(', ')}`].join('\n'),
-    title: PR_TITLE,
+    commitMessage: [title, '', `Targets: ${names.join(', ')}`].join('\n'),
+    title,
     body: [
-      'Adds Dokploy deploy targets to `.capy/deploy.json`.',
+      kind?.pr.intro ?? 'Adds Dokploy deploy targets to `.capy/deploy.json`.',
       '',
       ...lines,
       '',
@@ -163,7 +169,7 @@ async function applyRepo(repo: RepoRef, targets: readonly TargetToWrite[], deps:
   const paths = uniqueSorted(targets.map((t) => t.file));
   const planned = await Promise.all(
     paths.map((path) =>
-      planFile(github, repo, base.base, path, targets.filter((t) => t.file === path)),
+      planFile(github, repo, base.base, path, targets.filter((t) => t.file === path), deps.kind),
     ),
   );
   const failedRead = planned.find((p) => !p.ok);
@@ -173,7 +179,7 @@ async function applyRepo(repo: RepoRef, targets: readonly TargetToWrite[], deps:
   const changed = files.filter((f) => f.written.length > 0);
   if (changed.length === 0) return { kind: 'unchanged', already };
 
-  const words = wording(repo, changed);
+  const words = wording(repo, changed, deps.kind);
   const opened = await openFilesPullRequest(
     {
       repo,

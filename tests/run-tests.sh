@@ -65,6 +65,7 @@ ISOLATED_FILES=(
   tests/commands/rotatePromotesThenRotates.test.ts
   tests/commands/rotateRefusals.test.ts
   tests/commands/removeCommand.test.ts
+  tests/commands/editNamePrompt.test.ts
   tests/commands/connectDokploy.test.ts
   tests/commands/gateFirst.test.ts
   tests/commands/bootstrapNoSecrets.test.ts
@@ -80,6 +81,11 @@ ISOLATED_FILES=(
   tests/commands/agentsCommand.test.ts
   tests/commands/transportCommand.test.ts
   tests/commands/pairCommand.test.ts
+  tests/commands/deployVercelApiMode.test.ts
+  tests/deploy/vercelApiModeTokenStore.test.ts
+  tests/commands/systemSetKeyHelp.test.ts
+  tests/commands/deployVercelSetupPicker.test.ts
+  tests/deploy/vercelSetupTokenStore.test.ts
   # Reads process.stdout.isTTY/columns/rows directly; on CI's Linux runner an
   # earlier batch file left isTTY unassignable ("readonly property").
   tests/ui/terminalQr.test.ts

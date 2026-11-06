@@ -47,6 +47,7 @@ import {
   setSyncKeepHash,
 } from '../types/index';
 import { SYSTEM_PROJECT_NAME } from './reservedProjectName';
+import { formatKeyHelp, keyHelpForName } from '../deploy/keyHelp';
 
 export { SYSTEM_PROJECT_NAME } from './reservedProjectName';
 
@@ -403,6 +404,56 @@ export interface GetConnectorSecretOptions {
   devMode?: boolean;
   /** No terminal → never prompts; a missing entry resolves to `null`. */
   interactive: boolean;
+  /** Where the caller's service lives (Dokploy's dashboard URL), so the key help can link to the page that makes the key. */
+  helpBaseUrl?: string;
+  /** The slug of the Vercel team that owns the project, when known, so the token instructions can name it. */
+  helpTeam?: string;
+}
+
+/** Before a hidden key prompt: where to get that key, for the four known key names ("paste it here" — the prompt is right below). Stderr, so it never mixes with machine output. */
+function printKeyHelpBeforePrompt(name: string, helpBaseUrl: string | undefined, helpTeam: string | undefined): void {
+  const help = keyHelpForName(name, { baseUrl: helpBaseUrl, team: helpTeam, mode: 'paste' });
+  if (help) console.error(formatKeyHelp(help));
+}
+
+/**
+ * The hidden prompt for one secret, then the save, then one line saying it was
+ * saved (the name only, never the value). The line goes to stderr with the key
+ * help, so it never mixes with machine output. An empty answer saves nothing.
+ */
+async function promptAndSaveSecret(
+  ctx: SystemStoreContext,
+  name: string,
+  help: { baseUrl: string | undefined; team: string | undefined },
+): Promise<string | null> {
+  printKeyHelpBeforePrompt(name, help.baseUrl, help.team);
+
+  const { value } = await inquirer.prompt([
+    {
+      type: 'password',
+      name: 'value',
+      message: `Enter a value for ${name}:`, // COPY-FLAG
+      mask: '*',
+    },
+  ]);
+  const trimmed = typeof value === 'string' ? value.trim() : '';
+  if (!trimmed) return null;
+
+  await commitSystemStore(ctx, setting(name, trimmed));
+  process.stderr.write(`Saved ${name} in the org system store.\n`); // COPY-FLAG
+  return trimmed;
+}
+
+/**
+ * Asks for a NEW value of a connector's secret (hidden input) and saves it
+ * over the stored one, through the same save path as the first-use prompt.
+ * Opening the store requires org owner/admin: anyone else gets the store's own
+ * coded refusal. Returns `null` when nothing was entered (nothing is saved).
+ */
+export async function replaceConnectorSecret(name: string, opts: GetConnectorSecretOptions): Promise<string | null> {
+  assertValidConnectorName(name);
+  const ctx = await openSystemStoreContext(opts);
+  return promptAndSaveSecret(ctx, name, { baseUrl: opts.helpBaseUrl, team: opts.helpTeam });
 }
 
 /**
@@ -422,19 +473,7 @@ export async function getConnectorSecret(name: string, opts: GetConnectorSecretO
   if (existing !== null) return existing;
   if (!opts.interactive) return null;
 
-  const { value } = await inquirer.prompt([
-    {
-      type: 'password',
-      name: 'value',
-      message: `Enter a value for ${name}:`, // COPY-FLAG
-      mask: '*',
-    },
-  ]);
-  const trimmed = typeof value === 'string' ? value.trim() : '';
-  if (!trimmed) return null;
-
-  await commitSystemStore(ctx, setting(name, trimmed));
-  return trimmed;
+  return promptAndSaveSecret(ctx, name, { baseUrl: opts.helpBaseUrl, team: opts.helpTeam });
 }
 
 export interface GetDirectionalSecretOptions {
@@ -443,6 +482,10 @@ export interface GetDirectionalSecretOptions {
   devMode?: boolean;
   /** No terminal → never prompts; refuses instead when `fallbackName` has a value to offer (see below). */
   interactive: boolean;
+  /** Where the caller's service lives (Dokploy's dashboard URL), so the key help can link to the page that makes the key. */
+  helpBaseUrl?: string;
+  /** The slug of the Vercel team that owns the project, when known, so the token instructions can name it. */
+  helpTeam?: string;
   /**
    * Code to refuse with when `primaryName` is missing, `fallbackName` DOES
    * have a value, and there is no terminal to ask which one the caller
@@ -538,17 +581,5 @@ export async function getDirectionalConnectorSecret(
     // else "add new" — fall through to the same prompt case 2 uses.
   }
 
-  const { value } = await inquirer.prompt([
-    {
-      type: 'password',
-      name: 'value',
-      message: `Enter a value for ${primaryName}:`, // COPY-FLAG
-      mask: '*',
-    },
-  ]);
-  const trimmed = typeof value === 'string' ? value.trim() : '';
-  if (!trimmed) return null;
-
-  await commitSystemStore(ctx, setting(primaryName, trimmed));
-  return trimmed;
+  return promptAndSaveSecret(ctx, primaryName, { baseUrl: opts.helpBaseUrl, team: opts.helpTeam });
 }

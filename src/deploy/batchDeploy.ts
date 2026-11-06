@@ -38,7 +38,7 @@ import type { GithubApi, RepoRef } from './githubApi';
 import type { ResolveDokployApiKeyResult } from './adapters/dokploy';
 import { createDokployAdapter } from './adapters/dokploy';
 import { resolveDokployApiKeyOnce } from './dokployApiKeyOnce';
-import { RecordClient, RecordResult, deliveryFor, recordDeliveriesOnServer } from './deliveryRecord';
+import { RecordClient, RecordResult, deliveredBefore, deliveryFor, recordDeliveriesOnServer } from './deliveryRecord';
 import { buildDeployPrBody } from './deployPrBody';
 import { foldDeployKeep, hashValue } from './keepGate';
 import { parseTargets } from './configuredTargets';
@@ -618,6 +618,8 @@ async function passOverTarget(
     noDeploy: false,
     keepOtherManaged: true,
     cwd: process.cwd(),
+    // Vercel API mode: a value Vercel holds as sensitive is replaced here only where Capy delivered it before (this pass asks nobody).
+    sensitiveReplace: { delivered: deliveredBefore(serverKeep, { ...effective.config, branch: item.branch }, env.adapter), allowed: false },
     ...callCtx,
     ...(targetCheck === undefined ? {} : { targetCheck }),
   };

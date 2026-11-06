@@ -1,5 +1,7 @@
 import { resolveContext, writeAndSync, writeImportOutcome, ResolvedContext } from './connectors/shared';
-import { listProviders, loadProvider, ConnectOpts, ConnectorModule } from './connectors/registry';
+import { keptReport, placeholderSetCommand, placeholdersReport } from '../core/placeholder';
+import { listProviders, loadProvider, ConnectFailure, ConnectOpts, ConnectorModule } from './connectors/registry';
+import { formatKeyHelp } from '../deploy/keyHelp';
 import { EXIT_NEEDS_INPUT, isInteractive } from '../ui/interactive';
 import { resolveOrgContext } from '../core/orgContext';
 import { conflictFlagsOrExit } from '../sync/conflicts';
@@ -7,6 +9,32 @@ import { gateFirst, type GateOptions } from '../sync/gate';
 import type { DiscoveryContext } from './connectors/dokployDiscovery';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
+
+/**
+ * A refusal, in the terminal or as one JSON object. `link` + `remedy` (where to
+ * get a missing key, and what to do) and `unanswered` are added only when the
+ * connector set them. Human text goes to stderr, never stdout.
+ */
+function printFailure(outcome: ConnectFailure, json: boolean): void {
+  if (json) {
+    console.log(
+      JSON.stringify({
+        ok: false,
+        code: outcome.code,
+        message: outcome.message,
+        ...(outcome.unanswered === undefined ? {} : { unanswered: outcome.unanswered }),
+        ...(outcome.link ? { link: outcome.link } : {}),
+        ...(outcome.remedy ? { remedy: outcome.remedy } : {}),
+      }),
+    );
+    return;
+  }
+  console.error(`\n  ${outcome.message}`);
+  // The refusal says what is still needed, as flags: print each hint beside it.
+  (outcome.unanswered ?? []).forEach((u) => console.error(`  ${u.flag}: ${u.hint}`));
+  console.error('');
+  if (outcome.remedy) console.error(formatKeyHelp({ remedy: outcome.remedy, lines: outcome.remedy.split('\n') }) + '\n');
+}
 
 /** A refusal that only a flag (or a person) can answer exits `EXIT_NEEDS_INPUT`, so an agent branches on it; every other refusal exits 1. */
 function exitCodeForRefusalCode(code: string): number {
@@ -214,23 +242,12 @@ export class ConnectCommand {
     opts: ConnectOpts,
   ): Promise<{ linked: boolean }> {
     const outcome = await mod.import!(ctx, opts);
+    // "from Dokploy" / "from Vercel": omitted `displayName` is Dokploy, the
+    // only import connector that predates the field (its output is unchanged).
+    const label = mod.displayName ?? 'Dokploy';
 
     if (!outcome.ok) {
-      if (opts.json) {
-        console.log(
-          JSON.stringify({
-            ok: false,
-            code: outcome.code,
-            message: outcome.message,
-            ...(outcome.unanswered === undefined ? {} : { unanswered: outcome.unanswered }),
-          }),
-        );
-      } else {
-        console.error(`\n  ${outcome.message}`);
-        // The refusal says what is still needed, as flags: print each hint beside it.
-        (outcome.unanswered ?? []).forEach((u) => console.error(`  ${u.flag}: ${u.hint}`));
-        console.error('');
-      }
+      printFailure(outcome, !!opts.json);
       process.exitCode = exitCodeForRefusalCode(outcome.code);
       return { linked: false };
     }
@@ -247,7 +264,9 @@ export class ConnectCommand {
     const { wrote } = await writeImportOutcome(ctx, outcome, { push: !opts.noPush, dryRun });
     const pushed = !opts.noPush && wrote;
     const cleared = outcome.cleared ?? [];
-    const hasChange = outcome.imported.length > 0 || cleared.length > 0;
+    const placeholders = outcome.placeholders ?? [];
+    const kept = outcome.kept ?? [];
+    const hasChange = outcome.imported.length > 0 || cleared.length > 0 || placeholders.length > 0;
 
     if (opts.json) {
       console.log(
@@ -264,6 +283,10 @@ export class ConnectCommand {
           unchanged: outcome.unchanged,
           ...(outcome.wouldAsk ? { wouldAsk: outcome.wouldAsk } : {}),
           skipped: outcome.skipped,
+          // Names Vercel has but will not give back: recorded with no value (names and codes only).
+          ...(outcome.placeholders ? { placeholders: placeholdersReport(outcome.placeholders) } : {}),
+          // Names Vercel will not give back where Capy already has a value: left untouched (names and codes only).
+          ...(outcome.kept ? { kept: keptReport(outcome.kept) } : {}),
           warnings: outcome.warnings,
           pushed,
         }),
@@ -277,7 +300,7 @@ export class ConnectCommand {
       console.log(dryRun ? '  Nothing to import.' : '  Nothing new to import.');
     } else if (dryRun) {
       if (outcome.imported.length > 0) {
-        console.log(`  Would import ${outcome.imported.map((e) => B(e.varName)).join(', ')} from Dokploy.`);
+        console.log(`  Would import ${outcome.imported.map((e) => B(e.varName)).join(', ')} from ${label}.`);
       }
       if (cleared.length > 0) {
         console.log(`  Would clear: ${cleared.join(', ')}`);
@@ -285,11 +308,11 @@ export class ConnectCommand {
     } else {
       if (outcome.imported.length > 0) {
         console.log(
-          `  ✓ Imported ${outcome.imported.map((e) => B(e.varName)).join(', ')} from Dokploy` +
+          `  ✓ Imported ${outcome.imported.map((e) => B(e.varName)).join(', ')} from ${label}` +
             `${pushed ? ' and pushed' : ' (not pushed)'}.`,
         );
-      } else {
-        console.log(`  ✓ Cleared from Dokploy${pushed ? ' and pushed' : ' (not pushed)'}.`);
+      } else if (cleared.length > 0) {
+        console.log(`  ✓ Cleared from ${label}${pushed ? ' and pushed' : ' (not pushed)'}.`);
       }
       if (cleared.length > 0) {
         console.log(`  Cleared: ${cleared.join(', ')}`);
@@ -303,6 +326,15 @@ export class ConnectCommand {
     }
     if (outcome.wouldAsk && outcome.wouldAsk.length > 0) {
       console.log(`  Conflicts (would ask): ${outcome.wouldAsk.join(', ')}`);
+    }
+    if (placeholders.length > 0) {
+      // COPY-FLAG: new user-facing string, minimal/neutral wording.
+      console.log(`  ${dryRun ? 'Would record' : 'Recorded'} with no value yet: ${placeholders.map((p) => `${p.name} (${p.code})`).join(', ')}`);
+      console.log(`  Set one with: ${placeholderSetCommand('NAME')}`); // COPY-FLAG
+    }
+    if (kept.length > 0) {
+      // COPY-FLAG: new user-facing string, minimal/neutral wording.
+      console.log(`  Kept the Capy value for ${kept.length} name(s) Vercel will not return: ${kept.map((k) => `${k.name} (${k.reason})`).join(', ')}`);
     }
     if (outcome.skipped.length > 0) {
       console.log(`  Skipped: ${outcome.skipped.map((s) => `${s.name} (${s.code})`).join(', ')}`);
@@ -328,21 +360,13 @@ export class ConnectCommand {
     const outcome = await mod.discover!(ctx, opts);
 
     if (!outcome.ok) {
-      if (opts.json) {
-        console.log(
-          JSON.stringify({
-            ok: false,
-            code: outcome.code,
-            message: outcome.message,
-            ...(outcome.unanswered === undefined ? {} : { unanswered: outcome.unanswered }),
-          }),
-        );
-      } else {
-        console.error(`\n  ${outcome.message}\n`);
-      }
+      printFailure(outcome, !!opts.json);
       process.exitCode = exitCodeForRefusalCode(outcome.code);
       return { linked: false };
     }
+
+    // A connector whose plan has its own shape (Vercel) reports it itself.
+    if (mod.reportDiscovery) return mod.reportDiscovery(outcome, opts, provider);
 
     const planForOutput = {
       ...(outcome.plan.environmentFilter ? { environmentFilter: outcome.plan.environmentFilter } : {}),
@@ -398,6 +422,8 @@ export class ConnectCommand {
               ...(e.outcome.cleared ? { cleared: e.outcome.cleared } : {}),
               unchanged: e.outcome.unchanged,
               skipped: e.outcome.skipped,
+              ...(e.outcome.placeholders ? { placeholders: placeholdersReport(e.outcome.placeholders) } : {}),
+              ...(e.outcome.kept ? { kept: keptReport(e.outcome.kept) } : {}),
               warnings: e.outcome.warnings,
             })),
           }
@@ -418,6 +444,8 @@ export class ConnectCommand {
               ...(e.outcome.cleared ? { cleared: e.outcome.cleared } : {}),
               unchanged: e.outcome.unchanged,
               skipped: e.outcome.skipped,
+              ...(e.outcome.placeholders ? { placeholders: placeholdersReport(e.outcome.placeholders) } : {}),
+              ...(e.outcome.kept ? { kept: keptReport(e.outcome.kept) } : {}),
               warnings: e.outcome.warnings,
             })),
           },
@@ -432,7 +460,7 @@ export class ConnectCommand {
     const linked =
       !!outcome.applied &&
       outcome.applied.some((f) =>
-        f.environments.some((e) => e.outcome.imported.length > 0 || (e.outcome.cleared?.length ?? 0) > 0),
+        f.environments.some((e) => e.outcome.imported.length > 0 || (e.outcome.cleared?.length ?? 0) > 0 || (e.outcome.placeholders?.length ?? 0) > 0),
       );
     // A per-folder failure still lets the OTHER folders' steps run (see
     // `runDiscoverySequences`) — but the run as a whole did not fully

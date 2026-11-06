@@ -2,7 +2,7 @@
 
 # capy CLI reference
 
-Version `0.9.13`. Generated from `capy help --json`.
+Version `0.9.14`. Generated from `capy help --json`.
 
 ## Commands
 
@@ -34,7 +34,7 @@ JSON support: yes (`--json`)
 
 ## `capy edit`
 
-Inspect and edit secrets in an interactive TUI, or set one variable from a piped value
+Inspect and edit secrets in an interactive TUI, or set one variable from a hidden prompt or a piped value
 
 ```
 capy edit [name] [options]
@@ -42,7 +42,7 @@ capy edit [name] [options]
 
 | Option | Description | Default |
 |---|---|---|
-| `--no-push` | piped value: write .env only; do not push to Capy |  |
+| `--no-push` | with a name: write .env only; do not push to Capy |  |
 | `--json` | emit machine-readable JSON instead of the human UI (piped value) |  |
 | `--non-tty` | treat stdin as not a terminal; never prompt (agents/CI) |  |
 | `--pr` | create a PR with the keep.lock change (answers the prompt) |  |
@@ -127,10 +127,11 @@ capy deploy [target] [options]
 | `--scope <scope>` | gh-actions: "repo" or "env" |  |
 | `--env-name <name>` | gh-actions: env name when --scope env |  |
 | `--no-deploy` | write and verify the target, but skip the platform deploy/redeploy (target mode) |  |
+| `--replace-sensitive` | vercel: allow replacing a value Vercel holds as sensitive, for the first time for a target, without asking |  |
 | `--json` | describe the route (unanswered stops + any known branch problem) as JSON instead of travelling it |  |
-| `--discover` | dokploy: find the services that match Capy projects and print JSON (never prompts) |  |
-| `--plan <file>` | dokploy --discover: the plan file to check (see schemas.deploy_dokploy_plan in `capy help --json`) |  |
-| `--confirm <plan_id>` | dokploy --discover: write the plan that --dry-run printed (one PR per repo) |  |
+| `--discover` | dokploy/vercel: find the services that match Capy projects and print JSON (never prompts) |  |
+| `--plan <file>` | dokploy/vercel --discover: the plan file to check (see schemas.deploy_dokploy_plan and schemas.deploy_vercel_plan in `capy help --json`) |  |
+| `--confirm <plan_id>` | dokploy/vercel --discover: write the plan that --dry-run printed (one PR per repo) |  |
 | `--base-url <url>` | dokploy --discover: the Dokploy dashboard URL (else the org system variable _CONNECTOR_DOKPLOY_BASE_URL) |  |
 | `--resolve <NAME=pinned|local|remote|delete>` | answer a difference from Capy: pinned, local, remote or delete; NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict) | `[]` |
 | `--conflict <conflict_id>` | the conflict_id a conflict returned: binds --resolve to what was seen |  |
@@ -728,13 +729,15 @@ capy connect [provider] [options]
 | `--base-url <url>` | dokploy import: dashboard URL |  |
 | `--application <id>` | dokploy import: Application id (mutually exclusive with --compose) |  |
 | `--compose <id>` | dokploy import: Compose service id (mutually exclusive with --application) |  |
-| `--token-env <name>` | dokploy import: env var holding the API token |  |
+| `--token-env <name>` | dokploy/vercel import: env var holding the API token |  |
+| `--project <project>` | vercel import: Vercel project id or name (under --discover: the project that wins a mapping collision) |  |
+| `--team <team>` | vercel import/discover: Vercel team slug or id (default: the token's only team) |  |
 | `--json` | emit machine-readable JSON instead of the human UI (import connectors) |  |
 | `--dry-run` | dokploy import/discover: preview the plan only — resolve settings + read Dokploy, write/push nothing |  |
-| `--discover` | dokploy: find every Dokploy service matching a repo under cwd, instead of one named --application/--compose |  |
+| `--discover` | dokploy/vercel: find every Dokploy service / Vercel project matching a repo under cwd, instead of one named --application/--compose/--project |  |
 | `-y, --yes` | dokploy import/discover: skip the confirmation prompt (import: --overwrite's clear/replace/import ask) — discover never prompts and needs --yes to write |  |
 | `--overwrite` | dokploy import: set the branch's vars to EXACTLY Dokploy's set — clear names not in Dokploy, replace differing values, import new ones |  |
-| `--environment <names>` | dokploy discover: restrict the plan to these Dokploy environment names, comma-separated (e.g. staging,preview) |  |
+| `--environment <names>` | dokploy/vercel discover: restrict the plan to these environment names, comma-separated (e.g. staging,preview); vercel import: which Vercel environment to read (default: the current branch's name) |  |
 | `--resolve <NAME=pinned|local|remote|delete>` | answer a difference from Capy: pinned, local, remote or delete; NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict) | `[]` |
 | `--conflict <conflict_id>` | the conflict_id a conflict returned: binds --resolve to what was seen |  |
 
@@ -845,6 +848,72 @@ JSON Schemas of the files commands read, as published under `schemas` in `capy h
 }
 ```
 
+### `deploy_vercel_plan`
+
+```json
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "capy deploy vercel --discover plan",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "entries"
+  ],
+  "properties": {
+    "version": {
+      "const": 1
+    },
+    "entries": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "project_id",
+          "branch",
+          "service_id",
+          "git_branch",
+          "vars"
+        ],
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Capy project id"
+          },
+          "branch": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Capy branch the target ships from"
+          },
+          "service_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Vercel environment id from the discovery facts (a project plus one of its environments)"
+          },
+          "git_branch": {
+            "type": "string",
+            "minLength": 1,
+            "description": "git branch the Vercel project deploys from (the CI deploy PR base)"
+          },
+          "vars": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+            },
+            "description": "Variable names the target delivers; each must exist on the Capy branch"
+          }
+        }
+      }
+    }
+  }
+}
+```
+
 ## Error codes
 
 Every refusal carries a stable `code` — branch on it, never on message text.
@@ -931,6 +1000,50 @@ Every refusal carries a stable `code` — branch on it, never on message text.
 - `CI_DEPLOY_TARGETS_RECORD_FAILED`
 - `DEPLOY_STALE_KEEP`
 - `DEPLOY_TOKEN_UNTRACKED`
+- `VERCEL_TOKEN_MISSING`
+- `VERCEL_CONNECTOR_KEY_MISSING`
+- `VERCEL_AUTH_FAILED`
+- `VERCEL_API_ERROR`
+- `VERCEL_RATE_LIMITED`
+- `VERCEL_TEAM_REQUIRED`
+- `VERCEL_TEAM_NOT_FOUND`
+- `VERCEL_PROJECT_REQUIRED`
+- `VERCEL_PROJECT_NOT_FOUND`
+- `VERCEL_ENVIRONMENT_REQUIRED`
+- `VERCEL_ENVIRONMENT_NOT_FOUND`
+- `VERCEL_CONFIRMATION_REQUIRED`
+- `VERCEL_MAPPING_COLLISION`
+- `VERCEL_TARGET_KEY_MISSING`
+- `VERCEL_TOKEN_REJECTED`
+- `VERCEL_NO_ACCESS`
+- `VERCEL_NETWORK_ERROR`
+- `VERCEL_VERIFY_MISMATCH`
+- `VERCEL_OPTIONS_INVALID`
+- `VERCEL_SPLIT_NOT_RESTORED`
+- `VERCEL_URL_INVALID`
+- `VERCEL_SENSITIVE_REPLACE_UNCONFIRMED`
+- `VERCEL_PROJECT_NOT_GITHUB`
+- `VERCEL_ENV_LIST_TRUNCATED`
+- `VERCEL_PREVIEW_DEPLOYMENTS_UNAVAILABLE`
+- `CAPY_VALUE_KEPT`
+- `CONNECTOR_PUSH_FAILED`
+- `CONNECTOR_FOLDER_NOT_INITIALIZED`
+- `CONNECTOR_PROJECT_LOOKUP_FAILED`
+- `CONNECTOR_PROJECT_NAME_EXISTS`
+- `CONNECTOR_PROJECT_NOT_FOUND`
+- `CONNECTOR_INIT_FAILED`
+- `CONNECTOR_PROJECT_NAME_TOO_LONG`
+- `CONNECTOR_KEY_RESOLUTION_FAILED`
+- `CONNECTOR_FOLDER_DIRTY`
+- `CONNECTOR_BRANCH_PROTECTED`
+- `CONNECTOR_KEEP_MISSING`
+- `CONNECTOR_CHECKOUT_FAILED`
+- `CONNECTOR_REMOTE_UNREADABLE`
+- `CONNECTOR_COMMIT_WOULD_MIX`
+- `CONNECTOR_COMMIT_BRANCH_INVALID`
+- `CONNECTOR_COMMIT_BRANCH_EXISTS`
+- `CONNECTOR_GIT_IDENTITY_MISSING`
+- `CONNECTOR_COMMIT_FAILED`
 - `EDIT_NEEDS_TTY`
 - `EDIT_STDIN_LOCAL_ONLY`
 - `STDIN_EMPTY`

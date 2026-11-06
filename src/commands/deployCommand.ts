@@ -13,6 +13,7 @@
 import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import { join, basename, dirname } from 'path';
 import inquirer from 'inquirer';
+import { formatKeyHelp } from '../deploy/keyHelp';
 import { FileManager } from '../files/fileManager';
 import {
   DeployAdapter,
@@ -65,6 +66,7 @@ import { SyncEngine } from '../sync/syncEngine';
 import type { AuthService } from '../auth/authService';
 import type { ServiceClient } from '../service/serviceClient';
 import { ProjectManager } from '../core/projectManager';
+import { placeholdersOnBranch } from '../core/placeholder';
 import { tmpdir } from 'os';
 import { ALL_ADAPTERS, getAdapter, listPlanned } from '../deploy/registry';
 import { detectAwsRegion, leafFor } from '../deploy/adapters/awsSsm';
@@ -88,7 +90,11 @@ import {
 import { classify, isBuildTime } from '../deploy/classify';
 import { buildDeployPrBody } from '../deploy/deployPrBody';
 import { resolveDokployApiKeyOnce } from '../deploy/dokployApiKeyOnce';
-import { deliveryFor, recordDeliveriesOnServer, targetRefFor } from '../deploy/deliveryRecord';
+import { resolveVercelTokenOnce } from '../deploy/vercelTokenOnce';
+import { resolveVercelSetup } from '../deploy/vercelSetup';
+import { isVercelApiMode } from '../deploy/vercelTargetApi';
+import type { AdapterCallContext } from '../deploy/adapter';
+import { deliveredBefore, deliveryFor, recordDeliveriesOnServer, targetRefFor } from '../deploy/deliveryRecord';
 import { deployPlan, unansweredDeployStops, type DeployStopId } from '../core/deployPlan';
 import {
   conflictFlagsOrExit,
@@ -151,6 +157,11 @@ export interface DeployCliOptions {
    * ships it later. `targets` are still recorded — the write happened.
    */
   noDeploy?: boolean;
+  /**
+   * `--replace-sensitive`: allow replacing a value Vercel holds as sensitive, for the first time for a target, without asking.
+   * Off a terminal this is the only yes; without it such a deploy is refused (`VERCEL_SENSITIVE_REPLACE_UNCONFIRMED`).
+   */
+  replaceSensitive?: boolean;
   /**
    * `--resolve` / `--conflict` as typed (CAP-717): they decide the conflicts between the folder, Capy and the
    * platform off a terminal. Without them such a conflict stops the deploy (exit 3, the payload on stdout).
@@ -410,6 +421,51 @@ async function loadDeploySecrets(
     console.error(`${RED('✗')} decrypt: ${err.message}`);
     return null;
   }
+}
+
+// ── Names with no value yet, and replacing a sensitive Vercel value ─────────
+
+/** The names the picker and the var-set check know on the active branch: the `.env` names, plus the placeholders (no value, but they exist). */
+function branchVarNames(cwd: string): ReadonlySet<string> {
+  const pm = new ProjectManager(cwd);
+  const branch = pm.deriveActiveBranch();
+  const placeholders = branch ? placeholdersOnBranch(pm.readKeepFile(), branch).map((p) => p.name) : [];
+  return new Set([...Object.keys(new FileManager(cwd).readEnvFile()), ...placeholders]);
+}
+
+/**
+ * What the adapter needs to leave placeholders alone and to ask before replacing a sensitive Vercel value for the first time.
+ * Read from keep.lock; the answer to the question is recorded by the delivery itself (`deliveredBefore`).
+ */
+function placeholderDeliveryContext(
+  cwd: string,
+  target: TargetConfig,
+  adapter: DeployAdapter,
+  options: DeployCliOptions,
+): Pick<DeployContext, 'placeholders' | 'sensitiveReplace'> {
+  const keep = new ProjectManager(cwd).readKeepFile();
+  const canAsk = process.stdin.isTTY === true && !options.yes && !options.json && !options.dryRun;
+  return {
+    placeholders: placeholdersOnBranch(keep, target.branch).map((p) => p.name),
+    sensitiveReplace: {
+      delivered: deliveredBefore(keep, target, adapter),
+      allowed: options.replaceSensitive === true,
+      ...(canAsk ? { ask: askToReplaceSensitive } : {}),
+    },
+  };
+}
+
+async function askToReplaceSensitive(names: readonly string[]): Promise<boolean> {
+  const ans = await inquirer.prompt([
+    {
+      type: 'confirm',
+      name: 'yes',
+      // COPY-FLAG: new user-facing string, minimal/neutral wording.
+      message: `Replace the value Vercel holds as sensitive for ${names.join(', ')}? Capy cannot read it, so it cannot tell whether it differs.`,
+      default: false,
+    },
+  ]);
+  return !!ans.yes;
 }
 
 // ── Targets recording (CAP-679) ─────────────────────────────────────────────
@@ -1159,6 +1215,8 @@ export async function resolveAdapterOptions(
    * existing caller that never had an org id to pass, is unaffected.
    */
   orgId?: string,
+  /** `readOnly`: a dry run — the Vercel setup may read the token from the store but never asks for or saves one. */
+  setup?: { readOnly?: boolean },
 ): Promise<Record<string, unknown>> {
   if (adapter.id === 'cf-worker') {
     return await inquirer.prompt([
@@ -1179,41 +1237,10 @@ export async function resolveAdapterOptions(
     ]);
   }
   if (adapter.id === 'vercel') {
-    // Vercel: code ships via the keep.lock PR (Vercel git CI builds on merge),
-    // but capy pushes each var as a plaintext Environment Variable into the
-    // chosen Vercel environment via the vercel CLI — so the build reads them
-    // natively with no `capy run` decrypt step. Capture the app dir, which
-    // Vercel environment these vars go to, and — for Preview — exactly which
-    // git branch that Preview env is wired to. The Preview scope is a GIT
-    // branch Vercel knows about, which is NOT a capy branch name nor necessarily
-    // the branch you're checked out on, so we pick from the repo's real branches.
-    const ans = await inquirer.prompt([
-      {
-        type: 'input',
-        name: 'projectDir',
-        message: 'Project directory (contains .vercel/project.json or package.json):',
-        default: existingOpts.projectDir ?? detectedOpts.projectDir ?? '.',
-        validate: (v: string) => (v.trim() ? true : 'required'),
-      },
-      {
-        type: 'list',
-        name: 'vercelEnv',
-        message: 'Which Vercel environment should these secrets go to?',
-        choices: [
-          { name: 'Preview — scoped to a specific git branch', value: 'preview' },
-          { name: 'Production', value: 'production' },
-        ],
-        default: existingOpts.vercelEnv ?? 'preview',
-      },
-    ]);
-    // Drop gitBranch entirely for production — it has no meaning there.
-    return ans.vercelEnv === 'preview'
-      ? {
-          projectDir: ans.projectDir,
-          vercelEnv: 'preview',
-          gitBranch: await promptVercelGitBranch(cwd, existingOpts.gitBranch),
-        }
-      : { projectDir: ans.projectDir, vercelEnv: 'production' };
+    // API mode only: the project's dashboard link (or name), checked live
+    // against Vercel. No `vercel` program, no `.vercel/project.json`, no
+    // `vercel link`. See `deploy/vercelSetup.ts`.
+    return (await resolveVercelSetup(existingOpts, orgId, { readOnly: setup?.readOnly })).options;
   }
   if (adapter.id === 'cf-pages') {
     return await inquirer.prompt([
@@ -1364,10 +1391,13 @@ async function resolveGitBaseBranch(
   cwd: string,
   mode: DeployMode,
   existing: TargetConfig | undefined,
+  /** A branch the platform itself names (Vercel's production branch): it leads the defaults. */
+  platformBranch?: string,
 ): Promise<string | undefined> {
   if (mode !== 'ci') return undefined;
   const local = listLocalBranches(cwd);
   const fallback =
+    platformBranch ??
     currentBranch(cwd) ??
     existing?.gitBaseBranch ??
     (local.includes('main') ? 'main' : local.includes('master') ? 'master' : 'main');
@@ -1417,12 +1447,14 @@ async function pickNewVars(target: TargetConfig, added: readonly string[]): Prom
   return ans.vars;
 }
 
-async function runPicker(
+export async function runPicker(
   cwd: string,
   keep: KeepInfo,
   existing?: TargetConfig,
   /** When set, skip adapter-selection (caller has already picked). */
   preselectedAdapterId?: string,
+  /** `readOnly`: a dry run — a setup question that would save a key to the store does not ask. */
+  setup?: { readOnly?: boolean },
 ): Promise<TargetConfig | null> {
   // Scope the picker to the ACTIVE branch's vars. keep.lock's `variables` is the
   // union across EVERY branch, so it would offer vars that only exist on
@@ -1434,7 +1466,7 @@ async function runPicker(
   // off a different directory is how the picker ends up ticking a variable the
   // target does not have. Identical whenever the two agree, which is every
   // production call.
-  const branchVarSet = new Set(Object.keys(new FileManager(cwd).readEnvFile()));
+  const branchVarSet = branchVarNames(cwd);
   const branchVars = keep.variables.filter((v) => branchVarSet.has(v));
 
   // 1. Pick adapter (when not pre-selected). Real adapters are selectable;
@@ -1469,7 +1501,12 @@ async function runPicker(
   // 4. Adapter-specific options.
   const detectedOpts = (detected.options ?? {}) as Record<string, string>;
   const existingOpts = (existing?.options ?? {}) as Record<string, string>;
-  const options = await resolveAdapterOptions(adapter, cwd, branchVars, detectedOpts, existingOpts, keep.orgId);
+  // Vercel's setup also learns the project's production branch, which becomes
+  // the default for the PR base branch below.
+  const vercelSetup = adapter.id === 'vercel' ? await resolveVercelSetup(existingOpts, keep.orgId, { readOnly: setup?.readOnly }) : undefined;
+  const options = vercelSetup
+    ? vercelSetup.options
+    : await resolveAdapterOptions(adapter, cwd, branchVars, detectedOpts, existingOpts, keep.orgId, setup);
 
   // 5. Var picking — show every var in keep.lock and pre-select the ones
   // most likely to be relevant for this adapter (runtime for cf-worker,
@@ -1525,7 +1562,7 @@ async function runPicker(
   // shape. Text entry defaulting to the current branch (you usually open the
   // PR against the branch you're on), then the existing target's saved value,
   // then main/master.
-  const gitBaseBranch = await resolveGitBaseBranch(cwd, mode, existing);
+  const gitBaseBranch = await resolveGitBaseBranch(cwd, mode, existing, vercelSetup?.productionBranch);
 
   // 7. Target name.
   const defaultName = existing?.name ?? `${adapter.id}-${branch}`;
@@ -1579,6 +1616,11 @@ export function pushedLine(target: TargetConfig, noDeploy: boolean): string {
   return noDeploy ? 'pushed, release not triggered' : `pushed to ${target.name}`;
 }
 
+/** A key refusal says where to get a key and what to do (stderr). Prints nothing for any other refusal. */
+function printKeyHelp(r: { link?: { label: string; url: string }; remedy?: string }): void {
+  if (r.link && r.remedy) console.error('\n' + formatKeyHelp({ remedy: r.remedy }) + '\n');
+}
+
 function renderResult(result: DeployResult): void {
   console.log('');
   for (const step of result.steps) {
@@ -1587,6 +1629,7 @@ function renderResult(result: DeployResult): void {
     const detail = step.detail ? `  ${DIM(step.detail)}` : '';
     const url = step.url ? `  ${step.url}` : '';
     console.log(`  ${mark} ${step.label}${detail}${url}`);
+    if (step.status === 'fail') printKeyHelp(step);
   }
   // `result.warnings` (e.g. Dokploy's DOKPLOY_SHADOWED_VAR) is printed once,
   // right after preflight (see the `preflight.warnings` loop above this
@@ -2163,8 +2206,10 @@ async function buildAndSaveTarget(
   existing: TargetConfig | undefined,
   preselectedAdapterId: string | undefined,
   announceSaved: boolean,
+  /** `readOnly`: a dry run — a setup question that would save a key to the store does not ask. */
+  setup?: { readOnly?: boolean },
 ): Promise<StepResult<TargetConfig>> {
-  const built = await runPicker(cwd, keep, existing, preselectedAdapterId);
+  const built = await runPicker(cwd, keep, existing, preselectedAdapterId, setup);
   if (!built) {
     console.log('Cancelled.');
     return stepStop(0);
@@ -2261,7 +2306,7 @@ async function resolveTargetById(
   const sameKind = listTargets(cwd).filter((t) => t.kind === adapter.id);
   const chosen = await chooseSavedTarget(sameKind, adapter);
   if (chosen !== '__new__') return stepOk(chosen);
-  return buildAndSaveTarget(cwd, keep, undefined, adapter.id, true);
+  return buildAndSaveTarget(cwd, keep, undefined, adapter.id, true, { readOnly: !!options.dryRun });
 }
 
 /** No name, no `--target`: picker on first use or `--edit`, the only saved target, or a list. */
@@ -2272,7 +2317,7 @@ async function resolveTargetInteractively(
 ): Promise<StepResult<TargetConfig>> {
   const targets = listTargets(cwd);
   if (targets.length === 0 || options.edit) {
-    return buildAndSaveTarget(cwd, keep, options.edit && targets.length === 1 ? targets[0] : undefined, undefined, true);
+    return buildAndSaveTarget(cwd, keep, options.edit && targets.length === 1 ? targets[0] : undefined, undefined, true, { readOnly: !!options.dryRun });
   }
   if (targets.length === 1) return stepOk(targets[0]);
 
@@ -2292,7 +2337,7 @@ async function resolveTargetInteractively(
       ],
     },
   ]);
-  if (ans.name === '__new__') return buildAndSaveTarget(cwd, keep, undefined, undefined, false);
+  if (ans.name === '__new__') return buildAndSaveTarget(cwd, keep, undefined, undefined, false, { readOnly: !!options.dryRun });
   return stepOk(targets.find((t) => t.name === ans.name)!);
 }
 
@@ -2327,7 +2372,9 @@ async function healVercelGitBranch(
   options: DeployCliOptions,
 ): Promise<StepResult<TargetConfig>> {
   const targetOpts = target.options as Record<string, unknown>;
-  if (!(target.kind === 'vercel' && targetOpts.vercelEnv === 'preview' && !targetOpts.gitBranch)) {
+  // API-mode targets (CAP-696) do not need a git branch: without one, the
+  // vars apply to every Preview branch — so they are never healed here.
+  if (!(target.kind === 'vercel' && !isVercelApiMode(targetOpts) && targetOpts.vercelEnv === 'preview' && !targetOpts.gitBranch)) {
     return stepOk(target);
   }
   if (options.yes) {
@@ -2362,7 +2409,7 @@ async function reconcileTargetVars(
   target: TargetConfig,
   options: DeployCliOptions,
 ): Promise<StepResult<TargetConfig>> {
-  const branchVarSet = new Set(Object.keys(new FileManager(cwd).readEnvFile()));
+  const branchVarSet = branchVarNames(cwd);
   const currentVars = keep.variables.filter((v) => branchVarSet.has(v));
   // Legacy targets have no `knownVars` baseline; treat current as known so we
   // don't false-flag intentionally-unselected vars as "newly added".
@@ -2408,7 +2455,9 @@ async function confirmOrEdit(
   target: TargetConfig,
   adapter: DeployAdapter,
   mode: DeployMode,
-  adapterCallCtx: { orgId: string | undefined; devMode: boolean | undefined; interactive: boolean; resolvedApiKey: ResolveDokployApiKeyResult | undefined },
+  adapterCallCtx: AdapterCallContext,
+  /** A dry run: the edit picker's setup may read but never save a key. */
+  dryRun: boolean = false,
 ): Promise<StepResult<TargetConfig>> {
   const summary =
     mode === 'ci'
@@ -2432,7 +2481,7 @@ async function confirmOrEdit(
     return stepStop(0);
   }
   if (action === 'edit') {
-    const edited = await runPicker(cwd, keep, target);
+    const edited = await runPicker(cwd, keep, target, undefined, { readOnly: !!dryRun });
     if (!edited) {
       console.log('Cancelled.');
       return stepStop(0);
@@ -2448,12 +2497,13 @@ async function confirmOrEdit(
     if (!recheck.ok) {
       console.error(`${RED('✗')} preflight: ${recheck.reason}`);
       if (recheck.hint) console.error('\n' + recheck.hint);
+      printKeyHelp(recheck);
       return stepStop(1);
     }
     // Loop back to the confirm prompt with the edited target.
-    return confirmOrEdit(cwd, keep, edited, adapter, mode, adapterCallCtx);
+    return confirmOrEdit(cwd, keep, edited, adapter, mode, adapterCallCtx, dryRun);
   }
-  return confirmOrEdit(cwd, keep, target, adapter, mode, adapterCallCtx);
+  return confirmOrEdit(cwd, keep, target, adapter, mode, adapterCallCtx, dryRun);
 }
 
 // ── Main: capy deploy [name] ───────────────────────────────────────────────
@@ -2559,7 +2609,15 @@ export async function deployCommand(
     !!options.yes || !!options.dryRun,
   );
   const dokployApiKey = await resolveDokployApiKeyOnce(adapter, reconciled.value, keep.orgId, options.devMode, secretsInteractive);
-  const adapterCallCtx = { orgId: keep.orgId, devMode: options.devMode, interactive: secretsInteractive, resolvedApiKey: dokployApiKey };
+  // Vercel API mode only (CAP-696) — same once-per-command resolution, same prompt rules.
+  const vercelToken = await resolveVercelTokenOnce(adapter, reconciled.value, keep.orgId, options.devMode, secretsInteractive);
+  const adapterCallCtx: AdapterCallContext = {
+    orgId: keep.orgId,
+    devMode: options.devMode,
+    interactive: secretsInteractive,
+    resolvedApiKey: dokployApiKey,
+    resolvedVercelToken: vercelToken,
+  };
 
   // Preflight (fail BEFORE decryption). At a terminal, a failed preflight is
   // not a dead end: the user can edit the target (e.g. a wrong composeId) and
@@ -2574,12 +2632,13 @@ export async function deployCommand(
     if (result.ok) return { ok: true, target: t, preflight: result };
     console.error(`${RED('✗')} preflight: ${result.reason}`);
     if (result.hint) console.error('\n' + result.hint);
+    printKeyHelp(result);
     if (!canFixInteractively) return { ok: false };
     // COPY-FLAG: minimal neutral wording, pending Vince's approval.
     const action = await keypressConfirm({ message: 'Preflight failed. Press e to edit this target, c to check again, esc to cancel.' });
     if (action === 'confirm') return preflightOrEdit(t);
     if (action !== 'edit') return { ok: false };
-    const edited = await runPicker(cwd, keep, t);
+    const edited = await runPicker(cwd, keep, t, undefined, { readOnly: !!options.dryRun });
     if (!edited) return { ok: false };
     upsertTarget(cwd, edited);
     console.log(GREEN(`✓ Saved target "${edited.name}" to .capy/deploy.json`));
@@ -2605,7 +2664,7 @@ export async function deployCommand(
   // `capy deploy --edit`, then re-run.
   const confirmed: StepResult<TargetConfig> =
     !options.yes && !options.dryRun
-      ? await confirmOrEdit(cwd, keep, preflightOutcome.target, adapter, mode, adapterCallCtx)
+      ? await confirmOrEdit(cwd, keep, preflightOutcome.target, adapter, mode, adapterCallCtx, !!options.dryRun)
       : { ok: true, value: preflightOutcome.target };
   if (!confirmed.ok) return confirmed.code;
   const target = confirmed.value;
@@ -2761,6 +2820,7 @@ export async function deployCommand(
     secretsOnly: mode === 'ci',
     noDeploy: !!options.noDeploy,
     cwd,
+    ...(adapter.id === 'vercel' ? placeholderDeliveryContext(cwd, target, adapter, options) : {}),
     ...adapterCallCtx,
     // A dry run's delivery stays a plain dry run (it reads nothing): the preview of conflicts was the step before.
     ...(settled.targetCheck === undefined || options.dryRun ? {} : { targetCheck: settled.targetCheck }),

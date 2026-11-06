@@ -345,9 +345,9 @@ const deploy = program
   .option('--scope <scope>', 'gh-actions: "repo" or "env"')
   .option('--env-name <name>', 'gh-actions: env name when --scope env')
   // COPY-FLAG: the option descriptions of `deploy <target> --discover` are minimal and neutral.
-  .option('--discover', 'dokploy: find the services that match Capy projects and print JSON (never prompts)')
-  .option('--plan <file>', 'dokploy --discover: the plan file to check (see schemas.deploy_dokploy_plan in `capy help --json`)')
-  .option('--confirm <plan_id>', 'dokploy --discover: write the plan that --dry-run printed (one PR per repo)')
+  .option('--discover', 'dokploy/vercel: find the services that match Capy projects and print JSON (never prompts)')
+  .option('--plan <file>', 'dokploy/vercel --discover: the plan file to check (see schemas.deploy_dokploy_plan and schemas.deploy_vercel_plan in `capy help --json`)')
+  .option('--confirm <plan_id>', 'dokploy/vercel --discover: write the plan that --dry-run printed (one PR per repo)')
   .option('--base-url <url>', 'dokploy --discover: the Dokploy dashboard URL (else the org system variable _CONNECTOR_DOKPLOY_BASE_URL)')
   .addOption(resolveOption())
   .addOption(conflictOption())

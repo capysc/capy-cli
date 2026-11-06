@@ -50,6 +50,7 @@ export async function resolveDokployApiKeyOnce(
     interactive,
     orgId,
     devMode,
+    helpBaseUrl: (target.options as { baseUrl?: string }).baseUrl,
     storeName: DOKPLOY_TARGET_SECRET_NAME,
     deps: { getConnectorSecret },
   });

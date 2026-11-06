@@ -18,6 +18,18 @@
  * server (the pushed blob and keep.lock are built from parsed values).
  */
 
+/**
+ * Whole comment lines Capy owns (never a variable). `ensure`: each appears exactly once (kept where it
+ * is when already there, appended otherwise). `drop`: each is removed wherever it appears. Matching is
+ * whole-line equality with a line Capy would itself write; nothing is interpreted.
+ */
+export interface EnvNotes {
+  readonly ensure: readonly string[];
+  readonly drop: readonly string[];
+}
+
+const NO_NOTES: EnvNotes = { ensure: [], drop: [] };
+
 export interface EnvHeader {
   org_id?: string;
   project_id?: string;
@@ -108,8 +120,15 @@ function headerLineKey(content: string): (typeof HEADER_KEYS)[number] | null {
  * `entries` is the complete desired set, in order, with each value already
  * rendered as it should appear after `=`.
  */
-export function upsertEnvText(existing: string, header: EnvHeader, entries: ReadonlyArray<readonly [string, string]>): string {
+export function upsertEnvText(
+  existing: string,
+  header: EnvHeader,
+  entries: ReadonlyArray<readonly [string, string]>,
+  notes: EnvNotes = NO_NOTES,
+): string {
   const lines = splitLines(existing);
+  const ensureSet = new Set(notes.ensure);
+  const dropSet = new Set(notes.drop.filter((l) => !ensureSet.has(l)));
   const wanted = new Map(entries);
   const headerValues = HEADER_KEYS.flatMap((k) => (header[k] ? [[k, header[k] as string] as const] : []));
 
@@ -117,7 +136,7 @@ export function upsertEnvText(existing: string, header: EnvHeader, entries: Read
     const headerText = headerValues.map(([k, v]) => `# capy:${k}=${v}`).join('\n');
     const body = entries.map(([k, v]) => `${k}=${v}`).join('\n');
     const joined = headerText ? `${headerText}\n\n${body}` : body;
-    return joined + '\n';
+    return [joined, ...notes.ensure].filter((part) => part !== '').join('\n') + '\n';
   }
 
   const eol = dominantEol(lines);
@@ -138,11 +157,17 @@ export function upsertEnvText(existing: string, header: EnvHeader, entries: Read
       return [`${def.prefix}${def.key}=${wanted.get(def.key)}${def.inlineComment}${lastEol || (i === lines.length - 1 ? '' : eol)}`];
     }
     if (coveredByDefinition.has(i)) return [];
+    if (dropSet.has(line.content)) return [];
+    // A note that appears twice keeps its first line.
+    if (ensureSet.has(line.content) && lines.findIndex((l) => l.content === line.content) !== i) return [];
     return [line.content + line.eol];
   });
 
   const missingHeader = headerValues.filter(([k]) => !presentHeaderKeys.has(k)).map(([k, v]) => `# capy:${k}=${v}${eol}`);
-  const newEntries = entries.filter(([k]) => !presentKeys.has(k)).map(([k, v]) => `${k}=${v}${eol}`);
+  const newEntries = [
+    ...entries.filter(([k]) => !presentKeys.has(k)).map(([k, v]) => `${k}=${v}${eol}`),
+    ...notes.ensure.filter((note) => !lines.some((l) => l.content === note)).map((note) => `${note}${eol}`),
+  ];
   const body = kept.join('');
   const bodyWithTerminator = body.length > 0 && !/(\r\n|\n|\r)$/.test(body) && newEntries.length > 0 ? body + eol : body;
   const headerBlock = missingHeader.length > 0
