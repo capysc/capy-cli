@@ -10,6 +10,7 @@ import {
   buildLocationTable,
   filteredRows,
   filteredRowsWithReasons,
+  sortRows,
   formatUsersCell,
   formatBranchCell,
   formatProjectCell,
@@ -575,7 +576,7 @@ describe('search bar — always-on, fzf-style (no "/" mode)', () => {
     const s = pressKeys(type(initialSecretsScreenState(rows), 'db'), ESC);
     expect(s.search.query).toBe('');
     expect(s.quit).toBe(false);
-    expect(filteredRows(s)).toEqual(rows);
+    expect(filteredRows(s)).toEqual(sortRows(rows, 'name-asc')); // CAP-731: the default sort is name A-Z, no longer arrival order
   });
 
   test('Esc with an already-empty query quits', () => {
