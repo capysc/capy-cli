@@ -75,14 +75,15 @@ export function parameterNameFor(varName: string, opts: AwsSsmOptions): string {
 // ── Helpers ────────────────────────────────────────────────────────────────
 
 function which(bin: string): string | null {
-  const r = spawnSync('which', [bin], { encoding: 'utf-8' });
+  const r = spawnSync('which', [bin], { encoding: 'utf-8', env: process.env });
   return r.status === 0 ? r.stdout.trim() || null : null;
 }
 
 /** Region from the ambient aws CLI config, for picker defaults. */
 export function detectAwsRegion(): string | null {
-  // env is passed on purpose: Bun only looks up the current PATH when env is
-  // given, and the tests put a stub aws first on PATH. Node behaves the same.
+  // env is passed on purpose (here, in which() and in spawnAsync): Bun only
+  // looks up the current PATH when env is given, and the tests put a stub aws
+  // first on PATH. Node behaves the same either way.
   const r = spawnSync('aws', ['configure', 'get', 'region'], {
     encoding: 'utf-8',
     env: process.env,
@@ -96,7 +97,7 @@ function spawnAsync(
   stdin?: string,
 ): Promise<{ stdout: string; stderr: string; code: number }> {
   return new Promise((resolve) => {
-    const child = spawn(cmd, args, { stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = spawn(cmd, args, { stdio: ['pipe', 'pipe', 'pipe'], env: process.env });
     let stdout = '';
     let stderr = '';
     child.stdout.on('data', (d) => (stdout += d.toString()));

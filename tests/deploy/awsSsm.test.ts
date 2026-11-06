@@ -2,7 +2,6 @@ import { describe, test, expect, beforeEach, afterEach, beforeAll, afterAll } fr
 import { mkdirSync, writeFileSync, rmSync, existsSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
-import { spawnSync } from 'child_process';
 import {
   awsSsmAdapter,
   leafFor,
@@ -13,12 +12,28 @@ import {
 } from '../../src/deploy/adapters/awsSsm';
 import { TargetConfig } from '../../src/deploy/adapter';
 
-// "Happy path" preflight needs the aws CLI on PATH (the binary check is the
-// last step before ok:true). CI doesn't ship it, so gate that test.
-// Config-error tests short-circuit before the binary check.
-const HAS_AWS = spawnSync('which', ['aws']).status === 0;
-
 const ROOT = join(tmpdir(), `capy-aws-ssm-adapter-${process.pid}`);
+
+// No test here may start the real aws CLI: on CI runners it can take more
+// than 5 s to start, and a deploy test would reach out to AWS. A stub aws goes
+// first on PATH for the whole file. It answers `configure get region` with a
+// fixed region and fails every other command at once.
+const STUB_BIN = join(tmpdir(), `capy-aws-stub-${process.pid}`);
+const STUB_REGION = 'stub-region-1';
+const realPath = process.env.PATH;
+beforeAll(() => {
+  mkdirSync(STUB_BIN, { recursive: true });
+  writeFileSync(
+    join(STUB_BIN, 'aws'),
+    `#!/bin/sh\nif [ "$1" = configure ]; then echo ${STUB_REGION}; exit 0; fi\necho "stub aws: no AWS calls in tests" >&2\nexit 1\n`,
+    { mode: 0o755 },
+  );
+  process.env.PATH = `${STUB_BIN}:${realPath}`;
+});
+afterAll(() => {
+  process.env.PATH = realPath;
+  rmSync(STUB_BIN, { recursive: true, force: true });
+});
 
 beforeEach(() => {
   if (existsSync(ROOT)) rmSync(ROOT, { recursive: true, force: true });
@@ -86,22 +101,6 @@ describe('awsSsm — name mapping', () => {
 });
 
 describe('awsSsm — detect', () => {
-  // detect() asks the aws CLI for a default region. Starting the real aws CLI
-  // can take more than 5 s on CI runners, so these tests put a stub first on
-  // PATH that answers at once with a fixed region.
-  const STUB_BIN = join(tmpdir(), `capy-aws-stub-${process.pid}`);
-  const STUB_REGION = 'stub-region-1';
-  const realPath = process.env.PATH;
-  beforeAll(() => {
-    mkdirSync(STUB_BIN, { recursive: true });
-    writeFileSync(join(STUB_BIN, 'aws'), `#!/bin/sh\necho ${STUB_REGION}\n`, { mode: 0o755 });
-    process.env.PATH = `${STUB_BIN}:${realPath}`;
-  });
-  afterAll(() => {
-    process.env.PATH = realPath;
-    rmSync(STUB_BIN, { recursive: true, force: true });
-  });
-
   test('uses the region from the aws CLI (the stub, never the real aws)', async () => {
     writeFileSync(
       join(ROOT, 'main.tf'),
@@ -218,7 +217,7 @@ describe('awsSsm — preflight (config errors, no aws CLI needed)', () => {
     expect(r.reason).toContain('no vars');
   });
 
-  test.if(HAS_AWS)('valid config passes with aws on PATH', async () => {
+  test('valid config passes with aws on PATH', async () => {
     const r = await awsSsmAdapter.preflight(baseTarget(), { cwd: ROOT });
     expect(r.ok).toBe(true);
   });
