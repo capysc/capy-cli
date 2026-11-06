@@ -196,7 +196,7 @@ describe('resolveVercelSetup — refusals and re-asks', () => {
     );
     expect(out.stderr.join('\n')).toContain(ERROR_CODES.VERCEL_URL_INVALID);
     expect(out.asker.count('projectUrl')).toBe(2);
-    expect(callsOf(fetchMock).every((c) => !c.url.includes('example.com'))).toBe(true);
+    expect(callsOf(fetchMock).every((c) => new URL(c.url).hostname !== 'example.com')).toBe(true);
   });
 
   test('no token: says so, shows the approved instructions (with the link\'s team), saves what was typed — and sends zero requests', async () => {
