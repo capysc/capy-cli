@@ -1,3 +1,5 @@
+import { readFileSync } from 'fs';
+import { join } from 'path';
 import { CapyError, ERROR_CODES } from '../types/index';
 import { isMembershipRevokedError } from '../errors/membershipRevoked';
 
@@ -42,6 +44,9 @@ export function renderError(error: any, context: ErrorContext = {}): string {
       // now, so they are ordinary cases in the same switch as everything else.
       case ERROR_CODES.PROJECT_NOT_FOUND:
         return renderProjectNotFound(context);
+      // CAP-729: a deleted project is not a missing one. It has its own screen so the "recreate" advice above can never reach it.
+      case ERROR_CODES.PROJECT_DELETED:
+        return renderProjectDeleted(context);
       case ERROR_CODES.BRANCH_NOT_FOUND:
         return renderBranchNotFound(error);
       case ERROR_CODES.INVALID_FORMAT:
@@ -206,6 +211,48 @@ function renderProjectNotFound(ctx: ErrorContext): string {
     `  To fix:`,
     `    1. Delete ${bold('keep.lock')} and ${bold('.capy/')} then run ${bold('capy')} to re-initialize`,
     `    2. Or run ${bold('capy')} — it will offer to recreate the project`,
+    '',
+  ];
+  return lines.filter(l => l !== '').join('\n') + '\n';
+}
+
+/** The project this folder's keep.lock points at. Read only, never written; `undefined` when there is no readable keep.lock. */
+function keepLockProject(dir: string): { name?: string; id?: string } | undefined {
+  try {
+    const raw = JSON.parse(readFileSync(join(dir, 'keep.lock'), 'utf-8'));
+    return {
+      name: typeof raw?.project_name === 'string' ? raw.project_name : undefined,
+      id: typeof raw?.project_id === 'string' ? raw.project_id : undefined,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * CAP-729: the folder's project was deleted (HTTP 410, code `PROJECT_DELETED`).
+ *
+ * Tells the person how to get it back and nothing else: it never offers to
+ * create a new project in its place and never touches keep.lock. The project is
+ * named from the caller's context, else from keep.lock (read only).
+ *
+ * COPY-FLAG: every string here is a minimal-neutral placeholder.
+ */
+function renderProjectDeleted(ctx: ErrorContext): string {
+  const fromLock = ctx.projectName !== undefined && ctx.projectId !== undefined ? undefined : keepLockProject(process.cwd());
+  const name = ctx.projectName ?? fromLock?.name;
+  const id = ctx.projectId ?? fromLock?.id;
+  const target = id ?? name ?? '<project>';
+  const lines = [
+    '',
+    `  ${bold('Project deleted')}`, // COPY-FLAG
+    name ? `  ${grey(`Project "${name}" was deleted.`)}` : '', // COPY-FLAG
+    id ? `  ${grey(`ID: ${id}`)}` : '', // COPY-FLAG
+    '',
+    `  To restore it, an organization owner runs:`, // COPY-FLAG
+    `    ${bold(`capy org restore-project ${target}`)}`,
+    '',
+    `  ${grey('Only an owner can restore a project.')}`, // COPY-FLAG
     '',
   ];
   return lines.filter(l => l !== '').join('\n') + '\n';

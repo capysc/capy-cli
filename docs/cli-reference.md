@@ -482,6 +482,54 @@ capy org [options]
 
 JSON support: no
 
+### `capy org delete-project`
+
+Delete a project (owners only; hidden, not destroyed; an owner can restore it)
+
+```
+capy org delete-project <name-or-id> [options]
+```
+
+| Option | Description | Default |
+|---|---|---|
+| `--force` | delete even if the project has live deploy tokens (those deploys stop on their next restart) |  |
+| `--yes` | skip the confirmation question |  |
+| `--non-tty` | treat stdin as not a terminal: refuse unless --yes is passed |  |
+| `--json` | emit machine-readable JSON instead of the human UI |  |
+
+JSON support: yes (`--json`)
+
+### `capy org restore-project`
+
+Restore a deleted project (owners only)
+
+```
+capy org restore-project <name-or-id> [options]
+```
+
+| Option | Description | Default |
+|---|---|---|
+| `--yes` | skip the confirmation question |  |
+| `--non-tty` | treat stdin as not a terminal: refuse unless --yes is passed |  |
+| `--json` | emit machine-readable JSON instead of the human UI |  |
+
+JSON support: yes (`--json`)
+
+### `capy org projects`
+
+List projects in the active organization; --deleted also lists deleted ones (owners only)
+
+```
+capy org projects [options]
+```
+
+| Option | Description | Default |
+|---|---|---|
+| `--deleted` | also list deleted projects, marked as deleted, with the date |  |
+| `--json` | emit machine-readable JSON instead of the human UI |  |
+
+JSON support: yes (`--json`)
+
 ## `capy info`
 
 Show current session info
@@ -1059,6 +1107,13 @@ Every refusal carries a stable `code` — branch on it, never on message text.
 - `SECRET_NOT_FOUND`
 - `SECRETS_NOTHING_SELECTED`
 - `SECRETS_PARTIAL`
+- `PROJECT_DELETED`
+- `PROJECT_DELETE_OWNER_ONLY`
+- `PROJECT_HAS_LIVE_DEPLOY_TOKENS`
+- `PROJECT_NOT_DELETED`
+- `SYSTEM_STORE_IMMUTABLE`
+- `PROJECT_AMBIGUOUS`
+- `CONFIRMATION_REQUIRED`
 - `REPO_LINKS_UNSUPPORTED`
 - `DRY_RUN_UNSUPPORTED`
 - `GITHUB_TIMEOUT`
