@@ -1,5 +1,6 @@
 import { ProjectManager } from '../core/projectManager';
 import { listAllVarsOnBranch, listManagedKeys, findManagedConnector } from './connectors/shared';
+import { placeholderLabel, placeholderOf, placeholderSetCommand } from '../core/placeholder';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 const DIM = '\x1b[90m';
@@ -45,9 +46,12 @@ export class ListCommand {
     const managed = new Set(listManagedKeys(keep, branch).map((m) => m.varName));
     const variables = listAllVarsOnBranch(keep, branch).map((name) => {
       const c = managed.has(name) ? findManagedConnector(keep, name, branch) : undefined;
+      const marker = placeholderOf(keep, name, branch);
       return {
         name,
         managed: !!c,
+        // No value yet (a placeholder): the provider and its reason code, and the command that sets one.
+        placeholder: marker ? { provider: marker.provider, reason: marker.reason, setWith: placeholderSetCommand(name) } : null,
         connector: c
           ? {
               provider: c.provider,
@@ -72,7 +76,10 @@ export class ListCommand {
     console.log(`  ${keep.project_name} ${DIM}·${RESET} ${branch} ${DIM}(${variables.length})${RESET}`);
     for (const v of variables) {
       const tag = v.connector ? ` ${DIM}(${v.connector.provider})${RESET}` : '';
-      console.log(`  ${v.name}${tag}`);
+      const marker = placeholderOf(keep, v.name, branch);
+      // COPY-FLAG: new user-facing string, minimal/neutral wording.
+      const note = marker ? ` ${DIM}${placeholderLabel(marker)} — set it with: ${placeholderSetCommand(v.name)}${RESET}` : '';
+      console.log(`  ${v.name}${tag}${note}`);
     }
     console.log('');
   }

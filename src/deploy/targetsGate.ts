@@ -143,6 +143,26 @@ export function upsertTargetElement(
   return [...filtered, element];
 }
 
+/**
+ * `deployed_value_hash` by variable name: what Capy last delivered to (provider, target) on `branch`
+ * (CAP-717's target conflict check compares the platform's live value against it). A variable the target
+ * never received, or a placeholder that never had a push, is absent.
+ */
+export function deployedHashesFor(
+  keep: KeepFile | null | undefined,
+  branch: string,
+  provider: string,
+  target: string,
+): Readonly<Record<string, string>> {
+  return Object.fromEntries(
+    Object.entries(keep?.variables ?? {}).flatMap(([name, entries]) => {
+      const entry = entries.find((e) => (e.branch ?? '') === branch) as EntryWithTargets | undefined;
+      const hash = entry?.targets?.find((t) => t.provider === provider && t.target === target)?.deployed_value_hash;
+      return hash === undefined ? [] : ([[name, hash]] as const);
+    }),
+  );
+}
+
 export interface VarDelivery {
   name: string;
   valueHash: string;

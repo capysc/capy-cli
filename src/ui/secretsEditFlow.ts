@@ -9,14 +9,23 @@
 // ever contains it (the dialog shows a mask), and no effect other than `runSet`
 // carries it.
 //
-// Steps:  value -> locations -> (loading) -> repos -> running -> done
+// Steps:  value -> locations -> (loading) -> repos -> running -> (conflicts -> running) -> done
 //   value      Old value (Ctrl+R reveals it, on screen only) and a hidden New value
 //              input. Enter next, Esc cancels. Layout shared with capy edit (valueDialog.ts).
 //   locations  the row's project/branch locations, ALL selected (protected too,
 //              each labelled `protected`). Same keys as `capy deploy`'s picker:
 //              space, a (toggle all), i (invert), / (filter), enter, and Esc back.
 //   repos      the repos to open a PR in, with the approved prompt, all selected.
-//   running    keys are ignored: a push in flight is never abandoned halfway.
+//   running    keys are ignored: a push in flight is never abandoned halfway. Before any push, every
+//              location is read; one whose value someone else changed since the row was listed comes
+//              back as a row (`compareSecrets`: pinned = the listed value, local = the new one,
+//              remote = what is there now) and the flow goes to `conflicts` (nothing has been written).
+//   conflicts  one line per such location, answered with bare `capy`'s four choices: l writes the new value
+//              there (local), r leaves the location (remote), p writes back the value you were shown
+//              (pinned; only when that old value could be read, it is on screen as the Old value), d removes
+//              the variable there (delete). Enter runs once every one is answered, Esc cancels with nothing
+//              written. An answer holds only for the value it was made against: if the location moved again,
+//              the run comes back here with it.
 //   done       the confirmation; only Esc leaves it. `c` copies the PR links to the clipboard (and the
 //              screen stays), so they can also be selected and copied by hand first.
 
@@ -27,7 +36,10 @@ import type { ValueState } from './secretsScreen';
 import { sanitizePastedText } from './editScreen';
 import { CONFIRM_MESSAGE } from '../commands/keepLockPr';
 import { CANCELLED_NOTHING, STOPPING_AGAIN, STOPPING_NOW, stoppingAfter, DryRunView, renderDryRunPlan, renderSecretSetConfirmation, TERMINAL_STYLE } from '../commands/secretsSetText';
-import { RepoTarget, RunProgress, SecretSetResult, SetLocation, planRepos, repoKey, repoLabel } from '../commands/secretsSet';
+import { LocationConflict, RepoTarget, RunProgress, SecretSetResult, SetLocation, locationKeyOf, planRepos, repoKey, repoLabel } from '../commands/secretsSet';
+import { bindAnswer, holdsFor, type BoundAnswer } from '../sync/noFolder';
+import type { Resolution } from '../sync/conflicts';
+import { formatRelativeTime } from './relativeTime';
 import { TableColumn, clipLine, pickerTableLines } from './pickerTable';
 import { COPY_HINT_PAIR, CopyEffect, CopyOutcome, copiedLine, copyEffectFor, isCopyKey, uniqueUrls } from './copyPrLinks';
 import type { OrgRepoLink, SecretIndexRow } from '../service/serviceClient';
@@ -106,6 +118,16 @@ export type EditFlow =
       readonly progress?: RunProgress;
       /** A stop was asked for in this phase, this many times (Ctrl+C / Esc). */
       readonly stop?: { readonly phase: RunProgress['phase']; readonly count: number };
+      /** What the run was asked to do: asked again, with decisions, if it comes back with conflicts. */
+      readonly request: RunRequest;
+    } & Carried)
+  | ({
+      readonly step: 'conflicts';
+      readonly request: RunRequest;
+      readonly conflicts: readonly LocationConflict[];
+      /** The answer at each moved location, by `locationKeyOf`: `local` or `remote`. */
+      readonly choices: Readonly<Record<string, Resolution>>;
+      readonly cursor: number;
     } & Carried)
   | {
       readonly step: 'done';
@@ -125,6 +147,15 @@ export interface RunRequest {
   readonly reposUnavailable?: string;
   /** The PR base of each repo, already read for the repo step; absent: read again. */
   readonly bases?: Readonly<Record<string, string>>;
+  /**
+   * The fingerprint the row listed for its locations: what the person saw. A location holding anything else (and not
+   * the new value) was changed by someone else since (CAP-714). Absent: locations are not compared.
+   */
+  readonly seen?: string;
+  /** The answers for moved locations, by `locationKeyOf`, with the fingerprints they were made against. */
+  readonly decisions?: Readonly<Record<string, BoundAnswer>>;
+  /** The old value (what the person was shown) for each location answered `pinned`, by `locationKeyOf`: written back there. */
+  readonly restore?: Readonly<Record<string, string>>;
 }
 
 export type EditEffect =
@@ -312,13 +343,14 @@ function stepRepos(flow: Extract<EditFlow, { step: 'repos' }>, key: string): Edi
     value: flow.value,
     locations: flow.chosen,
     repos: flow.box.checked.map((i) => flow.targets[i]),
+    seen: flow.rowHash,
     ...(flow.unavailable === undefined ? {} : { reposUnavailable: flow.unavailable }),
   };
   const running = { step: 'running', name: flow.name, value: flow.value, locations: flow.locations, count: flow.chosen.length, ...oldOf(flow) } as const;
   // Enter while the bases are still loading is fine: the run waits for that same read, it does not start another.
   return flow.bases === undefined
-    ? { flow: { ...running, pending: request }, effect: null }
-    : { flow: running, effect: { type: 'runSet', request: { ...request, bases: flow.bases } } };
+    ? { flow: { ...running, request, pending: request }, effect: null }
+    : { flow: { ...running, request: { ...request, bases: flow.bases } }, effect: { type: 'runSet', request: { ...request, bases: flow.bases } } };
 }
 
 /** The effect that reads the BASE column, once the repo table is up and its bases are not known yet. */
@@ -338,7 +370,7 @@ export function applyBasesLoaded(flow: EditFlow | null, bases: Readonly<Record<s
   if (flow.step === 'repos' && flow.bases === undefined) return { flow: { ...flow, bases }, effect: null };
   if (flow.step === 'running' && flow.pending !== undefined) {
     const { pending, ...rest } = flow;
-    return { flow: rest, effect: { type: 'runSet', request: { ...pending, bases } } };
+    return { flow: { ...rest, request: { ...pending, bases } }, effect: { type: 'runSet', request: { ...pending, bases } } };
   }
   return { flow, effect: null };
 }
@@ -367,6 +399,62 @@ export function applyProgress(flow: EditFlow | null, progress: RunProgress): Edi
   return { ...flow, progress, stop };
 }
 
+// ── Conflicts: the locations someone else changed since the row was listed ──
+
+const choiceAt = (flow: Extract<EditFlow, { step: 'conflicts' }>, c: LocationConflict): Resolution | undefined => flow.choices[locationKeyOf(c.location)];
+
+/** Whether every conflicting location has been decided. */
+export const allDecided = (flow: Extract<EditFlow, { step: 'conflicts' }>): boolean => flow.conflicts.every((c) => choiceAt(flow, c) !== undefined);
+
+/** The run again, with each answer bound to the fingerprints it was made against. */
+function withDecisions(flow: Extract<EditFlow, { step: 'conflicts' }>): RunRequest {
+  const oldValue = flow.old.status === 'ok' ? flow.old.value : undefined;
+  return {
+    ...flow.request,
+    decisions: Object.fromEntries(
+      flow.conflicts.flatMap((c) => {
+        const choice = choiceAt(flow, c);
+        return choice === undefined ? [] : [[locationKeyOf(c.location), bindAnswer(choice, c.conflict)] as const];
+      }),
+    ),
+    // `pinned` writes back the old value (the one that was shown); `p` is only offered when it could be read.
+    restore:
+      oldValue === undefined
+        ? undefined
+        : Object.fromEntries(flow.conflicts.filter((c) => choiceAt(flow, c) === 'pinned').map((c) => [locationKeyOf(c.location), oldValue] as const)),
+  };
+}
+
+function stepConflicts(flow: Extract<EditFlow, { step: 'conflicts' }>, key: string): EditStep {
+  if (isEsc(key)) return { flow: null, effect: null, note: CANCELLED_NOTHING };
+  if (key === KEY_UP) return stay({ ...flow, cursor: Math.max(0, flow.cursor - 1) });
+  if (key === KEY_DOWN) return stay({ ...flow, cursor: Math.min(flow.conflicts.length - 1, flow.cursor + 1) });
+  const decide = (choice: Resolution): EditStep => {
+    const at = flow.conflicts[flow.cursor];
+    return at === undefined ? stay(flow) : stay({ ...flow, choices: { ...flow.choices, [locationKeyOf(at.location)]: choice } });
+  };
+  if (key === 'l' || key === 'L') return decide('local');
+  if (key === 'r' || key === 'R') return decide('remote');
+  if (key === 'd' || key === 'D') return decide('delete');
+  // Pinned writes back the value the person was shown: unavailable (a key that does nothing) when it could not be read.
+  if ((key === 'p' || key === 'P') && flow.old.status === 'ok') return decide('pinned');
+  if (key !== '\r' || !allDecided(flow)) return stay(flow);
+  const request = withDecisions(flow);
+  const kept = flow.conflicts.filter((c) => choiceAt(flow, c) === 'remote').length;
+  return {
+    flow: {
+      step: 'running',
+      name: flow.name,
+      value: flow.value,
+      locations: flow.locations,
+      count: flow.request.locations.length - kept,
+      request,
+      ...oldOf(flow),
+    },
+    effect: { type: 'runSet', request },
+  };
+}
+
 /** One key token applied to the flow. */
 export function stepEdit(flow: EditFlow, key: string): EditStep {
   if (flow.step === 'value') return stepValue(flow, key);
@@ -374,6 +462,7 @@ export function stepEdit(flow: EditFlow, key: string): EditStep {
   if (flow.step === 'loading') return stepLoading(flow, key);
   if (flow.step === 'repos') return stepRepos(flow, key);
   if (flow.step === 'running') return stepRunning(flow, key);
+  if (flow.step === 'conflicts') return stepConflicts(flow, key);
   return stepDone(flow, key);
 }
 
@@ -416,7 +505,8 @@ export type RunFinished =
   | { readonly ok: true; readonly result: SecretSetResult }
   /** A dry run: what would happen. Nothing was changed. */
   | { readonly ok: true; readonly plan: DryRunView }
-  | { readonly ok: false; readonly code: string };
+  /** `conflicts`: nothing was written, because these locations were changed by someone else since the row was listed (CAP-714). */
+  | { readonly ok: false; readonly code: string; readonly conflicts?: readonly LocationConflict[] };
 
 /** The PR links of a finished run: each PR's own `url` (a dry run, a failure and a repo that needed no PR have none), once each. */
 export const prUrlsOf = (finished: RunFinished): readonly string[] =>
@@ -427,10 +517,37 @@ function finishedText(name: string, finished: RunFinished): string {
   return 'plan' in finished ? renderDryRunPlan(finished.plan) : renderSecretSetConfirmation(finished.result, TERMINAL_STYLE);
 }
 
+/** Locations where the person left the other value (remote): said under the result, since nothing else mentions them. */
+const keptNote = (kept: number): string => (kept === 0 ? '' : `\nKept the other value in ${kept} location${kept === 1 ? '' : 's'}.`); // COPY-FLAG
+
+/** The conflicts screen for what a run found. An answer made earlier stays only where the value it was made against is still the one there. */
+function conflictsStep(flow: Extract<EditFlow, { step: 'running' }>, conflicts: readonly LocationConflict[]): EditFlow {
+  const choices = Object.fromEntries(
+    conflicts.flatMap((c) => {
+      const earlier = flow.request.decisions?.[locationKeyOf(c.location)];
+      return holdsFor(earlier, c.conflict) ? [[locationKeyOf(c.location), earlier.choice] as const] : [];
+    }),
+  );
+  return {
+    step: 'conflicts',
+    name: flow.name,
+    value: flow.value,
+    locations: flow.locations,
+    request: flow.request,
+    conflicts,
+    choices,
+    cursor: 0,
+    ...oldOf(flow),
+  };
+}
+
 /** The run finished. Dropped unless the flow is still running. */
 export function applyRunFinished(flow: EditFlow | null, finished: RunFinished): EditFlow | null {
   if (flow === null || flow.step !== 'running') return flow;
-  return { step: 'done', text: finishedText(flow.name, finished), prUrls: prUrlsOf(finished) };
+  if (!finished.ok && finished.conflicts !== undefined && finished.conflicts.length > 0) return conflictsStep(flow, finished.conflicts);
+  const kept = Object.values(flow.request.decisions ?? {}).filter((d) => d.choice === 'remote').length;
+  const text = finishedText(flow.name, finished);
+  return { step: 'done', text: finished.ok && 'result' in finished ? text + keptNote(kept) : text, prUrls: prUrlsOf(finished) };
 }
 
 /** The copy the `copyToClipboard` effect started finished. Dropped unless the flow is still on the result. */
@@ -475,6 +592,25 @@ function pickerHint(searching: boolean, next: string): string {
   return searching
     ? hint(['esc', 'stop filtering'], ['space', 'select'], ['enter', next]) // COPY-FLAG
     : hint(['space', 'select'], ['a', 'toggle all'], ['i', 'invert'], ['/', 'filter'], ['enter', next], ['esc', 'back']);
+}
+
+/** The conflicts step: what changed where, and the decision so far at each location. Names and places only, never a value. */
+function renderConflicts(flow: Extract<EditFlow, { step: 'conflicts' }>, maxWidth: number): { readonly lines: readonly string[]; readonly footer: string } {
+  const n = flow.conflicts.length;
+  const row = (c: LocationConflict, i: number): string => {
+    const choice = choiceAt(flow, c);
+    const when = c.changedAt === undefined ? '' : ` · changed ${formatRelativeTime(c.changedAt)}`; // COPY-FLAG
+    const line = `${i === flow.cursor ? '▶' : ' '} ${c.location.project_name} ${c.location.branch}${when}  ${choice === undefined ? '—' : choice}`; // COPY-FLAG
+    return i === flow.cursor ? `${BOLD}${clipLine(line, maxWidth)}${RESET}` : clipLine(line, maxWidth);
+  };
+  return {
+    lines: [
+      `${BOLD}${flow.name}${RESET} ${DIM}· changed since you looked in ${n} location${n === 1 ? '' : 's'}${RESET}`, // COPY-FLAG
+      '',
+      ...flow.conflicts.map(row),
+    ],
+    footer: hint(['l', 'local'], ['r', 'remote'], ...(flow.old.status === 'ok' ? ([['p', 'pinned']] as const) : []), ['d', 'delete'], ...(allDecided(flow) ? ([['enter', 'continue']] as const) : []), ['esc', 'cancel']), // COPY-FLAG
+  };
 }
 
 /** Body lines (no margin) and the footer for the flow, for `width` x `height`. */
@@ -542,6 +678,7 @@ export function renderEdit(
       footer: pickerHint(flow.box.searching, 'run'),
     };
   }
+  if (flow.step === 'conflicts') return renderConflicts(flow, maxWidth);
   if (flow.step === 'running') {
     return { lines: [`${DIM}${runningLine(flow, dryRun)}${RESET}`], footer: flow.stop === undefined ? hint(['ctrl+c', 'stop']) : '' }; // COPY-FLAG
   }

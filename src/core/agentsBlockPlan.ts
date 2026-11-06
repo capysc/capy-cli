@@ -25,6 +25,9 @@ export const AGENTS_BLOCK = [
   '- Run `capy help --json` for every command, its options, and its error codes.',
   '- Always pass `--json` and branch on the `code` field, never on message text.',
   '- Run `capy pair --json` in an interactive terminal/PTY. After browser approval, it asks "Enable this location as [email]?" before installing the session or keys. Show the returned email to the human and obtain explicit Yes/No approval before answering. Never automatically confirm or pipe `yes`; Enter defaults to No. No upfront email is required.',
+  '- Commands that write run bare `capy` first. If your folder and Capy differ they write nothing and exit 3 with `SECRETS_CONFLICT`, a `conflict_id`, and the differing names (fingerprints, never values).', // COPY-FLAG
+  '- Show the human those names and ask, for each: pinned, local, remote or delete. Never answer for the human. Then rerun the same command with `--resolve NAME=<choice>` for every name (`NAME@TARGET=local|remote` for a platform row) and `--conflict <conflict_id>`.', // COPY-FLAG
+  '- `SECRETS_CONFLICT_STALE` means Capy moved since: show the fresh rows and ask again.', // COPY-FLAG
   '- Never print, log, or commit secret values.',
   '- To set a value, pipe it from the command that produces it: `<cmd> | capy edit NAME --json`. Never put a value in a command argument, an `echo`, or a heredoc — it would land in your context and the shell history.',
   AGENTS_BLOCK_END,

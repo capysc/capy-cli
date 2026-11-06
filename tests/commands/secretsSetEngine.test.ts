@@ -147,15 +147,15 @@ describe('pushing locations', () => {
     ]);
   });
 
-  test('a branch with no line for NAME fails VARIABLE_NOT_FOUND and nothing is pushed there', async () => {
+  test('a branch that lost NAME since its row was listed (moved) is not written to without an answer, and nothing is pushed there', async () => {
     const { service, env } = world();
     const noName = { ...service, getDecryptData: async () => ({ env_content: 'OTHER=capy:x:y', decrypt_key: '', expires_at: '', keep_file: JSON.stringify({ version: '3.0', org_id: 'o', project_id: 'pA', project_name: 'n', variables: {} }) }) };
     const result = await runSecretSet(
-      { name: NAME, value: SENTINEL, locations: [loc('pA', 'staging')], repos: [] },
+      { name: NAME, value: SENTINEL, locations: [loc('pA', 'staging')], repos: [], shown: { 'pA/staging': 'aaaaaaaaaaaaaaaa' } },
       { ...env, client: noName as never },
     );
     expect(result.failed).toEqual([
-      { kind: 'location', project: PROJECT_NAMES.pA, branch: 'staging', protected: false, code: ERROR_CODES.VARIABLE_NOT_FOUND },
+      { kind: 'location', project: PROJECT_NAMES.pA, branch: 'staging', protected: false, code: ERROR_CODES.SECRETS_CONFLICT },
     ]);
     expect(service.pushSecrets.mock.calls).toHaveLength(0);
   });

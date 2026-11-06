@@ -23,8 +23,8 @@ describe('decideEditMode', () => {
     expect(decideEditMode(facts({ stdinIsTTY: true }))).toBe('tui');
   });
 
-  test('2. a terminal and a name is still the TUI (focused on NAME)', () => {
-    expect(decideEditMode(facts({ stdinIsTTY: true, hasName: true }))).toBe('tui');
+  test('2. a terminal and a name is the hidden value prompt (capy add NAME --force), not the TUI', () => {
+    expect(decideEditMode(facts({ stdinIsTTY: true, hasName: true }))).toBe('prompt');
   });
 
   test('a name with stdin not a terminal is piped mode', () => {

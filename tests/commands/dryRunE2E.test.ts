@@ -310,13 +310,17 @@ describe('capy remove NAME --dry-run', () => {
     });
   });
 
-  test('a local drift on OTHER variables still refuses, as in a real run', async () => {
+  test('a local-only variable is a difference bare capy settles first (docs/conflict-resolution.md): the preview reports it with dry_run, exit 3, and changes nothing', async () => {
     await withWorld(async (h, env) => {
       await seedReal(h, env);
-      // A second variable that exists only locally (unpushed): removing NAME would carry it along.
+      // A second variable that exists only locally (unpushed): the folder and Capy differ, so nothing is written from this folder.
       await h.run(['edit', 'DRY_OTHER', '--json', '--no-push'], 'x\n', undefined, { ...env, CAPY_NO_REPO_LINK: '1' });
+      const before = state(h);
+      const pushes = h.pushCount();
       const out = await h.run(['remove', NAME, '--yes', '--json', '--dry-run'], undefined, undefined, env);
-      expect(json(out)).toMatchObject({ ok: false, code: 'REMOVE_LOCAL_DRIFT' });
+      expect(out.code).toBe(3);
+      expect(json(out)).toMatchObject({ ok: false, code: 'SECRETS_CONFLICT', dry_run: true, conflicts: [{ name: 'DRY_OTHER', type: 'new' }] });
+      expectNothingWritten(h, before, pushes);
     });
   });
 });

@@ -41,3 +41,30 @@ export const DEPLOY_DOKPLOY_PLAN_SCHEMA = {
     },
   },
 } as const;
+
+/** Where the Vercel plan's schema is published (`capy deploy vercel --discover`). */
+export const VERCEL_PLAN_SCHEMA_REF = { command: 'capy help --json', pointer: '/schemas/deploy_vercel_plan' } as const;
+
+/**
+ * The plan `capy deploy vercel --discover --plan <file>` reads: the same shape as the Dokploy plan, with the
+ * service named by the `service_id` of a Vercel environment (project + environment) from the discovery facts,
+ * and `git_branch` the project's production branch (the deploy PR base). IDs and names only.
+ */
+export const DEPLOY_VERCEL_PLAN_SCHEMA = {
+  ...DEPLOY_DOKPLOY_PLAN_SCHEMA,
+  title: 'capy deploy vercel --discover plan', // COPY-FLAG
+  properties: {
+    ...DEPLOY_DOKPLOY_PLAN_SCHEMA.properties,
+    entries: {
+      ...DEPLOY_DOKPLOY_PLAN_SCHEMA.properties.entries,
+      items: {
+        ...DEPLOY_DOKPLOY_PLAN_SCHEMA.properties.entries.items,
+        properties: {
+          ...DEPLOY_DOKPLOY_PLAN_SCHEMA.properties.entries.items.properties,
+          service_id: { type: 'string', minLength: 1, description: 'Vercel environment id from the discovery facts (a project plus one of its environments)' }, // COPY-FLAG
+          git_branch: { type: 'string', minLength: 1, description: 'git branch the Vercel project deploys from (the CI deploy PR base)' }, // COPY-FLAG
+        },
+      },
+    },
+  },
+} as const;

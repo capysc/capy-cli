@@ -7,6 +7,7 @@ import { describe, test, expect, mock } from 'bun:test';
 import { recordDeliveriesOnServer, deliveryFor } from '../../src/deploy/deliveryRecord';
 import { CapyError, ERROR_CODES, KeepFile } from '../../src/types/index';
 import { dokployTarget, hashOf, serverKeepFor } from '../helpers/batchDeployWorld';
+import { SyncEngine } from '../../src/sync/syncEngine';
 
 const AT = '2026-10-04T10:00:00.000Z';
 const { delivery, values } = deliveryFor(dokployTarget('api', { vars: ['API_KEY'] }), { id: 'dokploy' }, undefined, false, { API_KEY: hashOf('API_KEY') });
@@ -45,6 +46,40 @@ describe('recordDeliveriesOnServer', () => {
       expect(await recordDeliveriesOnServer(c, 'pA', 'production', [{ delivery, values, deliveredAt: AT }])).toEqual({ ok: false, code: ERROR_CODES.NO_KEEP_FILE });
       expect(c.pushSecrets.mock.calls).toHaveLength(0);
     }
+  });
+
+  test('the push names the keep it was built from (CAP-712)', async () => {
+    const serverKeep = serverKeepFor('pA', 'production');
+    const c = client(JSON.stringify(serverKeep));
+    await recordDeliveriesOnServer(c, 'pA', 'production', [{ delivery, values, deliveredAt: AT }]);
+    expect(c.pushSecrets.mock.calls[0][5]).toBe(SyncEngine.computeKeepHash(serverKeep, 'production'));
+  });
+
+  test('stale base: read again and record on top of the new keep, once', async () => {
+    const first = serverKeepFor('pA', 'production');
+    const second: KeepFile = { ...first, deploy_revision: 7 };
+    const reads = mock(async () => ({ env_file: 'BLOB-AS-STORED', keep_hash: 'h', keep_file: JSON.stringify(reads.mock.calls.length === 1 ? first : second) }));
+    const pushes = mock(async (..._a: unknown[]) => {
+      if (pushes.mock.calls.length === 1) throw new CapyError('moved', ERROR_CODES.SECRETS_STALE_BASE, { status: 409 });
+      return {};
+    });
+    const out = await recordDeliveriesOnServer({ getLatestSecrets: reads, pushSecrets: pushes }, 'pA', 'production', [{ delivery, values, deliveredAt: AT }]);
+    expect(out).toEqual({ ok: true, pushed: true });
+    expect(reads.mock.calls).toHaveLength(2);
+    expect(pushes.mock.calls).toHaveLength(2);
+    // The second push was built from the SECOND read.
+    expect((JSON.parse(String(pushes.mock.calls[1][1])) as KeepFile).deploy_revision).toBe(7);
+    expect(pushes.mock.calls[1][5]).toBe(SyncEngine.computeKeepHash(second, 'production'));
+  });
+
+  test('stale twice: the code, not a loop', async () => {
+    const reads = mock(async () => ({ env_file: 'B', keep_hash: 'h', keep_file: JSON.stringify(serverKeepFor('pA', 'production')) }));
+    const pushes = mock(async (..._a: unknown[]) => {
+      throw new CapyError('moved', ERROR_CODES.SECRETS_STALE_BASE, { status: 409 });
+    });
+    const out = await recordDeliveriesOnServer({ getLatestSecrets: reads, pushSecrets: pushes }, 'pA', 'production', [{ delivery, values, deliveredAt: AT }]);
+    expect(out).toEqual({ ok: false, code: ERROR_CODES.SECRETS_STALE_BASE });
+    expect(pushes.mock.calls).toHaveLength(2);
   });
 
   test('a refused push is a code, never a throw', async () => {

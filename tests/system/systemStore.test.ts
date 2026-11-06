@@ -6,7 +6,7 @@
  * fake service, rather than checking that a function merely returned
  * something. Maps to docs/org-system-store.md's numbered Proofs where noted.
  */
-import { mock, describe, it, expect, beforeAll, beforeEach, afterAll } from 'bun:test';
+import { mock, spyOn, describe, it, expect, beforeAll, beforeEach, afterAll } from 'bun:test';
 import { mkdtempSync, rmSync, readdirSync, statSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { randomBytes } from 'crypto';
@@ -141,6 +141,7 @@ afterAll(() => {
 let openSystemStore: typeof import('../../src/system/systemStore').openSystemStore;
 let getConnectorSecret: typeof import('../../src/system/systemStore').getConnectorSecret;
 let getDirectionalConnectorSecret: typeof import('../../src/system/systemStore').getDirectionalConnectorSecret;
+let replaceConnectorSecret: typeof import('../../src/system/systemStore').replaceConnectorSecret;
 let assertValidConnectorName: typeof import('../../src/system/systemStore').assertValidConnectorName;
 let wrapAndSaveMasterKey: typeof import('../../src/crypto/keyResolver').wrapAndSaveMasterKey;
 let resolveProjectKey: typeof import('../../src/crypto/keyResolver').resolveProjectKey;
@@ -157,6 +158,7 @@ beforeAll(async () => {
   openSystemStore = ss.openSystemStore;
   getConnectorSecret = ss.getConnectorSecret;
   getDirectionalConnectorSecret = ss.getDirectionalConnectorSecret;
+  replaceConnectorSecret = ss.replaceConnectorSecret;
   assertValidConnectorName = ss.assertValidConnectorName;
 
   const kr = await import('../../src/crypto/keyResolver');
@@ -228,6 +230,8 @@ function allWrittenBytes(): string {
 describe('systemStore', () => {
   beforeEach(async () => {
     servers.clear();
+    // A new fake server is a new org: this machine's copy of its store (keep.lock pins) starts over too.
+    rmSync(getSystemStoreDir(ORG_A), { recursive: true, force: true });
     calls.length = 0;
     promptedWith = [];
     promptQueue = [];
@@ -287,6 +291,38 @@ describe('systemStore', () => {
     expect(store2.listNames()).toEqual([]);
   });
 
+  it('CAP-712: another admin\'s entry saved after this handle opened survives this handle\'s set, and two sets through one handle both land', async () => {
+    const mine = await openSystemStore({ orgId: ORG_A, devMode: true });
+    const theirs = await openSystemStore({ orgId: ORG_A, devMode: true });
+    await theirs.set('_CONNECTOR_THEIRS_KEY', 'theirs');
+
+    await mine.set('_CONNECTOR_MINE_KEY', 'mine-1');
+    await mine.set('_CONNECTOR_MINE_OTHER', 'mine-2');
+
+    const reopened = await openSystemStore({ orgId: ORG_A, devMode: true });
+    expect(reopened.listNames().map((e) => e.name).sort()).toEqual(['_CONNECTOR_MINE_KEY', '_CONNECTOR_MINE_OTHER', '_CONNECTOR_THEIRS_KEY']);
+    expect(reopened.get('_CONNECTOR_THEIRS_KEY')).toBe('theirs');
+  });
+
+  it('the store has no folder to compare with: a set lands on top of the latest, changing only its own name (the shared upload, with base_keep_hash)', async () => {
+    const seed = await openSystemStore({ orgId: ORG_A, devMode: true });
+    await seed.set('_CONNECTOR_SHARED_KEY', 'v0');
+    await seed.set('_CONNECTOR_OTHER_KEY', 'o0');
+    const mine = await openSystemStore({ orgId: ORG_A, devMode: true });
+    const theirs = await openSystemStore({ orgId: ORG_A, devMode: true });
+    // The other admin is on another machine: this machine's copy of the store never sees their save.
+    const gc = await import('../../src/config/globalConfig');
+    const mineOnDisk = gc.readSystemKeepFile(ORG_A)!;
+    await theirs.set('_CONNECTOR_OTHER_KEY', 'o-theirs');
+    gc.saveSystemKeepFile(ORG_A, mineOnDisk);
+
+    await mine.set('_CONNECTOR_SHARED_KEY', 'v-mine');
+    const after = await openSystemStore({ orgId: ORG_A, devMode: true });
+    expect(after.get('_CONNECTOR_SHARED_KEY')).toBe('v-mine');
+    // The other admin's save, which this handle never saw, is not reverted by it.
+    expect(after.get('_CONNECTOR_OTHER_KEY')).toBe('o-theirs');
+  });
+
   it('rejects a bad name before any network call (Proof: SYSTEM_STORE_BAD_NAME)', () => {
     expect(() => assertValidConnectorName('NOT_A_CONNECTOR_NAME')).toThrow();
     try {
@@ -338,6 +374,7 @@ describe('systemStore', () => {
   it('owner and admin roles both succeed on read and write', async () => {
     for (const role of ['owner', 'admin'] as const) {
       servers.clear();
+      rmSync(getSystemStoreDir(ORG_A), { recursive: true, force: true });
       await seedMasterKey(ORG_A, USER_A);
       serverFor(ORG_A).role = role;
       const store = await openSystemStore({ orgId: ORG_A, devMode: true });
@@ -401,6 +438,113 @@ describe('systemStore', () => {
       const again = await getConnectorSecret('_CONNECTOR_DOKPLOY_API_KEY', { orgId: ORG_A, devMode: true, interactive: false });
       expect(again).toBe('typed-secret');
       expect(promptedWith).toHaveLength(1);
+    });
+  });
+
+  // ── Key help before the hidden prompt ──
+  describe('key help (hidden-prompt path)', () => {
+    /** Runs `fn` with console.error captured; returns what it printed. */
+    const stderrOf = async (fn: () => Promise<unknown>): Promise<string> => {
+      const spy = spyOn(console, 'error').mockImplementation((() => {}) as never);
+      try {
+        await fn();
+        return spy.mock.calls.map((a) => a.map(String).join(' ')).join('\n');
+      } finally {
+        spy.mockRestore();
+      }
+    };
+
+    it('a known key name: the approved instructions end "Then paste it here." (stderr), before the prompt', async () => {
+      promptQueue.push({ value: 'typed-secret' });
+      const text = await stderrOf(() => getConnectorSecret('_CONNECTOR_VERCEL_TOKEN', { orgId: ORG_A, devMode: true, interactive: true }));
+      expect(text).toContain('Create a token at https://vercel.com/account/settings/tokens. Set Scope to the team that owns the project.');
+      expect(text).toContain('Then paste it here.');
+      expect(text).not.toContain('typed-secret');
+    });
+
+    it('a known Vercel key name with a team slug: the slug is named', async () => {
+      promptQueue.push({ value: 'typed-secret' });
+      const text = await stderrOf(() => getConnectorSecret('_CONNECTOR_VERCEL_TOKEN', { orgId: ORG_A, devMode: true, interactive: true, helpTeam: 'acme' }));
+      expect(text).toContain('Set Scope to the team that owns the project (acme).');
+    });
+
+    it('a known Dokploy key name with a base URL: the link is that Dokploy\'s page', async () => {
+      promptQueue.push({ value: 'typed-secret' });
+      const text = await stderrOf(() =>
+        getConnectorSecret('_CONNECTOR_DOKPLOY_API_KEY', { orgId: ORG_A, devMode: true, interactive: true, helpBaseUrl: 'https://d.example.test' }),
+      );
+      expect(text).toContain('https://d.example.test/dashboard/settings/profile');
+    });
+
+    it('any other name: nothing is printed', async () => {
+      promptQueue.push({ value: 'typed-secret' });
+      const text = await stderrOf(() => getConnectorSecret('_CONNECTOR_FOO_KEY', { orgId: ORG_A, devMode: true, interactive: true }));
+      expect(text).toBe('');
+    });
+  });
+
+  // ── The saved confirmation after the hidden prompt ──
+  describe('saved confirmation (hidden-prompt path)', () => {
+    /** Runs `fn` with stderr writes captured; returns what was written. */
+    const stderrWritesOf = async (fn: () => Promise<unknown>): Promise<string> => {
+      const spy = spyOn(process.stderr, 'write').mockImplementation((() => true) as never);
+      try {
+        await fn();
+        return spy.mock.calls.map((a) => String(a[0])).join('');
+      } finally {
+        spy.mockRestore();
+      }
+    };
+    const SAVED = 'Saved _CONNECTOR_VERCEL_TOKEN in the org system store.\n';
+
+    it('getConnectorSecret: one line after the save, naming the secret and never its value', async () => {
+      promptQueue.push({ value: 'typed-secret-value' });
+      const text = await stderrWritesOf(() => getConnectorSecret('_CONNECTOR_VERCEL_TOKEN', { orgId: ORG_A, devMode: true, interactive: true }));
+      expect(text).toBe(SAVED);
+      expect(text).not.toContain('typed-secret-value');
+    });
+
+    it('getDirectionalConnectorSecret: the same single line', async () => {
+      promptQueue.push({ value: 'typed-secret-value' });
+      const text = await stderrWritesOf(() =>
+        getDirectionalConnectorSecret('_CONNECTOR_VERCEL_TOKEN', '_TARGET_VERCEL_TOKEN', {
+          orgId: ORG_A,
+          devMode: true,
+          interactive: true,
+          missingWithFallbackCode: 'X',
+        }),
+      );
+      expect(text).toBe(SAVED);
+    });
+
+    it('an empty answer saves nothing and says nothing; an existing entry and a non-interactive call say nothing', async () => {
+      promptQueue.push({ value: '   ' });
+      expect(await stderrWritesOf(() => getConnectorSecret('_CONNECTOR_VERCEL_TOKEN', { orgId: ORG_A, devMode: true, interactive: true }))).toBe('');
+      expect(await stderrWritesOf(() => getConnectorSecret('_CONNECTOR_VERCEL_TOKEN', { orgId: ORG_A, devMode: true, interactive: false }))).toBe('');
+      const store = await openSystemStore({ orgId: ORG_A, devMode: true });
+      await store.set('_CONNECTOR_VERCEL_TOKEN', 'present');
+      expect(await stderrWritesOf(() => getConnectorSecret('_CONNECTOR_VERCEL_TOKEN', { orgId: ORG_A, devMode: true, interactive: true }))).toBe('');
+    });
+
+    it('replaceConnectorSecret: prompts again over a saved value, replaces it, and confirms once', async () => {
+      const store = await openSystemStore({ orgId: ORG_A, devMode: true });
+      await store.set('_CONNECTOR_VERCEL_TOKEN', 'old-value');
+      promptQueue.push({ value: 'new-value' });
+      const text = await stderrWritesOf(async () => {
+        expect(await replaceConnectorSecret('_CONNECTOR_VERCEL_TOKEN', { orgId: ORG_A, devMode: true, interactive: true })).toBe('new-value');
+      });
+      expect(text).toBe(SAVED);
+      expect(promptedWith).toHaveLength(1);
+      expect(promptedWith[0][0].type).toBe('password');
+      expect((await openSystemStore({ orgId: ORG_A, devMode: true })).get('_CONNECTOR_VERCEL_TOKEN')).toBe('new-value');
+    });
+
+    it('replaceConnectorSecret: an empty answer keeps the old value', async () => {
+      const store = await openSystemStore({ orgId: ORG_A, devMode: true });
+      await store.set('_CONNECTOR_VERCEL_TOKEN', 'old-value');
+      promptQueue.push({ value: '' });
+      expect(await replaceConnectorSecret('_CONNECTOR_VERCEL_TOKEN', { orgId: ORG_A, devMode: true, interactive: true })).toBeNull();
+      expect((await openSystemStore({ orgId: ORG_A, devMode: true })).get('_CONNECTOR_VERCEL_TOKEN')).toBe('old-value');
     });
   });
 

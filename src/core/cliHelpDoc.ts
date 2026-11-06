@@ -11,7 +11,7 @@
  */
 import type { Argument, Command, Option } from 'commander';
 import { ERROR_CODES } from '../types/index';
-import { DEPLOY_DOKPLOY_PLAN_SCHEMA } from '../commands/deployDiscover/schema';
+import { DEPLOY_DOKPLOY_PLAN_SCHEMA, DEPLOY_VERCEL_PLAN_SCHEMA } from '../commands/deployDiscover/schema';
 
 export interface CliArgumentDoc {
   name: string;
@@ -66,12 +66,14 @@ export interface CliHelpDoc {
   name: string;
   version: string;
   commands: CliCommandDoc[];
-  /** JSON Schemas of the files commands read, by name (`deploy_dokploy_plan`). */
+  /** JSON Schemas of the files commands read, by name (`deploy_dokploy_plan`, `deploy_vercel_plan`). */
   schemas: Record<string, unknown>;
   errorCodes: string[];
   conventions: {
     json: string;
     codes: string;
+    /** What a command that writes from a folder does first, and how a difference is answered off a terminal (CAP-717). */
+    conflicts?: string;
   };
 }
 
@@ -122,9 +124,14 @@ export const DRY_RUN_COMMANDS: ReadonlySet<string> = new Set([
 /** The JSON Schemas published in `capy help --json`. */
 export const HELP_SCHEMAS: Readonly<Record<string, unknown>> = {
   deploy_dokploy_plan: DEPLOY_DOKPLOY_PLAN_SCHEMA,
+  deploy_vercel_plan: DEPLOY_VERCEL_PLAN_SCHEMA,
 };
 
-/** Modes that are flags of a command rather than sub-commands, by command path. */
+/**
+ * Modes that are flags of a command rather than sub-commands, by command path.
+ * `capy deploy vercel --discover` is the same mode with another target: it is not listed
+ * separately, and its plan schema is published under `schemas.deploy_vercel_plan`.
+ */
 export const COMMAND_MODES: Readonly<Record<string, readonly CliModeDoc[]>> = {
   deploy: [
     {
@@ -173,6 +180,9 @@ export function buildCliHelpDoc(program: Command): CliHelpDoc {
     conventions: {
       json: 'Pass --json on any command whose supportsJson is true and parse stdout as JSON; prose (progress, prompts, errors) goes to stderr so stdout stays pure JSON.',
       codes: 'Branch only on the machine-readable `code` field (from --json output or a CapyError), never on human-readable message text — messages may be reworded without notice.',
+      // COPY-FLAG: minimal and neutral; the contract is docs/conflict-resolution.md.
+      conflicts:
+        'Every command that writes from a folder (edit, add, remove, connect, rotate, push, checkout, org, deploy, deploy revoke, deploy targets-remove) runs bare `capy` first; `checkout -b` is the one exception (a new branch carries the uncommitted values of the folder). Off a terminal, if the folder and Capy differ on any variable, nothing is written, the exit code is 3, and stdout is {ok:false, code:"SECRETS_CONFLICT", conflict_id, conflicts:[{name, project, branch, type, pinned, local, remote}]} (fingerprints only, never values; a Dokploy value has {name, target, pinned, local, remote}). Ask the person, then rerun the same command with --resolve NAME=pinned|local|remote|delete for every row (NAME@TARGET=local|remote for a Dokploy value) and --conflict <conflict_id>. A state that moved since is SECRETS_CONFLICT_STALE with the fresh rows. There is no resolve-all.',
     },
   };
 }

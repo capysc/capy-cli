@@ -11,7 +11,9 @@
  */
 
 import type { Classification } from './classify';
-import type { ResolveDokployApiKeyResult } from './dokployApi';
+import type { ResolveDokployApiKeyResult, TargetCheck } from './dokployApi';
+import type { ResolveVercelTokenResult } from './vercelTargetApi';
+import type { TargetConflict } from '../sync/conflicts';
 import type { ErrorCode } from '../types/index';
 
 export type DeployMode = 'direct' | 'ci';
@@ -36,6 +38,12 @@ export interface AdapterCallContext {
   interactive?: boolean;
   /** A Dokploy API key pre-resolved by the caller — see `AdapterCallContext`'s own doc. */
   resolvedApiKey?: ResolveDokployApiKeyResult;
+  /**
+   * A Vercel token pre-resolved by the caller, once per command — set only
+   * for a Vercel target in API mode (CAP-696). Same idea as `resolvedApiKey`:
+   * the system store is asked at most once, and an admin prompted at most once.
+   */
+  resolvedVercelToken?: ResolveVercelTokenResult;
 }
 
 export interface TargetConfig {
@@ -108,6 +116,10 @@ export interface PreflightResult {
    * set both.
    */
   code?: ErrorCode;
+  /** Where to get a missing or rejected API key (same shape as `Blocked.link`). Additive; set only by key refusals. */
+  link?: { label: string; url: string };
+  /** One plain instruction for the human that goes with `link`. */
+  remedy?: string;
   /** Non-blocking heads-up(s), shown whether or not ok is true. */
   warnings?: readonly DeployWarning[];
 }
@@ -120,6 +132,10 @@ export interface DeployStep {
   url?: string;
   /** Machine-readable companion to `detail` on a `'fail'` step — see `PreflightResult.code`'s own doc. */
   code?: ErrorCode;
+  /** Where to get a missing or rejected API key — see `PreflightResult.link`. */
+  link?: { label: string; url: string };
+  /** See `PreflightResult.remedy`. */
+  remedy?: string;
 }
 
 export interface DeployResult {
@@ -132,6 +148,14 @@ export interface DeployResult {
   epilogue?: string;
   /** Non-blocking heads-up(s) about the deploy that just ran. */
   warnings?: readonly DeployWarning[];
+  /**
+   * Target conflicts (CAP-717; only an adapter with `readsLiveValues`): delivered names whose live value on
+   * the platform was changed outside Capy. On a failed result they are unanswered and NOTHING was written; on a
+   * dry run with a `targetCheck` they are the preview. Fingerprints only.
+   */
+  conflicts?: readonly TargetConflict[];
+  /** Names the delivery left alone because the platform's value was kept (`remote`): not written, not to be recorded as delivered. */
+  skipped?: readonly string[];
 }
 
 export interface DeployContext extends AdapterCallContext {
@@ -164,6 +188,32 @@ export interface DeployContext extends AdapterCallContext {
   noDeploy?: boolean;
   /** cwd of the user's invocation. */
   cwd: string;
+  /**
+   * CAP-717, an adapter with `readsLiveValues` only: compare each delivered name with the platform's live value
+   * before writing. Absent: no comparison (the delivery is as it always was). With `dryRun` it reads and reports
+   * `conflicts` and writes nothing.
+   */
+  targetCheck?: TargetCheck;
+  /**
+   * Names on the branch that exist with no value yet (placeholders, core/placeholder.ts). A target var in this list
+   * is never written: the platform keeps its own value. Vercel only; absent: none.
+   */
+  placeholders?: readonly string[];
+  /**
+   * Vercel API mode: replacing a value Vercel holds as sensitive. `delivered` are the target vars Capy has delivered to
+   * this target before (a delivery record in keep.lock): the first replacement of the others needs a yes.
+   * `allowed` is `--replace-sensitive`. `ask` is set only where a person can answer; it resolves the answer.
+   */
+  sensitiveReplace?: {
+    readonly delivered: readonly string[];
+    readonly allowed: boolean;
+    readonly ask?: (names: readonly string[]) => Promise<boolean>;
+  };
+  /**
+   * Deliver only the names in `config.vars`, leaving every other line Capy already manages on the platform exactly
+   * as it is (the batch deploy of picked variables, CAP-715). Absent: the managed block holds the target's vars.
+   */
+  keepOtherManaged?: boolean;
 }
 
 export type AdapterVarKind = 'runtime' | 'build-time';
@@ -252,6 +302,11 @@ export interface DeployAdapter {
    * than setting each secret as a plaintext vendor env var.
    */
   needsDeployToken?: boolean;
+  /**
+   * When true the adapter can read the platform's live values before it writes, and honours
+   * `DeployContext.targetCheck` (CAP-717: Dokploy). Other platforms cannot be read back.
+   */
+  readsLiveValues?: boolean;
   /**
    * Hard requirements: binaries that must be on PATH, env vars that must be
    * set (typically only in CI), and an adapter-specific auth check. Any

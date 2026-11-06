@@ -475,3 +475,36 @@ describe('rate-limit headers as structured fields', () => {
     expect(b.details).toMatchObject({ retry_after_ms: 9000 });
   });
 });
+
+// ── pushSecrets: the base it was built from, and the server's 409 (CAP-712) ─
+
+describe('pushSecrets base_keep_hash and SECRETS_STALE_BASE', () => {
+  const client = () => new ServiceClient('http://localhost:3002');
+  const sentBody = (): Record<string, unknown> => JSON.parse(String(mockFetch.mock.calls[0][1].body));
+  beforeEach(() => jest.clearAllMocks());
+
+  test('the base hash rides in the body when given, and is absent when not (an older server just ignores it)', async () => {
+    mockFetch.mockResolvedValueOnce(mockFetchResponse({ keep_hash: 'h' }));
+    await client().pushSecrets('p1', '{}', 'blob', 'main', undefined, 'a'.repeat(64));
+    expect(sentBody()).toEqual({ keep_file: '{}', env_blob: 'blob', branch: 'main', base_keep_hash: 'a'.repeat(64) });
+
+    jest.clearAllMocks();
+    mockFetch.mockResolvedValueOnce(mockFetchResponse({ keep_hash: 'h' }));
+    await client().pushSecrets('p1', '{}', 'blob', 'main');
+    expect(sentBody()).toEqual({ keep_file: '{}', env_blob: 'blob', branch: 'main' });
+  });
+
+  test('a 409 with code SECRETS_STALE_BASE is thrown with that code, decided by the code and not the sentence', async () => {
+    mockFetch.mockResolvedValueOnce(mockFetchResponse({ code: 'SECRETS_STALE_BASE', latest_keep_hash: 'b'.repeat(64), error: 'any wording at all' }, false, 409));
+    const err = (await client().pushSecrets('p1', '{}', 'blob', 'main', undefined, 'a'.repeat(64)).catch((e: unknown) => e)) as CapyError;
+    expect(err).toBeInstanceOf(CapyError);
+    expect(err.code).toBe(ERROR_CODES.SECRETS_STALE_BASE);
+    expect(err.details).toMatchObject({ status: 409, data: { latest_keep_hash: 'b'.repeat(64) } });
+  });
+
+  test('a 409 carrying some other code is not mistaken for it', async () => {
+    mockFetch.mockResolvedValueOnce(mockFetchResponse({ code: 'SOMETHING_ELSE', error: 'SECRETS_STALE_BASE' }, false, 409));
+    const err = (await client().pushSecrets('p1', '{}', 'blob', 'main').catch((e: unknown) => e)) as CapyError;
+    expect(err.code).toBe(ERROR_CODES.SERVICE_ERROR);
+  });
+});

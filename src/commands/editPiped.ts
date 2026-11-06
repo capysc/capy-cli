@@ -9,9 +9,12 @@
  *
  * | name | stdin   | mode     |
  * |------|---------|----------|
- * | any  | TTY     | `tui`    |
+ * | no   | TTY     | `tui`    |
+ * | yes  | TTY     | `prompt` |
  * | yes  | not TTY | `piped`  |
  * | no   | not TTY | `refuse` |
+ *
+ * `prompt` is `capy add NAME --force`: the hidden value prompt, then the one write path.
  *
  * `--non-tty` takes the TTY off the table. A name with `--non-tty` on a real
  * terminal has nothing piped to read, so it refuses rather than block on the
@@ -22,8 +25,9 @@ import { isLocalOnly } from '../config/profileConfig';
 import { MAX_PIPED_BYTES, readPipedValue, refuseInvalidName, refusePiped } from './pipedValue';
 import { isValidVarName, runPipedWrite } from './pipedWrite';
 import type { PrFlags } from './keepLockPr';
+import type { GateOptions } from '../sync/gate';
 
-export type EditMode = 'tui' | 'piped' | 'refuse';
+export type EditMode = 'tui' | 'prompt' | 'piped' | 'refuse';
 
 export interface EditModeFacts {
   readonly hasName: boolean;
@@ -33,7 +37,7 @@ export interface EditModeFacts {
 
 export function decideEditMode(facts: EditModeFacts): EditMode {
   const { hasName, stdinIsTTY, nonTty } = facts;
-  if (stdinIsTTY && !nonTty) return 'tui';
+  if (stdinIsTTY && !nonTty) return hasName ? 'prompt' : 'tui';
   const somethingIsPiped = !stdinIsTTY;
   if (hasName) return somethingIsPiped ? 'piped' : 'refuse';
   return 'refuse';
@@ -56,6 +60,17 @@ export interface EditPipedOpts {
   readonly pr?: PrFlags;
   /** `--dry-run`: say what would happen; change nothing. */
   readonly dryRun?: boolean;
+  /** What bare `capy` runs with as this write's first step: `--resolve` / `--conflict` (already validated) and the flags. */
+  readonly gate: GateOptions;
+}
+
+/** `EDIT_STDIN_LOCAL_ONLY`, exit 1: `capy edit NAME` on a terminal writes through Capy, which a local-only profile has no organization for. */
+export function refuseEditPromptLocalOnly(json: boolean): never {
+  return refusePiped(
+    json,
+    ERROR_CODES.EDIT_STDIN_LOCAL_ONLY,
+    'Setting a value by name needs an organization. This profile is local-only. Run capy edit to use the editor.', // COPY-FLAG
+  );
 }
 
 /** `<cmd> | capy edit NAME`: read stdin, set the variable, report. Never prompts. */

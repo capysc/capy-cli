@@ -18,8 +18,12 @@ import inquirer from 'inquirer';
 import { generateDeployHtml } from '../ui/deployPage/html';
 import { hashValue } from '../deploy/keepGate';
 import { stripTargetsForDeployId } from '../deploy/targetsGate';
+import { uploadKeepOnly } from '../sync/commit';
+import { SyncEngine } from '../sync/syncEngine';
 import { ERROR_CODES } from '../types/index';
 import type { ProjectState } from '../types/index';
+import { gateFirst } from '../sync/gate';
+import { conflictFlagsOrExit, type RawConflictFlags } from '../sync/conflicts';
 
 /**
  * `deploy revoke <id>` (CAP-679): strip every `targets` element carrying
@@ -64,24 +68,16 @@ async function stripRevokedTargets(
       return;
     }
 
-    const { resolveProjectKey: resolveKey } = await import('../crypto/keyResolver');
-    const { Encryptor } = await import('../crypto/encryptor');
-    const { deriveResourceId } = await import('../crypto/resourceId');
-    const projectKey = await resolveKey(projectState.organizationId, projectState.projectId, userId, {
-      coDecrypt: (o, c) => serviceClient.coDecrypt(o, c).then((r) => r.plaintext),
-      wrapOuterLayer: (o, p) => serviceClient.wrapOuterLayer(o, p).then((r) => r.ciphertext),
-    });
-    const fm = new FileManager();
-    const rawLocal = fm.readEnvFile();
-    const localPlaintext = Object.fromEntries(
-      Object.entries(rawLocal).map(([k, v]) => [k, v.startsWith('capy:') ? fm.decryptValue(v, projectKey) : v]),
-    );
-    const envBlob = Object.entries(localPlaintext)
-      .map(([k, v]) => `${k}=capy:${deriveResourceId(branch, k)}:${Encryptor.encrypt(v, projectKey)}`)
-      .join('\n');
-    const pushed = await serviceClient.pushSecrets(projectState.projectId, JSON.stringify(nextKeep), envBlob, branch);
-    const { SyncEngine } = await import('../sync/syncEngine');
-    fm.writeKeepFile(SyncEngine.adoptServerKeep(pushed.keep_file, nextKeep, branch));
+    // A keep-only change on the SERVER's latest, through the shared keep-only upload (sync/commit.ts): no value
+    // moves, so nothing in this folder's `.env` can leak into the blob or revert anyone's value.
+    const done = await uploadKeepOnly(serviceClient, projectState.projectId, branch, (latest) => stripTargetsForDeployId(latest, deployId));
+    if (!done.ok) {
+      console.error(`  \x1b[33m!\x1b[0m could not strip revoked deploy targets in keep.lock: ${done.code}`);
+      return;
+    }
+    if (done.pushed) {
+      new FileManager().writeKeepFile(SyncEngine.spliceKeepBranch(keep, SyncEngine.adoptServerKeep(done.serverKeepFile, done.keep, branch), branch));
+    }
   } catch (err: any) {
     console.error(`  \x1b[33m!\x1b[0m could not strip revoked deploy targets in keep.lock: ${err?.message ?? err}`);
   }
@@ -336,6 +332,12 @@ export interface DeployCommandOptions {
   yes?: boolean;
   /** Forwarded to the connector flow: force a redeploy even if keep.lock is unchanged. */
   force?: boolean;
+  /** `--json`: stdout belongs to JSON, so bare `capy`'s differences are reported, not asked. */
+  json?: boolean;
+  /** `--dry-run`: bare `capy`'s differences are reported (with `dry_run`), never answered. */
+  dryRun?: boolean;
+  /** `--resolve` / `--conflict` as typed (CAP-717). */
+  conflictFlags?: RawConflictFlags;
 }
 
 /** org-scoped silent → unscoped silent → interactive: the first success, else the last attempt. */
@@ -489,6 +491,19 @@ export class DeployCommand {
   }
 
   async execute(): Promise<void> {
+    // A bad --resolve / --conflict is refused before anything is read or authenticated.
+    conflictFlagsOrExit(this.options.conflictFlags ?? {}, this.options.json === true);
+    // Bare `capy` runs before anything else (docs/conflict-resolution.md): before detecting the project, signing in, the
+    // picker, a mint of deploy credentials, or the GitHub Actions connector. The folder and Capy must agree before this
+    // mints a token from the folder's `.env`; off a terminal (`--yes`, `--json`, `--dry-run`) a difference ends the run
+    // with its payload alone on stdout.
+    await gateFirst({
+      devMode: this.devMode,
+      nonTty: this.options.yes === true,
+      json: this.options.json === true,
+      conflictFlags: this.options.conflictFlags,
+      dryRun: this.options.dryRun === true,
+    });
     try {
       const pm = new ProjectManager();
       const fm = new FileManager();
@@ -604,7 +619,12 @@ export class DeployRevokeCommand {
     this.devMode = devMode;
   }
 
-  async execute(deployIdPrefix: string): Promise<void> {
+  async execute(deployIdPrefix: string, opts: { readonly nonTty?: boolean; readonly conflictFlags?: RawConflictFlags } = {}): Promise<void> {
+    // A bad --resolve / --conflict is refused before anything is read or authenticated.
+    conflictFlagsOrExit(opts.conflictFlags ?? {}, false);
+    // Bare `capy` runs first (docs/conflict-resolution.md), before the revoke and the keep.lock strip that follows it
+    // (a Keep-only upload): revoking a deploy writes from this folder like every other command does.
+    await gateFirst({ devMode: this.devMode, nonTty: opts.nonTty, conflictFlags: opts.conflictFlags });
     try {
       const pm = new ProjectManager();
       const projectState = await pm.detectProjectState();

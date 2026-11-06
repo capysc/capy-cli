@@ -46,6 +46,10 @@ const SERVER_CODES = new Set<string>([
   // POST already has) and 410 once expired.
   ERROR_CODES.TRANSPORT_NOT_FOUND,
   ERROR_CODES.TRANSPORT_EXPIRED,
+  // CAP-712 — `POST /secrets/:projectId` with a `base_keep_hash` that is no
+  // longer the server's latest: HTTP 409. The commit path (sync/commit.ts)
+  // re-reads and re-plans on exactly this code.
+  ERROR_CODES.SECRETS_STALE_BASE,
 ]);
 
 /**
@@ -706,6 +710,9 @@ export class ServiceClient {
    * The response's keep_file (when the server sends one) is the pushed
    * keep.lock with server-assigned changed_at timestamps — callers should
    * adopt it as the local keep.lock (SyncEngine.adoptServerKeep).
+   *
+   * `baseKeepHash` (CAP-712): `SyncEngine.computeKeepHash` of the latest keep the push
+   * was built from. Pass it for every push that was built from a read.
    */
   async pushSecrets(
     projectId: string,
@@ -713,11 +720,16 @@ export class ServiceClient {
     envBlob: string,
     branch: string,
     onRateLimit?: (rate: RateInfo) => void,
+    baseKeepHash?: string,
   ): Promise<{ keep_hash: string; keep_file?: string }> {
     return this.request('POST', `/secrets/${projectId}`, {
       keep_file: keepFile,
       env_blob: envBlob,
       branch,
+      // The branch hash of the latest keep the caller built this push from. A server
+      // that knows the field refuses (409 SECRETS_STALE_BASE) when it is no longer the
+      // latest; one that does not ignores it.
+      ...(baseKeepHash === undefined ? {} : { base_keep_hash: baseKeepHash }),
     }, { onRateLimit });
   }
 

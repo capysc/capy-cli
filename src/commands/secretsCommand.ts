@@ -3,6 +3,7 @@ import { resolveOrgContext } from '../core/orgContext';
 import { Spinner } from '../ui/spinner';
 import { CapyError, ERROR_CODES } from '../types/index';
 import { rowIdOf } from './secretsRowId';
+import { placeholderSetCommand } from '../core/placeholder';
 import { secretRowStatus, secretRowStatusJson, type SecretRowStatus } from '../core/deployStatus';
 
 /**
@@ -130,6 +131,8 @@ export class SecretsCommand {
     const withIds = rows.map((row) => ({
       ...row,
       row_id: rowIdOf(row.name, row.value_hash),
+      // An empty value hash is a name with no value yet (a placeholder, or a connector entry before its first push).
+      ...(row.value_hash === '' ? { no_value: true, set_with: placeholderSetCommand(row.name) } : {}),
       ...statusFields(secretRowStatus(row)),
       locations: row.locations.map((loc) =>
         loc.targets === undefined ? loc : { ...loc, targets: loc.targets.map((t) => ({ ...t, up_to_date: !t.stale })) },

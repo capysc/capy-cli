@@ -160,18 +160,22 @@ describe('a run: values, preflight, record and PR', () => {
     return { ...w, plan };
   };
 
-  test('one unlock for the whole run, and each target\'s own variables (and only those) reach the adapter, decrypted', async () => {
+  test('one unlock for the whole run, and only the PICKED variables of each target reach the adapter, decrypted (CAP-715)', async () => {
     const { plan, env, openKeys, adapter, service } = await plannedWorld();
     const result = await runBatchDeploy(plan, env);
 
     expect(openKeys.mock.calls).toHaveLength(1);
     expect(service.getDecryptData.mock.calls.map((c) => `${c[0]}/${c[1]}`).toSorted()).toEqual(['pA/production', 'pA/production', 'pB/staging']);
     const sent = Object.fromEntries(adapter.deploy.mock.calls.map(([config, ctx]) => [config.name, ctx.env]));
+    // The request picks API_KEY. `api` also lists DB_URL, which is not picked: it is not sent (it used to be).
     expect(sent).toEqual({
-      api: { API_KEY: VALUES.API_KEY, DB_URL: VALUES.DB_URL },
+      api: { API_KEY: VALUES.API_KEY },
       worker: { API_KEY: VALUES.API_KEY },
       site: { API_KEY: VALUES.API_KEY },
     });
+    expect(adapter.deploy.mock.calls.every(([config]) => config.vars.every((v) => v === 'API_KEY'))).toBe(true);
+    // ... and the adapter is told to leave every other line Capy manages in the service's block as it is.
+    expect(adapter.deploy.mock.calls.every(([, ctx]) => ctx.keepOtherManaged === true)).toBe(true);
     // CI mode: secrets only. Capy never triggers a deploy; merging the PR does.
     expect(adapter.deploy.mock.calls.every(([, ctx]) => ctx.secretsOnly === true && ctx.noDeploy === false && ctx.dryRun === false)).toBe(true);
     expect(result.targets.map((t) => t.kind)).toEqual(['delivered', 'delivered', 'delivered']);
@@ -238,8 +242,8 @@ describe('a run: values, preflight, record and PR', () => {
     expect(apiKey.targets.map((t) => t.target).toSorted()).toEqual(['api', 'legacy', 'worker']);
     expect(apiKey.targets.find((t) => t.target === 'legacy')).toEqual(LEGACY_RECORD);
     expect(apiKey.targets.find((t) => t.target === 'api')?.deployed_value_hash).toBe(hashOf('API_KEY'));
-    const dbUrl = keep.variables.DB_URL[0] as unknown as { targets: Array<{ target: string }> };
-    expect(dbUrl.targets.map((t) => t.target)).toEqual(['api']); // `worker` does not ship DB_URL
+    // DB_URL was not picked, so no target is recorded for it (`api` lists it, `worker` does not ship it).
+    expect((keep.variables.DB_URL[0] as unknown as { targets?: unknown }).targets).toBeUndefined();
     expect(blob).toBe(service.blobs['pA/production']);
     // The pin itself is untouched: only `targets` changed.
     expect(keep.variables.API_KEY[0].value_hash).toBe(hashOf('API_KEY'));
@@ -255,7 +259,7 @@ describe('a run: values, preflight, record and PR', () => {
     const site = pulls.find((p) => p.title === 'deploy: site → staging (dokploy)');
     expect(api?.repo).toBe('mono');
     expect(api?.base).toBe('main');
-    expect(api?.body).toBe(buildDeployPrBody(dokployTarget('api')));
+    expect(api?.body).toBe(buildDeployPrBody(dokployTarget('api', { vars: ['API_KEY'] }))); // only the picked variable
     expect(site?.repo).toBe('solo');
     expect(site?.base).toBe('staging'); // gitBaseBranch, not the repo's default branch `trunk`
     expect(site?.body).toBe(buildDeployPrBody(dokployTarget('site', { branch: 'staging', gitBaseBranch: 'staging', vars: ['API_KEY'] })));
@@ -264,7 +268,7 @@ describe('a run: values, preflight, record and PR', () => {
     const apiBlob = blobs.find((k) => k.variables.API_KEY[0].targets?.some((t) => t.target === 'api')) as KeepFile;
     expect(apiBlob.variables.API_KEY[0].targets?.map((t) => t.target)).toEqual(['api']);
     expect(apiBlob.variables.API_KEY[0].targets?.[0].deployed_value_hash).toBe(hashOf('API_KEY'));
-    expect(apiBlob.variables.DB_URL[0].targets?.[0].deployed_value_hash).toBe(hashOf('DB_URL'));
+    expect(apiBlob.variables.DB_URL[0].targets ?? []).toEqual([]); // not picked: nothing recorded for it
   });
 
   test('every PR is read from the target\'s base, and the delivered result carries its URL', async () => {
@@ -312,9 +316,11 @@ describe('a run: values, preflight, record and PR', () => {
     expect(w.github.createPull.mock.calls).toHaveLength(2);
   });
 
-  test('a variable missing from the Capy branch is left out and named, like capy deploy; the rest are delivered', async () => {
+  test('a PICKED variable missing from the Capy branch is left out and named, like capy deploy; the rest are delivered', async () => {
     const w = await plannedWorld({}, fakeAdapter(), { vars: ['API_KEY'] }); // DB_URL is not in any branch
-    const result = await runBatchDeploy(w.plan, w.env);
+    // Both names are picked this time (a variable that is not picked is not "missing", it is not asked for).
+    const both = await planBatchDeploy(w.github, { names: [NAME, 'DB_URL'], locations: request.locations }, LINKS);
+    const result = await runBatchDeploy(both, w.env);
     expect(result.targets[0]).toMatchObject({ kind: 'delivered', missing_vars: ['DB_URL'] });
     const apiCall = w.adapter.deploy.mock.calls.find(([c]) => c.name === 'api');
     expect(apiCall?.[0].vars).toEqual(['API_KEY']);

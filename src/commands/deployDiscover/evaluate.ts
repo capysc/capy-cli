@@ -36,6 +36,7 @@ import {
   uniqueSorted,
 } from './facts';
 import { PlanError } from './plan';
+import type { KindOverrides } from './kind';
 
 export interface ResolvedEntry {
   readonly index: number;
@@ -96,10 +97,12 @@ export function resolveEntries(
   entries: readonly PlanEntry[],
   services: ReadonlyMap<string, ServiceFacts>,
   projects: ReadonlyMap<string, CapyProjectFacts>,
+  kind?: KindOverrides,
 ): readonly ResolvedEntry[] {
+  const duplicateKey = kind?.duplicateKey ?? ((e: PlanEntry): string => `${e.project_id}\u0000${e.branch}`);
   return entries.map((entry, index) => {
     const resolved = resolveEntry(entry, index, services, projects);
-    const duplicate = entries.slice(0, index).some((e) => e.project_id === entry.project_id && e.branch === entry.branch);
+    const duplicate = entries.slice(0, index).some((e) => duplicateKey(e) === duplicateKey(entry));
     return duplicate ? { ...resolved, errors: [...resolved.errors, err(at(index), ERROR_CODES.DUPLICATE_ENTRY)] } : resolved;
   });
 }
@@ -153,7 +156,7 @@ export interface Evaluation {
   readonly entries: readonly EvaluatedEntry[];
 }
 
-function githubErrors(r: ResolvedEntry, reads: GithubReads): readonly PlanError[] {
+function githubErrors(r: ResolvedEntry, reads: GithubReads, kind?: KindOverrides): readonly PlanError[] {
   if (r.link === undefined) return [];
   const branches = reads.branches.get(repoKey(r.link));
   const branchErrors: readonly PlanError[] =
@@ -170,19 +173,29 @@ function githubErrors(r: ResolvedEntry, reads: GithubReads): readonly PlanError[
       ? [err(at(r.index, 'project_id'), ERROR_CODES.KEEP_PR_READ_FAILED)]
       : isFailure(targets)
         ? [err(at(r.index, 'project_id'), targets.code)]
-        : conflictingTarget(targets, r.entry.service_id, r.entry.branch) !== undefined
+        : conflictOf(targets, r, kind) !== undefined
           ? [err(at(r.index, 'branch'), ERROR_CODES.TARGET_EXISTS)]
           : [];
   return [...branchErrors, ...targetErrors];
 }
 
+function conflictOf(targets: readonly ExistingTarget[], r: ResolvedEntry, kind?: KindOverrides): ExistingTarget | undefined {
+  if (kind === undefined) return conflictingTarget(targets, r.entry.service_id, r.entry.branch);
+  return r.service === undefined ? undefined : kind.conflicting(targets, r.service, r.entry.branch);
+}
+
+function configuredOf(targets: readonly ExistingTarget[], r: ResolvedEntry, kind?: KindOverrides): ExistingTarget | undefined {
+  if (kind === undefined) return configuredTarget(targets, r.entry.service_id, r.entry.branch);
+  return r.service === undefined ? undefined : kind.configured(targets, r.service, r.entry.branch);
+}
+
 /** Step 2: the plan against GitHub's branches and the repos' deploy.json files. */
-export function evaluatePlan(resolved: readonly ResolvedEntry[], reads: GithubReads): Evaluation {
-  const errors = resolved.flatMap((r) => [...r.errors, ...githubErrors(r, reads)]);
+export function evaluatePlan(resolved: readonly ResolvedEntry[], reads: GithubReads, kind?: KindOverrides): Evaluation {
+  const errors = resolved.flatMap((r) => [...r.errors, ...githubErrors(r, reads, kind)]);
   const entries = resolved.flatMap((r): EvaluatedEntry[] => {
     if (r.service === undefined || r.project === undefined || r.link === undefined) return [];
     const targets = reads.deployJson.get(fileKeyOf(r.link));
-    const existing = targets === undefined || isFailure(targets) ? undefined : configuredTarget(targets, r.entry.service_id, r.entry.branch);
+    const existing = targets === undefined || isFailure(targets) ? undefined : configuredOf(targets, r, kind);
     return [
       {
         resolved: { ...r, service: r.service, project: r.project, link: r.link },
@@ -196,14 +209,14 @@ export function evaluatePlan(resolved: readonly ResolvedEntry[], reads: GithubRe
 
 // ── The targets to write ─────────────────────────────────────────────────────
 
-/** `dokploy-<capy branch>`, restricted to the characters a target name allows. */
-export function targetBaseName(branch: string): string {
+/** `<provider>-<capy branch>` (`dokploy-…` unless asked), restricted to the characters a target name allows. */
+export function targetBaseName(branch: string, provider: string = 'dokploy'): string {
   const cleaned = branch
     .toLowerCase()
     .replace(/[^a-z0-9-]+/g, '-')
     .replace(/-+/g, '-')
     .replace(/^-+|-+$/g, '');
-  return cleaned === '' ? 'dokploy' : `dokploy-${cleaned}`;
+  return cleaned === '' ? provider : `${provider}-${cleaned}`;
 }
 
 /** `base`, or `base-2`, `base-3`, … when `taken` already has it. */
@@ -255,6 +268,7 @@ export function targetsToWrite(
   evaluated: readonly EvaluatedEntry[],
   reads: GithubReads,
   baseUrl: string,
+  kind?: KindOverrides,
 ): readonly TargetToWrite[] {
   const pending = sortedCopy(
     evaluated.filter((e) => e.status === 'write'),
@@ -271,14 +285,13 @@ export function targetsToWrite(
       return read === undefined || isFailure(read) ? [] : read.map((t) => t.name);
     })();
     const taken = new Set([...existingNames, ...acc.filter((t) => t.fileKey === key).map((t) => t.target.name)]);
-    const name = uniqueName(targetBaseName(entry.branch), taken);
-    const target = dokployTargetOf({
-      name,
-      entry: { ...entry, vars: uniqueSorted(entry.vars) },
-      service,
-      baseUrl,
-      knownVars: project.var_names_by_branch[entry.branch] ?? [],
-    });
+    const normalizedEntry = { ...entry, vars: uniqueSorted(entry.vars) };
+    const knownVars = project.var_names_by_branch[entry.branch] ?? [];
+    const name = uniqueName(kind === undefined ? targetBaseName(entry.branch) : kind.baseName(normalizedEntry, service), taken);
+    const target =
+      kind === undefined
+        ? dokployTargetOf({ name, entry: normalizedEntry, service, baseUrl, knownVars })
+        : kind.targetFor({ name, entry: normalizedEntry, service, link, knownVars });
     return [
       ...acc,
       {

@@ -8,13 +8,19 @@
  * (the keep.lock hash), so clones on the old keep.lock keep getting the old
  * value until they pull the merged PR.
  *
- * HOW A LOCATION IS PUSHED, with no project folder: the same sequence the org
- * system store uses (system/systemStore.ts) and `capy edit` uses — resolve the
- * project key, fetch the branch's blob + keep from the service, change only
- * this variable, push with the keep update through the same `pushSecrets`
- * route, `writeKeepCache`. Every OTHER variable's line in the blob is carried
- * over byte for byte (it is never decrypted and re-encrypted), so a push
- * touches this one variable and nothing else. Each branch is its own push.
+ * HOW A LOCATION IS PUSHED, with no project folder: the shared upload every
+ * write uses (sync/commit.ts `uploadChanges`) — resolve the project key, read the
+ * branch's blob + keep from the service, change only this variable, push with the
+ * keep update and `base_keep_hash` through the same `pushSecrets` route,
+ * `writeKeepCache`. Every OTHER variable's line in the blob is carried over byte
+ * for byte (it is never decrypted and re-encrypted), so a push touches this one
+ * variable and nothing else. Each branch is its own push.
+ *
+ * WHEN A LOCATION MOVED (docs/conflict-resolution.md, "Commands with no folder"):
+ * `compareSecrets` over the fingerprint the row listed (pinned), the new value
+ * (local) and what the location holds now (remote). Unchanged since the row was
+ * listed: written. Moved: written only as the person answered (`local` writes,
+ * `remote` leaves it), and an answer holds only for the state it was made against.
  *
  * HOW A REPO IS UPDATED: one PR on the repo's default branch through
  * keepLockPr's `openKeepLockPullRequest` (blob per keep.lock, one tree, one
@@ -27,10 +33,10 @@
  * Locations and repos fail independently. A failure is a code, never a message,
  * and nothing here ever prints, returns or throws the value or any hash of it.
  */
-import { FileManager } from '../files/fileManager';
-import { Encryptor } from '../crypto/encryptor';
-import { deriveResourceId } from '../crypto/resourceId';
 import { SyncEngine } from '../sync/syncEngine';
+import { UploadIo, envBlobOf, isStaleBase, snapshotFrom, uploadChanges, type Changes } from '../sync/commit';
+import type { SourceConflict } from '../sync/conflicts';
+import { BoundAnswer, actionFor, holdsFor, movedRow, shownValueUnavailable } from '../sync/noFolder';
 import { hashValue } from '../deploy/keepGate';
 import type { EditSaveRecord } from '../deploy/keepGate';
 import { writeKeepCache } from '../config/globalConfig';
@@ -91,6 +97,18 @@ export interface SetRequest {
   readonly repos: readonly RepoTarget[];
   /** Each repo's PR base, by `repoKey`. Absent: the repo's default branch. */
   readonly bases?: Readonly<Record<string, string>>;
+  /**
+   * The fingerprint each location's row listed, by `locationKeyOf` (CAP-717): what the person was shown. A location
+   * that holds something else now (and not the new value) moved since, and is written only as `answers` say.
+   * Absent: the location is not compared.
+   */
+  readonly shown?: Readonly<Record<string, string>>;
+  /** The answers for locations that moved, by `locationKeyOf`, each bound to the state it was made against. */
+  readonly answers?: Readonly<Record<string, BoundAnswer>>;
+  /** The value each location answered `pinned` gets written back: the plaintext of what the person was shown, by `locationKeyOf`. */
+  readonly restore?: Readonly<Record<string, string>>;
+  /** The run's key resolver, when the caller already unlocked (the unlock is once per run). Absent: opened here. */
+  readonly keys?: KeyResolver;
 }
 
 export interface PrResult {
@@ -110,6 +128,8 @@ export interface SecretSetResult {
   readonly name: string;
   readonly updated: readonly LocationRef[];
   readonly unchanged: readonly LocationRef[];
+  /** Locations whose variable was removed (the answer was `delete`). Left out of JSON when there are none. */
+  readonly removed?: readonly LocationRef[];
   readonly prs: readonly PrResult[];
   /** Repos whose keep.lock on the default branch already carries these entries: no PR was needed. */
   readonly no_pr: ReadonlyArray<{ readonly repo: string; readonly reason: 'NO_DIFF_VS_BASE' }>;
@@ -272,15 +292,8 @@ export function keepDiverged(
 type LocationOutcome =
   | { readonly kind: 'updated'; readonly location: SetLocation; readonly entry: KeepVariableEntry; readonly serverKeep: KeepFile }
   | { readonly kind: 'unchanged'; readonly location: SetLocation }
+  | { readonly kind: 'removed'; readonly location: SetLocation }
   | { readonly kind: 'failed'; readonly location: SetLocation; readonly code: string };
-
-/** What a branch holds right now: its blob lines (kept verbatim), the server's keep, and the current plaintext of `name`. */
-interface Current {
-  readonly lines: readonly string[];
-  readonly serverKeep: KeepFile;
-  readonly index: number;
-  readonly plaintext: string;
-}
 
 function parseKeepJson(raw: string | undefined): KeepFile | undefined {
   if (raw === undefined || raw === '') return undefined;
@@ -294,19 +307,7 @@ function parseKeepJson(raw: string | undefined): KeepFile | undefined {
   }
 }
 
-const lineIndexOf = (lines: readonly string[], name: string): number =>
-  lines.findIndex((l) => l.startsWith(`${name}=`));
-
 type Tried<T> = { readonly ok: true; readonly value: T } | { readonly ok: false; readonly error: unknown };
-
-/** `f()` as a result instead of a throw. */
-function attempt<T>(f: () => T): Tried<T> {
-  try {
-    return { ok: true, value: f() };
-  } catch (error) {
-    return { ok: false, error };
-  }
-}
 
 const settled = <T>(promise: Promise<T>): Promise<Tried<T>> =>
   promise.then(
@@ -314,62 +315,117 @@ const settled = <T>(promise: Promise<T>): Promise<Tried<T>> =>
     (error: unknown): Tried<T> => ({ ok: false, error }),
   );
 
-type Fetched = Awaited<ReturnType<SetEnv['client']['getDecryptData']>>;
-
-/** What a branch holds, from its fetched data: blob lines (kept verbatim), the server's keep, and the plaintext of `name`. Throws a coded `CapyError`; the value is never in what it throws. */
-function currentFrom(data: Fetched, name: string, projectKey: string): Current {
-  const lines = (data.env_content ?? '').split('\n').filter((l) => l.trim().length > 0);
-  const serverKeep = parseKeepJson(data.keep_file);
-  if (serverKeep === undefined) throw new CapyError('keep.lock unavailable', ERROR_CODES.NO_KEEP_FILE);
-  const index = lineIndexOf(lines, name);
-  if (index === -1) throw new CapyError('variable not found', ERROR_CODES.VARIABLE_NOT_FOUND);
-  const raw = lines[index].slice(name.length + 1);
-  const plaintext = new FileManager().decryptValue(raw, projectKey);
-  return { lines, serverKeep, index, plaintext };
-}
-
 const withRate = <R>(result: R, rate: RateInfo | undefined): PoolItem<R> => ({ result, ...(rate === undefined ? {} : { rate }) });
 const failedItem = (location: SetLocation, err: unknown, rate?: RateInfo): PoolItem<LocationOutcome> =>
   withRate<LocationOutcome>({ kind: 'failed', location, code: codeOf(err) }, rate);
 
-/** One location: read the current branch, replace `name`, push, write the cache. Never throws; reports the rate-limit reading it saw. */
-async function pushLocation(env: SetEnv, keys: KeyResolver, loc: SetLocation, name: string, value: string): Promise<PoolItem<LocationOutcome>> {
+/** A call that failed, with the rate-limit reading it saw: how the bulk transport reports it through the shared upload. */
+class RatedFailure extends Error {
+  constructor(
+    readonly error: unknown,
+    readonly rate: RateInfo | undefined,
+  ) {
+    super('rated failure');
+  }
+}
+
+/** The error a failure carries (a transport failure wraps the real one), and its reading. */
+const unwrapped = (err: unknown): { readonly error: unknown; readonly rate: RateInfo | undefined } =>
+  err instanceof RatedFailure ? { error: err.error, rate: err.rate } : { error: err, rate: undefined };
+
+/** The shared upload's transport for the bulk writes: every call reads the rate-limit headers and waits out a 429. */
+function bulkIo(env: SetEnv, loc: SetLocation, projectKey: string): UploadIo {
+  return {
+    read: async () => {
+      const read = await callWithBackoff((onRate) => env.client.getDecryptData(loc.project_id, loc.branch, undefined, true, onRate), env.sleep);
+      if (!read.ok) throw new RatedFailure(read.error, read.rate);
+      return { snapshot: snapshotFrom(read.value, loc.branch, projectKey), rate: read.rate };
+    },
+    push: async (keepFile, envBlob, baseKeepHash) => {
+      const pushed = await callWithBackoff((onRate) => env.client.pushSecrets(loc.project_id, keepFile, envBlob, loc.branch, onRate, baseKeepHash), env.sleep);
+      if (!pushed.ok) throw new RatedFailure(pushed.error, pushed.rate);
+      return { result: pushed.value, rate: pushed.rate };
+    },
+  };
+}
+
+/**
+ * One location: read the current branch, replace `name`, push (the shared upload, with `base_keep_hash`), write the
+ * cache. Never throws; reports the rate-limit reading it saw. If the server says someone saved since the read
+ * (`SECRETS_STALE_BASE`), the location is read and compared once more from the new latest.
+ */
+async function pushLocation(
+  env: SetEnv,
+  keys: KeyResolver,
+  loc: SetLocation,
+  name: string,
+  value: string,
+  check: { readonly shown?: string; readonly answer?: BoundAnswer; readonly restore?: string },
+  retried: boolean = false,
+): Promise<PoolItem<LocationOutcome>> {
   const key = await settled(keys(loc.project_id));
   if (!key.ok) return failedItem(loc, key.error);
-  const read = await callWithBackoff((onRate) => env.client.getDecryptData(loc.project_id, loc.branch, undefined, true, onRate), env.sleep);
-  if (!read.ok) return failedItem(loc, read.error, read.rate);
-  const current = attempt(() => currentFrom(read.value, name, key.value));
-  if (!current.ok) return failedItem(loc, current.error, read.rate);
-  if (current.value.plaintext === value) return withRate<LocationOutcome>({ kind: 'unchanged', location: loc }, read.rate);
+  const io = bulkIo(env, loc, key.value);
+  const read = await settled(io.read());
+  if (!read.ok) {
+    const failure = unwrapped(read.error);
+    return failedItem(loc, failure.error, failure.rate);
+  }
+  const { snapshot, rate: readRate } = read.value;
+  const entry = snapshot.entries[name];
+  if (entry?.plaintext === value) return withRate<LocationOutcome>({ kind: 'unchanged', location: loc }, readRate);
+  if (snapshot.keep === undefined) return failedItem(loc, new CapyError('keep.lock unavailable', ERROR_CODES.NO_KEEP_FILE), readRate);
+  if (entry !== undefined && entry.plaintext === undefined) return failedItem(loc, new CapyError('variable not readable', ERROR_CODES.PERMISSION_DENIED), readRate);
 
-  const write = attempt(() => {
-    const existing = current.value.serverKeep.variables[name]?.find((e) => e.branch === loc.branch);
-    const resourceId = existing?.resource_id ?? deriveResourceId(loc.branch, name);
-    const newLine = `${name}=capy:${resourceId}:${Encryptor.encrypt(value, key.value)}`;
-    return {
-      envBlob: current.value.lines.map((l, i) => (i === current.value.index ? newLine : l)).join('\n'),
-      merged: new SyncEngine().mergeWithKeep(
-        current.value.serverKeep,
-        { [name]: { resource_id: resourceId, value_hash: hashValue(value) } },
-        loc.branch,
-      ),
-    };
-  });
-  if (!write.ok) return failedItem(loc, write.error, read.rate);
+  // Someone else changed it since the person looked: not overwritten unless they answered, against exactly this state.
+  const moved =
+    check.shown === undefined
+      ? undefined
+      : movedRow({
+          name,
+          project: loc.project_name,
+          branch: loc.branch,
+          shown: check.shown,
+          local: hashValue(value),
+          remote: entry?.hash,
+          serverKeepHash: SyncEngine.computeKeepHash(snapshot.keep, loc.branch),
+        });
+  const answered = moved === undefined ? { ok: true as const, value: 'write' as const } : answerAt(check, moved);
+  if (!answered.ok) return failedItem(loc, answered.error, readRate);
+  const action = answered.value;
+  // Nothing to remove where the variable is already gone.
+  if (action === 'leave' || (action === 'remove' && entry === undefined)) return withRate<LocationOutcome>({ kind: 'unchanged', location: loc }, readRate);
+  // `pinned` writes back the value that was shown; no plaintext for it is a refusal, never a guess.
+  if (action === 'restore' && check.restore === undefined) return failedItem(loc, shownValueUnavailable(name), readRate);
 
-  const pushed = await callWithBackoff(
-    (onRate) => env.client.pushSecrets(loc.project_id, JSON.stringify(write.value.merged), write.value.envBlob, loc.branch, onRate),
-    env.sleep,
+  const uploaded = await settled(
+    uploadChanges({
+      client: env.client,
+      projectId: loc.project_id,
+      branch: loc.branch,
+      projectKey: key.value,
+      startKeep: snapshot.keep,
+      changes: changesFor(action, name, value, check.restore),
+      seen: snapshot,
+      io,
+    }),
   );
-  const rate = mergeRates(read.rate, pushed.rate, (env.now ?? Date.now)());
-  if (!pushed.ok) return failedItem(loc, pushed.error, rate);
+  if (!uploaded.ok) {
+    if (!retried && isStaleBase(unwrapped(uploaded.error).error)) return pushLocation(env, keys, loc, name, value, check, true);
+    const failure = unwrapped(uploaded.error);
+    return failedItem(loc, failure.error, mergeRates(readRate, failure.rate, (env.now ?? Date.now)()));
+  }
+  const rate = mergeRates(readRate, uploaded.value.rates.push, (env.now ?? Date.now)());
+  const pushedResult = uploaded.value.result;
+  if (pushedResult === undefined) return failedItem(loc, new CapyError('nothing was pushed', ERROR_CODES.SERVICE_ERROR), rate);
 
-  const done = attempt(() => {
-    env.writeCache(env.orgId, loc.project_id, pushed.value.keep_hash, write.value.envBlob);
-    const adopted = SyncEngine.adoptServerKeep(pushed.value.keep_file, write.value.merged, loc.branch);
+  const done = attemptSync(() => {
+    env.writeCache(env.orgId, loc.project_id, pushedResult.keep_hash, envBlobOf(uploaded.value.lines));
+    const adopted = SyncEngine.adoptServerKeep(pushedResult.keep_file, uploaded.value.keep, loc.branch);
     return { adopted, entry: adopted.variables[name]?.find((e) => e.branch === loc.branch) };
   });
   if (!done.ok) return failedItem(loc, done.error, rate);
+  if (action === 'remove') return withRate<LocationOutcome>({ kind: 'removed', location: loc }, rate);
   return withRate<LocationOutcome>(
     done.value.entry === undefined
       ? { kind: 'failed', location: loc, code: ERROR_CODES.SERVICE_ERROR }
@@ -378,9 +434,95 @@ async function pushLocation(env: SetEnv, keys: KeyResolver, loc: SetLocation, na
   );
 }
 
+/** `f()` as a result instead of a throw. */
+function attemptSync<T>(f: () => T): Tried<T> {
+  try {
+    return { ok: true, value: f() };
+  } catch (error) {
+    return { ok: false, error };
+  }
+}
+
+/** What the answer for a moved location does there: it must be bound to exactly the state that was read, else the location is not written. */
+function answerAt(check: { readonly answer?: BoundAnswer }, moved: SourceConflict): Tried<ReturnType<typeof actionFor>> {
+  return holdsFor(check.answer, moved)
+    ? { ok: true, value: actionFor(check.answer.choice) }
+    : { ok: false, error: new CapyError('changed since it was read', ERROR_CODES.SECRETS_CONFLICT) };
+}
+
+/** The change one location gets: the new value (`write`), the value that was shown (`restore`), or the variable removed (`remove`). */
+const changesFor = (action: ReturnType<typeof actionFor>, name: string, value: string, restore: string | undefined): Changes =>
+  action === 'remove' ? { set: {}, remove: [name] } : { set: { [name]: action === 'restore' && restore !== undefined ? restore : value }, remove: [] };
+
+/** The plaintext of the value `hash` names, read from the first of `candidates` that still holds it (a location of the same row); `undefined` if none does. */
+export async function recoverShownValue(
+  env: SetEnv,
+  keys: KeyResolver,
+  candidates: readonly SetLocation[],
+  name: string,
+  hash: string,
+): Promise<string | undefined> {
+  const at = async (i: number): Promise<string | undefined> => {
+    const loc = candidates[i];
+    if (loc === undefined) return undefined;
+    const found = await settled(
+      (async (): Promise<string | undefined> => {
+        const key = await keys(loc.project_id);
+        const read = await callWithBackoff((onRate) => env.client.getDecryptData(loc.project_id, loc.branch, undefined, true, onRate), env.sleep);
+        if (!read.ok) return undefined;
+        const entry = snapshotFrom(read.value, loc.branch, key).entries[name];
+        return entry !== undefined && entry.hash === hash ? entry.plaintext : undefined;
+      })(),
+    );
+    return found.ok && found.value !== undefined ? found.value : at(i + 1);
+  };
+  return at(0);
+}
+
 export interface LocationPreview {
   readonly action: 'update' | 'unchanged';
   readonly serverKeep: KeepFile | undefined;
+  /** What the location holds now, as fingerprints (never the value); absent when it could not be read. `hash` is absent when the location no longer has the variable. */
+  readonly current?: { readonly hash: string | undefined; readonly serverKeepHash: string; readonly changedAt?: string };
+}
+
+/** A location whose value moved since its row was listed (CAP-717): the row `compareSecrets` gives, and when Capy's value last changed. */
+export interface LocationConflict {
+  readonly location: SetLocation;
+  readonly conflict: SourceConflict;
+  readonly changedAt?: string;
+}
+
+/** The identity an answer for a location is kept under. */
+export const locationKeyOf = (l: Pick<SetLocation, 'project_id' | 'branch'>): string => `${l.project_id}/${l.branch}`;
+
+/**
+ * The locations whose value moved since their row was listed, and what they hold now: `shown` is each row's
+ * fingerprint by `locationKeyOf`, `previews` are the reads of `locations`, in order. A location that could not be
+ * read has nothing known to compare. Fingerprints only.
+ */
+export function movedLocations(
+  name: string,
+  value: string,
+  locations: readonly SetLocation[],
+  shown: Readonly<Record<string, string>>,
+  previews: readonly LocationPreview[],
+): readonly LocationConflict[] {
+  return locations.flatMap((location, i): LocationConflict[] => {
+    const current = previews[i]?.current;
+    const was = shown[locationKeyOf(location)];
+    if (current === undefined || was === undefined) return [];
+    const conflict = movedRow({
+      name,
+      project: location.project_name,
+      branch: location.branch,
+      shown: was,
+      local: hashValue(value),
+      remote: current.hash,
+      serverKeepHash: current.serverKeepHash,
+    });
+    return conflict === undefined ? [] : [{ location, conflict, ...(current.changedAt === undefined ? {} : { changedAt: current.changedAt }) }];
+  });
 }
 
 const UNKNOWN_PREVIEW: LocationPreview = { action: 'update', serverKeep: undefined };
@@ -398,9 +540,21 @@ async function previewItem(
   const read = await callWithBackoff((onRate) => env.client.getDecryptData(loc.project_id, loc.branch, undefined, true, onRate), env.sleep);
   if (!read.ok) return withRate(UNKNOWN_PREVIEW, read.rate);
   if (key === undefined || !key.ok) return withRate({ action: 'update', serverKeep: parseKeepJson(read.value.keep_file) }, read.rate);
-  const current = attempt(() => currentFrom(read.value, name, key.value));
+  const snapshot = attemptSync(() => snapshotFrom(read.value, loc.branch, key.value));
+  const serverKeep = snapshot.ok ? snapshot.value.keep : undefined;
+  const entry = snapshot.ok ? snapshot.value.entries[name] : undefined;
   return withRate<LocationPreview>(
-    current.ok ? { action: current.value.plaintext === value ? 'unchanged' : 'update', serverKeep: current.value.serverKeep } : UNKNOWN_PREVIEW,
+    serverKeep === undefined || (entry !== undefined && entry.plaintext === undefined)
+      ? UNKNOWN_PREVIEW
+      : {
+          action: entry?.plaintext === value ? 'unchanged' : 'update',
+          serverKeep,
+          current: {
+            hash: entry?.hash,
+            serverKeepHash: SyncEngine.computeKeepHash(serverKeep, loc.branch),
+            changedAt: serverKeep.variables[name]?.find((e) => e.branch === loc.branch)?.changed_at,
+          },
+        },
     read.rate,
   );
 }
@@ -421,8 +575,10 @@ export async function previewLocations(
   locations: readonly SetLocation[],
   name: string,
   value: string | undefined,
+  /** The run's key resolver, when the caller already unlocked. */
+  opened?: KeyResolver,
 ): Promise<readonly LocationPreview[]> {
-  const keys = value === undefined || locations.length === 0 ? undefined : env.openKeys();
+  const keys = value === undefined || locations.length === 0 ? undefined : (opened ?? env.openKeys());
   const pooled = await runPool({
     items: locations,
     limit: LOCATION_CONCURRENCY,
@@ -559,11 +715,16 @@ const NO_KEYS: KeyResolver = async () => {
  * what it left unstarted is in `cancelled`. Everything in the result is in input order.
  */
 export async function runSecretSet(req: SetRequest, env: SetEnv, hooks: RunHooks = {}): Promise<SecretSetResult> {
-  const keys = req.locations.length === 0 || hooks.stopPushes?.aborted === true ? NO_KEYS : env.openKeys();
+  const keys = req.locations.length === 0 || hooks.stopPushes?.aborted === true ? NO_KEYS : (req.keys ?? env.openKeys());
   const pushed = await runPool({
     items: req.locations,
     limit: LOCATION_CONCURRENCY,
-    run: (loc) => pushLocation(env, keys, loc, req.name, req.value),
+    run: (loc) =>
+      pushLocation(env, keys, loc, req.name, req.value, {
+        shown: req.shown?.[locationKeyOf(loc)],
+        answer: req.answers?.[locationKeyOf(loc)],
+        restore: req.restore?.[locationKeyOf(loc)],
+      }),
     stop: hooks.stopPushes,
     reserve: PACING_RESERVE,
     now: env.now,
@@ -618,6 +779,7 @@ export async function runSecretSet(req: SetRequest, env: SetEnv, hooks: RunHooks
     name: req.name,
     updated: refsFor(updated),
     unchanged: outcomes.flatMap((o) => (o.kind === 'unchanged' ? [locationRef(o.location)] : [])),
+    ...(outcomes.some((o) => o.kind === 'removed') ? { removed: outcomes.flatMap((o) => (o.kind === 'removed' ? [locationRef(o.location)] : [])) } : {}),
     prs: present.flatMap((o) => (o.kind === 'pr' ? [o.pr] : [])),
     no_pr: present.flatMap((o) => (o.kind === 'no_pr' ? [{ repo: o.repo, reason: 'NO_DIFF_VS_BASE' as const }] : [])),
     failed: [

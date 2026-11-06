@@ -54,8 +54,10 @@ function fakeCtx(dir: string): ResolvedContext {
       writeSyncState: () => {},
     },
     serviceClient: {
-      // No real server round trip: omitting `keep_file` makes `adoptServerKeep`
-      // fall back to the locally-merged keep (see its own doc).
+      // No real server round trip. The commit path reads the server's latest first (an empty
+      // project here); omitting `keep_file` from the push answer makes `adoptServerKeep`
+      // fall back to the keep that was uploaded (see its own doc).
+      getDecryptData: async () => ({ env_content: '', decrypt_key: '', expires_at: '' }),
       pushSecrets: async () => ({ keep_hash: 'h'.repeat(16) }),
     },
     orgId: 'o',

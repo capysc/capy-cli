@@ -16,6 +16,7 @@ import inquirer from 'inquirer';
 import { isInteractive, EXIT_NEEDS_INPUT } from '../ui/interactive';
 import { openSystemStore, assertValidConnectorName } from '../system/systemStore';
 import { CapyError, ERROR_CODES } from '../types/index';
+import { formatKeyHelp, keyHelpFields, keyHelpForName, KeyHelp } from '../deploy/keyHelp';
 
 export interface SystemCommandOpts {
   org?: string;
@@ -29,20 +30,22 @@ export interface SystemRmOpts extends SystemCommandOpts {
 }
 
 /** Pure JSON refusal on stdout — never on stderr, so `--json` output stays parseable. */
-function refuseJson(code: string, error: string, exitCode: number): never {
-  console.log(JSON.stringify({ ok: false, code, error }, null, 2));
+function refuseJson(code: string, error: string, exitCode: number, help: KeyHelp | null): never {
+  console.log(JSON.stringify({ ok: false, code, error, ...(help ? keyHelpFields(help) : {}) }, null, 2));
   process.exit(exitCode);
 }
 
 /** Prose refusal on stderr — human mode only. */
-function refuseHuman(message: string, exitCode: number): never {
+function refuseHuman(message: string, exitCode: number, help: KeyHelp | null): never {
   console.error(message);
+  if (help) console.error(formatKeyHelp(help));
   process.exit(exitCode);
 }
 
-function refuse(json: boolean, code: string, message: string, exitCode: number): never {
-  if (json) refuseJson(code, message, exitCode);
-  refuseHuman(message, exitCode);
+/** `help`: where to get the key, for a refusal about one of the four known key names (additive; absent for every other refusal). */
+function refuse(json: boolean, code: string, message: string, exitCode: number, help: KeyHelp | null = null): never {
+  if (json) refuseJson(code, message, exitCode, help);
+  refuseHuman(message, exitCode, help);
 }
 
 function exitCodeFor(code: string): number {
@@ -68,9 +71,9 @@ function requireValidName(name: string, json: boolean): void {
 }
 
 /** Exits with `SYSTEM_STORE_NEEDS_TTY` when there is no terminal to ask a human. */
-function requireTty(json: boolean, message: string): void {
+function requireTty(json: boolean, message: string, help: KeyHelp | null = null): void {
   if (!isInteractive()) {
-    refuse(json, ERROR_CODES.SYSTEM_STORE_NEEDS_TTY, message, EXIT_NEEDS_INPUT);
+    refuse(json, ERROR_CODES.SYSTEM_STORE_NEEDS_TTY, message, EXIT_NEEDS_INPUT, help);
   }
 }
 
@@ -115,7 +118,12 @@ export async function systemSetCommand(name: string, opts: SystemCommandOpts): P
 
   // Before any network call — see docs/org-system-store.md Proof 3.
   requireValidName(name, json);
-  requireTty(json, `\`capy system set\` needs a terminal to prompt for the value — there is no --value flag.`); // COPY-FLAG
+  // For the four known key names: where to get the key. Without a terminal it is part of the refusal.
+  requireTty(json, `\`capy system set\` needs a terminal to prompt for the value — there is no --value flag.`, keyHelpForName(name)); // COPY-FLAG
+
+  // With a terminal the hidden prompt follows right here, so the help ends "paste it here". Stderr, so `--json` stays pure.
+  const help = keyHelpForName(name, { mode: 'paste' });
+  if (help) console.error(formatKeyHelp(help));
 
   const value = await promptForHiddenValue(name, json);
 

@@ -1,13 +1,15 @@
-import { createHash } from 'crypto';
 import { ProjectManager } from '../core/projectManager';
 import { FileManager } from '../files/fileManager';
 import { AuthService, silentAuthFailureMessage } from '../auth/authService';
 import { ServiceClient } from '../service/serviceClient';
 import { SyncEngine } from '../sync/syncEngine';
+import { compareSecrets, hashValue, type DiffResult } from '../sync/compareSecrets';
 import { CapyError, ERROR_CODES, KeepFile } from '../types/index';
 import { fetchSecretsWithCache, readSecretsLocal } from '../config/globalConfig';
 import { isLocalOnly } from '../config/profileConfig';
 import { resolveLocalProjectKey } from '../core/localUnlock';
+import { pinnedHashes } from '../sync/commit';
+import { placeholdersOnBranch, placeholderSetCommand } from '../core/placeholder';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -40,93 +42,6 @@ function classifyRemoteFailure(err: unknown): RemoteFailure {
   return 'network_error';
 }
 
-export interface DiffResult {
-  variable: string;
-  type: 'new' | 'changed' | 'deleted';
-  pinned?: string;
-  local?: string;
-  remote?: string;
-}
-
-/**
- * Compare three sources: pinned (keep.lock hashes), local (.env values), remote (Keep values).
- * Returns diff results and column visibility flags.
- */
-export function compareSecrets(
-  pinned: Record<string, string>,  // variable -> value_hash
-  local: Record<string, string>,   // variable -> plaintext value (hashed for comparison)
-  remote: Record<string, string>,  // variable -> plaintext value (hashed for comparison)
-): { diffs: DiffResult[]; showLocal: boolean; showRemote: boolean } {
-  const hasRemote = Object.keys(remote).length > 0;
-
-  const allVars = new Set([
-    ...Object.keys(pinned),
-    ...Object.keys(local),
-    ...(hasRemote ? Object.keys(remote) : []),
-  ]);
-
-  const diffs: DiffResult[] = [];
-  let localDiffersFromPinned = false;
-  let remoteDiffersFromPinned = false;
-
-  for (const variable of allVars) {
-    const pinnedHash = pinned[variable];
-    const localHash = local[variable];
-    // If remote has no data at all, treat each variable as matching pinned.
-    // If remote has data but this variable is missing, it's a real absence.
-    const remoteHash = hasRemote ? remote[variable] : pinnedHash;
-
-    // Silent reconcile (CAP-307): no pinned baseline yet, but local and remote
-    // already agree. There is nothing to push (remote already holds this exact
-    // value) and nothing to pull — so don't report a diff and don't let this
-    // variable flip the showLocal/showRemote direction hints. The pin is adopted
-    // naturally via the "Everything is up to date!" path when no other variable
-    // differs. Scoped tightly: only when pinned is absent AND local === remote
-    // (both present); genuine divergence (local !== remote) still surfaces below.
-    if (!pinnedHash && localHash !== undefined && localHash === remoteHash) {
-      continue;
-    }
-
-    // Track if local or remote differs from pinned at all
-    if (localHash !== pinnedHash) localDiffersFromPinned = true;
-    if (remoteHash !== pinnedHash) remoteDiffersFromPinned = true;
-
-    // Only report rows with mismatches
-    if (pinnedHash === localHash && pinnedHash === remoteHash) continue;
-    if (!pinnedHash && !localHash && !remoteHash) continue;
-
-    // Determine type
-    let type: 'new' | 'changed' | 'deleted';
-    if (!pinnedHash && !localHash && remoteHash) {
-      type = 'new';
-    } else if (!pinnedHash && localHash && !remoteHash) {
-      type = 'new';
-    } else if (pinnedHash && !remoteHash && !localHash) {
-      type = 'deleted';
-    } else if ((pinnedHash && !remoteHash) || (!pinnedHash && remoteHash)) {
-      type = remoteHash ? 'new' : 'deleted';
-    } else {
-      type = 'changed';
-    }
-
-    diffs.push({
-      variable,
-      type,
-      pinned: pinnedHash || undefined,
-      local: localHash || undefined,
-      remote: remoteHash || undefined,
-    });
-  }
-
-  // Column visibility:
-  // If all local values match pinned → hide Local column
-  // If all remote values match pinned → hide Remote column
-  const showLocal = localDiffersFromPinned;
-  const showRemote = remoteDiffersFromPinned;
-
-  return { diffs, showLocal, showRemote };
-}
-
 /**
  * Create a value snippet in abc...xyz format.
  */
@@ -137,12 +52,9 @@ export function formatSnippet(value: string): string {
   return `${value.slice(0, 3)}...${value.slice(-3)}`;
 }
 
-/**
- * Hash a plaintext value the same way keep.lock stores it.
- */
-export function hashValue(value: string): string {
-  return createHash('sha256').update(value).digest('hex').slice(0, 16);
-}
+// Where they have always been imported from (the comparison itself lives in sync/compareSecrets.ts).
+export { compareSecrets, hashValue };
+export type { DiffResult };
 
 export class StatusCommand {
   private projectManager: ProjectManager;
@@ -300,12 +212,9 @@ export class StatusCommand {
     const branchLabel = branch;
 
     // Build pinned hashes from keep.lock for active branch
-    const pinned: Record<string, string> = Object.fromEntries(
-      Object.entries(keep.variables).flatMap(([varName, entries]) => {
-        const entry = entries.find(e => e.branch === branch);
-        return entry ? [[varName, entry.value_hash] as const] : [];
-      }),
-    );
+    // A placeholder pins no value, so it is never compared; it is listed on its own.
+    const pinned = pinnedHashes(keep, branch);
+    const placeholders = placeholdersOnBranch(keep, branch).map((p) => p.name);
 
     // Build local hashes from .env. Two facts, deliberately separate: the
     // sentence a person reads, and the verdict the report branches on.
@@ -350,6 +259,8 @@ export class StatusCommand {
       remoteMatchesPinned: !showRemote,
       remoteFailure: remoteFailure ?? null,
       diffs,
+      // Names with no value yet (see `capy list`); they are not differences.
+      placeholders,
     };
 
     if (opts.json) {
@@ -369,6 +280,11 @@ export class StatusCommand {
     // Full output
     console.log(`${B('capy')}: ${keep.project_name} (${branchLabel})`);
     console.log('');
+    if (placeholders.length > 0) {
+      // COPY-FLAG: new user-facing string, minimal/neutral wording.
+      console.log(`  No value yet: ${placeholders.join(', ')}. Set one with: ${placeholderSetCommand('NAME')}`);
+      console.log('');
+    }
 
     if (diffs.length === 0) {
       console.log(`> ${totalSecrets} secret${totalSecrets !== 1 ? 's' : ''} match pinned branch.`);

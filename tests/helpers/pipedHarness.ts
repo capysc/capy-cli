@@ -9,6 +9,7 @@
  *   POST /orgs/:org/co-decrypt   identity (the on-disk blob is already the inner layer)
  *   POST /orgs/:org/wrap         identity
  *   POST /secrets/:project       answers like the real one, or 500 once `failPushes()` was called
+ *   GET  /secrets/:project?branch=  the branch fixture if set, else what was pushed (404 before any push)
  *
  * Every request it receives is appended to a log file (and the push-failure
  * switch is a flag file) rather than held in a mutable variable, so tests can
@@ -78,6 +79,8 @@ export interface Harness {
   setOrgRepos(body: unknown): void;
   /** Makes the mock answer `GET /secrets/:project?branch=<branch>` with this body. */
   setBranchData(project: string, branch: string, body: unknown): void;
+  /** Makes the mock answer `GET /projects/:project/branches` with these branches (without it: 404, like an unknown project). */
+  setBranches(project: string, branches: readonly { readonly id: string; readonly name: string; readonly is_protected: boolean }[]): void;
   /** How `PUT /orgs/:org/projects/:project/repos` answers: `ok`, `mismatch` (other repos known), `500`, or `hang` (never). Default `ok`. */
   setRepoPutMode(mode: 'ok' | 'mismatch' | '500' | 'hang'): void;
   /** The `PUT .../repos` requests the mock has received (parsed bodies). */
@@ -161,6 +164,12 @@ function walkFiles(dir: string): readonly (readonly [string, Buffer])[] {
   });
 }
 
+/** What the mock service has been pushed so far (CAP-712: a save reads the server's latest first, so the mock must remember). */
+function readStore(root: string): { readonly keep: KeepFile | undefined; readonly blobs: Readonly<Record<string, string>> } {
+  const file = join(root, 'store.json');
+  return existsSync(file) ? (JSON.parse(readFileSync(file, 'utf8')) as ReturnType<typeof readStore>) : { keep: undefined, blobs: {} };
+}
+
 interface MockService {
   readonly server: Server;
   readonly url: string;
@@ -196,18 +205,35 @@ async function startMockService(requestLog: string, failFlag: string, root: stri
         known_repos: mode === 'mismatch' ? [{ host: 'github.com', owner: 'someone-else', name: 'copied-from', path: '.' }] : [],
       });
     }
+    if (req.method === 'GET' && /^\/projects\/[^/?]+\/branches$/.test(path)) {
+      const data = fixture(`branches-${path.split('/')[2]}.json`);
+      return data === undefined ? send(404, { error: 'no branches fixture' }) : send(200, data);
+    }
     if (req.method === 'GET' && /^\/secrets\/[^/?]+\?/.test(path)) {
       const [project, query] = path.slice('/secrets/'.length).split('?');
       const branch = new URLSearchParams(query).get('branch') ?? '';
       const data = fixture(`branch-${project}-${branch}.json`);
-      return data === undefined ? send(404, { error: 'no branch fixture' }) : send(200, data);
+      if (data !== undefined) return send(200, data);
+      // No fixture: answer like the real server does, from what was pushed (nothing pushed yet: 404).
+      const stored = readStore(root);
+      if (stored.keep === undefined) return send(404, { error: 'no branch fixture' });
+      const hash = SyncEngine.computeKeepHash(stored.keep, branch);
+      return send(200, { env_file: stored.blobs[hash] ?? '', permissions: ['*'], keep_hash: hash, keep_file: JSON.stringify(stored.keep) });
     }
     if (path.endsWith('/co-decrypt')) return send(200, { plaintext: (JSON.parse(body) as { ciphertext: string }).ciphertext });
     if (path.endsWith('/wrap')) return send(200, { ciphertext: (JSON.parse(body) as { plaintext: string }).plaintext });
     if (path.startsWith('/secrets/') && req.method === 'POST') {
       if (existsSync(failFlag)) return send(500, { error: 'mock push failure' });
-      const parsed = JSON.parse(body) as { keep_file: string; branch: string };
+      const parsed = JSON.parse(body) as { keep_file: string; env_blob?: string; branch: string };
       const keep = JSON.parse(parsed.keep_file) as KeepFile;
+      // Remember the push, like the real server: the next read answers with it.
+      const before = readStore(root);
+      const spliced = SyncEngine.spliceKeepBranch(before.keep ?? null, keep, parsed.branch);
+      const hash = SyncEngine.computeKeepHash(spliced, parsed.branch);
+      writeFileSync(join(root, 'store.json'), JSON.stringify({ keep: spliced, blobs: { ...before.blobs, [hash]: parsed.env_blob ?? '' } }));
+      // The push is now the server's latest for the branch: a fixture a test set earlier no longer describes it.
+      const project = path.slice('/secrets/'.length).split('?')[0];
+      rmSync(join(root, `branch-${project}-${parsed.branch}.json`), { force: true });
       return send(200, { keep_hash: SyncEngine.computeKeepHash(keep, parsed.branch) });
     }
     return send(404, { error: 'unexpected request' });
@@ -271,6 +297,7 @@ export async function createHarness(): Promise<Harness> {
     setSecretsIndex: (body) => writeFileSync(join(root, 'secrets-index.json'), JSON.stringify(body)),
     setOrgRepos: (body) => writeFileSync(join(root, 'org-repos.json'), JSON.stringify(body)),
     setBranchData: (projectId, branch, body) => writeFileSync(join(root, `branch-${projectId}-${branch}.json`), JSON.stringify(body)),
+    setBranches: (projectId, branches) => writeFileSync(join(root, `branches-${projectId}.json`), JSON.stringify({ branches })),
     setRepoPutMode: (mode) => writeFileSync(join(root, 'repo-put-mode'), mode),
     repoPuts: () =>
       requests()
@@ -296,4 +323,18 @@ export async function createHarness(): Promise<Harness> {
 /** sha256 of a string, for asserting "this file did not change" without printing contents. */
 export function digest(value: string): string {
   return createHash('sha256').update(value).digest('hex');
+}
+
+/**
+ * A world of its own for a test that leaves the folder different from Capy (`--no-push` writes `.env` only): the next
+ * command that writes meets bare `capy` first (docs/conflict-resolution.md) and would stop on that difference, so such a
+ * test must not share its world with the ones after it.
+ */
+export async function withHarness<T>(fn: (harness: Harness) => Promise<T>): Promise<T> {
+  const harness = await createHarness();
+  try {
+    return await fn(harness);
+  } finally {
+    await harness.dispose();
+  }
 }

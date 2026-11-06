@@ -8,7 +8,7 @@
 // row's value, only to show it (masked, `r` reveals) on that one screen. It is dropped when the
 // run starts or the flow ends, and it is never in the exit text, a note, a log or any JSON.
 //
-// Steps:  planning -> plan -> running -> done
+// Steps:  planning -> plan -> running -> (conflicts -> running) -> done
 //   planning  reads the repos' deploy.json from GitHub (no key is opened, nothing is written).
 //             Esc cancels.
 //   plan      the row's value (masked), then a checkbox list of the targets (location, target,
@@ -18,12 +18,20 @@
 //             Esc / `n` cancels. A plan with nothing to deploy says so and only Esc works.
 //             Under `--dry-run` Enter shows what would happen for the ticked targets and
 //             changes nothing: no effect is ever started.
-//   running   Ctrl+C / Esc stop: no further target is started, every one in flight finishes.
+//   running   Ctrl+C / Esc stop: no further target is started, every one in flight finishes. Before
+//             anything is delivered every Dokploy target is read and compared with what Capy last
+//             delivered; a variable someone changed on the service outside Capy comes back as a
+//             row and the flow goes to `conflicts` (nothing has been written).
+//   conflicts one line per variable and target. l delivers Capy's value (local), r leaves the
+//             service's (remote: that variable is not delivered or recorded); Enter runs once every
+//             one is answered, Esc cancels with nothing written. An answer holds only for the live
+//             value it was made against: if the service changed again, the run comes back here.
 //   done      the result; only Esc leaves it. `c` copies the PR links to the clipboard (and the screen
 //             stays), so they can also be selected and copied by hand first.
 
 import type { SecretIndexRow } from '../service/serviceClient';
 import { BatchPhase, BatchPlan, BatchProgress, BatchResult, restrictPlan, targetKeyOf } from '../deploy/batchDeploy';
+import { resolveKeyOf, seenResolutions, type SeenResolutions, type TargetConflict, type TargetResolution } from '../sync/conflicts';
 import {
   DRY_RUN_DEPLOY_NOTE,
   PLAN_HEADINGS,
@@ -74,6 +82,17 @@ export type DeployFlow =
       readonly progress?: BatchProgress;
       /** A stop was asked for in this phase, this many times (Ctrl+C / Esc). */
       readonly stop?: { readonly phase: BatchPhase; readonly count: number };
+      /** The decisions this run was started with, if it is the one that follows `conflicts`. */
+      readonly decisions?: SeenResolutions;
+    }
+  | {
+      readonly step: 'conflicts';
+      readonly row: SecretIndexRow;
+      readonly plan: BatchPlan;
+      readonly conflicts: readonly TargetConflict[];
+      /** The answer for each row, by `NAME@TARGET`. */
+      readonly choices: Readonly<Record<string, TargetResolution>>;
+      readonly cursor: number;
     }
   | {
       readonly step: 'done';
@@ -90,7 +109,7 @@ export type DeployEffect =
   | { readonly type: 'loadDeployPlan'; readonly row: SecretIndexRow }
   /** Stop: `planning` kills the GitHub reads; `pushing` / `prs` start nothing new and wait for every item in flight. */
   | { readonly type: 'cancelDeploy'; readonly phase: 'planning' | BatchPhase }
-  | { readonly type: 'runDeploy'; readonly plan: BatchPlan };
+  | { readonly type: 'runDeploy'; readonly plan: BatchPlan; readonly decisions?: SeenResolutions };
 
 export interface DeployStep {
   /** `null`: the flow is over and the list is back. */
@@ -161,6 +180,35 @@ function stepRunning(flow: Extract<DeployFlow, { step: 'running' }>, key: string
   return { flow: { ...flow, stop: { phase, count } }, effect: { type: 'cancelDeploy', phase } };
 }
 
+// ── Conflicts: variables someone changed on the service outside Capy ───────
+
+const choiceAt = (flow: Extract<DeployFlow, { step: 'conflicts' }>, c: TargetConflict): TargetResolution | undefined => flow.choices[resolveKeyOf(c)];
+
+/** Whether every row has been answered. */
+export const allDecided = (flow: Extract<DeployFlow, { step: 'conflicts' }>): boolean => flow.conflicts.every((c) => choiceAt(flow, c) !== undefined);
+
+/** The answers given, each bound to the fingerprints it was made against (`seenResolutions`). */
+const decisionsOf = (flow: Extract<DeployFlow, { step: 'conflicts' }>): SeenResolutions =>
+  seenResolutions(
+    Object.fromEntries(flow.conflicts.flatMap((c) => (choiceAt(flow, c) === undefined ? [] : [[resolveKeyOf(c), choiceAt(flow, c) as TargetResolution] as const]))),
+    flow.conflicts,
+  );
+
+function stepConflicts(flow: Extract<DeployFlow, { step: 'conflicts' }>, key: string): DeployStep {
+  if (isEsc(key)) return { flow: null, effect: null, note: CANCELLED_NOTHING };
+  if (key === `${ESC}[A`) return stay({ ...flow, cursor: Math.max(0, flow.cursor - 1) });
+  if (key === `${ESC}[B`) return stay({ ...flow, cursor: Math.min(flow.conflicts.length - 1, flow.cursor + 1) });
+  const decide = (choice: TargetResolution): DeployStep => {
+    const at = flow.conflicts[flow.cursor];
+    return at === undefined ? stay(flow) : stay({ ...flow, choices: { ...flow.choices, [resolveKeyOf(at)]: choice } });
+  };
+  if (key === 'l' || key === 'L') return decide('local');
+  if (key === 'r' || key === 'R') return decide('remote');
+  if (key !== '\r' || !allDecided(flow)) return stay(flow);
+  const decisions = decisionsOf(flow);
+  return { flow: { step: 'running', row: flow.row, plan: flow.plan, decisions }, effect: { type: 'runDeploy', plan: flow.plan, decisions } };
+}
+
 /** One key token applied to the flow. */
 export function stepDeploy(flow: DeployFlow, key: string, dryRun: boolean = false): DeployStep {
   if (flow.step === 'planning') {
@@ -168,6 +216,7 @@ export function stepDeploy(flow: DeployFlow, key: string, dryRun: boolean = fals
   }
   if (flow.step === 'plan') return stepPlan(flow, key, dryRun);
   if (flow.step === 'running') return stepRunning(flow, key);
+  if (flow.step === 'conflicts') return stepConflicts(flow, key);
   return stepDone(flow, key);
 }
 
@@ -231,11 +280,22 @@ export const prUrlsOf = (result: BatchResult): readonly string[] =>
 
 export type DeployFinished =
   | { readonly ok: true; readonly result: BatchResult }
-  | { readonly ok: false; readonly code: string };
+  /** `conflicts`: nothing was delivered, because these variables were changed on the service outside Capy. */
+  | { readonly ok: false; readonly code: string; readonly conflicts?: readonly TargetConflict[] };
 
 /** The run finished. Dropped unless the flow is still running. */
 export function applyDeployFinished(flow: DeployFlow | null, finished: DeployFinished): DeployFlow | null {
   if (flow === null || flow.step !== 'running') return flow;
+  if (!finished.ok && finished.conflicts !== undefined && finished.conflicts.length > 0) {
+    // An answer given earlier stays only where the live value it was made against is still the one on the service.
+    const choices = Object.fromEntries(
+      finished.conflicts.flatMap((c) => {
+        const earlier = flow.decisions?.[resolveKeyOf(c)];
+        return earlier !== undefined && earlier.remote === c.remote && earlier.local === c.local ? [[resolveKeyOf(c), earlier.choice] as const] : [];
+      }),
+    );
+    return { step: 'conflicts', row: flow.row, plan: flow.plan, conflicts: finished.conflicts, choices, cursor: 0 };
+  }
   return {
     step: 'done',
     text: finished.ok ? renderBatchResult(finished.result, TERMINAL_STYLE) : `✗ ${flow.row.name} was not deployed. (${finished.code})`, // COPY-FLAG
@@ -259,6 +319,7 @@ export function deployRunningLine(flow: Extract<DeployFlow, { step: 'running' }>
   if (flow.stop !== undefined) return p !== undefined && p.inFlight > 0 ? stoppingAfter(p.inFlight) : STOPPING_NOW;
   if (p === undefined) return `Deploying ${flow.row.name} to ${plural(flow.plan.targets.length, 'target')}…`; // COPY-FLAG
   if (p.phase === 'pushing') return `Deploying ${flow.row.name}… ${p.done} of ${plural(p.total, 'target')}`; // COPY-FLAG
+  if (p.phase === 'checking') return 'Checking targets…'; // COPY-FLAG
   if (p.phase === 'recording') return 'Recording deliveries…'; // COPY-FLAG
   return `Opening pull requests… ${p.done} of ${p.total}`; // COPY-FLAG
 }
@@ -315,6 +376,21 @@ function renderPlan(
   };
 }
 
+/** The conflicts step: which variable on which target, and the decision so far. Names only, never a value. */
+function renderConflicts(flow: Extract<DeployFlow, { step: 'conflicts' }>, width: number): { readonly lines: readonly string[]; readonly footer: string } {
+  const maxWidth = Math.max(20, width - 3);
+  const n = flow.conflicts.length;
+  const row = (c: TargetConflict, i: number): string => {
+    const choice = choiceAt(flow, c);
+    const line = `${i === flow.cursor ? '▶' : ' '} ${c.target} · ${c.name} · changed outside Capy  ${choice === undefined ? '—' : choice}`; // COPY-FLAG
+    return i === flow.cursor ? `${BOLD}${clipLine(line, maxWidth)}${RESET}` : clipLine(line, maxWidth);
+  };
+  return {
+    lines: [`${BOLD}${flow.row.name}${RESET} ${DIM}· changed outside Capy in ${n} place${n === 1 ? '' : 's'}${RESET}`, '', ...flow.conflicts.map(row)], // COPY-FLAG
+    footer: hint(['l', 'local'], ['r', 'remote'], ...(allDecided(flow) ? ([['enter', 'continue']] as const) : []), ['esc', 'cancel']), // COPY-FLAG
+  };
+}
+
 /** Body lines (no margin) and the footer for the flow, for `width` x `height`. */
 export function renderDeploy(
   flow: DeployFlow,
@@ -325,6 +401,7 @@ export function renderDeploy(
     return { lines: [`${DIM}Reading deploy targets…${RESET}`], footer: hint(['esc', 'cancel']) }; // COPY-FLAG
   }
   if (flow.step === 'plan') return renderPlan(flow, width, height);
+  if (flow.step === 'conflicts') return renderConflicts(flow, width);
   if (flow.step === 'running') {
     return { lines: [`${DIM}${deployRunningLine(flow)}${RESET}`], footer: flow.stop === undefined ? hint(['ctrl+c', 'stop']) : '' }; // COPY-FLAG
   }

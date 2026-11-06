@@ -12,19 +12,32 @@
  * (`batchDeploy.ts`). Never carries a value: names, hashes and codes only.
  */
 import type { DeployAdapter, TargetConfig } from './adapter';
+import { isVercelApiMode } from './vercelTargetApi';
 import { TargetDeliveryDescriptor, VarDelivery, recordTargetDeliveries } from './targetsGate';
-import { CapyError, ERROR_CODES, KeepFile } from '../types/index';
+import { uploadKeepOnly } from '../sync/commit';
+import type { RateInfo } from '../utils/pool';
+import type { KeepFile } from '../types/index';
 
 /**
  * Adapter-specific handle for what a target actually points at, when one is
  * knowable from `target.options` alone. Only Dokploy defines this today
- * (`composeId` / `applicationId`); every other adapter gets `undefined` —
+ * (`composeId` / `applicationId`) and Vercel API mode (`projectId`); every other adapter gets `undefined` —
  * there is no spec'd `ref` shape for them yet.
  */
 export function targetRefFor(target: TargetConfig): Record<string, string> | undefined {
   const opts = target.options as Record<string, unknown>;
   if (typeof opts.composeId === 'string') return { composeId: opts.composeId };
   if (typeof opts.applicationId === 'string') return { applicationId: opts.applicationId };
+  // Vercel API mode (CAP-696): the project, plus the custom environment's id
+  // when the target points at one.
+  if (target.kind === 'vercel' && isVercelApiMode(opts)) {
+    return {
+      projectId: String(opts.projectId),
+      ...(typeof opts.customEnvironmentId === 'string' && opts.customEnvironmentId
+        ? { envId: opts.customEnvironmentId }
+        : {}),
+    };
+  }
   return undefined;
 }
 
@@ -56,79 +69,65 @@ export function deliveryFor(
   return { delivery, values };
 }
 
+/**
+ * The target vars Capy has delivered to this target before: a delivery record with a value hash on the branch's entry.
+ * (A target that is only configured, with no push yet, has a record without one.) This is how "the first replacement
+ * of a sensitive Vercel value was confirmed" is remembered: the delivery that followed it is the record.
+ */
+export function deliveredBefore(keep: KeepFile | null | undefined, target: Pick<TargetConfig, 'name' | 'branch' | 'vars'>, adapter: Pick<DeployAdapter, 'id'>): readonly string[] {
+  return target.vars.filter((name) =>
+    (keep?.variables[name] ?? [])
+      .filter((entry) => entry.branch === target.branch)
+      .some((entry) =>
+        (entry.targets ?? []).some((t) => t.provider === adapter.id && t.target === target.name && t.deployed_value_hash !== undefined),
+      ),
+  );
+}
+
 /** What the recorder needs from the service client. */
 export interface RecordClient {
   getLatestSecrets(projectId: string, branch: string): Promise<{ env_file: string; keep_hash: string; keep_file?: string } | null>;
-  pushSecrets(projectId: string, keepFile: string, envBlob: string, branch: string): Promise<unknown>;
+  pushSecrets(
+    projectId: string,
+    keepFile: string,
+    envBlob: string,
+    branch: string,
+    onRateLimit?: (rate: RateInfo) => void,
+    /** The branch hash of the keep this push was built from; the server refuses (SECRETS_STALE_BASE) when it is no longer the latest. */
+    baseKeepHash?: string,
+  ): Promise<unknown>;
 }
 
 export type RecordResult =
   | { readonly ok: true; /** `false`: every delivery was already recorded, so nothing was pushed. */ readonly pushed: boolean }
   | { readonly ok: false; readonly code: string };
 
-function parseServerKeep(raw: string | undefined): KeepFile | undefined {
-  if (raw === undefined || raw === '') return undefined;
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    const obj = typeof parsed === 'object' && parsed !== null ? (parsed as Record<string, unknown>) : undefined;
-    const vars = obj?.variables;
-    return typeof vars === 'object' && vars !== null && !Array.isArray(vars) ? (parsed as KeepFile) : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-const codeOf = (err: unknown): string => (err instanceof CapyError ? err.code : ERROR_CODES.SERVICE_ERROR);
-
-/** The server's keep and blob for `branch`, read in one call so the two always belong together. */
-async function readServerSnapshot(
-  client: RecordClient,
-  projectId: string,
-  branch: string,
-): Promise<{ readonly ok: true; readonly keep: KeepFile; readonly envFile: string } | { readonly ok: false; readonly code: string }> {
-  try {
-    const latest = await client.getLatestSecrets(projectId, branch);
-    const keep = parseServerKeep(latest?.keep_file);
-    return latest === null || keep === undefined
-      ? { ok: false, code: ERROR_CODES.NO_KEEP_FILE }
-      : { ok: true, keep, envFile: latest.env_file };
-  } catch (err) {
-    return { ok: false, code: codeOf(err) };
-  }
-}
+type Deliveries = ReadonlyArray<{
+  readonly delivery: TargetDeliveryDescriptor;
+  readonly values: readonly VarDelivery[];
+  /** ISO time the values reached the platform. */
+  readonly deliveredAt: string;
+}>;
 
 /**
  * Fetches the server's keep for (project, branch), applies every delivery in
  * `deliveries` to it, and pushes the result back server-only with the blob
- * unchanged. Nothing is pushed when every delivery is already recorded.
+ * unchanged. Nothing is pushed when every delivery is already recorded. This is
+ * the shared keep-only upload (`uploadKeepOnly`, sync/commit.ts): the push names
+ * the keep it was built from (`base_keep_hash`), and if the server says it is no
+ * longer the latest (`SECRETS_STALE_BASE`) the keep is read and built once more.
  * Never throws; a failure is a code.
  *
  * Two callers must not run this for the SAME (project, branch) at once: each
  * would read the same keep and the later push would drop the earlier record.
  * Put every delivery of one (project, branch) in one call instead.
  */
-export async function recordDeliveriesOnServer(
-  client: RecordClient,
-  projectId: string,
-  branch: string,
-  deliveries: ReadonlyArray<{
-    readonly delivery: TargetDeliveryDescriptor;
-    readonly values: readonly VarDelivery[];
-    /** ISO time the values reached the platform. */
-    readonly deliveredAt: string;
-  }>,
-): Promise<RecordResult> {
-  const snapshot = await readServerSnapshot(client, projectId, branch);
-  if (!snapshot.ok) return snapshot;
-  const next = deliveries.reduce(
-    (keep, d) => (d.values.length === 0 ? keep : recordTargetDeliveries(keep, branch, d.delivery, d.deliveredAt, d.values)),
-    snapshot.keep,
+export async function recordDeliveriesOnServer(client: RecordClient, projectId: string, branch: string, deliveries: Deliveries): Promise<RecordResult> {
+  const done = await uploadKeepOnly(client, projectId, branch, (keep) =>
+    deliveries.reduce(
+      (acc, d) => (d.values.length === 0 ? acc : recordTargetDeliveries(acc, branch, d.delivery, d.deliveredAt, d.values)),
+      keep,
+    ),
   );
-  if (next === snapshot.keep) return { ok: true, pushed: false };
-  try {
-    await client.pushSecrets(projectId, JSON.stringify(next), snapshot.envFile, branch);
-    return { ok: true, pushed: true };
-  } catch (err) {
-    return { ok: false, code: codeOf(err) };
-  }
+  return done.ok ? { ok: true, pushed: done.pushed } : done;
 }

@@ -43,6 +43,7 @@ ISOLATED_FILES=(
   tests/commands/deployDokploySystemStoreToken.test.ts
   tests/commands/deployCiChangeGate.test.ts
   tests/commands/deployCiTargetsRecord.test.ts
+  tests/commands/deployTargetConflict.test.ts
   tests/commands/deployRevokeWiring.test.ts
   tests/commands/deployDirectModeTiming.test.ts
   tests/commands/deployDokployPickerTokenEnv.test.ts
@@ -62,6 +63,14 @@ ISOLATED_FILES=(
   tests/commands/localOnlyFlow.test.ts
   tests/ui/secretsScreenSearchHashing.test.ts
   tests/commands/rotatePromotesThenRotates.test.ts
+  tests/commands/rotateRefusals.test.ts
+  tests/commands/removeCommand.test.ts
+  tests/commands/editNamePrompt.test.ts
+  tests/commands/connectDokploy.test.ts
+  tests/commands/gateFirst.test.ts
+  tests/commands/bootstrapNoSecrets.test.ts
+  tests/commands/bareCapyCommit.test.ts
+  tests/commands/deployGate.test.ts
   tests/system/systemStore.test.ts
   tests/system/systemStoreFreshStore.test.ts
   tests/commands/systemCommand.test.ts
@@ -72,6 +81,11 @@ ISOLATED_FILES=(
   tests/commands/agentsCommand.test.ts
   tests/commands/transportCommand.test.ts
   tests/commands/pairCommand.test.ts
+  tests/commands/deployVercelApiMode.test.ts
+  tests/deploy/vercelApiModeTokenStore.test.ts
+  tests/commands/systemSetKeyHelp.test.ts
+  tests/commands/deployVercelSetupPicker.test.ts
+  tests/deploy/vercelSetupTokenStore.test.ts
   # Reads process.stdout.isTTY/columns/rows directly; on CI's Linux runner an
   # earlier batch file left isTTY unassignable ("readonly property").
   tests/ui/terminalQr.test.ts

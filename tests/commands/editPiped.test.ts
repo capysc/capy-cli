@@ -10,7 +10,7 @@
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
 import { readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
-import { createHarness, digest, BRANCH, DEV_CLI, type Harness } from '../helpers/pipedHarness';
+import { createHarness, withHarness, digest, BRANCH, DEV_CLI, type Harness } from '../helpers/pipedHarness';
 
 const PEM = [
   '-----BEGIN PRIVATE KEY-----',
@@ -123,9 +123,12 @@ describe('capy edit NAME < value (piped)', () => {
   });
 
   test('6. exactly 1 MiB is accepted; 1 MiB + 1 byte is STDIN_TOO_LARGE and nothing is written', async () => {
-    const atCap = await h().run(['edit', 'SPEC6_AT_CAP', '--json', '--no-push'], 'a'.repeat(1024 * 1024));
-    expect(atCap.code).toBe(0);
-    expect(h().envValue('SPEC6_AT_CAP')?.length).toBe(1024 * 1024);
+    // --no-push leaves .env different from Capy, which the next write would stop on: its own world.
+    await withHarness(async (own) => {
+      const atCap = await own.run(['edit', 'SPEC6_AT_CAP', '--json', '--no-push'], 'a'.repeat(1024 * 1024));
+      expect(atCap.code).toBe(0);
+      expect(own.envValue('SPEC6_AT_CAP')?.length).toBe(1024 * 1024);
+    });
 
     const over = await h().run(['edit', 'SPEC6_OVER', '--json'], 'a'.repeat(1024 * 1024 + 1));
     expect(over.code).toBe(1);
@@ -163,15 +166,17 @@ describe('capy edit NAME < value (piped)', () => {
   }, 15000);
 
   test('8. --no-push updates .env only: no push call, and the result says so', async () => {
-    const pushesBefore = h().pushCount();
-    const r = await h().run(['edit', 'SPEC8_LOCAL', '--json', '--no-push'], 'local-only\n');
-    expect(r.code).toBe(0);
-    expect(parseJson(r.stdout)).toEqual({ ok: true, name: 'SPEC8_LOCAL', branch: BRANCH, action: 'created', pushed: false, keep_lock: { changed: false } });
-    expect(h().envValue('SPEC8_LOCAL')).toBe('local-only');
-    expect(h().pushCount()).toBe(pushesBefore);
-
-    const human = await h().run(['edit', 'SPEC8_LOCAL_B', '--no-push'], 'x\n');
-    expect(human.stderr.trim()).toBe(`✓ Set SPEC8_LOCAL_B on ${BRANCH} (.env only — not pushed)`);
+    await withHarness(async (own) => {
+      const r = await own.run(['edit', 'SPEC8_LOCAL', '--json', '--no-push'], 'local-only\n');
+      expect(r.code).toBe(0);
+      expect(parseJson(r.stdout)).toEqual({ ok: true, name: 'SPEC8_LOCAL', branch: BRANCH, action: 'created', pushed: false, keep_lock: { changed: false } });
+      expect(own.envValue('SPEC8_LOCAL')).toBe('local-only');
+      expect(own.pushCount()).toBe(0);
+    });
+    await withHarness(async (own) => {
+      const human = await own.run(['edit', 'SPEC8_LOCAL_B', '--no-push'], 'x\n');
+      expect(human.stderr.trim()).toBe(`✓ Set SPEC8_LOCAL_B on ${BRANCH} (.env only — not pushed)`);
+    });
   });
 
   test('a name that is not a valid variable name is INVALID_FORMAT and is not echoed', async () => {

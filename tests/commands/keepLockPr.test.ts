@@ -7,6 +7,7 @@
  * `mock.module` — so this file needs no process isolation.
  */
 import { describe, test, expect, mock, spyOn } from 'bun:test';
+import { PassThrough } from 'node:stream';
 import {
   buildCommitMessage,
   buildPrBody,
@@ -610,11 +611,18 @@ describe('PR branch name', () => {
 
 describe('after the edit TUI exits, before the PR prompts', () => {
   test('raw mode is off and the TUI key listener is gone when the confirm runs', async () => {
-    const originalIsTTY = Object.getOwnPropertyDescriptor(process.stdin, 'isTTY');
-    const originalRaw = Object.getOwnPropertyDescriptor(process.stdin, 'setRawMode');
-    const setRawMode = mock((_on: boolean) => process.stdin);
-    Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });
-    Object.defineProperty(process.stdin, 'setRawMode', { value: setRawMode, configurable: true, writable: true });
+    const originalStdin = Object.getOwnPropertyDescriptor(process, 'stdin');
+    if (originalStdin === undefined) throw new Error('process.stdin must exist');
+    // Earlier screens can leave the runner's non-TTY stdin closed. Marking that
+    // stream as a TTY cannot reopen it: Bun's pause() is then a no-op. A fresh
+    // stream exercises the real screen's cleanup independently of test order.
+    const input = new PassThrough();
+    const setRawMode = mock((_on: boolean) => input);
+    Object.defineProperties(input, {
+      isTTY: { value: true },
+      setRawMode: { value: setRawMode },
+    });
+    Object.defineProperty(process, 'stdin', { value: input, configurable: true });
     const write = spyOn(process.stdout, 'write').mockImplementation((() => true) as never);
     const dataListenersBefore = process.stdin.listenerCount('data');
     const resizeListenersBefore = process.listenerCount('SIGWINCH');
@@ -658,10 +666,8 @@ describe('after the edit TUI exits, before the PR prompts', () => {
       expect(process.listenerCount('SIGWINCH')).toBe(resizeListenersBefore);
     } finally {
       write.mockRestore();
-      if (originalIsTTY) Object.defineProperty(process.stdin, 'isTTY', originalIsTTY);
-      else Reflect.deleteProperty(process.stdin, 'isTTY');
-      if (originalRaw) Object.defineProperty(process.stdin, 'setRawMode', originalRaw);
-      else Reflect.deleteProperty(process.stdin, 'setRawMode');
+      Object.defineProperty(process, 'stdin', originalStdin);
+      input.destroy();
     }
   });
 });

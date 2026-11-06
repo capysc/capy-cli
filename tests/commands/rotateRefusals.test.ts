@@ -6,11 +6,16 @@
  * the tests run the real command against a real keep.lock and read what it
  * wrote.
  */
-import { describe, test, expect, beforeEach, afterEach, spyOn } from 'bun:test';
+import { describe, test, expect, beforeEach, afterEach, spyOn, mock } from 'bun:test';
 import { mkdirSync, writeFileSync, rmSync, existsSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import type { ConnectorMetadata, KeepFile } from '../../src/types/index';
+import { stubbedGate } from '../helpers/gateMock';
+
+// The refusals under test come from rotate's own checks; bare `capy` (its first step) is tested in tests/sync and
+// tests/commands/gateFirst.test.ts. `mock.module()` is process-wide: this file runs isolated (tests/run-tests.sh).
+mock.module('../../src/sync/gate', () => stubbedGate());
 
 const TEST_DIR = join(tmpdir(), `capy-rotate-refusals-${process.pid}`);
 const ORIGINAL_CWD = process.cwd();

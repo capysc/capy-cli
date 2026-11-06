@@ -26,7 +26,7 @@
  * clear/replace/import plan itself, and it never touches Dokploy vars past
  * what `--compose`/`--application`'s own single-service import (below, and
  * in `dokploy.ts`) already does. The only new behaviour that import gained
- * for this is `--overwrite` (see `dokploy.ts#computeOverwritePlan`) — a
+ * for this is `--overwrite` (see `discoverySteps.ts#computeOverwritePlan`) — a
  * flag usable standalone too, not something discovery invented for itself.
  * Discovery DOES decide, per step, whether to pass `--overwrite`
  * automatically — see "Auto-overwrite", below — but the actual clear/
@@ -118,8 +118,11 @@ import { isReservedProjectName } from '../../system/reservedProjectName';
 import { KeepFile } from '../../types/index';
 import type { AuthService } from '../../auth/authService';
 import type { ServiceClient } from '../../service/serviceClient';
-import type { ImportOutcome } from './registry';
+import type { ConnectFailure, ImportOutcome } from './registry';
+import type { FolderSync } from '../../sync/gate';
+import type { ConflictPayload } from '../../sync/conflicts';
 import type { DiscoveryCommitOutcome } from '../../git/discoveryCommit';
+import { DOKPLOY_DISCOVERY_CODES, type DiscoveryCodes } from './discoveryCodes';
 
 /**
  * The context `capy connect dokploy --discover` runs with — deliberately
@@ -254,8 +257,8 @@ export interface CandidateRepo {
 
 export interface DiscoveryRemoteReadError {
   repoDir: string;
-  /** Stable refusal code — branch on this, never on `message`. */
-  code: 'DOKPLOY_REMOTE_UNREADABLE';
+  /** Stable refusal code — branch on this, never on `message`. `DOKPLOY_REMOTE_UNREADABLE` for Dokploy, `CONNECTOR_REMOTE_UNREADABLE` for the other providers. */
+  code: string;
   /** git's own stderr (or a fallback naming its exit code) — for display only. */
   message: string;
 }
@@ -274,10 +277,10 @@ export interface CandidateReposResult {
  * defect a live sandbox run hit: git's "dubious ownership" refusal made
  * every single service come back `no_remote_match`).
  */
-export function findCandidateReposResult(cwd: string): CandidateReposResult {
+export function findCandidateReposResult(cwd: string, codes: Pick<DiscoveryCodes, 'remoteUnreadable'> = DOKPLOY_DISCOVERY_CODES): CandidateReposResult {
   const self = probeRepoDir(cwd);
   if (self.kind === 'unreadable') {
-    return { repos: [], unreadable: [{ repoDir: cwd, code: 'DOKPLOY_REMOTE_UNREADABLE', message: self.message }] };
+    return { repos: [], unreadable: [{ repoDir: cwd, code: codes.remoteUnreadable, message: self.message }] };
   }
   if (self.kind === 'ok') {
     const remote = readOriginRemote(self.repoRoot);
@@ -291,7 +294,7 @@ export function findCandidateReposResult(cwd: string): CandidateReposResult {
       return remote ? [{ repoDir: probe.repoRoot, remote }] : [];
     }),
     unreadable: childProbes.flatMap(({ dir, probe }) =>
-      probe.kind === 'unreadable' ? [{ repoDir: dir, code: 'DOKPLOY_REMOTE_UNREADABLE' as const, message: probe.message }] : [],
+      probe.kind === 'unreadable' ? [{ repoDir: dir, code: codes.remoteUnreadable, message: probe.message }] : [],
     ),
   };
 }
@@ -332,7 +335,7 @@ export function deepestCommonDir(dirs: readonly string[]): string {
 }
 
 /** A Compose service's folder is its compose file's directory; an Application's is the repo root (`''`). */
-export function serviceFolder(service: { serviceKind: 'application' | 'compose'; composePath?: string }): string {
+export function serviceFolder(service: { serviceKind: DiscoveryServiceKind; composePath?: string }): string {
   if (service.serviceKind === 'application' || !service.composePath) return '';
   return normalizeRelativeDir(posix.dirname(normalizeRelativeDir(service.composePath)));
 }
@@ -411,7 +414,8 @@ export const DISCOVERY_PROJECT_NAME_MAX_LENGTH = 255;
 
 // ── Matching Dokploy services to repos ──────────────────────────────────────
 
-export type DiscoveryServiceKind = 'application' | 'compose';
+/** `'vercel'` (CAP-696): a Vercel project, whose id rides in `serviceId` — see `vercelDiscovery.ts`. */
+export type DiscoveryServiceKind = 'application' | 'compose' | 'vercel';
 
 export interface ServiceDetail {
   /** Dokploy PROJECT id (CAP-703); `projectName` alone is not unique. */
@@ -434,12 +438,20 @@ export interface ServiceDetail {
 
 export type DiscoveryUnmatchedReason = 'no_git_source' | 'no_remote_match';
 
+/** Why a Vercel project was not matched to a local repo (CAP-696). */
+export type VercelUnmatchedReason =
+  | 'no_git_link'
+  | 'unsupported_git_provider'
+  | 'no_remote_match'
+  | 'root_directory_missing'
+  | 'no_variables';
+
 export interface DiscoveryUnmatched {
   projectName: string;
   serviceName: string;
   serviceKind: DiscoveryServiceKind;
   serviceId: string;
-  reason: DiscoveryUnmatchedReason;
+  reason: DiscoveryUnmatchedReason | VercelUnmatchedReason;
 }
 
 interface MatchedService extends ServiceDetail {
@@ -580,6 +592,18 @@ export interface DiscoveryPlanEnv {
   gitBranch?: string;
   /** Already-fetched (`application.one`/`compose.one`) env — plan preview reads this; the real per-environment import step re-fetches fresh rather than trusting a plan-time snapshot that may be stale by the time it runs. */
   rawEnv: string | null;
+  /**
+   * Vercel plan only (CAP-696): the names this environment will NOT import and
+   * the stable reason code for each (`gitBranch` for a branch-scoped preview
+   * record). Names only. Absent for Dokploy.
+   */
+  skipped?: ReadonlyArray<{ name: string; code: string; gitBranch?: string }>;
+  /**
+   * Vercel plan only: names Vercel will not give back where this environment's branch already holds a Capy
+   * value (known from the local keep.lock). The value stays untouched, so they are not in `skipped` or counted
+   * in `skippedCount`. A branch the run will create is not known yet: its unreadable names stay in `skipped`.
+   */
+  kept?: ReadonlyArray<{ name: string; code: string; reason: string }>;
   /**
    * PREVIEW ONLY, and only known when `DiscoveryPlanFolder.initialized` —
    * whether this environment's branch already exists on the server, i.e.
@@ -805,7 +829,7 @@ export interface DiscoveryCollision {
 }
 
 /** Two or more distinct (project, service) groups mapping the same (repoDir, folder, environment). */
-function detectCollisions(folders: readonly DiscoveryPlanFolder[]): readonly DiscoveryCollision[] {
+export function detectCollisions(folders: readonly DiscoveryPlanFolder[]): readonly DiscoveryCollision[] {
   interface Cell {
     repoDir: string;
     folder: string;
@@ -863,6 +887,8 @@ export interface DiscoveryPlan {
   allEnvironmentNames: readonly string[];
   /** The `--environment` names this plan was filtered to, if any (CAP-657 follow-up) — for the plan header ("filtered to: staging"). Absent when no filter was passed. */
   environmentFilter?: readonly string[];
+  /** Vercel plan only (CAP-696): the team scope the plan read. Absent for Dokploy and for a personal-account Vercel plan. */
+  team?: { id: string; slug?: string };
 }
 
 /**
@@ -999,11 +1025,18 @@ export function orderEnvironments<T extends { environmentName: string }>(environ
  * ever call `process.exit`: a multi-folder run must be able to abort ONE
  * folder on a coded failure and continue with the next, which the CLI's own
  * command classes (`CapyCommand`, `CheckoutCommand`) cannot do as they
- * stand today (see `dokploy.ts`'s own doc on `buildRealDiscoverySequenceDeps`
+ * stand today (see `discoverySteps.ts`'s own doc on `buildRealDiscoverySequenceDeps`
  * for exactly where this deviates from literally invoking those classes, and
  * why).
  */
 export interface DiscoverySequenceDeps {
+  /**
+   * Bare `capy` in (repoDir, folder), until it and Capy agree: the FIRST step for every folder, before anything is written
+   * into it (docs/conflict-resolution.md). A folder that is not a Capy project yet has nothing to compare. A difference
+   * nobody can answer (discovery never prompts), a stop or a failure skips the folder: nothing was written into it, and the
+   * result carries the folder's coded failure (and, for a difference, its `conflict_id` and rows).
+   */
+  syncFolder: (repoDir: string, folder: string) => Promise<FolderSync>;
   /**
    * No keep.lock at (repoDir, folder) → run the init flow (existing-project
    * picking, or create new, in the caller's org) — interactive only; a
@@ -1086,6 +1119,8 @@ export type DiscoveryFolderResult =
       message: string;
       /** Environments this folder finished BEFORE the step that aborted it. */
       environments: readonly DiscoverySequenceEnvResult[];
+      /** The folder differed from Capy and nobody could answer: the rows and `conflict_id` for a rerun with `--resolve` + `--conflict`. */
+      conflict?: ConflictPayload;
     };
 
 interface SequenceAcc {
@@ -1116,6 +1151,20 @@ export async function runDiscoverySequence(
   opts: { overwrite: boolean },
   deps: DiscoverySequenceDeps,
 ): Promise<DiscoveryFolderResult> {
+  // Bare `capy` first, in this folder, before anything is written into it.
+  const synced = await deps.syncFolder(folder.repoDir, folder.folder);
+  if (!synced.ok) {
+    return {
+      repoDir: folder.repoDir,
+      folder: folder.folder,
+      ok: false,
+      code: synced.code,
+      message: synced.message,
+      environments: [],
+      ...(synced.conflict === undefined ? {} : { conflict: synced.conflict }),
+    };
+  }
+
   const project = await deps.ensureProject(folder.repoDir, folder.folder, folder.remote);
   if (!project.ok) {
     return { repoDir: folder.repoDir, folder: folder.folder, ok: false, code: project.code, message: project.message, environments: [] };
@@ -1214,11 +1263,4 @@ export type DiscoveryOutcome =
       /** CAP-703: `BASE_URL_NOT_SAVED` / `BASE_URL_DIFFERS_FROM_STORED`, as codes. */
       notices?: ReadonlyArray<{ readonly code: string; readonly reason?: string; readonly stored?: string; readonly used?: string }>;
     }
-  | {
-      ok: false;
-      /** Stable refusal code — branch on this, never on `message`. */
-      code: string;
-      message: string;
-      /** CAP-703: what a caller must still supply, as flags (`DOKPLOY_SETTINGS_MISSING`). */
-      unanswered?: ReadonlyArray<{ readonly id: string; readonly flag: string; readonly hint: string }>;
-    };
+  | ConnectFailure;

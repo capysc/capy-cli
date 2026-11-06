@@ -89,6 +89,7 @@ import {
   summaryLine,
 } from './plan';
 import { sortedCopy } from '../../deploy/dokployApi';
+import type { KindOverrides } from './kind';
 
 // ── Seams ────────────────────────────────────────────────────────────────────
 
@@ -109,26 +110,30 @@ export type ContextResult =
   | { readonly ok: true; readonly orgId: string; readonly client: CapyReads }
   | { readonly ok: false; readonly code: string; readonly message: string };
 
-/** Everything external, injected: tests pass fakes; `realDeployDiscoverIo` builds the real one. */
-export interface DeployDiscoverIo {
+/** What every provider's discovery needs from the outside, injected: tests pass fakes. */
+export interface CommonIo {
   readonly devMode: boolean;
   readonly env: Readonly<Record<string, string | undefined>>;
-  /** The base URL of a Dokploy target already saved in this folder's deploy.json (the third place the shared resolver looks). */
-  readonly savedBaseUrl: () => string | undefined;
-  /** Opens the org system store for the Dokploy base URL variable. Absent: the variable is not consulted. Rejects with a coded error for a non-admin. */
-  readonly openBaseUrlStore?: (orgId: string) => Promise<BaseUrlStore>;
   /** Reads the plan file; throws when it cannot. */
   readonly readFile: (path: string) => string;
   /** Silent auth only: never a prompt, never a browser. */
   readonly context: () => Promise<ContextResult>;
-  /** The org system store read for the Dokploy key. */
-  readonly getConnectorSecret: (name: string, opts: DokploySystemStoreCallOptions) => Promise<string | null>;
-  readonly dokploy: (baseUrl: string, token: string) => DiscoveryDokployClient;
   /** `undefined` when `gh` is not installed. */
   readonly github: () => GithubApi | undefined;
   readonly branchName: () => string;
   /** Progress, for stderr. Never stdout. */
   readonly progress: (line: string) => void;
+}
+
+/** Everything external, injected: tests pass fakes; `realDeployDiscoverIo` builds the real one. */
+export interface DeployDiscoverIo extends CommonIo {
+  /** The base URL of a Dokploy target already saved in this folder's deploy.json (the third place the shared resolver looks). */
+  readonly savedBaseUrl: () => string | undefined;
+  /** Opens the org system store for the Dokploy base URL variable. Absent: the variable is not consulted. Rejects with a coded error for a non-admin. */
+  readonly openBaseUrlStore?: (orgId: string) => Promise<BaseUrlStore>;
+  /** The org system store read for the Dokploy key. */
+  readonly getConnectorSecret: (name: string, opts: DokploySystemStoreCallOptions) => Promise<string | null>;
+  readonly dokploy: (baseUrl: string, token: string) => DiscoveryDokployClient;
 }
 
 export interface DeployDiscoverResult {
@@ -140,17 +145,17 @@ export interface DeployDiscoverResult {
 /** Exit code for a refusal that needs a different invocation (the plan to confirm), not a retry. */
 const EXIT_NEEDS_INPUT = 3;
 
-function refuse(code: string, error: string, extra: Readonly<Record<string, unknown>> = {}): DeployDiscoverResult {
+export function refuse(code: string, error: string, extra: Readonly<Record<string, unknown>> = {}): DeployDiscoverResult {
   return {
     exitCode: code === ERROR_CODES.PLAN_CONFIRM_REQUIRED || code === 'DOKPLOY_SETTINGS_MISSING' ? EXIT_NEEDS_INPUT : 1,
     body: { ok: false, code, error, ...extra },
   };
 }
 
-type Step<T> = { readonly ok: true; readonly value: T } | { readonly ok: false; readonly result: DeployDiscoverResult };
+export type Step<T> = { readonly ok: true; readonly value: T } | { readonly ok: false; readonly result: DeployDiscoverResult };
 
-const done = <T>(value: T): Step<T> => ({ ok: true, value });
-const stop = (result: DeployDiscoverResult): Step<never> => ({ ok: false, result });
+export const done = <T>(value: T): Step<T> => ({ ok: true, value });
+export const stop = (result: DeployDiscoverResult): Step<never> => ({ ok: false, result });
 
 const codeOfError = (err: unknown): { readonly code: string; readonly message: string } =>
   err instanceof CapyError
@@ -191,11 +196,25 @@ const extrasBody = (extras: BaseUrlExtras): Readonly<Record<string, unknown>> =>
 
 // ── The world: Dokploy, Capy ─────────────────────────────────────────────────
 
-interface World {
+export interface World {
   readonly orgId: string;
   readonly services: readonly ServiceFacts[];
   readonly links: readonly OrgRepoLink[];
   readonly projects: ReadonlyMap<string, CapyProjectFacts>;
+}
+
+/** The Capy side of every provider's world: ONE call each for the repo links and the secret NAME index, however many projects there are (the service limits /orgs). */
+export async function loadCapySide(
+  io: Pick<CommonIo, 'progress'>,
+  client: CapyReads,
+  orgId: string,
+): Promise<Step<{ readonly links: readonly OrgRepoLink[]; readonly projects: ReadonlyMap<string, CapyProjectFacts> }>> {
+  io.progress('Reading Capy projects…'); // COPY-FLAG
+  const repos = await capyCall<OrgReposResponse>(() => client.getOrgRepos(orgId));
+  if (!repos.ok) return repos;
+  const index = await capyCall<SecretIndexResponse>(() => client.getSecretIndex(orgId));
+  if (!index.ok) return index;
+  return done({ links: repos.value.repos, projects: capyProjectsOf(repos.value.repos, index.value.rows) });
 }
 
 async function dokployClient(io: DeployDiscoverIo, baseUrl: string, orgId: string): Promise<Step<DiscoveryDokployClient>> {
@@ -226,7 +245,7 @@ function dokployFailure(err: unknown): DeployDiscoverResult {
 }
 
 /** A Capy call that waits out a 429 (bounded) and reports a failure as its code. */
-async function capyCall<T>(call: () => Promise<T>): Promise<Step<T>> {
+export async function capyCall<T>(call: () => Promise<T>): Promise<Step<T>> {
   const answer = await callWithBackoff(() => call());
   if (answer.ok) return done(answer.value);
   const { code, message } = codeOfError(answer.error);
@@ -253,18 +272,9 @@ async function loadWorld(
   );
   if (!details.ok) return stop(dokployFailure(details.err));
 
-  // ONE call each, however many projects there are: the service limits /orgs.
-  io.progress('Reading Capy projects…'); // COPY-FLAG
-  const repos = await capyCall<OrgReposResponse>(() => client.getOrgRepos(orgId));
-  if (!repos.ok) return repos;
-  const index = await capyCall<SecretIndexResponse>(() => client.getSecretIndex(orgId));
-  if (!index.ok) return index;
-  return done({
-    orgId,
-    services: details.value.map(serviceFactsOf),
-    links: repos.value.repos,
-    projects: capyProjectsOf(repos.value.repos, index.value.rows),
-  });
+  const capy = await loadCapySide(io, client, orgId);
+  if (!capy.ok) return capy;
+  return done({ orgId, services: details.value.map(serviceFactsOf), ...capy.value });
 }
 
 // ── GitHub reads ─────────────────────────────────────────────────────────────
@@ -272,12 +282,12 @@ async function loadWorld(
 const GITHUB_CONCURRENCY = 4;
 
 /** `fn` over `items`, a few at a time, results in input order. `fn` must not reject. */
-async function readEach<T, R>(items: readonly T[], fn: (item: T) => Promise<R>): Promise<readonly R[]> {
+export async function readEach<T, R>(items: readonly T[], fn: (item: T) => Promise<R>): Promise<readonly R[]> {
   const pooled = await runPool({ items, limit: GITHUB_CONCURRENCY, run: async (item) => ({ result: await fn(item) }) });
   return pooled.results;
 }
 
-const refKey = (repo: RepoRef): string => `${repo.owner.toLowerCase()}/${repo.name.toLowerCase()}`;
+export const refKey = (repo: RepoRef): string => `${repo.owner.toLowerCase()}/${repo.name.toLowerCase()}`;
 
 /** The default branch of each repo, or the code of why they could not be read. Keyed by `refKey`. */
 async function readDefaultBranches(
@@ -308,8 +318,8 @@ const isFailure = (v: readonly ExistingTarget[] | ReadFailure): v is ReadFailure
 // ── Discovery ────────────────────────────────────────────────────────────────
 
 /** Default branches and deploy.json targets for the repos some Dokploy service tracks. */
-async function discoveryGithubFacts(
-  io: DeployDiscoverIo,
+export async function discoveryGithubFacts(
+  io: Pick<CommonIo, 'github' | 'progress'>,
   world: World,
 ): Promise<{
   readonly defaultBranches: Readonly<Record<string, string | null>>;
@@ -376,12 +386,12 @@ async function runDiscovery(opts: DeployDiscoverOpts, io: DeployDiscoverIo): Pro
 
 // ── The plan ─────────────────────────────────────────────────────────────────
 
-interface ParsedPlan {
+export interface ParsedPlan {
   readonly entries: readonly PlanEntry[];
   readonly plan: Plan;
 }
 
-function readPlan(opts: DeployDiscoverOpts, io: DeployDiscoverIo): Step<ParsedPlan> {
+export function readPlan(opts: Pick<DeployDiscoverOpts, 'plan'>, io: Pick<CommonIo, 'readFile'>): Step<ParsedPlan> {
   const text = (() => {
     try {
       return { ok: true as const, text: io.readFile(opts.plan as string) };
@@ -404,12 +414,12 @@ function readPlan(opts: DeployDiscoverOpts, io: DeployDiscoverIo): Step<ParsedPl
   return done({ entries, plan });
 }
 
-function invalidPlan(errors: readonly PlanError[], extra: Readonly<Record<string, unknown>> = {}): DeployDiscoverResult {
+export function invalidPlan(errors: readonly PlanError[], extra: Readonly<Record<string, unknown>> = {}): DeployDiscoverResult {
   return refuse(ERROR_CODES.PLAN_INVALID, 'The plan has errors. Nothing was changed.', { errors, ...extra }); // COPY-FLAG
 }
 
 /** GitHub reads a plan needs: each repo's branches, each deploy.json at its repo's default branch. */
-async function planGithubReads(io: DeployDiscoverIo, needs: ReturnType<typeof githubNeeds>): Promise<GithubReads & { readonly defaultBranches: ReadonlyMap<string, string | null> }> {
+export async function planGithubReads(io: Pick<CommonIo, 'github' | 'progress'>, needs: ReturnType<typeof githubNeeds>): Promise<GithubReads & { readonly defaultBranches: ReadonlyMap<string, string | null> }> {
   const github = io.github();
   const unavailable: ReadFailure = { code: ERROR_CODES.KEEP_PR_GH_UNAVAILABLE };
   if (github === undefined || needs.repos.length === 0) {
@@ -437,7 +447,7 @@ async function planGithubReads(io: DeployDiscoverIo, needs: ReturnType<typeof gi
   return { branches: new Map(branchReads), deployJson: new Map(fileReads), defaultBranches };
 }
 
-function summaryOf(evaluated: readonly EvaluatedEntry[]): readonly string[] {
+function summaryOf(evaluated: readonly EvaluatedEntry[], kind?: KindOverrides): readonly string[] {
   const sorted = sortedCopy(
     evaluated,
     (a, b) =>
@@ -450,7 +460,9 @@ function summaryOf(evaluated: readonly EvaluatedEntry[]): readonly string[] {
     const normalized: PlanEntry = { ...entry, vars: uniqueSorted(entry.vars) };
     return e.status === 'already_configured'
       ? alreadyConfiguredLine({ project_name: project.project_name, entry: normalized, target_name: e.existingTargetName ?? '' })
-      : summaryLine({ project_name: project.project_name, kind: service.kind, entry: normalized });
+      : kind === undefined
+        ? summaryLine({ project_name: project.project_name, kind: service.kind, entry: normalized })
+        : kind.summaryLine({ project_name: project.project_name, service, entry: normalized });
   });
 }
 
@@ -475,13 +487,36 @@ async function runPlan(opts: DeployDiscoverOpts, io: DeployDiscoverIo, parsed: P
   const world = await loadWorld(io, ctx.client, ctx.orgId, dokploy.value, new Set(entries.map((e) => e.service_id)));
   if (!world.ok) return world.result;
 
-  const resolved = resolveEntries(entries, new Map(world.value.services.map((s) => [s.service_id, s])), world.value.projects);
+  return finishPlan({ opts, io, parsed, planId, world: world.value, scope: baseUrl, extras: extrasBody(extras) });
+}
+
+/**
+ * Everything after the world is read, for every provider: check the plan against GitHub and Capy, then print the
+ * dry run, refuse a real run without its `--confirm`, or write the targets (one PR per repo).
+ */
+export async function finishPlan(args: {
+  readonly opts: Pick<DeployDiscoverOpts, 'dryRun' | 'plan' | 'confirm'>;
+  readonly io: Pick<CommonIo, 'github' | 'progress' | 'branchName'>;
+  readonly parsed: ParsedPlan;
+  readonly planId: string;
+  readonly world: World;
+  /** What the targets are written for (Dokploy: the base URL). */
+  readonly scope: string;
+  /** Fields merged into the output after the plan's own (Dokploy: the saved-base-URL report and notices). */
+  readonly extras: Readonly<Record<string, unknown>>;
+  readonly kind?: KindOverrides;
+}): Promise<DeployDiscoverResult> {
+  const { opts, io, parsed, planId, world, scope, extras, kind } = args;
+  const { entries, plan } = parsed;
+  const confirming = opts.confirm !== undefined && opts.dryRun !== true;
+
+  const resolved = resolveEntries(entries, new Map(world.services.map((s) => [s.service_id, s])), world.projects, kind);
   const needs = githubNeeds(resolved);
   const reads = await planGithubReads(io, needs);
-  const evaluation = evaluatePlan(resolved, reads);
+  const evaluation = evaluatePlan(resolved, reads, kind);
   if (evaluation.errors.length > 0) return invalidPlan(evaluation.errors, { plan_id: planId });
 
-  const toWrite = targetsToWrite(evaluation.entries, reads, baseUrl);
+  const toWrite = targetsToWrite(evaluation.entries, reads, scope, kind);
   const configured = evaluation.entries
     .filter((e) => e.status === 'already_configured')
     .map((e) => ({
@@ -490,7 +525,7 @@ async function runPlan(opts: DeployDiscoverOpts, io: DeployDiscoverIo, parsed: P
       service_id: e.resolved.entry.service_id,
       target_name: e.existingTargetName ?? '',
     }));
-  const summary = summaryOf(evaluation.entries);
+  const summary = summaryOf(evaluation.entries, kind);
   const prPreview = uniqueSorted(toWrite.map((t) => t.repoKey)).map((k) => {
     const mine = toWrite.filter((t) => t.repoKey === k);
     return {
@@ -500,7 +535,7 @@ async function runPlan(opts: DeployDiscoverOpts, io: DeployDiscoverIo, parsed: P
       targets: mine.map((t) => t.target.name),
     };
   });
-  const dryBody = { plan, plan_id: planId, summary_lines: summary, already_configured: configured, prs: prPreview, ...extrasBody(extras) };
+  const dryBody = { plan, plan_id: planId, summary_lines: summary, already_configured: configured, prs: prPreview, ...extras };
 
   if (!confirming) {
     if (opts.dryRun === true) {
@@ -513,7 +548,7 @@ async function runPlan(opts: DeployDiscoverOpts, io: DeployDiscoverIo, parsed: P
           next_steps: [
             { action: 'relay', field: 'summary_lines' },
             { action: 'get_approval' },
-            { run: `capy deploy dokploy --discover --plan ${opts.plan} --confirm ${planId}` },
+            { run: `${kind?.command ?? 'capy deploy dokploy --discover'} --plan ${opts.plan} --confirm ${planId}` },
           ],
         },
       };
@@ -525,7 +560,7 @@ async function runPlan(opts: DeployDiscoverOpts, io: DeployDiscoverIo, parsed: P
     );
   }
 
-  const applied = await applyTargets(toWrite, { github: io.github(), branchName: io.branchName });
+  const applied = await applyTargets(toWrite, { github: io.github(), branchName: io.branchName, ...(kind === undefined ? {} : { kind }) });
   const failed = applied.failed.length > 0;
   return {
     exitCode: failed ? 1 : 0,
@@ -537,7 +572,7 @@ async function runPlan(opts: DeployDiscoverOpts, io: DeployDiscoverIo, parsed: P
       prs: applied.prs,
       failed: applied.failed,
       already_configured: configured,
-      ...extrasBody(extras),
+      ...extras,
     },
   };
 }

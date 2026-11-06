@@ -7,7 +7,7 @@
 //
 // Every binding in this file is declared const; nothing is ever reassigned.
 // A raw-mode stdin is an inherently callback-driven Node API — keypresses,
-// terminal resizes, SIGINT/SIGTERM, and a value fetch resolving are four
+// terminal resizes, SIGINT/SIGTERM, effect results, and scheduled draws are
 // independent, asynchronously-arriving event sources that all have to feed
 // into ONE sequential stream of immutable states. Rather than holding a
 // mutable "current state" cell, every source re-emits onto a single local
@@ -51,7 +51,6 @@ const {
   HIDE_CURSOR,
   SHOW_CURSOR,
   MOVE_HOME,
-  CLEAR_SCREEN,
   ENTER_ALT_SCREEN,
   EXIT_ALT_SCREEN,
   ENABLE_BRACKETED_PASTE,
@@ -84,13 +83,19 @@ export interface SecretsDeployActions {
   /** The Dokploy targets of this row, from GitHub (reads only: nothing is unlocked or written). Never rejects. */
   readonly loadPlan: (row: SecretIndexRow) => Promise<DeployPlanLoaded>;
   /** Pushes the values, records the deliveries and opens the PRs, reporting progress as items complete. Never rejects. */
-  readonly run: (plan: BatchPlan, onProgress?: (progress: BatchProgress) => void) => Promise<DeployFinished>;
+  readonly run: (
+    plan: BatchPlan,
+    onProgress?: (progress: BatchProgress) => void,
+    /** The decisions made for conflicts found by an earlier run, with the fingerprints they were made against (CAP-714). */
+    decisions?: Extract<DeployEffect, { type: 'runDeploy' }>['decisions'],
+  ) => Promise<DeployFinished>;
   /** Stops what is in flight: `planning` kills the GitHub reads; `pushing` / `prs` start nothing new and wait for every item in flight. */
   readonly cancel: (phase: Extract<DeployEffect, { type: 'cancelDeploy' }>['phase']) => void;
 }
 
 type DriverAction =
   | { readonly kind: 'key'; readonly key: string }
+  | { readonly kind: 'draw' }
   | { readonly kind: 'resize' }
   | { readonly kind: 'quit' }
   | { readonly kind: 'value'; readonly row: SecretIndexRow; readonly result: ValueState }
@@ -109,7 +114,11 @@ export type CopyText = (text: string) => Promise<boolean>;
 function draw(state: SecretsScreenState): void {
   const width = process.stdout.columns || 80;
   const height = process.stdout.rows || 24;
-  process.stdout.write(CLEAR_SCREEN + MOVE_HOME + render(state, width, height));
+  // render() already clears the rest of every line. Clear below its last
+  // line too, so a shorter frame erases anything the previous one left there.
+  // One synchronized write keeps the terminal from showing a partial frame;
+  // terminals without synchronized-output support ignore the mode switches.
+  process.stdout.write(`\x1b[?2026h${MOVE_HOME}${render(state, width, height)}\x1b[J\x1b[?2026l`);
 }
 
 /**
@@ -126,13 +135,24 @@ async function loop(
   bus: EventEmitter,
   deploy: SecretsDeployActions | undefined,
   copy: CopyText,
+  drawPending: boolean = false,
 ): Promise<string | null> {
   if (state.quit) return state.exitText;
-  draw(state);
 
   const { value } = await actions.next();
   const [action] = value;
-  const next = (s: SecretsScreenState) => loop(s, actions, decryptAt, edit, bus, deploy, copy);
+  const next = (s: SecretsScreenState) => {
+    // Reduce every key and start its effects immediately, but paint only
+    // after this tick's queued actions have drained. The pending flag travels
+    // with the immutable state, so a burst schedules just one draw action.
+    if (!s.quit && !drawPending) setImmediate(() => bus.emit('action', { kind: 'draw' }));
+    return loop(s, actions, decryptAt, edit, bus, deploy, copy, true);
+  };
+
+  if (action.kind === 'draw') {
+    draw(state);
+    return loop(state, actions, decryptAt, edit, bus, deploy, copy);
+  }
 
   // A push in flight is never abandoned halfway: a quit signal waits for it.
   if (action.kind === 'quit') {
@@ -206,7 +226,7 @@ function perform(
   }
   if (effect.type === 'runDeploy') {
     const ran = deploy
-      ? deploy.run(effect.plan, (progress) => bus.emit('action', { kind: 'deployProgress', progress }))
+      ? deploy.run(effect.plan, (progress) => bus.emit('action', { kind: 'deployProgress', progress }), effect.decisions)
       : Promise.resolve<DeployFinished>({ ok: false, code: 'UNAVAILABLE' });
     void ran.then((finished) => bus.emit('action', { kind: 'deployRan', finished }));
     return;
@@ -276,7 +296,9 @@ export async function runSecretsScreen(
 
   const exitText = await (async () => {
     try {
-      return await loop(initialSecretsScreenState(rows, dryRun), actions, decryptAt, edit, bus, deploy, copy);
+      const state = initialSecretsScreenState(rows, dryRun);
+      draw(state);
+      return await loop(state, actions, decryptAt, edit, bus, deploy, copy);
     } finally {
       process.stdout.write(DISABLE_BRACKETED_PASTE + SHOW_CURSOR + EXIT_ALT_SCREEN);
       if (process.stdin.isTTY) process.stdin.setRawMode(false);

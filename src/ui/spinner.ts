@@ -19,7 +19,14 @@ export class Spinner {
     return this.tty ? process.stdout : process.stderr;
   }
 
-  constructor(text: string) {
+  /**
+   * `quiet`: says nothing while things go well, and puts a failure or a warning on stderr whatever stdout is. For a
+   * step a command runs first on behalf of its own output (sync/gate.ts), where stdout belongs to that command.
+   */
+  constructor(
+    text: string,
+    private readonly quiet: boolean = false,
+  ) {
     this.text = text;
   }
 
@@ -27,6 +34,7 @@ export class Spinner {
     if (this.isSpinning) return this;
 
     this.isSpinning = true;
+    if (this.quiet) return this;
     if (!this.tty) {
       // No animation off-TTY (carriage-return redraw is meaningless when piped);
       // emit a single progress line to stderr instead.
@@ -63,23 +71,24 @@ export class Spinner {
 
   succeed(text?: string): void {
     this.stop();
+    if (this.quiet) return;
     this.stream.write(`\x1b[32m✓\x1b[0m ${text || this.text}\n`); // Green checkmark
   }
 
   fail(text?: string): void {
     this.stop();
-    this.stream.write(`\x1b[31m✗\x1b[0m ${text || this.text}\n`); // Red X
+    (this.quiet ? process.stderr : this.stream).write(`\x1b[31m✗\x1b[0m ${text || this.text}\n`); // Red X
   }
 
   warn(text?: string): void {
     this.stop();
-    this.stream.write(`\x1b[33m⚠\x1b[0m ${text || this.text}\n`); // Yellow warning
+    (this.quiet ? process.stderr : this.stream).write(`\x1b[33m⚠\x1b[0m ${text || this.text}\n`); // Yellow warning
   }
 }
 
 /**
  * Factory function to match ora's API
  */
-export default function ora(text: string): Spinner {
-  return new Spinner(text);
+export default function ora(text: string, quiet: boolean = false): Spinner {
+  return new Spinner(text, quiet);
 }

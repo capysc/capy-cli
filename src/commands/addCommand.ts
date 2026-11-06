@@ -2,11 +2,14 @@ import { CapyError, ERROR_CODES } from '../types';
 import { resolveContext, writeAndSync, type ResolvedContext } from './connectors/shared';
 import { DRY_RUN_UNSUPPORTED_MESSAGES, MAX_PIPED_BYTES, readPipedValue, refuseDryRunUnsupported, refuseInvalidName, refusePiped } from './pipedValue';
 import { runPipedWrite, variableExists } from './pipedWrite';
+import { conflictFlagsOrExit, type RawConflictFlags } from '../sync/conflicts';
+import { gateFirst, type GateOptions } from '../sync/gate';
 import {
   recordsForWrite,
   refuseBadPrFlags,
   reportKeepLockHuman,
   runKeepLockPrStep,
+  type KeepLockCommandName,
   type PrFlags,
 } from './keepLockPr';
 
@@ -26,9 +29,16 @@ export interface AddOpts {
   pr?: PrFlags;
   /** The global `--dry-run`: a piped add previews; an interactive add refuses (`DRY_RUN_UNSUPPORTED`). */
   dryRun?: boolean;
+  /** `--resolve` / `--conflict` as typed (CAP-717): they answer the differences bare `capy` finds first. */
+  conflictFlags?: RawConflictFlags;
 }
 
 const VAR_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/** What bare `capy` needs to run as this command's first step. */
+function gateOptionsOf(opts: AddOpts, devMode: boolean): GateOptions {
+  return { devMode, json: opts.json === true, nonTty: opts.nonTty, conflictFlags: opts.conflictFlags, dryRun: opts.dryRun === true };
+}
 
 /**
  * Piped mode is "a value arrives on stdin". It is decided by stdin alone.
@@ -65,6 +75,93 @@ async function writeInOrder(
   return writeInOrder({ ...ctx, localPlaintext: { ...ctx.localPlaintext, [name]: value } }, rest, push);
 }
 
+/** What the prompted set needs beyond the flags: who is asking, and what a dry run says. */
+export interface PromptedSetArgs {
+  readonly names: readonly string[];
+  readonly opts: AddOpts;
+  readonly devMode: boolean;
+  /** Which command is writing: named in the PR body. */
+  readonly command: KeepLockCommandName;
+  /** The `DRY_RUN_UNSUPPORTED` sentence for this command. */
+  readonly dryRunMessage: string;
+}
+
+/**
+ * The hidden terminal prompt and the one write path behind it, shared by `capy add NAME`
+ * and `capy edit NAME` on a terminal. Asks for each value (masked), writes, syncs, runs the
+ * keep.lock PR step. With `opts.force` an existing name is overwritten without a question.
+ */
+export async function runPromptedSet(args: PromptedSetArgs): Promise<void> {
+  const { names, opts, devMode, command, dryRunMessage } = args;
+
+  // The prompts would really save: a dry run never runs for real. Before any prompt.
+  if (opts.dryRun === true) return refuseDryRunUnsupported(opts.json === true, dryRunMessage);
+
+  if (names.length === 0) {
+    throw new CapyError('No variable name given.', ERROR_CODES.INVALID_FORMAT);
+  }
+  for (const name of names) {
+    if (!VAR_RE.test(name)) {
+      throw new CapyError(`"${name}" is not a valid environment variable name.`, ERROR_CODES.INVALID_FORMAT);
+    }
+  }
+
+  // Bare `capy` runs before anything else: the folder and Capy must agree before this writes (docs/conflict-resolution.md).
+  const gate = gateOptionsOf(opts, devMode);
+  conflictFlagsOrExit(opts.conflictFlags ?? {}, opts.json === true);
+  await gateFirst(gate);
+
+  const ctx = await resolveContext({ devMode, gate });
+  const push = opts.noPush !== true;
+
+  const existing = names.filter((n) => n in ctx.localPlaintext);
+  if (existing.length > 0 && !opts.force && !opts.nonTty) {
+    const inquirer = (await import('inquirer')).default;
+    const { ok } = await inquirer.prompt([
+      { type: 'confirm', name: 'ok', message: `${existing.join(', ')} already exist(s). Overwrite?`, default: false },
+    ]);
+    if (!ok) {
+      console.log('Aborted.');
+      return;
+    }
+  }
+
+  const savedNames = await collectViaTerminal(ctx, names, opts, push);
+
+  const where = push ? ` and synced to ${ctx.branch}` : ' (.env only — not pushed)';
+  console.log(`✓ Saved ${savedNames.length} variable(s): ${savedNames.join(', ')}${where}.`);
+
+  const outcome = await runKeepLockPrStep({
+    command,
+    cwd: process.cwd(),
+    records: recordsForWrite(ctx.keep, ctx.pm.readKeepFile(), ctx.branch, savedNames),
+    localKeep: ctx.keep,
+    flags: opts.pr ?? {},
+    json: opts.json === true,
+    nonTty: opts.nonTty,
+  });
+  reportKeepLockHuman(outcome, { successTo: 'stdout', noteUnanswered: false });
+}
+
+/** The hidden terminal prompt, one value per name. */
+async function collectViaTerminal(
+  ctx: ResolvedContext,
+  names: readonly string[],
+  opts: AddOpts,
+  push: boolean,
+): Promise<string[]> {
+  if (opts.nonTty) {
+    throw new CapyError(
+      // COPY-FLAG
+      'Non-interactive add reads the value from stdin: <cmd> | capy add NAME',
+      ERROR_CODES.INVALID_FORMAT,
+    );
+  }
+  const pairs = await promptForValues(names);
+  await writeInOrder(ctx, pairs, push);
+  return pairs.map((p) => p.name);
+}
+
 export class AddCommand {
   constructor(private readonly devMode: boolean = false) {}
 
@@ -77,48 +174,13 @@ export class AddCommand {
     // `<cmd> | capy add NAME`: the value comes from stdin and nothing prompts.
     if (isPipedAdd()) return this.executePiped(names, opts);
 
-    // The prompts would really save: a dry run never runs for real. Before any prompt.
-    if (opts.dryRun === true) return refuseDryRunUnsupported(opts.json === true, DRY_RUN_UNSUPPORTED_MESSAGES.add);
-
-    if (names.length === 0) {
-      throw new CapyError('No variable name given.', ERROR_CODES.INVALID_FORMAT);
-    }
-    for (const name of names) {
-      if (!VAR_RE.test(name)) {
-        throw new CapyError(`"${name}" is not a valid environment variable name.`, ERROR_CODES.INVALID_FORMAT);
-      }
-    }
-
-    const ctx = await resolveContext({ devMode: this.devMode });
-    const push = opts.noPush !== true;
-
-    const existing = names.filter((n) => n in ctx.localPlaintext);
-    if (existing.length > 0 && !opts.force && !opts.nonTty) {
-      const inquirer = (await import('inquirer')).default;
-      const { ok } = await inquirer.prompt([
-        { type: 'confirm', name: 'ok', message: `${existing.join(', ')} already exist(s). Overwrite?`, default: false },
-      ]);
-      if (!ok) {
-        console.log('Aborted.');
-        return;
-      }
-    }
-
-    const savedNames = await this.collectViaTerminal(ctx, names, opts, push);
-
-    const where = push ? ` and synced to ${ctx.branch}` : ' (.env only — not pushed)';
-    console.log(`✓ Saved ${savedNames.length} variable(s): ${savedNames.join(', ')}${where}.`);
-
-    const outcome = await runKeepLockPrStep({
+    return runPromptedSet({
+      names,
+      opts,
+      devMode: this.devMode,
       command: 'add',
-      cwd: process.cwd(),
-      records: recordsForWrite(ctx.keep, ctx.pm.readKeepFile(), ctx.branch, savedNames),
-      localKeep: ctx.keep,
-      flags: opts.pr ?? {},
-      json: opts.json === true,
-      nonTty: opts.nonTty,
+      dryRunMessage: DRY_RUN_UNSUPPORTED_MESSAGES.add,
     });
-    reportKeepLockHuman(outcome, { successTo: 'stdout', noteUnanswered: false });
   }
 
   /** `<cmd> | capy add NAME`. One name, one pipe; an existing name needs `--force`. */
@@ -137,6 +199,8 @@ export class AddCommand {
     const [name] = names;
     // The argument is not echoed: a `NAME=value` typed by mistake must not be printed back.
     if (!VAR_RE.test(name)) return refuseInvalidName(json);
+    // A bad flag is refused before stdin is read or anything is authenticated.
+    conflictFlagsOrExit(opts.conflictFlags ?? {}, json);
 
     const piped = await readPipedValue(process.stdin, MAX_PIPED_BYTES);
     if (!piped.ok) return refusePiped(json, piped.code, piped.error);
@@ -148,7 +212,8 @@ export class AddCommand {
       command: 'add',
       pr: opts.pr,
       dryRun: opts.dryRun === true,
-      gate: (ctx) =>
+      gate: gateOptionsOf(opts, this.devMode),
+      refuseWhen: (ctx) =>
         variableExists(ctx, name) && opts.force !== true
           ? {
               code: ERROR_CODES.ADD_VAR_EXISTS,
@@ -156,24 +221,5 @@ export class AddCommand {
             }
           : undefined,
     });
-  }
-
-  /** The hidden terminal prompt, one value per name. */
-  private async collectViaTerminal(
-    ctx: ResolvedContext,
-    names: readonly string[],
-    opts: AddOpts,
-    push: boolean,
-  ): Promise<string[]> {
-    if (opts.nonTty) {
-      throw new CapyError(
-        // COPY-FLAG
-        'Non-interactive add reads the value from stdin: <cmd> | capy add NAME',
-        ERROR_CODES.INVALID_FORMAT,
-      );
-    }
-    const pairs = await promptForValues(names);
-    await writeInOrder(ctx, pairs, push);
-    return pairs.map((p) => p.name);
   }
 }
