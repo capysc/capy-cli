@@ -229,22 +229,18 @@ function nextColumn(column: ColumnMode, dir: 1 | -1): ColumnMode {
 
 // ── Sorting (CAP-731) ────────────────────────────────────────────────────────
 //
-// Ctrl+S cycles the list through SORT_ORDER (wrapping). Search still decides
+// Ctrl+S opens a sort menu listing SORT_ORDER; Enter applies the chosen sort and
+// goes back to the top of the list. Search still decides
 // WHICH rows show; the sort only orders them. Every comparison keys off a
 // machine value (the name string, the status `kind`, a timestamp), never the
 // words the screen prints. Ties always fall back to a deterministic key, so the
 // order never depends on how the server (or a previous sort) happened to arrive.
 
 export type SortMode = 'name-asc' | 'name-desc' | 'status-asc' | 'status-desc' | 'updated-newest' | 'updated-oldest';
-/** Ctrl+S walks this order and wraps; the first entry is the default. */
+/** The order the sort menu lists; the first entry is the default. */
 export const SORT_ORDER: readonly SortMode[] = ['name-asc', 'name-desc', 'status-asc', 'status-desc', 'updated-newest', 'updated-oldest'];
 
-/** The next sort after `mode`, wrapping from the last back to the first. Pure. */
-export function nextSort(mode: SortMode): SortMode {
-  return SORT_ORDER[(SORT_ORDER.indexOf(mode) + 1) % SORT_ORDER.length];
-}
-
-/** What the footer says each sort is. */
+/** What the footer and the sort menu say each sort is. */
 const SORT_LABELS: Readonly<Record<SortMode, string>> = {
   'name-asc': 'name A-Z', // COPY-FLAG
   'name-desc': 'name Z-A', // COPY-FLAG
@@ -348,11 +344,17 @@ export interface SearchState {
   readonly query: string;
 }
 
+export interface SortMenuState {
+  readonly cursor: number;
+}
+
 export interface SecretsScreenState {
   readonly rows: readonly SecretIndexRow[];
   readonly column: ColumnMode;
-  /** How the list is ordered (Ctrl+S cycles it); search decides which rows show, this decides their order. */
+  /** How the list is ordered (chosen in the Ctrl+S menu); search decides which rows show, this decides their order. */
   readonly sort: SortMode;
+  /** The Ctrl+S sort menu, open while a sort is being chosen: `cursor` indexes `SORT_ORDER`. `null` when closed. */
+  readonly sortMenu: SortMenuState | null;
   readonly cursorIndex: number;
   readonly search: SearchState;
   readonly popup: PopupState | null;
@@ -374,6 +376,7 @@ export function initialSecretsScreenState(rows: readonly SecretIndexRow[], dryRu
     rows,
     column: COLUMN_ORDER[0],
     sort: SORT_ORDER[0],
+    sortMenu: null,
     cursorIndex: 0,
     search: { query: '' },
     popup: null,
@@ -522,6 +525,9 @@ export function handleKey(state: SecretsScreenState, rawKey: string): ReduceResu
   if (state.edit) return handleEditFlowKey(state, state.edit, key);
   if (state.deploy) return handleDeployFlowKey(state, state.deploy, key);
 
+  // The sort menu owns the keyboard: nothing reaches the search, edit, deploy or column keys.
+  if (state.sortMenu) return noEffect(handleSortMenuKey(state, state.sortMenu, key));
+
   if (state.popup) {
     if (key === 'd' || key === 'D' || key === KEY_CTRL_D) return openDeployOnCursor(state);
     return key === 'e' || key === 'E' || key === KEY_CTRL_E ? openEditOnCursor(state) : noEffect(handlePopupKey(state, key));
@@ -635,17 +641,26 @@ function applyQuery(state: SecretsScreenState, query: string): SecretsScreenStat
 }
 
 /**
- * Switches to `sort` and keeps the highlighted row highlighted: it is found again
- * by name + value hash in the new order (a row is one (name, value_hash) pair).
- * With no highlighted row (an empty list) the cursor just stays clamped.
+ * Switches to `sort` and goes back to the top: the first row of the new order is
+ * highlighted, so the list shows from its start (Vince, 2026-11-06). The scroll
+ * window follows the cursor, so a cursor of 0 is the top of the list.
  */
 function applySort(state: SecretsScreenState, sort: SortMode): SecretsScreenState {
-  const before = filteredRows(state);
-  const current = before[clampIndex(state.cursorIndex, before.length)];
-  const resorted = { ...state, sort };
-  const after = filteredRows(resorted);
-  const found = current === undefined ? -1 : after.findIndex((r) => r.name === current.name && r.value_hash === current.value_hash);
-  return { ...resorted, cursorIndex: found >= 0 ? found : clampIndex(state.cursorIndex, after.length) };
+  return { ...state, sort, cursorIndex: 0 };
+}
+
+/** Moves the sort menu's cursor by `step`, wrapping at both ends. */
+function stepSortMenu(menu: SortMenuState, step: 1 | -1): SortMenuState {
+  return { cursor: (menu.cursor + step + SORT_ORDER.length) % SORT_ORDER.length };
+}
+
+/** The sort menu's keys: ↑/↓ move (wrapping), Enter applies and closes, Esc or `q` close unchanged. Every other key does nothing. */
+function handleSortMenuKey(state: SecretsScreenState, menu: SortMenuState, key: string): SecretsScreenState {
+  if (key === KEY_UP) return { ...state, sortMenu: stepSortMenu(menu, -1) };
+  if (key === KEY_DOWN) return { ...state, sortMenu: stepSortMenu(menu, 1) };
+  if (key === '\r') return applySort({ ...state, sortMenu: null }, SORT_ORDER[menu.cursor]);
+  if (key === KEY_ESC || key === KEY_ESC_ESC || key === 'q' || key === 'Q') return { ...state, sortMenu: null };
+  return state;
 }
 
 function handlePopupKey(state: SecretsScreenState, key: string): SecretsScreenState {
@@ -704,7 +719,7 @@ function handleListKey(state: SecretsScreenState, key: string): ReduceResult {
   if (key === KEY_CTRL_D && state.search.query === '') return openDeployOnCursor(state);
 
   // Works with or without a typed filter: the sort only orders the rows the search shows.
-  if (key === KEY_CTRL_S) return noEffect(applySort(state, nextSort(state.sort)));
+  if (key === KEY_CTRL_S) return noEffect({ ...state, sortMenu: { cursor: Math.max(0, SORT_ORDER.indexOf(state.sort)) } });
 
   if (key === KEY_TAB) {
     return noEffect({ ...state, column: nextColumn(state.column, 1) });
@@ -1095,6 +1110,7 @@ export function mainTableLayout(available: number): { readonly nameW: number; re
 export function render(state: SecretsScreenState, termWidth: number, termHeight: number): string {
   if (state.edit) return renderEditScreen(state.edit, termWidth, termHeight, state.dryRun);
   if (state.deploy) return renderDeployScreen(state.deploy, termWidth, termHeight, state.dryRun);
+  if (state.sortMenu) return renderSortMenuScreen(state, state.sortMenu, termWidth, termHeight);
   const m = ' '.repeat(MARGIN);
   const available = Math.max(40, termWidth - MARGIN * 2);
   const matched = filteredRowsWithReasons(state);
@@ -1189,6 +1205,50 @@ function renderDeployScreen(flow: DeployFlow, termWidth: number, termHeight: num
   ];
   // No line is ever wider than the terminal (a wrapped line would break the layout).
   return out.map((l) => clipLine(l, termWidth) + CLEAR_EOL).join('\n');
+}
+
+const SORT_MENU_TITLE = 'sort by'; // COPY-FLAG
+const SORT_MENU_CURRENT = '●'; // COPY-FLAG
+
+/** The sort menu's key hints. */
+const SORT_MENU_HINTS: readonly FooterHint[] = [
+  { id: 'navigate', key: null, label: '↑↓ choose' }, // COPY-FLAG
+  { id: 'inspect', key: 'enter', label: 'sort' }, // COPY-FLAG
+  { id: 'esc', key: 'esc', label: 'cancel' }, // COPY-FLAG
+];
+
+/** The `size` menu entries to show around `cursor`: all of them when they fit, else a window that keeps the cursor in view. */
+function sortMenuWindowStart(cursor: number, size: number): number {
+  return Math.min(Math.max(0, cursor - size + 1), Math.max(0, SORT_ORDER.length - size));
+}
+
+/**
+ * The sort menu's screen, laid out like the edit and deploy screens: the header,
+ * then the menu, then its key hints. Each entry is drawn like a list row (`▶` and
+ * inverse on the cursor), and the sort now in use carries a `●`. On a short
+ * terminal only the entries around the cursor are shown, so it never overflows.
+ */
+function renderSortMenuScreen(state: SecretsScreenState, menu: SortMenuState, termWidth: number, termHeight: number): string {
+  const m = ' '.repeat(MARGIN);
+  const width = Math.max(1, termWidth - MARGIN);
+  const entryRoom = Math.max(1, termHeight - 5); // header, blank, title, blank, footer
+  const size = Math.min(SORT_ORDER.length, entryRoom);
+  const start = sortMenuWindowStart(menu.cursor, size);
+  const entries: readonly string[] = SORT_ORDER.slice(start, start + size).map((mode, i) => {
+    const selected = start + i === menu.cursor;
+    const text = `${selected ? '▶ ' : '  '}${mode === state.sort ? SORT_MENU_CURRENT : ' '} ${SORT_LABELS[mode]}`;
+    return selected ? INVERSE + padVis(truncate(text, width), Math.min(width, 32)) + RESET : text;
+  });
+  const out: readonly string[] = [
+    `${m}${BOLD}capy secrets${RESET}${dryRunTag(state.dryRun)}`,
+    '',
+    `${m}${BOLD}${SORT_MENU_TITLE}${RESET}`,
+    ...entries.map((l) => m + l),
+    '',
+    m + joinHints(SORT_MENU_HINTS),
+  ];
+  // No line is ever wider than the terminal, and the whole screen never taller than it.
+  return out.slice(0, Math.max(1, termHeight)).map((l) => clipLine(l, termWidth) + CLEAR_EOL).join('\n');
 }
 
 function spliceIn(bodyLines: readonly string[], afterIndex: number, insert: readonly string[]): string[] {

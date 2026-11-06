@@ -4,7 +4,6 @@ import {
   handleKey,
   render,
   filteredRows,
-  nextSort,
   sortRows,
   SORT_ORDER,
   SecretsScreenState,
@@ -16,6 +15,9 @@ const ESC = '\x1b';
 const CTRL_S = '\x13';
 const ENTER = '\r';
 const KEY_DOWN = `${ESC}[B`;
+const KEY_UP = `${ESC}[A`;
+const CTRL_E = '\x05';
+const CTRL_D = '\x04';
 const KEY_TAB = '\t';
 
 function stripAnsi(s: string): string {
@@ -46,47 +48,125 @@ const press = (state: SecretsScreenState, ...keys: readonly string[]): SecretsSc
 const typed = (state: SecretsScreenState, text: string): SecretsScreenState => press(state, ...text.split(''));
 const withSort = (rows: readonly SecretIndexRow[], sort: SortMode): SecretsScreenState => ({ ...initialSecretsScreenState(rows), sort });
 const names = (state: SecretsScreenState): readonly string[] => filteredRows(state).map((r) => r.name);
+/** Opens the sort menu, moves down to `mode`, and presses Enter. */
+const choose = (state: SecretsScreenState, mode: SortMode): SecretsScreenState =>
+  press(state, CTRL_S, ...Array.from({ length: (SORT_ORDER.indexOf(mode) - SORT_ORDER.indexOf(state.sort) + SORT_ORDER.length) % SORT_ORDER.length }, () => KEY_DOWN), ENTER);
 const cursorName = (state: SecretsScreenState): string | undefined => filteredRows(state)[state.cursorIndex]?.name;
 
-describe('nextSort', () => {
-  test('walks the six sorts in order and wraps back to name A-Z', () => {
+describe('the sort order', () => {
+  test('lists the six sorts in order, and the screen starts on name A-Z', () => {
     expect(SORT_ORDER).toEqual(['name-asc', 'name-desc', 'status-asc', 'status-desc', 'updated-newest', 'updated-oldest']);
-    expect(SORT_ORDER.map(nextSort)).toEqual(['name-desc', 'status-asc', 'status-desc', 'updated-newest', 'updated-oldest', 'name-asc']);
-  });
-
-  test('the screen starts on name A-Z', () => {
     expect(initialSecretsScreenState([]).sort).toBe('name-asc');
+    expect(initialSecretsScreenState([]).sortMenu).toBeNull();
   });
 });
 
-describe('Ctrl+S cycles the list sort', () => {
+describe('Ctrl+S opens the sort menu', () => {
   const rows = [row({ name: 'B', value_hash: 'b' }), row({ name: 'C', value_hash: 'c' }), row({ name: 'A', value_hash: 'a' })];
 
-  test('six presses visit each sort and come back to name A-Z', () => {
-    const visited = Array.from({ length: 6 }).reduce<{ readonly state: SecretsScreenState; readonly seen: readonly SortMode[] }>(
-      (acc) => {
-        const state = press(acc.state, CTRL_S);
-        return { state, seen: [...acc.seen, state.sort] };
-      },
-      { state: initialSecretsScreenState(rows), seen: [] },
-    );
-    expect(visited.seen).toEqual(['name-desc', 'status-asc', 'status-desc', 'updated-newest', 'updated-oldest', 'name-asc']);
+  test('it opens with its cursor on the current sort and changes nothing else', () => {
+    const open = press(initialSecretsScreenState(rows), CTRL_S);
+    expect(open.sortMenu).toEqual({ cursor: 0 });
+    expect(open.sort).toBe('name-asc');
+    expect(open.search.query).toBe('');
+    expect(press(withSort(rows, 'status-desc'), CTRL_S).sortMenu).toEqual({ cursor: 3 });
   });
 
-  test('name A-Z then name Z-A order the rows', () => {
-    expect(names(initialSecretsScreenState(rows))).toEqual(['A', 'B', 'C']);
-    expect(names(press(initialSecretsScreenState(rows), CTRL_S))).toEqual(['C', 'B', 'A']);
+  test('Up and Down move in the menu and wrap at both ends', () => {
+    const open = press(initialSecretsScreenState(rows), CTRL_S);
+    expect(press(open, KEY_DOWN).sortMenu).toEqual({ cursor: 1 });
+    expect(press(open, KEY_UP).sortMenu).toEqual({ cursor: 5 });
+    expect(press(open, ...Array.from({ length: 6 }, () => KEY_DOWN)).sortMenu).toEqual({ cursor: 0 });
+    expect(press(open, KEY_DOWN, KEY_DOWN, KEY_UP).sortMenu).toEqual({ cursor: 1 });
   });
 
-  test('Tab and Shift+Tab still cycle columns and leave the sort alone', () => {
-    const s = press(initialSecretsScreenState(rows), CTRL_S, KEY_TAB);
+  test('moving in the menu does not change the sort or the list cursor until Enter', () => {
+    const moved = press(initialSecretsScreenState(rows), KEY_DOWN, CTRL_S, KEY_DOWN, KEY_DOWN);
+    expect(moved.sort).toBe('name-asc');
+    expect(moved.cursorIndex).toBe(1);
+    expect(names(moved)).toEqual(['A', 'B', 'C']);
+  });
+
+  test('Enter applies the highlighted sort, closes the menu, and puts the list cursor at 0', () => {
+    const s = press(initialSecretsScreenState(rows), KEY_DOWN, KEY_DOWN, CTRL_S, KEY_DOWN, ENTER);
+    expect(s.sort).toBe('name-desc');
+    expect(s.sortMenu).toBeNull();
+    expect(s.cursorIndex).toBe(0);
+    expect(names(s)).toEqual(['C', 'B', 'A']);
+  });
+
+  test('Enter on the current sort closes the menu and still goes to the top', () => {
+    const s = press(initialSecretsScreenState(rows), KEY_DOWN, CTRL_S, ENTER);
+    expect(s.sort).toBe('name-asc');
+    expect(s.sortMenu).toBeNull();
+    expect(s.cursorIndex).toBe(0);
+  });
+
+  test('each of the six sorts can be chosen', () => {
+    expect(SORT_ORDER.map((mode) => choose(initialSecretsScreenState(rows), mode).sort)).toEqual([...SORT_ORDER]);
+  });
+
+  test('Esc closes the menu with no change', () => {
+    const before = press(initialSecretsScreenState(rows), KEY_DOWN);
+    expect(press(before, CTRL_S, KEY_DOWN, KEY_DOWN, ESC)).toEqual(before);
+  });
+
+  test('a double Esc and `q` also close it with no change', () => {
+    const before = press(initialSecretsScreenState(rows), KEY_DOWN);
+    expect(press(before, CTRL_S, KEY_DOWN, `${ESC}${ESC}`)).toEqual(before);
+    expect(press(before, CTRL_S, KEY_DOWN, 'q')).toEqual(before);
+    expect(press(before, CTRL_S, KEY_DOWN, 'Q')).toEqual(before);
+  });
+
+  test('Esc in the menu does not quit the screen or clear a typed search', () => {
+    const s = press(typed(initialSecretsScreenState(rows), 'a'), CTRL_S, ESC);
+    expect(s.quit).toBe(false);
+    expect(s.search.query).toBe('a');
+  });
+
+  test('letters do not reach the search while the menu is open', () => {
+    const open = press(initialSecretsScreenState(rows), CTRL_S);
+    const s = press(open, 'a', 'b', 'x', ' ', 'j', 'k', '/');
+    expect(s).toEqual(open);
+    expect(s.search.query).toBe('');
+  });
+
+  test('Tab, Shift+Tab, Ctrl+E, Ctrl+D, Ctrl+S, Backspace and paging do nothing in the menu', () => {
+    const open = press(initialSecretsScreenState(rows), CTRL_S);
+    [KEY_TAB, `${ESC}[Z`, CTRL_E, CTRL_D, CTRL_S, '\x7f', `${ESC}[5~`, `${ESC}[6~`].forEach((k) => {
+      const after = handleKey(open, k);
+      expect(after.state).toEqual(open);
+      expect(after.effect).toBeNull();
+    });
+  });
+
+  test('Ctrl+E and Ctrl+D do nothing in the menu even with the list on a row', () => {
+    const open = press(initialSecretsScreenState(rows), KEY_DOWN, CTRL_S);
+    expect(handleKey(open, CTRL_E)).toEqual({ state: open, effect: null });
+    expect(handleKey(open, CTRL_D)).toEqual({ state: open, effect: null });
+  });
+
+  test('Enter in the menu applies the sort and does not open the details', () => {
+    const after = handleKey(press(initialSecretsScreenState(rows), CTRL_S, KEY_DOWN), ENTER);
+    expect(after.state.popup).toBeNull();
+    expect(after.state.edit).toBeNull();
+    expect(after.state.deploy).toBeNull();
+    expect(after.effect).toBeNull();
+  });
+
+  test('Ctrl+C still quits from the menu', () => {
+    expect(press(initialSecretsScreenState(rows), CTRL_S, '\x03').quit).toBe(true);
+  });
+
+  test('Tab and Shift+Tab still cycle columns in the list and leave the sort alone', () => {
+    const s = press(choose(initialSecretsScreenState(rows), 'name-desc'), KEY_TAB);
     expect(s.column).toBe('branch');
     expect(s.sort).toBe('name-desc');
     expect(press(s, `${ESC}[Z`).column).toBe('project');
   });
 
   test('Ctrl+S is not typed into the search bar', () => {
-    expect(press(initialSecretsScreenState(rows), CTRL_S).search.query).toBe('');
+    expect(press(initialSecretsScreenState(rows), CTRL_S, ENTER).search.query).toBe('');
   });
 });
 
@@ -182,27 +262,34 @@ describe('updated sorts', () => {
   });
 });
 
-describe('the cursor stays on its row', () => {
+describe('a sort change goes back to the top', () => {
   const rows = [row({ name: 'A', value_hash: 'a' }), row({ name: 'B', value_hash: 'b' }), row({ name: 'C', value_hash: 'c' }), row({ name: 'D', value_hash: 'd' })];
 
-  test('after each sort change the highlighted row is the same row', () => {
-    const onB = press(initialSecretsScreenState(rows), KEY_DOWN);
-    expect(cursorName(onB)).toBe('B');
-    const after = SORT_ORDER.slice(1).reduce<readonly SecretsScreenState[]>((acc) => [...acc, press(acc[acc.length - 1], CTRL_S)], [onB]);
-    after.forEach((s) => expect(cursorName(s)).toBe('B'));
-    expect(after[1].cursorIndex).toBe(2); // name Z-A: D, C, B, A
+  test('after each sort change the first row of the new order is highlighted', () => {
+    const onC = press(initialSecretsScreenState(rows), KEY_DOWN, KEY_DOWN);
+    expect(cursorName(onC)).toBe('C');
+    const after = SORT_ORDER.map((mode) => choose(onC, mode));
+    after.forEach((s) => {
+      expect(s.cursorIndex).toBe(0);
+      expect(cursorName(s)).toBe(filteredRows(s)[0].name);
+    });
+    expect(cursorName(after[1])).toBe('D'); // name Z-A: D, C, B, A
   });
 
-  test('the same row is kept for two rows with one name and different values', () => {
-    const dup = [row({ name: 'DB', value_hash: 'a' }), row({ name: 'DB', value_hash: 'b' })];
-    const onSecond = press(initialSecretsScreenState(dup), KEY_DOWN);
-    const sorted = press(onSecond, CTRL_S, CTRL_S);
-    expect(filteredRows(sorted)[sorted.cursorIndex].value_hash).toBe('b');
+  test('the rendered list starts at the first row after a sort change', () => {
+    const many = Array.from({ length: 60 }, (_, i) => row({ name: `K${String(i).padStart(2, '0')}`, value_hash: `h${i}` }));
+    const scrolled = press(initialSecretsScreenState(many), ...Array.from({ length: 50 }, () => KEY_DOWN));
+    expect(stripAnsi(render(scrolled, 120, 20))).not.toContain('K00');
+    const sorted = choose(scrolled, 'name-asc');
+    expect(sorted.cursorIndex).toBe(0);
+    const text = stripAnsi(render(sorted, 120, 20));
+    expect(text).toContain('K00');
+    expect(text).not.toContain('K59');
   });
 
-  test('Enter after a sort opens the details of the highlighted row', () => {
-    const s = press(initialSecretsScreenState(rows), KEY_DOWN, CTRL_S, ENTER);
-    expect(s.popup?.rowName).toBe('B');
+  test('Enter after a sort opens the details of the first row', () => {
+    const s = press(initialSecretsScreenState(rows), KEY_DOWN, CTRL_S, KEY_DOWN, ENTER, ENTER);
+    expect(s.popup?.rowName).toBe('D');
   });
 });
 
@@ -217,25 +304,25 @@ describe('sort and search together', () => {
   test('search decides which rows show, the sort orders them', () => {
     const s = typed(initialSecretsScreenState(rows), 'api');
     expect(names(s)).toEqual(['API_ONE', 'API_THREE', 'API_TWO']);
-    expect(names(press(s, CTRL_S))).toEqual(['API_TWO', 'API_THREE', 'API_ONE']);
+    expect(names(choose(s, 'name-desc'))).toEqual(['API_TWO', 'API_THREE', 'API_ONE']);
   });
 
   test('typing after a sort keeps that sort', () => {
-    const s = typed(press(initialSecretsScreenState(rows), CTRL_S), 'api');
+    const s = typed(choose(initialSecretsScreenState(rows), 'name-desc'), 'api');
     expect(s.sort).toBe('name-desc');
     expect(names(s)).toEqual(['API_TWO', 'API_THREE', 'API_ONE']);
   });
 
-  test('the cursor stays on its row when Ctrl+S is pressed with a filter typed', () => {
+  test('choosing a sort with a filter typed goes back to the first match', () => {
     const s = press(typed(initialSecretsScreenState(rows), 'api'), KEY_DOWN);
     expect(cursorName(s)).toBe('API_THREE');
-    expect(cursorName(press(s, CTRL_S))).toBe('API_THREE');
+    expect(cursorName(choose(s, 'name-desc'))).toBe('API_TWO');
   });
 
   test('a search that matches by value orders its matches by the sort too', () => {
     const s = typed(initialSecretsScreenState(rows), 'zzzz-no-match');
     expect(names(s)).toEqual([]);
-    expect(press(s, CTRL_S).cursorIndex).toBe(0);
+    expect(choose(s, 'name-desc').cursorIndex).toBe(0);
   });
 });
 
@@ -246,6 +333,7 @@ describe('Ctrl+S in the details view', () => {
     expect(open.popup).not.toBeNull();
     const after = handleKey(open, CTRL_S);
     expect(after.state.sort).toBe('name-asc');
+    expect(after.state.sortMenu).toBeNull();
     expect(after.state.popup).toEqual(open.popup);
     expect(after.effect).toBeNull();
   });
@@ -260,7 +348,7 @@ describe('footer hint', () => {
   });
 
   test('follows the sort through the whole cycle', () => {
-    const labels = SORT_ORDER.reduce<readonly string[]>((acc, _s, i) => [...acc, footer(SORT_ORDER.slice(0, i).reduce((st) => press(st, CTRL_S), initialSecretsScreenState(rows)))], []);
+    const labels = SORT_ORDER.map((mode) => footer(choose(initialSecretsScreenState(rows), mode)));
     expect(labels.map((l) => l.match(/ctrl\+s sort: (.*)$/)?.[1])).toEqual([
       'name A-Z',
       'name Z-A',
@@ -304,5 +392,65 @@ describe('footer hint', () => {
   test('the longest sort label still fits at 80 columns', () => {
     const s = { ...initialSecretsScreenState(rows), sort: 'status-desc' as const };
     expect(footer(s, 80)).toContain('ctrl+s sort: deploy status Z-A');
+  });
+});
+
+describe('the sort menu on screen', () => {
+  const rows = [row({ name: 'A', value_hash: 'a' }), row({ name: 'B', value_hash: 'b' })];
+  const lines = (state: SecretsScreenState, width: number, height: number): readonly string[] => stripAnsi(render(state, width, height)).split('\n');
+  const open = (mode: SortMode = 'name-asc'): SecretsScreenState => press(withSort(rows, mode), CTRL_S);
+  const LABELS = ['name A-Z', 'name Z-A', 'deploy status A-Z', 'deploy status Z-A', 'updated newest', 'updated oldest'];
+
+  test('shows the title, the six labels, and the menu footer', () => {
+    const l = lines(open(), 100, 30);
+    LABELS.forEach((label) => expect(l.join('\n')).toContain(label));
+    expect(l.join('\n')).toContain('sort by');
+    expect(l.filter((x) => x.trim() !== '').slice(-1)[0]).toContain('↑↓ choose · enter sort · esc cancel');
+  });
+
+  test('marks the current sort and puts the pointer on the menu cursor', () => {
+    const l = lines(press(open('status-asc'), KEY_DOWN), 100, 30);
+    const marked = l.filter((x) => x.includes('●'));
+    expect(marked.length).toBe(1);
+    expect(marked[0]).toContain('deploy status A-Z');
+    const pointed = l.filter((x) => x.includes('▶'));
+    expect(pointed.length).toBe(1);
+    expect(pointed[0]).toContain('deploy status Z-A');
+  });
+
+  test('the list and its footer are not drawn while the menu is open', () => {
+    const text = lines(open(), 100, 30).join('\n');
+    expect(text).not.toContain('search:');
+    expect(text).not.toContain('ctrl+s sort');
+  });
+
+  test('the list is back, with the new sort in its footer, after Enter', () => {
+    const text = lines(choose(initialSecretsScreenState(rows), 'updated-newest'), 100, 30).join('\n');
+    expect(text).toContain('search:');
+    expect(text).toContain('ctrl+s sort: updated newest');
+    expect(text).not.toContain('sort by');
+  });
+
+  test('fits 60 columns by 12 lines: all six labels, no line wider or taller than the terminal', () => {
+    const l = lines(open(), 60, 12);
+    expect(l.length).toBeLessThanOrEqual(12);
+    l.forEach((x) => expect(Array.from(x).length).toBeLessThanOrEqual(60));
+    LABELS.forEach((label) => expect(l.join('\n')).toContain(label));
+    expect(l.filter((x) => x.trim() !== '').slice(-1)[0]).toContain('esc cancel');
+  });
+
+  test('on a very short or narrow terminal it windows around the cursor and never overflows', () => {
+    [[40, 8], [30, 7], [20, 6], [80, 5]].forEach(([w, h]) => {
+      SORT_ORDER.forEach((_m, i) => {
+        const l = lines(press(open(), ...Array.from({ length: i }, () => KEY_DOWN)), w, h);
+        expect(l.length).toBeLessThanOrEqual(h);
+        l.forEach((x) => expect(Array.from(x).length).toBeLessThanOrEqual(w));
+        expect(l.filter((x) => x.includes('▶')).length).toBe(1);
+      });
+    });
+  });
+
+  test('the dry-run tag is on the menu screen', () => {
+    expect(lines(press(initialSecretsScreenState(rows, true), CTRL_S), 100, 30).join('\n')).toContain('DRY RUN');
   });
 });
