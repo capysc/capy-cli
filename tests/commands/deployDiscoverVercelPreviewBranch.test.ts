@@ -1,12 +1,13 @@
 /**
- * `capy deploy vercel --discover` (CAP-730): the git branch of a preview environment.
+ * `capy deploy vercel --discover` (CAP-730): the branch of a preview environment.
  *
- * Production keeps the project's production branch. The all-branches preview is judged from three signals (recent
- * preview deployments, branch-scoped variables, the GitHub default branch when it is not the production branch);
- * a custom environment from its branch rule. Agreement is `certain`; disagreement takes the strongest signal
- * (deployments, then scoped variables, then the default branch), is `needs_review`, and lists every signal; no signal
- * is the production branch, `needs_review`. A preview scoped to a git branch never becomes an empty proposal. The
- * deployments call failing is a coded notice, never a failed discovery. Names, ids and counts only.
+ * Production keeps the project's production branch. The all-branches preview's branch is the deploy PR base, so it is
+ * a LONG-LIVED branch: the candidates are only the production branch, the GitHub default branch and the branches
+ * preview variables are scoped to. Recent preview deployments never add a candidate; they rank the ones there are.
+ * One candidate: it, certain. Several: ranked by deployments, scoped variables, default branch; certain only when every
+ * signal that names a candidate names the winner. A custom environment uses its branch rule. A preview scoped to a
+ * branch never becomes an empty proposal. The deployments call failing is a coded notice, never a failed discovery.
+ * Names, ids and counts only.
  */
 import { describe, test, expect } from 'bun:test';
 import { runDeployVercelDiscover } from '../../src/commands/deployDiscover/vercel';
@@ -84,19 +85,72 @@ async function discover(setup: Setup = {}) {
 
 const deploys = (branch: string, n: number): readonly string[] => Array.from({ length: n }, () => branch);
 
-describe('preview git branch: one signal', () => {
-  test('recent preview deployments: the branch most of them built from', async () => {
-    const { previewProposal, previewService } = await discover({ deployments: [...deploys('develop', 5), ...deploys('feature-a', 2)] });
+describe('preview branch: candidates are long-lived branches; deployments only rank them', () => {
+  test('(a) default branch = production = main, deployments spread over feature branches: main, certain; the feature branches are one total, not a list', async () => {
+    const { previewProposal, previewService, body } = await discover({
+      deployments: [...deploys('feat/SLI-191', 3), ...deploys('fix/replicate-output-shape', 3), ...deploys('feature-b', 2)],
+    });
+    expect(previewProposal.git_branch).toBe('main');
+    expect(previewService.branch).toBe('main');
+    expect(previewProposal.confidence.branch).toBe('certain');
+    expect(previewProposal.evidence.git_branch).toEqual({
+      basis: 'production_branch_only',
+      signals: [{ code: 'RECENT_PREVIEW_DEPLOYMENTS', branches: [], other_branches: 8 }],
+    });
+    expect(JSON.stringify(body)).not.toContain('SLI-191');
+  });
+
+  test('(b) only a one-off capy/* import branch was deployed, once: main, certain', async () => {
+    const { previewProposal } = await discover({ deployments: ['capy/vercel-import-20261104-2058'] });
+    expect(previewProposal.git_branch).toBe('main');
+    expect(previewProposal.confidence.branch).toBe('certain');
+    expect(previewProposal.evidence.git_branch.basis).toBe('production_branch_only');
+  });
+
+  test('(c) the slidespeak-app shape (production main, default develop, scoped develop, develop 25 deploys, many features, main 0): develop, certain, counts only for candidates', async () => {
+    const features = Array.from({ length: 20 }, (_, i) => `feature-${i}`);
+    const { previewProposal, previewService, body } = await discover({
+      defaultBranch: 'develop',
+      scoped: [{ branch: 'develop', names: ['NEW_FLAG'] }],
+      deployments: [...deploys('develop', 25), ...features],
+    });
     expect(previewProposal.git_branch).toBe('develop');
     expect(previewService.branch).toBe('develop');
-    expect(previewProposal.evidence.git_branch.signals).toEqual([
-      { code: 'RECENT_PREVIEW_DEPLOYMENTS', branches: [{ branch: 'develop', weight: 5 }, { branch: 'feature-a', weight: 2 }] },
-    ]);
-    // Several deployment branches is one signal with a clear leader: no disagreement.
+    expect(previewProposal.confidence.branch).toBe('certain');
     expect(previewProposal.evidence.git_branch.basis).toBe('signals_agree');
+    expect(previewProposal.evidence.git_branch.signals).toEqual([
+      { code: 'RECENT_PREVIEW_DEPLOYMENTS', branches: [{ branch: 'develop', weight: 25 }], other_branches: 20 },
+      { code: 'BRANCH_SCOPED_VARIABLES', branches: [{ branch: 'develop', weight: 1, names: ['NEW_FLAG'], shadows: [] }] },
+      { code: 'GITHUB_DEFAULT_BRANCH', branches: [{ branch: 'develop', weight: 1 }] },
+    ]);
+    expect(JSON.stringify(body)).not.toContain('feature-7');
+  });
+
+  test('(d) default develop but the deployments are mostly on main: main wins the ranking, needs_review, every signal listed', async () => {
+    const { previewProposal } = await discover({ defaultBranch: 'develop', deployments: [...deploys('main', 6), ...deploys('develop', 1), 'feature-a'] });
+    expect(previewProposal.git_branch).toBe('main');
+    expect(previewProposal.confidence.branch).toBe('needs_review');
+    expect(previewProposal.evidence.git_branch.basis).toBe('strongest_signal');
+    expect(previewProposal.evidence.git_branch.signals).toEqual([
+      { code: 'RECENT_PREVIEW_DEPLOYMENTS', branches: [{ branch: 'main', weight: 6 }, { branch: 'develop', weight: 1 }], other_branches: 1 },
+      { code: 'GITHUB_DEFAULT_BRANCH', branches: [{ branch: 'develop', weight: 1 }] },
+    ]);
+  });
+
+  test('a branch that was only deployed from never becomes a candidate, however many deployments it has', async () => {
+    const { previewProposal } = await discover({ defaultBranch: 'develop', deployments: deploys('feat/x', 40) });
+    expect(previewProposal.git_branch).toBe('develop');
     expect(previewProposal.confidence.branch).toBe('certain');
   });
 
+  test('deployments with no git branch (a CLI deploy) count for no branch', async () => {
+    const { previewProposal } = await discover({ deployments: [null, null, 'develop'] });
+    expect(previewProposal.git_branch).toBe('main');
+    expect(previewProposal.evidence.git_branch.signals).toEqual([{ code: 'RECENT_PREVIEW_DEPLOYMENTS', branches: [], other_branches: 1 }]);
+  });
+});
+
+describe('preview git branch: scoped variables and the default branch', () => {
   test('branch-scoped variables: the branch with the most scoped variables, with their names and the names the all-branches preview shadows', async () => {
     const { previewProposal } = await discover({ scoped: [{ branch: 'develop', names: ['DB_URL', 'NEW_FLAG'] }, { branch: 'staging', names: ['ONLY_STAGING'] }] });
     expect(previewProposal.git_branch).toBe('develop');
@@ -123,14 +177,9 @@ describe('preview git branch: one signal', () => {
     const { previewProposal } = await discover({ defaultBranch: 'main', production: 'main' });
     expect(previewProposal.evidence.git_branch.signals).toEqual([]);
   });
-
-  test('deployments with no git branch (a CLI deploy) count for no branch', async () => {
-    const { previewProposal } = await discover({ deployments: [null, null, 'develop'] });
-    expect(previewProposal.evidence.git_branch.signals).toEqual([{ code: 'RECENT_PREVIEW_DEPLOYMENTS', branches: [{ branch: 'develop', weight: 1 }] }]);
-  });
 });
 
-describe('preview git branch: agreement, disagreement, nothing', () => {
+describe('preview git branch: ranking and disagreement', () => {
   test('all three signals name the same branch: that branch, certain, every signal listed', async () => {
     const { previewProposal } = await discover({
       defaultBranch: 'develop',
@@ -147,13 +196,13 @@ describe('preview git branch: agreement, disagreement, nothing', () => {
     ]);
   });
 
-  test('deployments outrank scoped variables and the default branch: needs_review, every signal listed', async () => {
+  test('deployments outrank scoped variables and the default branch among the candidates: needs_review, every signal listed', async () => {
     const { previewProposal } = await discover({
       defaultBranch: 'release',
-      deployments: deploys('staging', 4),
+      deployments: deploys('release', 4),
       scoped: [{ branch: 'develop', names: ['NEW_FLAG'] }],
     });
-    expect(previewProposal.git_branch).toBe('staging');
+    expect(previewProposal.git_branch).toBe('release');
     expect(previewProposal.confidence.branch).toBe('needs_review');
     expect(previewProposal.evidence.git_branch.basis).toBe('strongest_signal');
     expect(previewProposal.evidence.git_branch.signals.map((s: any) => s.code)).toEqual([
@@ -161,43 +210,36 @@ describe('preview git branch: agreement, disagreement, nothing', () => {
       'BRANCH_SCOPED_VARIABLES',
       'GITHUB_DEFAULT_BRANCH',
     ]);
-    expect(previewProposal.evidence.git_branch.signals.flatMap((s: any) => s.branches.map((b: any) => b.branch))).toEqual(['staging', 'develop', 'release']);
   });
 
-  test('scoped variables outrank the default branch when there are no deployments', async () => {
+  test('scoped variables outrank the default branch when no candidate was deployed', async () => {
     const { previewProposal } = await discover({ defaultBranch: 'release', scoped: [{ branch: 'develop', names: ['NEW_FLAG'] }] });
     expect(previewProposal.git_branch).toBe('develop');
     expect(previewProposal.confidence.branch).toBe('needs_review');
   });
 
-  test('deployments outrank the default branch when there are no scoped variables', async () => {
-    const { previewProposal } = await discover({ defaultBranch: 'release', deployments: deploys('develop', 2) });
-    expect(previewProposal.git_branch).toBe('develop');
-    expect(previewProposal.confidence.branch).toBe('needs_review');
-  });
-
-  test('a tie inside the strongest signal is broken by the next signal, never left to chance', async () => {
-    const { previewProposal } = await discover({ deployments: ['develop', 'staging'], defaultBranch: 'staging' });
+  test('a tie in deployments between candidates is broken by the next criterion, and is not agreement', async () => {
+    const { previewProposal } = await discover({ deployments: ['main', 'staging'], defaultBranch: 'staging' });
     expect(previewProposal.git_branch).toBe('staging');
     expect(previewProposal.confidence.branch).toBe('needs_review');
   });
 
   test('a tie nothing else breaks is settled by branch name, and needs_review', async () => {
-    const { previewProposal } = await discover({ deployments: ['staging', 'develop'] });
+    const { previewProposal } = await discover({ scoped: [{ branch: 'staging', names: ['A'] }, { branch: 'develop', names: ['B'] }] });
     expect(previewProposal.git_branch).toBe('develop');
     expect(previewProposal.confidence.branch).toBe('needs_review');
   });
 
-  test('no signal at all: the production branch, needs_review', async () => {
+  test('no other long-lived branch: the production branch, certain, whatever else was read', async () => {
     const { previewProposal, previewService } = await discover({ production: 'main', defaultBranch: 'main' });
     expect(previewProposal.git_branch).toBe('main');
     expect(previewService.branch).toBe('main');
-    expect(previewProposal.confidence.branch).toBe('needs_review');
-    expect(previewProposal.evidence.git_branch).toEqual({ basis: 'no_signals', signals: [] });
+    expect(previewProposal.confidence.branch).toBe('certain');
+    expect(previewProposal.evidence.git_branch).toEqual({ basis: 'production_branch_only', signals: [] });
   });
 
   test('a proposal that needs review is in the next step\'s review list', async () => {
-    const { body, previewProposal } = await discover({ defaultBranch: 'release', deployments: deploys('develop', 1) });
+    const { body, previewProposal } = await discover({ defaultBranch: 'release', scoped: [{ branch: 'develop', names: ['NEW_FLAG'] }] });
     expect(body.next_steps.find((s: any) => s.action === 'review').proposal_ids).toContain(previewProposal.proposal_id);
   });
 
@@ -229,10 +271,10 @@ describe('preview git branch: the deployments call', () => {
     expect(previewProposal.evidence.git_branch.signals.map((s: any) => s.code)).toEqual(['GITHUB_DEFAULT_BRANCH']);
   });
 
-  test('a failed call with nothing else to go on: the production branch, needs_review, plus the notice', async () => {
+  test('a failed call with no other long-lived branch: the production branch, plus the notice (deployments never decide alone)', async () => {
     const { body, previewProposal } = await discover({ deploymentsStatus: 403 });
     expect(previewProposal.git_branch).toBe('main');
-    expect(previewProposal.confidence.branch).toBe('needs_review');
+    expect(previewProposal.confidence.branch).toBe('certain');
     expect(body.notices.map((n: any) => n.code)).toContain('VERCEL_PREVIEW_DEPLOYMENTS_UNAVAILABLE');
   });
 
@@ -369,20 +411,41 @@ describe('inferPreviewBranch (pure)', () => {
     expect(leadersOf(signal('RECENT_PREVIEW_DEPLOYMENTS', ['b', 3], ['a', 3], ['c', 1]))).toEqual(['a', 'b']);
   });
 
-  test('a signal that names nothing is ignored', () => {
-    expect(inferPreviewBranch([signal('RECENT_PREVIEW_DEPLOYMENTS'), signal('GITHUB_DEFAULT_BRANCH', ['develop', 1])], 'main')).toEqual({
+  test('deployments alone add no candidate: the production branch, certain', () => {
+    expect(inferPreviewBranch([signal('RECENT_PREVIEW_DEPLOYMENTS', ['feat/x', 9], ['fix/y', 3])], 'main')).toMatchObject({
+      branch: 'main',
+      confidence: 'certain',
+      basis: 'production_branch_only',
+      candidates: ['main'],
+    });
+  });
+
+  test('candidates are the production branch, the default branch and the scoped branches only', () => {
+    const inferred = inferPreviewBranch(
+      [signal('RECENT_PREVIEW_DEPLOYMENTS', ['feat/x', 9]), signal('BRANCH_SCOPED_VARIABLES', ['staging', 2]), signal('GITHUB_DEFAULT_BRANCH', ['develop', 1])],
+      'main',
+    );
+    expect(inferred.candidates).toEqual(['develop', 'main', 'staging']);
+  });
+
+  test('the default branch alone beats the production branch, and everyone naming it is agreement', () => {
+    expect(inferPreviewBranch([signal('RECENT_PREVIEW_DEPLOYMENTS', ['feat/x', 9]), signal('GITHUB_DEFAULT_BRANCH', ['develop', 1])], 'main')).toMatchObject({
       branch: 'develop',
       confidence: 'certain',
       basis: 'signals_agree',
     });
   });
 
-  test('a signal that disagrees with itself (a tie) is not agreement', () => {
-    expect(inferPreviewBranch([signal('RECENT_PREVIEW_DEPLOYMENTS', ['a', 1], ['b', 1])], 'main')).toMatchObject({ branch: 'a', confidence: 'needs_review' });
+  test('a signal that disagrees with itself (a tie between candidates) is not agreement', () => {
+    expect(inferPreviewBranch([signal('BRANCH_SCOPED_VARIABLES', ['a', 1], ['b', 1])], 'main')).toMatchObject({ branch: 'a', confidence: 'needs_review' });
   });
 
-  test('without a production branch and without signals the answer is null, needs_review', () => {
-    expect(inferPreviewBranch([], null)).toEqual({ branch: null, confidence: 'needs_review', basis: 'no_signals' });
+  test('without a production branch and without candidates the answer is null, needs_review', () => {
+    expect(inferPreviewBranch([], null)).toMatchObject({ branch: null, confidence: 'needs_review', basis: 'no_signals' });
+  });
+
+  test('without a production branch, a single named candidate is the answer', () => {
+    expect(inferPreviewBranch([signal('GITHUB_DEFAULT_BRANCH', ['develop', 1])], null)).toMatchObject({ branch: 'develop', confidence: 'certain' });
   });
 });
 

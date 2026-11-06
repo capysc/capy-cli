@@ -2,19 +2,22 @@
  * Which git branch a Vercel environment deploys from (CAP-730), as pure functions.
  *
  * Production is the project's production branch, always. The all-branches
- * PREVIEW environment is usually fed from another branch (a repo whose default
- * branch is `develop` and whose production branch is `main`), so it is judged
- * from three signals, and a custom environment from its branch rule:
+ * PREVIEW environment's branch is the deploy PR base, so it must be a
+ * LONG-LIVED branch. The candidates are ONLY:
  *
- *   1. RECENT_PREVIEW_DEPLOYMENTS  the branch most recent preview deployments built from
- *   2. BRANCH_SCOPED_VARIABLES     the branch most preview variables are scoped to
- *   3. GITHUB_DEFAULT_BRANCH       the repo's default branch, when it is not the production branch
+ *   - the project's production branch
+ *   - the repo's GitHub default branch
+ *   - a branch that preview variables are scoped to
  *
- * Signals agree (every signal names the same single branch): that branch,
- * `certain`. They disagree: the strongest signal wins, in the order above
- * (what was actually deployed outranks what is configured, which outranks a
- * repo-wide default), and the choice is `needs_review` with every signal
- * listed. No signal: the production branch, `needs_review`.
+ * (a custom environment's `equals` rule names its own branch). Recent preview
+ * deployments never add a candidate: a feature branch, or a one-off import
+ * branch, was deployed once and is gone. Deployments only RANK the candidates.
+ *
+ * With one candidate (the production branch) that is the answer, `certain`.
+ * With several, they are ranked by deployments on each, then by scoped
+ * variables, then by being the default branch (then by name). The winner is
+ * `certain` only when every signal that names a candidate names the winner and
+ * only the winner; otherwise it is `needs_review`. Every signal is listed.
  *
  * Names, ids and counts only. Nothing in here ever holds a variable value.
  */
@@ -23,7 +26,7 @@ import type { VercelBranchMatcher, VercelDeployment } from '../../deploy/vercelA
 import type { BranchSignal, BranchSignalCode, GitBranchBasis, ServiceFacts, VercelServiceFacts } from './facts';
 import { byText, uniqueSorted } from './facts';
 
-/** The order signals outrank each other when they disagree. */
+/** The order the criteria rank the candidates in (see `inferPreviewBranch`). */
 export const BRANCH_SIGNAL_ORDER: readonly BranchSignalCode[] = ['RECENT_PREVIEW_DEPLOYMENTS', 'BRANCH_SCOPED_VARIABLES', 'GITHUB_DEFAULT_BRANCH'];
 
 export interface BranchInference {
@@ -43,9 +46,6 @@ export function leadersOf(signal: BranchSignal): readonly string[] {
   const top = Math.max(0, ...signal.branches.map((b) => b.weight));
   return uniqueSorted(signal.branches.filter((b) => b.weight === top).map((b) => b.branch));
 }
-
-/** A signal that names at least one branch. */
-const names = (signal: BranchSignal): boolean => signal.branches.length > 0;
 
 // ── The signals ──────────────────────────────────────────────────────────────
 
@@ -100,38 +100,67 @@ export function customRuleSignal(matcher: VercelBranchMatcher | undefined): Bran
 
 // ── The choice ───────────────────────────────────────────────────────────────
 
-const rankOf = (signal: BranchSignal): number => {
-  const at = BRANCH_SIGNAL_ORDER.indexOf(signal.code);
-  return at === -1 ? BRANCH_SIGNAL_ORDER.length : at;
-};
+const signalOf = (signals: readonly BranchSignal[], code: BranchSignalCode): BranchSignal | undefined => signals.find((s) => s.code === code);
 
-/** Every signal names the same single branch. */
-function agreement(active: readonly BranchSignal[]): string | null {
-  const leaders = active.map(leadersOf);
-  const first = leaders[0]?.[0];
-  return first !== undefined && leaders.every((l) => l.length === 1 && l[0] === first) ? first : null;
+const weightOf = (signals: readonly BranchSignal[], code: BranchSignalCode, branch: string): number =>
+  signalOf(signals, code)?.branches.find((b) => b.branch === branch)?.weight ?? 0;
+
+/** The long-lived branches a preview may deploy from: production, the default branch, the scoped branches. Never a deployed-from branch. */
+export function previewCandidates(signals: readonly BranchSignal[], productionBranch: string | null): readonly string[] {
+  const named = [signalOf(signals, 'BRANCH_SCOPED_VARIABLES'), signalOf(signals, 'GITHUB_DEFAULT_BRANCH')].flatMap((s) =>
+    s === undefined ? [] : s.branches.map((b) => b.branch),
+  );
+  return uniqueSorted([...(productionBranch === null ? [] : [productionBranch]), ...named]);
 }
 
-/**
- * The strongest signal wins; a tie inside it is broken by the next signal down
- * (when it names one of the tied branches), then by branch name.
- */
-function strongest(active: readonly BranchSignal[]): string {
-  const ordered = sortedCopy(active, (a, b) => rankOf(a) - rankOf(b));
-  const narrowed = ordered.slice(1).reduce<readonly string[]>((candidates, signal) => {
-    const common = leadersOf(signal).filter((b) => candidates.includes(b));
-    return common.length > 0 ? common : candidates;
-  }, leadersOf(ordered[0]));
-  return sortedCopy(narrowed, byText)[0];
+/** Candidates best first: deployments, then scoped variables, then the default branch, then name. */
+function rankCandidates(candidates: readonly string[], signals: readonly BranchSignal[]): readonly string[] {
+  const score = (branch: string): readonly number[] => [
+    weightOf(signals, 'RECENT_PREVIEW_DEPLOYMENTS', branch),
+    weightOf(signals, 'BRANCH_SCOPED_VARIABLES', branch),
+    weightOf(signals, 'GITHUB_DEFAULT_BRANCH', branch),
+  ];
+  return sortedCopy(candidates, (a, b) => {
+    const [sa, sb] = [score(a), score(b)];
+    return sb[0] - sa[0] || sb[1] - sa[1] || sb[2] - sa[2] || byText(a, b);
+  });
+}
+
+/** What a signal names among the candidates: its strongest candidate(s); none when it names no candidate. */
+function votesOf(signal: BranchSignal, candidates: readonly string[]): readonly string[] {
+  const mine = signal.branches.filter((b) => candidates.includes(b.branch) && b.weight > 0);
+  const top = Math.max(0, ...mine.map((b) => b.weight));
+  return uniqueSorted(mine.filter((b) => b.weight === top).map((b) => b.branch));
+}
+
+export interface PreviewInference extends BranchInference {
+  readonly candidates: readonly string[];
 }
 
 /** The git branch of an all-branches preview from its signals. */
-export function inferPreviewBranch(signals: readonly BranchSignal[], productionBranch: string | null): BranchInference {
-  const active = signals.filter(names);
-  if (active.length === 0) return { branch: productionBranch, confidence: 'needs_review', basis: 'no_signals' };
-  const agreed = agreement(active);
-  if (agreed !== null) return { branch: agreed, confidence: 'certain', basis: 'signals_agree' };
-  return { branch: strongest(active), confidence: 'needs_review', basis: 'strongest_signal' };
+export function inferPreviewBranch(signals: readonly BranchSignal[], productionBranch: string | null): PreviewInference {
+  const candidates = previewCandidates(signals, productionBranch);
+  if (candidates.length === 0) return { branch: productionBranch, confidence: 'needs_review', basis: 'no_signals', candidates };
+  if (candidates.length === 1 && candidates[0] === productionBranch) {
+    return { branch: productionBranch, confidence: 'certain', basis: 'production_branch_only', candidates };
+  }
+  const winner = rankCandidates(candidates, signals)[0];
+  const votes = signals.map((s) => votesOf(s, candidates)).filter((v) => v.length > 0);
+  const agreed = votes.every((v) => v.length === 1 && v[0] === winner);
+  return { branch: winner, confidence: agreed ? 'certain' : 'needs_review', basis: agreed ? 'signals_agree' : 'strongest_signal', candidates };
+}
+
+/**
+ * The deployments signal for output: counts for the candidate branches only, and one total for every other branch, so
+ * the evidence is not a list of every feature branch that was ever deployed.
+ */
+export function deploymentsForOutput(signal: BranchSignal, candidates: readonly string[]): BranchSignal {
+  const mine = signal.branches.filter((b) => candidates.includes(b.branch));
+  return {
+    ...signal,
+    branches: mine,
+    other_branches: signal.branches.filter((b) => !candidates.includes(b.branch)).reduce((total, b) => total + b.weight, 0),
+  };
 }
 
 /** The git branch of a custom environment from its rule: an exact rule names the branch; a pattern names none. */
@@ -164,7 +193,13 @@ export function withGitBranch(service: ServiceFacts, defaultBranch: string | nul
     const defaultSignal = defaultBranchSignal(defaultBranch, v.branch);
     const signals = [...v.git_branch_signals, ...(defaultSignal === null ? [] : [defaultSignal])];
     const inferred = inferPreviewBranch(signals, v.branch);
-    return { ...v, branch: inferred.branch, git_branch_signals: signals, git_branch_basis: inferred.basis, git_branch_confidence: inferred.confidence };
+    return {
+      ...v,
+      branch: inferred.branch,
+      git_branch_signals: signals.map((s) => (s.code === 'RECENT_PREVIEW_DEPLOYMENTS' ? deploymentsForOutput(s, inferred.candidates) : s)),
+      git_branch_basis: inferred.basis,
+      git_branch_confidence: inferred.confidence,
+    };
   }
   const custom = inferCustomBranch(v.git_branch_signals, v.branch);
   return custom === null

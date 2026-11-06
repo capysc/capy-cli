@@ -94,12 +94,16 @@ export interface BranchSignal {
     /** `BRANCH_SCOPED_VARIABLES`: those of `names` the all-branches preview also has (Vercel reads the scoped one on that branch). */
     readonly shadows?: readonly string[];
   }>;
+  /** `RECENT_PREVIEW_DEPLOYMENTS`, in the output: the deployments on branches that are not candidates (feature branches, one-off import branches), as one total. */
+  readonly other_branches?: number;
   /** `CUSTOM_ENVIRONMENT_RULE`: the matcher as Vercel holds it. */
   readonly rule?: { readonly type: string; readonly pattern: string };
 }
 
 /** How the git branch of a Vercel service was settled. */
 export type GitBranchBasis =
+  /** No long-lived branch other than the production branch: the production branch. */
+  | 'production_branch_only'
   | 'signals_agree'
   | 'strongest_signal'
   | 'no_signals'

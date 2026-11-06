@@ -11,8 +11,9 @@
  * the `KindOverrides` that turn a plan entry into a Vercel target.
  *
  * The git branch of a service (the deploy PR base): production's is the project's production branch. The all-branches
- * preview is judged from recent preview deployments, branch-scoped variables and the GitHub default branch; a custom
- * environment from its branch rule (CAP-730, see `vercelBranch.ts`). The signals are listed in the proposal's evidence.
+ * preview's is one of the long-lived branches (production, the GitHub default branch, branches with scoped variables),
+ * ranked by recent preview deployments; a custom environment's is its branch rule (CAP-730, see `vercelBranch.ts`).
+ * The signals are listed in the proposal's evidence.
  *
  * A "service" is one ENVIRONMENT of one Vercel project that holds variables:
  * production, preview, each custom environment, and `development` only when
