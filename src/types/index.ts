@@ -805,6 +805,8 @@ export const ERROR_CODES = {
   VERCEL_PROJECT_NOT_GITHUB: 'VERCEL_PROJECT_NOT_GITHUB',
   /** Vercel said a project's env list has another page that this client cannot ask for; the names read may be incomplete (a notice). */
   VERCEL_ENV_LIST_TRUNCATED: 'VERCEL_ENV_LIST_TRUNCATED',
+  /** Vercel's recent preview deployments of a project could not be read (the call failed, or the token cannot see them); that project's preview branch is judged without them (a notice). Discovery goes on. */
+  VERCEL_PREVIEW_DEPLOYMENTS_UNAVAILABLE: 'VERCEL_PREVIEW_DEPLOYMENTS_UNAVAILABLE',
   // --- Import connectors ---
   /** `capy connect vercel`: Vercel will not return this name's value, and Capy already has one. The Capy value was left untouched (reported, not an error). */
   CAPY_VALUE_KEPT: 'CAPY_VALUE_KEPT',

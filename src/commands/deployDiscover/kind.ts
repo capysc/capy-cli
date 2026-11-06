@@ -12,7 +12,7 @@
  */
 import type { TargetConfig } from '../../deploy/adapter';
 import type { OrgRepoLink } from '../../service/serviceClient';
-import type { PlanEntry } from './discovery';
+import type { Confidence, PlanEntry, UnresolvedReason } from './discovery';
 import type { ExistingTarget, ServiceFacts } from './facts';
 
 /** A pointer into the `capy help --json` document. */
@@ -39,6 +39,15 @@ export interface KindOverrides {
   readonly configured: (targets: readonly ExistingTarget[], service: ServiceFacts, capyBranch: string) => ExistingTarget | undefined;
   /** An existing target that would clash with a new one for this service on this Capy branch. */
   readonly conflicting: (targets: readonly ExistingTarget[], service: ServiceFacts, capyBranch: string) => ExistingTarget | undefined;
+  /** Replaces the branch confidence of a proposal (`undefined`: the shared rule stands). */
+  readonly branchConfidence?: (service: ServiceFacts, choice: BranchChoice, defaultBranch: string | null | undefined) => Confidence | undefined;
+  /** What a proposal's `evidence.git_branch` shows: how the service's git branch was settled (names, ids and counts only). */
+  readonly gitBranchEvidence?: (service: ServiceFacts) => Readonly<Record<string, unknown>> | undefined;
+  /**
+   * A service that would be proposed with NO variable is not proposed when this returns a reason: it stays unresolved with that
+   * reason instead, so an empty proposal never competes with a real one. `null`: propose as usual.
+   */
+  readonly emptyProposalReason?: (service: ServiceFacts) => UnresolvedReason | null;
   /** A plan entry's identity: two entries with the same key are `DUPLICATE_ENTRY`. */
   readonly duplicateKey: (entry: PlanEntry) => string;
   /** The `target` a proposal shows. */

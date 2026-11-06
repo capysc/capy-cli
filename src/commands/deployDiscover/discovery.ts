@@ -50,7 +50,9 @@ export type UnresolvedReason =
   | 'AMBIGUOUS'
   | 'BRANCH_UNMAPPED'
   | 'NO_REPO_LINK'
-  | 'SERVICE_HAS_NO_GIT_SOURCE';
+  | 'SERVICE_HAS_NO_GIT_SOURCE'
+  /** A Vercel preview scoped to one git branch whose variables match none of the Capy branch's: evidence for the preview's branch, not a target. */
+  | 'BRANCH_SCOPED_NO_VARIABLES';
 
 /** One entry of the plan file (`--plan`). IDs and names only. */
 export interface PlanEntry {
@@ -95,6 +97,8 @@ export interface Proposal {
     readonly var_overlap: VarOverlap;
     /** The name of an existing Dokploy target on this project branch that points at a DIFFERENT service (a plan entry for it is refused `TARGET_EXISTS`), else `null`. */
     readonly conflicting_target: string | null;
+    /** Vercel: how the service's git branch was settled, and every signal read for it (CAP-730). Absent for a service that is not judged. */
+    readonly git_branch?: Readonly<Record<string, unknown>>;
   };
   readonly confidence: {
     readonly project: Confidence;
@@ -341,6 +345,20 @@ function forProject(
   const projectNames = project.var_names_by_branch[choice.branch] ?? [];
   const overlap = overlapOf(service.env_var_names, projectNames);
   const vars = sharedNames(service.env_var_names, projectNames);
+  const emptyReason = vars.length === 0 ? kind?.emptyProposalReason?.(service) ?? null : null;
+  if (emptyReason !== null) {
+    return {
+      kind: 'unresolved',
+      unresolved: {
+        reason: emptyReason,
+        service_id: service.service_id,
+        project_id: project.project_id,
+        candidates: [{ project_id: project.project_id, project_name: project.project_name, branch: choice.branch }],
+      },
+    };
+  }
+  const gitBranchEvidence = kind?.gitBranchEvidence?.(service);
+  const branchConfidence = kind?.branchConfidence?.(service, choice, defaultBranch);
   const draft: Draft = {
     proposal_id: proposalIdOf(service.service_id, project.project_id, choice.branch),
     service_id: service.service_id,
@@ -354,10 +372,11 @@ function forProject(
       branch_match: choice.standard,
       var_overlap: overlap,
       conflicting_target: conflict?.name ?? null,
+      ...(gitBranchEvidence === undefined ? {} : { git_branch: gitBranchEvidence }),
     },
     confidence: {
       project: matched.exactPath && matched.projects.length === 1 && conflict === undefined ? 'certain' : 'needs_review',
-      branch: choice.standard && typeof defaultBranch === 'string' ? 'certain' : 'needs_review',
+      branch: branchConfidence ?? (choice.standard && typeof defaultBranch === 'string' ? 'certain' : 'needs_review'),
       vars: varsConfidence(overlap, service.env_var_names.length),
     },
     plan_entry: { project_id: project.project_id, branch: choice.branch, service_id: service.service_id, git_branch: gitBranch, vars },

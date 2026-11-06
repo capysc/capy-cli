@@ -25,7 +25,14 @@ export interface FakeVercelData {
   /** Projects per scope: a team id, or `personal`. */
   projects: Readonly<Record<string, ReadonlyArray<Record<string, unknown>>>>;
   envs: Readonly<Record<string, ReadonlyArray<RawEnv>>>;
-  custom?: Readonly<Record<string, ReadonlyArray<{ id: string; slug: string }>>>;
+  custom?: Readonly<Record<string, ReadonlyArray<{ id: string; slug: string; branchMatcher?: { type: string; pattern: string } }>>>;
+  /**
+   * Recent preview deployments per project id, newest first: the git branch each built from (`meta.githubCommitRef`;
+   * `null`: a deployment with no git branch, such as a CLI deploy). A project missing here has none.
+   */
+  deployments?: Readonly<Record<string, ReadonlyArray<{ branch: string | null }>>>;
+  /** Project ids whose deployments call answers with this HTTP status instead of a list (e.g. 403 for a token that cannot see deployments). */
+  deploymentsStatus?: Readonly<Record<string, number>>;
   /** Per-id decrypted values, keyed by env record id. A missing key = Vercel returned no `value`. */
   values?: Readonly<Record<string, string>>;
   /** Env record ids whose per-id answer says `decrypted: false` (Vercel would not decrypt the value, e.g. a role that cannot read production values). */
@@ -103,6 +110,23 @@ export function fakeVercelFetch(data: FakeVercelData): VercelFetchLike {
           decrypted: false,
         })),
         ...(data.envListNext === undefined ? {} : { pagination: { count: records.length, next: data.envListNext, prev: null } }),
+      });
+    }
+    if (path === '/v6/deployments') {
+      const projectId = u.searchParams.get('projectId') ?? '';
+      // The route is asked for preview deployments only, with a limit.
+      if (u.searchParams.get('target') !== 'preview' || !u.searchParams.get('limit')) {
+        return json({ error: { code: 'bad_request', message: 'target=preview and limit are required' } }, 400);
+      }
+      const forcedStatus = data.deploymentsStatus?.[projectId];
+      if (forcedStatus !== undefined) return json({ error: { code: 'forced', message: 'forced' } }, forcedStatus);
+      const limit = Number(u.searchParams.get('limit'));
+      return json({
+        deployments: (data.deployments?.[projectId] ?? []).slice(0, limit).map((d, i) => ({
+          uid: `dpl_${projectId}_${i}`,
+          meta: d.branch === null ? {} : { githubCommitRef: d.branch },
+        })),
+        pagination: { count: 0, next: null, prev: null },
       });
     }
     const envValueRoute = /^\/v1\/projects\/([^/]+)\/env\/([^/]+)$/.exec(path);

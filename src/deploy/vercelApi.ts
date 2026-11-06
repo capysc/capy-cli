@@ -83,9 +83,25 @@ export interface VercelProject {
   link: VercelGitLink | null;
 }
 
+/** How a custom environment picks the git branches it deploys: Vercel's branch matcher. A type this client does not know is dropped, never guessed at. */
+export type VercelBranchMatcherType = 'equals' | 'startsWith' | 'endsWith';
+
+export interface VercelBranchMatcher {
+  readonly type: VercelBranchMatcherType;
+  readonly pattern: string;
+}
+
 export interface VercelCustomEnvironment {
   id: string;
   slug: string;
+  /** The environment's branch rule; absent when it has none. */
+  branchMatcher?: VercelBranchMatcher;
+}
+
+/** One preview deployment, as far as discovery reads it: the git branch it built from (`meta.githubCommitRef`), when Vercel names one. A name only. */
+export interface VercelDeployment {
+  readonly id: string;
+  readonly gitBranch?: string;
 }
 
 export interface VercelEnvRecord {
@@ -135,7 +151,8 @@ export type VercelResource =
   | { readonly kind: 'teams' }
   | { readonly kind: 'projects' }
   | { readonly kind: 'project'; readonly project: string }
-  | { readonly kind: 'project_envs'; readonly project: string };
+  | { readonly kind: 'project_envs'; readonly project: string }
+  | { readonly kind: 'project_deployments'; readonly project: string };
 
 export class VercelApiError extends Error {
   constructor(
@@ -176,6 +193,7 @@ function deniedResource(resource: VercelResource | undefined): string {
   if (resource.kind === 'teams') return 'the team list';
   if (resource.kind === 'projects') return 'the project list';
   if (resource.kind === 'project') return `project ${resource.project}`;
+  if (resource.kind === 'project_deployments') return `the deployments of project ${resource.project}`;
   return `the environment variables of project ${resource.project}`;
 }
 
@@ -273,6 +291,8 @@ export interface VercelClient {
   getProject(idOrName: string, teamId?: string): Promise<VercelProject>;
   listCustomEnvironments(projectId: string, teamId?: string): Promise<readonly VercelCustomEnvironment[]>;
   listEnvs(projectId: string, teamId?: string): Promise<VercelEnvList>;
+  /** The project's most recent preview deployments (one page, newest first, at most `limit`). */
+  listPreviewDeployments(projectId: string, teamId?: string, limit?: number): Promise<readonly VercelDeployment[]>;
   /**
    * The decrypted value of one env record, `undefined` when Vercel returned none, or
    * `{ decrypted: false }` when Vercel says it did not decrypt the value (its structured
@@ -296,6 +316,8 @@ const DEFAULT_MAX_WAIT_MS = 60_000;
 const DEFAULT_RETRY_WAIT_MS = 1_000;
 const MAX_PAGES = 100;
 const PAGE_LIMIT = '100';
+/** How many recent preview deployments discovery counts branches over (Vercel's maximum page). */
+export const PREVIEW_DEPLOYMENTS_LIMIT = 100;
 
 const asRecord = (v: unknown): Record<string, unknown> | null =>
   v !== null && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
@@ -440,7 +462,20 @@ export function createVercelClient(token: string, options: VercelClientOptions =
         const rec = asRecord(e);
         const id = nonEmptyString(rec?.id);
         const slug = nonEmptyString(rec?.slug);
-        return id && slug ? [{ id, slug }] : [];
+        const branchMatcher = parseBranchMatcher(rec?.branchMatcher);
+        return id && slug ? [{ id, slug, ...(branchMatcher ? { branchMatcher } : {}) }] : [];
+      });
+    },
+
+    async listPreviewDeployments(projectId, teamId, limit = PREVIEW_DEPLOYMENTS_LIMIT) {
+      const body = asRecord(
+        await get('/v6/deployments', { kind: 'project_deployments', project: projectId }, { projectId, target: 'preview', limit: String(limit), teamId }),
+      );
+      return (Array.isArray(body?.deployments) ? body.deployments : []).flatMap((d): readonly VercelDeployment[] => {
+        const rec = asRecord(d);
+        const id = nonEmptyString(rec?.uid) ?? nonEmptyString(rec?.id);
+        const gitBranch = nonEmptyString(asRecord(rec?.meta)?.githubCommitRef);
+        return id ? [{ id, ...(gitBranch ? { gitBranch } : {}) }] : [];
       });
     },
 
@@ -460,6 +495,13 @@ export function createVercelClient(token: string, options: VercelClientOptions =
       return typeof body?.value === 'string' ? body.value : undefined;
     },
   };
+}
+
+function parseBranchMatcher(raw: unknown): VercelBranchMatcher | undefined {
+  const rec = asRecord(raw);
+  const type = rec?.type;
+  const pattern = nonEmptyString(rec?.pattern);
+  return pattern && (type === 'equals' || type === 'startsWith' || type === 'endsWith') ? { type, pattern } : undefined;
 }
 
 function parseTeam(raw: unknown): VercelTeam | null {

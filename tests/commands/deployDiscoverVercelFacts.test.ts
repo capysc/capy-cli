@@ -235,7 +235,8 @@ describe('facts: what is asked of Vercel', () => {
     const calls = world.vercelCalls();
     expect(calls.every((c) => c.method === 'GET' && c.authorization === `Bearer ${VERCEL_TOKEN}`)).toBe(true);
     const paths = new Set(calls.map((c) => new URL(c.url).pathname.replace(/prj_[a-z]+/, 'PRJ')));
-    expect(paths).toEqual(new Set(['/v2/teams', '/v10/projects', '/v9/projects/PRJ/custom-environments', '/v10/projects/PRJ/env']));
+    // CAP-730 adds the recent preview deployments (read-only, `target=preview`) to the routes asked.
+    expect(paths).toEqual(new Set(['/v2/teams', '/v10/projects', '/v9/projects/PRJ/custom-environments', '/v10/projects/PRJ/env', '/v6/deployments']));
   });
 
   test('a project\'s variables are listed WITHOUT decrypt, and the per-id value route is never called', async () => {

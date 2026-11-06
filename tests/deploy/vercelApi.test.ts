@@ -52,8 +52,9 @@ describe('names', () => {
 describe('createVercelClient — read-only, bearer auth, team scope', () => {
   test('exposes no method that could write', () => {
     const client = createVercelClient(TOKEN, { fetch: fakeVercelFetch({ projects: {}, envs: {} }) });
+    // CAP-730 adds `listPreviewDeployments`: a GET, like the rest.
     expect(Object.keys(client).toSorted()).toEqual(
-      ['getEnvValue', 'getProject', 'listCustomEnvironments', 'listEnvs', 'listProjects', 'listTeams'].toSorted(),
+      ['getEnvValue', 'getProject', 'listCustomEnvironments', 'listEnvs', 'listPreviewDeployments', 'listProjects', 'listTeams'].toSorted(),
     );
   });
 

@@ -10,6 +10,10 @@
  * file is what is Vercel's own: reading the projects, the service facts, and
  * the `KindOverrides` that turn a plan entry into a Vercel target.
  *
+ * The git branch of a service (the deploy PR base): production's is the project's production branch. The all-branches
+ * preview is judged from recent preview deployments, branch-scoped variables and the GitHub default branch; a custom
+ * environment from its branch rule (CAP-730, see `vercelBranch.ts`). The signals are listed in the proposal's evidence.
+ *
  * A "service" is one ENVIRONMENT of one Vercel project that holds variables:
  * production, preview, each custom environment, and `development` only when
  * it is the project's only environment with variables. A preview whose
@@ -27,12 +31,14 @@
  *   GET /v10/projects?teamId=                  projects[].{id,name,rootDirectory,link}, pagination.next (`from`)
  *   GET /v9/projects/{id}/custom-environments  environments[].{id,slug}
  *   GET /v10/projects/{id}/env?teamId=         envs[].{key,type,target,gitBranch,customEnvironmentIds}
+ *   GET /v6/deployments?projectId=&target=preview&limit=   deployments[].{uid,meta.githubCommitRef}
  */
 import { posix } from 'node:path';
 import type { TargetConfig } from '../../deploy/adapter';
 import {
   VercelClient,
   VercelCustomEnvironment,
+  VercelDeployment,
   VercelEnvRecord,
   VercelProject,
   VercelTeam,
@@ -65,17 +71,20 @@ import {
 import { DiscoveryInput, PlanEntry, buildDeployDiscovery } from './discovery';
 import { targetBaseName } from './evaluate';
 import {
+  BranchSignal,
   ExistingTarget,
   RepoOut,
   ServiceFacts,
   VercelServiceFacts,
   relPathOf,
+  repoKey,
   uniqueSorted,
   vercelServiceId,
 } from './facts';
 import type { BranchChoice, KindOverrides } from './kind';
 import { planIdOf } from './plan';
 import { DEPLOY_VERCEL_PLAN_SCHEMA, VERCEL_PLAN_SCHEMA_REF } from './schema';
+import { customRuleSignal, deploymentsSignal, scopedVariablesSignal, withGitBranch } from './vercelBranch';
 
 export { DEPLOY_VERCEL_PLAN_SCHEMA };
 
@@ -106,6 +115,8 @@ export interface VercelProjectScan {
   readonly team: { readonly id: string; readonly slug?: string } | null;
   readonly customEnvironments: readonly VercelCustomEnvironment[];
   readonly envs: readonly VercelEnvRecord[];
+  /** The project's recent preview deployments; absent when they were not read, or could not be (CAP-730). */
+  readonly previewDeployments?: readonly VercelDeployment[];
 }
 
 const namesOf = (records: readonly VercelEnvRecord[]): readonly string[] => uniqueSorted(records.map((r) => r.key));
@@ -151,13 +162,33 @@ function slicesOf(scan: VercelProjectScan): readonly EnvSlice[] {
   return [...slices, ...development];
 }
 
+/** The preview variables scoped to a branch of the repo, by branch: names only. */
+function scopedPreviewNames(scan: VercelProjectScan): ReadonlyArray<{ readonly branch: string; readonly names: readonly string[] }> {
+  const scoped = scan.envs.filter((r) => r.type !== 'system' && r.targets.includes('preview') && !!r.gitBranch);
+  return uniqueSorted(scoped.map((r) => r.gitBranch as string)).map((branch) => ({
+    branch,
+    names: namesOf(scoped.filter((r) => r.gitBranch === branch)),
+  }));
+}
+
+/** What points at a branch for a slice, before the repo's default branch is known: the all-branches preview's two signals, a custom environment's rule. `undefined`: the slice is not judged. */
+function branchSignalsOf(scan: VercelProjectScan, slice: EnvSlice): readonly BranchSignal[] | undefined {
+  if (slice.environment === 'preview' && slice.gitBranchScope === null && slice.customEnvironmentId === null) {
+    return [deploymentsSignal(scan.previewDeployments ?? []), scopedVariablesSignal(scopedPreviewNames(scan), slice.names)].flatMap((s) => (s === null ? [] : [s]));
+  }
+  const custom = scan.customEnvironments.find((c) => c.id === slice.customEnvironmentId);
+  const rule = custom === undefined ? null : customRuleSignal(custom.branchMatcher);
+  return rule === null ? undefined : [rule];
+}
+
 /** The services of one project: one per environment that has variables. */
 export function vercelServicesOf(scan: VercelProjectScan): readonly VercelServiceFacts[] {
   const { project } = scan;
   const repo = repoOfProject(project);
   const root = project.rootDirectory;
-  return slicesOf(scan).map(
-    (slice): VercelServiceFacts => ({
+  return slicesOf(scan).map((slice): VercelServiceFacts => {
+    const signals = branchSignalsOf(scan, slice);
+    return {
       service_id: vercelServiceId(project.id, slice.environment, slice.gitBranchScope),
       kind: 'vercel',
       name: project.name,
@@ -168,11 +199,13 @@ export function vercelServicesOf(scan: VercelProjectScan): readonly VercelServic
       git_branch_scope: slice.gitBranchScope,
       root_directory: root,
       repo,
+      // The production branch; `withGitBranch` replaces it for a service the signals judge, once the repo's default branch is read.
       branch: project.link?.productionBranch ?? null,
       path: repo === null ? null : relPathOf(root),
       env_var_names: slice.names,
-    }),
-  );
+      ...(signals === undefined ? {} : { git_branch_signals: signals }),
+    };
+  });
 }
 
 // ── Reading Vercel ───────────────────────────────────────────────────────────
@@ -198,15 +231,37 @@ async function readScopes(client: VercelClient): Promise<readonly Scope[]> {
 interface ScanOutcome {
   readonly scan?: VercelProjectScan;
   readonly truncated: boolean;
+  /** The recent preview deployments were asked for and could not be read: no signal, a notice (CAP-730). */
+  readonly deploymentsUnavailable?: boolean;
   readonly error?: unknown;
 }
 
-async function scanProject(client: VercelClient, project: VercelProject, team: Scope['team']): Promise<ScanOutcome> {
+/** Does the project have an all-branches preview with variables (the only service the deployments judge)? */
+const hasAllBranchesPreview = (scan: VercelProjectScan): boolean =>
+  slicesOf(scan).some((slice) => slice.environment === 'preview' && slice.gitBranchScope === null && slice.customEnvironmentId === null);
+
+type DeploymentsRead = { readonly ok: true; readonly deployments: readonly VercelDeployment[] } | { readonly ok: false };
+
+/** The recent preview deployments. A failure of any kind (no access, rate limit, an unreadable answer) is no signal, never an error. */
+async function readPreviewDeployments(client: VercelClient, projectId: string, teamId: string | undefined): Promise<DeploymentsRead> {
+  try {
+    return { ok: true, deployments: await client.listPreviewDeployments(projectId, teamId) };
+  } catch {
+    return { ok: false };
+  }
+}
+
+async function scanProject(client: VercelClient, project: VercelProject, team: Scope['team'], readDeployments: boolean): Promise<ScanOutcome> {
   try {
     const teamId = team?.id;
     const customEnvironments = await client.listCustomEnvironments(project.id, teamId);
     const list = await client.listEnvs(project.id, teamId);
-    return { scan: { project, team, customEnvironments, envs: list.envs }, truncated: list.truncated };
+    const scan: VercelProjectScan = { project, team, customEnvironments, envs: list.envs };
+    if (!readDeployments || !hasAllBranchesPreview(scan)) return { scan, truncated: list.truncated };
+    const read = await readPreviewDeployments(client, project.id, teamId);
+    return read.ok
+      ? { scan: { ...scan, previewDeployments: read.deployments }, truncated: list.truncated }
+      : { scan, truncated: list.truncated, deploymentsUnavailable: true };
   } catch (error) {
     return { truncated: false, error };
   }
@@ -248,7 +303,8 @@ async function loadVercel(
   const pooled = await runPool({
     items: readable,
     limit: SCAN_CONCURRENCY,
-    run: async ({ project, team }) => ({ result: await scanProject(client, project, team) }),
+    // A plan names its branches itself: the deployments are read only for discovery (`only` is plan mode).
+    run: async ({ project, team }) => ({ result: await scanProject(client, project, team, only === undefined) }),
     onChange: (p) => {
       if (p.done === p.total || p.done % 10 === 0) io.progress(`Read ${p.done} of ${p.total} Vercel projects`); // COPY-FLAG
     },
@@ -262,6 +318,7 @@ async function loadVercel(
     notices: [
       ...notLinked.map(({ project }) => ({ code: ERROR_CODES.VERCEL_PROJECT_NOT_GITHUB, detail: project.name })),
       ...pooled.results.flatMap((r) => (r.truncated && r.scan !== undefined ? [{ code: ERROR_CODES.VERCEL_ENV_LIST_TRUNCATED, detail: r.scan.project.name }] : [])),
+      ...pooled.results.flatMap((r) => (r.deploymentsUnavailable === true && r.scan !== undefined ? [{ code: ERROR_CODES.VERCEL_PREVIEW_DEPLOYMENTS_UNAVAILABLE, detail: r.scan.project.name }] : [])),
     ],
   });
 }
@@ -333,6 +390,17 @@ export const VERCEL_KIND: KindOverrides = {
   schemaRef: VERCEL_PLAN_SCHEMA_REF,
   planDomain: 'capy:deploy-vercel:plan:v1',
   chooseCapyBranch: chooseVercelBranch,
+  // The branch of a preview or a custom environment with a rule is judged from its signals (CAP-730); everything else keeps the shared rule.
+  branchConfidence: (service, choice) => {
+    const confidence = asVercel(service).git_branch_confidence;
+    return confidence === undefined ? undefined : choice.standard ? confidence : 'needs_review';
+  },
+  gitBranchEvidence: (service) => {
+    const v = asVercel(service);
+    return v.git_branch_basis === undefined ? undefined : { basis: v.git_branch_basis, signals: v.git_branch_signals ?? [] };
+  },
+  // A preview scoped to one branch is evidence for that branch's preview, never an empty target of its own.
+  emptyProposalReason: (service) => (asVercel(service).git_branch_scope === null ? null : 'BRANCH_SCOPED_NO_VARIABLES'),
   configured: (targets, service) => vercelConfigured(targets, service),
   // Several Vercel projects (a monorepo) may ship one Capy branch: a target for another project is not a clash.
   conflicting: () => undefined,
@@ -407,10 +475,12 @@ async function runDiscovery(io: DeployVercelDiscoverIo): Promise<DeployDiscoverR
   if (!capy.ok) return capy.result;
   const world: World = { orgId: ctx.orgId, services: vercel.value.services, ...capy.value };
   const github = await discoveryGithubFacts(io, world);
+  // The repo's default branch is read after the Vercel side: it joins the signals that settle a preview's branch now.
+  const services = world.services.map((service) => withGitBranch(service, service.repo === null ? null : github.defaultBranches[repoKey(service.repo)]));
   const input: DiscoveryInput = {
     baseUrl: '',
     header: { teams: vercel.value.teams },
-    services: world.services,
+    services,
     projects: world.projects,
     defaultBranches: github.defaultBranches,
     existingTargets: github.existingTargets,

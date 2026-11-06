@@ -71,6 +71,41 @@ export interface DokployServiceFacts {
   readonly env_var_names: readonly string[];
 }
 
+/**
+ * What points at a git branch for a Vercel environment (CAP-730). `RECENT_PREVIEW_DEPLOYMENTS`: the branches the
+ * latest preview deployments built from; `BRANCH_SCOPED_VARIABLES`: preview variables scoped to a branch;
+ * `GITHUB_DEFAULT_BRANCH`: the repo's default branch, when it is not the production branch;
+ * `CUSTOM_ENVIRONMENT_RULE`: a custom environment's branch matcher.
+ */
+export type BranchSignalCode =
+  | 'RECENT_PREVIEW_DEPLOYMENTS'
+  | 'BRANCH_SCOPED_VARIABLES'
+  | 'GITHUB_DEFAULT_BRANCH'
+  | 'CUSTOM_ENVIRONMENT_RULE';
+
+export interface BranchSignal {
+  readonly code: BranchSignalCode;
+  /** The branches this signal names, strongest first: `weight` is the deployment count, the variable count, or 1. */
+  readonly branches: ReadonlyArray<{
+    readonly branch: string;
+    readonly weight: number;
+    /** `BRANCH_SCOPED_VARIABLES`: the names of the variables scoped to this branch. Never a value. */
+    readonly names?: readonly string[];
+    /** `BRANCH_SCOPED_VARIABLES`: those of `names` the all-branches preview also has (Vercel reads the scoped one on that branch). */
+    readonly shadows?: readonly string[];
+  }>;
+  /** `CUSTOM_ENVIRONMENT_RULE`: the matcher as Vercel holds it. */
+  readonly rule?: { readonly type: string; readonly pattern: string };
+}
+
+/** How the git branch of a Vercel service was settled. */
+export type GitBranchBasis =
+  | 'signals_agree'
+  | 'strongest_signal'
+  | 'no_signals'
+  | 'custom_environment_rule'
+  | 'custom_environment_pattern';
+
 /** A Vercel environment of a project that holds variables (CAP-696): one deploy target is one of these. */
 export interface VercelServiceFacts {
   /** `<project id>:<environment>`; see `vercelServiceId`. Opaque to the caller: copy it into a plan. */
@@ -89,8 +124,18 @@ export interface VercelServiceFacts {
   /** The project's root directory as Vercel holds it; `null`: the repo root. */
   readonly root_directory: string | null;
   readonly repo: RepoOut | null;
-  /** The project's production branch (the deploy PR base); `null` when Vercel names none. */
+  /**
+   * The git branch the service deploys from (the deploy PR base). Production, `development` and a branch-scoped preview: the
+   * project's production branch. The all-branches preview and a custom environment: judged from `git_branch_signals` (CAP-730),
+   * the production branch when nothing points elsewhere. `null` when Vercel names none.
+   */
   readonly branch: string | null;
+  /** All-branches preview and custom environments only: every signal read for the branch (names and counts, never a value). */
+  readonly git_branch_signals?: readonly BranchSignal[];
+  /** Set with `git_branch_signals` once the repo's default branch is known: how `branch` was settled. */
+  readonly git_branch_basis?: GitBranchBasis;
+  /** Set with `git_branch_basis`: `certain` only when the signals agree (or a custom environment's rule names one branch). */
+  readonly git_branch_confidence?: 'certain' | 'needs_review';
   /** The REPO-RELATIVE folder of the project; `null` when it has no repo. */
   readonly path: string | null;
   /** Names only: never a value. */
