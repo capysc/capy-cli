@@ -81,8 +81,11 @@ function which(bin: string): string | null {
 
 /** Region from the ambient aws CLI config, for picker defaults. */
 export function detectAwsRegion(): string | null {
+  // env is passed on purpose: Bun only looks up the current PATH when env is
+  // given, and the tests put a stub aws first on PATH. Node behaves the same.
   const r = spawnSync('aws', ['configure', 'get', 'region'], {
     encoding: 'utf-8',
+    env: process.env,
   });
   return r.status === 0 ? r.stdout.trim() || null : null;
 }

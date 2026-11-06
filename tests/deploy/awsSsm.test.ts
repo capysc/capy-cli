@@ -1,4 +1,4 @@
-import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
+import { describe, test, expect, beforeEach, afterEach, beforeAll, afterAll } from 'bun:test';
 import { mkdirSync, writeFileSync, rmSync, existsSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
@@ -86,6 +86,31 @@ describe('awsSsm — name mapping', () => {
 });
 
 describe('awsSsm — detect', () => {
+  // detect() asks the aws CLI for a default region. Starting the real aws CLI
+  // can take more than 5 s on CI runners, so these tests put a stub first on
+  // PATH that answers at once with a fixed region.
+  const STUB_BIN = join(tmpdir(), `capy-aws-stub-${process.pid}`);
+  const STUB_REGION = 'stub-region-1';
+  const realPath = process.env.PATH;
+  beforeAll(() => {
+    mkdirSync(STUB_BIN, { recursive: true });
+    writeFileSync(join(STUB_BIN, 'aws'), `#!/bin/sh\necho ${STUB_REGION}\n`, { mode: 0o755 });
+    process.env.PATH = `${STUB_BIN}:${realPath}`;
+  });
+  afterAll(() => {
+    process.env.PATH = realPath;
+    rmSync(STUB_BIN, { recursive: true, force: true });
+  });
+
+  test('uses the region from the aws CLI (the stub, never the real aws)', async () => {
+    writeFileSync(
+      join(ROOT, 'main.tf'),
+      'data "aws_ssm_parameter" "db" {\n  name = "/capy/prod/database-url"\n}\n',
+    );
+    const r = await awsSsmAdapter.detect(ROOT);
+    expect(r.options?.region).toBe(STUB_REGION);
+  });
+
   test('infers prefix + kebab naming from literal tf parameter names', async () => {
     mkdirSync(join(ROOT, 'infra'), { recursive: true });
     writeFileSync(
