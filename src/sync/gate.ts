@@ -38,6 +38,7 @@ import {
   type FolderContext,
 } from './commit';
 import { CapyError, ERROR_CODES } from '../types/index';
+import { restoreCommandFor } from '../errors/projectDeleted';
 import type { SyncOutcome } from '../commands/capyCommand';
 
 export interface GateOptions {
@@ -191,6 +192,8 @@ async function failedSync(err: unknown, opts: GateOptions): Promise<never> {
   // Off a terminal (no one to read the error screen, stdout reserved for payloads): the code and what to do, on stderr.
   if (answersByProtocol(opts)) {
     console.error(`${coded.code}: ${coded.message}`);
+    const restore = coded.code === ERROR_CODES.PROJECT_DELETED ? restoreCommandFor(opts.cwd ?? process.cwd()) : undefined;
+    if (restore !== undefined) console.error(`To restore it, an organization owner runs: ${restore}`); // COPY-FLAG
     return process.exit(1);
   }
   const { displayErrorAndExit } = await import('../ui/errorScreen');

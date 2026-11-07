@@ -886,6 +886,21 @@ export const ERROR_CODES = {
   SECRETS_NOTHING_SELECTED: 'SECRETS_NOTHING_SELECTED',
   /** `capy secrets set NAME`: the run finished but at least one location or repo failed. Exit 1. */
   SECRETS_PARTIAL: 'SECRETS_PARTIAL',
+  // --- Project soft delete and restore (CAP-729) ---
+  /** The service answered 410: the project was deleted. Sent by every route that takes a project id. Never an invitation to recreate it. */
+  PROJECT_DELETED: 'PROJECT_DELETED',
+  /** Delete or restore was called by someone who is not an org owner (403). Reaches the client as a PERMISSION_DENIED whose `details.code` is this. */
+  PROJECT_DELETE_OWNER_ONLY: 'PROJECT_DELETE_OWNER_ONLY',
+  /** Delete without `--force` while the project has unrevoked deploy tokens (409). The body lists them. */
+  PROJECT_HAS_LIVE_DEPLOY_TOKENS: 'PROJECT_HAS_LIVE_DEPLOY_TOKENS',
+  /** Restore called on a project that is not deleted (409). */
+  PROJECT_NOT_DELETED: 'PROJECT_NOT_DELETED',
+  /** Delete called on the org's system store (403). Reaches the client as a PERMISSION_DENIED whose `details.code` is this. */
+  SYSTEM_STORE_IMMUTABLE: 'SYSTEM_STORE_IMMUTABLE',
+  /** `capy org delete-project` / `restore-project`: the name or id matched more than one project. The refusal lists the ids. */
+  PROJECT_AMBIGUOUS: 'PROJECT_AMBIGUOUS',
+  /** A destructive command needs a yes and there is no terminal to ask, and `--yes` was not passed. Exit 3. */
+  CONFIRMATION_REQUIRED: 'CONFIRMATION_REQUIRED',
   /** `GET /orgs/:orgId/repos` answered 404: the service predates project -> repo links. Never a failure of the command that asked. */
   REPO_LINKS_UNSUPPORTED: 'REPO_LINKS_UNSUPPORTED',
   /** `--dry-run` on a path that would prompt (the `capy edit` TUI, an interactive `capy add`, `capy remove`'s confirmation): it cannot preview, and a dry run never runs for real. Exit 1. */
