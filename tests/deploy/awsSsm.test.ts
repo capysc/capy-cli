@@ -85,6 +85,10 @@ describe('awsSsm — name mapping', () => {
   });
 });
 
+// detect() runs the real `aws configure get region` when the aws CLI is on
+// PATH. GitHub runners ship it, and its first cold start can pass 5s.
+const DETECT_TIMEOUT_MS = 30_000;
+
 describe('awsSsm — detect', () => {
   test('infers prefix + kebab naming from literal tf parameter names', async () => {
     mkdirSync(join(ROOT, 'infra'), { recursive: true });
@@ -104,7 +108,7 @@ data "aws_ssm_parameter" "workos_api_key" {
     expect(r.options?.naming).toBe('kebab');
     expect(r.summary).toContain('2 aws_ssm_parameter');
     expect(r.summary).toContain('/capy/prod/');
-  });
+  }, DETECT_TIMEOUT_MS);
 
   test('interpolated tf names: naming inferred, prefix NOT prefilled', async () => {
     writeFileSync(
@@ -121,7 +125,7 @@ data "aws_ssm_parameter" "workos_api_key" {
     const r = await awsSsmAdapter.detect(ROOT);
     expect(r.options?.pathPrefix).toBeUndefined();
     expect(r.options?.naming).toBe('kebab');
-  });
+  }, DETECT_TIMEOUT_MS);
 
   test('verbatim naming inferred from uppercase leaves', async () => {
     writeFileSync(
@@ -135,7 +139,7 @@ data "aws_ssm_parameter" "db" {
     const r = await awsSsmAdapter.detect(ROOT);
     expect(r.options?.naming).toBe('verbatim');
     expect(r.options?.pathPrefix).toBe('/myapp/');
-  });
+  }, DETECT_TIMEOUT_MS);
 
   test('returns empty when no tf files mention aws_ssm_parameter', async () => {
     writeFileSync(join(ROOT, 'main.tf'), `resource "aws_s3_bucket" "b" {}`);
