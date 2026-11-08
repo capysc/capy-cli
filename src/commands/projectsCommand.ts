@@ -28,6 +28,11 @@ export interface ProjectSummary {
   name: string;
   branches: ProjectBranchSummary[];
   /**
+   * Only on `--deleted` output: when the project was deleted, `null` for a live one.
+   * A deleted project lists no branches (the service answers 410 for them).
+   */
+  deleted_at?: string | null;
+  /**
    * Linked repos. Absent when the caller may not read them (only owners, admins
    * and project admins can) or the lookup failed; `[]` means "none linked".
    */
@@ -79,8 +84,9 @@ export class ProjectsCommand {
     private readonly devMode: boolean = false,
   ) {}
 
-  async execute(opts: { json?: boolean } = {}): Promise<void> {
+  async execute(opts: { json?: boolean; deleted?: boolean } = {}): Promise<void> {
     const json = opts.json === true;
+    const includeDeleted = opts.deleted === true;
     // Same CAP-273 contract as `usersCommand`/`listCommand`: under --json, no
     // progress output at all, so stdout stays pure JSON even on a TTY.
     const spinner = json ? null : new Spinner('Loading projects...');
@@ -88,7 +94,7 @@ export class ProjectsCommand {
 
     try {
       const { orgId, serviceClient } = await resolveOrgContext(this.apiUrl, this.devMode);
-      const summaries = await this.loadProjectSummaries(serviceClient);
+      const summaries = await this.loadProjectSummaries(serviceClient, includeDeleted);
       const projects = withRepos(summaries, await loadOrgRepos(serviceClient, orgId));
 
       spinner?.succeed(`${projects.length} project${projects.length !== 1 ? 's' : ''}`);
@@ -99,19 +105,25 @@ export class ProjectsCommand {
     }
   }
 
-  private async loadProjectSummaries(serviceClient: ServiceClient): Promise<ProjectSummary[]> {
-    const rawProjects = excludeSystemProject(await serviceClient.listProjects());
+  private async loadProjectSummaries(serviceClient: ServiceClient, includeDeleted: boolean): Promise<ProjectSummary[]> {
+    // The argument is only passed for `--deleted`, so a plain listing sends exactly the request it always did.
+    const listed = includeDeleted ? await serviceClient.listProjects({ includeDeleted: true }) : await serviceClient.listProjects();
+    const rawProjects = excludeSystemProject(listed);
     // Concurrent per-project branch fetch — independent GETs, fine to fan out.
     return Promise.all(
-      rawProjects.map(async (p) => ({
-        id: p.id,
-        name: p.name,
-        branches: (await serviceClient.listBranches(p.id)).map((b) => ({
-          id: b.id,
-          name: b.name,
-          protected: b.is_protected,
-        })),
-      })),
+      rawProjects.map(async (p) => {
+        const deletedAt = includeDeleted ? (p.deleted_at ?? null) : undefined;
+        // A deleted project answers 410 PROJECT_DELETED to its branch list: it has none to show.
+        const branches = deletedAt === null || deletedAt === undefined
+          ? (await serviceClient.listBranches(p.id)).map((b) => ({ id: b.id, name: b.name, protected: b.is_protected }))
+          : [];
+        return {
+          id: p.id,
+          name: p.name,
+          branches,
+          ...(includeDeleted ? { deleted_at: deletedAt } : {}),
+        };
+      }),
     );
   }
 
@@ -128,7 +140,7 @@ export class ProjectsCommand {
 
     console.log('');
     for (const project of projects) {
-      console.log(`  ${B(project.name)} ${DIM}·${RESET} ${this.formatBranches(project.branches)}${this.formatRepos(project.repos)}`);
+      console.log(`  ${B(project.name)} ${DIM}·${RESET} ${this.formatBranchesOrDeleted(project)}${this.formatRepos(project.repos)}`);
     }
     console.log('');
   }
@@ -137,6 +149,12 @@ export class ProjectsCommand {
   private formatRepos(repos: ProjectRepoSummary[] | undefined): string {
     if (repos === undefined || repos.length === 0) return '';
     return ` ${DIM}·${RESET} ${repos.map(formatRepo).join(', ')}`;
+  }
+
+  /** A deleted project reads `deleted <date>` where the branches would be. */
+  private formatBranchesOrDeleted(project: ProjectSummary): string {
+    if (project.deleted_at === null || project.deleted_at === undefined) return this.formatBranches(project.branches);
+    return `${DIM}deleted ${project.deleted_at.slice(0, 10)}${RESET}`; // COPY-FLAG
   }
 
   private formatBranches(branches: ProjectBranchSummary[]): string {

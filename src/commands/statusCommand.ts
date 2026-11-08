@@ -10,6 +10,7 @@ import { isLocalOnly } from '../config/profileConfig';
 import { resolveLocalProjectKey } from '../core/localUnlock';
 import { pinnedHashes } from '../sync/commit';
 import { placeholdersOnBranch, placeholderSetCommand } from '../core/placeholder';
+import { isProjectDeletedError } from '../errors/projectDeleted';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -76,11 +77,23 @@ export class StatusCommand {
   async execute(opts: { json?: boolean } = {}): Promise<void> {
     try {
       await this._execute(opts);
-    } catch {
-      // Exit silently on any error (auth, network, etc.)
+    } catch (err) {
+      // CAP-729: a deleted project is the one failure that is not silent (the git-hook form stays silent: it must never block git).
+      if (isProjectDeletedError(err) && !this.terse) return this.endProjectDeleted(err, opts.json === true);
+      // Exit silently on any other error (auth, network, etc.)
       // Hooks must never block git operations
       process.exit(0);
     }
+  }
+
+  /** The folder's project was deleted: the coded failure (JSON under `--json`, the error screen otherwise), exit 1. */
+  private async endProjectDeleted(err: CapyError, json: boolean): Promise<never> {
+    if (json) {
+      console.log(JSON.stringify({ ok: false, code: err.code, error: err.message }, null, 2));
+      return process.exit(1);
+    }
+    const { displayErrorAndExit } = await import('../ui/errorScreen');
+    return displayErrorAndExit(err);
   }
 
   /** The project key, or why it could not be had. Never throws. */
@@ -115,6 +128,7 @@ export class StatusCommand {
         ),
       };
     } catch (err: any) {
+      if (isProjectDeletedError(err)) throw err;
       // Auth or key resolution failed — compare pinned vs local only
       return { skip: { reason: err?.message || 'auth or key resolution failed', kind: classifyRemoteFailure(err) } };
     }
@@ -188,6 +202,7 @@ export class StatusCommand {
       );
       return { remoteHashes, skip: undefined };
     } catch (err: any) {
+      if (isProjectDeletedError(err)) throw err;
       return { remoteHashes: {}, skip: { reason: err?.message || 'network error', kind: classifyRemoteFailure(err) } };
     }
   }
