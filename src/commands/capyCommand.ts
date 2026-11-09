@@ -52,6 +52,7 @@ import {
   conflictRefusalFor,
   exitOnConflictRefusal,
   gateConflicts,
+  hasConflictFlags,
   parseConflictFlags,
   sourceRowsOf,
   type ConflictView,
@@ -96,6 +97,9 @@ export async function listOrgProjectsOrUnavailable(
 
 /** The menu's stand-in when the answers come from `--resolve` instead of a person. */
 const PROTOCOL_ACTION = 'protocol';
+
+/** What the menu's "Retrieve all pinned values" says when the pinned snapshot cannot be fetched. */
+const PINNED_FETCH_FAILED_MESSAGE = 'Could not fetch pinned values from remote.';
 
 /** What one pass of bare `capy`'s sync did. */
 export type SyncOutcome =
@@ -1214,6 +1218,18 @@ export class CapyCommand {
     console.log('');
   }
 
+  /**
+   * Off a terminal (`--json`, `--non-tty`, an agent), whether this run retrieves the whole `.env` by itself: the file does
+   * not exist (the file's existence is the signal, never its text), keep.lock pins something for the branch to retrieve,
+   * nobody is answering rows with `--resolve`, and it is not a `--dry-run` (which changes nothing). A file that exists,
+   * even an empty one, is never retrieved this way: its differences are reported as always. At a terminal the menu is unchanged.
+   */
+  private retrievesMissingEnvByProtocol(pinnedCount: number, hasKeep: boolean): boolean {
+    if (!this.protocol || this.options.dryRun === true || !hasKeep || pinnedCount === 0) return false;
+    if (hasConflictFlags(parseConflictFlags(this.options.conflictFlags ?? {}))) return false;
+    return !existsSync(this.projectManager.getEnvPath(this.options.envPath));
+  }
+
   private async syncProject(projectState: ProjectState, retried: boolean = false): Promise<SyncOutcome> {
     this.debug('syncProject start', {
       initialized: projectState.initialized,
@@ -1732,8 +1748,12 @@ export class CapyCommand {
     const menuChoices: MenuChoice[] = [...stateMenuChoices, { name: 'Continue working', value: 'skip' }].map((c) =>
       localMode && c.value === 'commit_local' ? { ...c, name: 'Commit all local values' } : c,
     );
+    // Off a terminal, a folder with no `.env` file at all has no local copy: nothing here can be read as deleted, so
+    // the whole file is retrieved in one run, exactly as the menu's "Retrieve all pinned values" does it.
+    const retrievesMissingEnv = this.retrievesMissingEnvByProtocol(Object.keys(pinned).length, currentKeep !== null);
+    const protocolAction = retrievesMissingEnv ? 'retrieve_pinned' : PROTOCOL_ACTION;
     const { action } = this.protocol
-      ? { action: PROTOCOL_ACTION }
+      ? { action: protocolAction }
       : await inquirer.prompt([{
           type: 'list',
           name: 'action',
@@ -1767,6 +1787,8 @@ export class CapyCommand {
                 keepHash,
               );
           if (!blob?.env_file) {
+            // No `.env` to begin with and no snapshot to fill it from: write nothing, end with a code.
+            if (retrievesMissingEnv) throw new CapyError(PINNED_FETCH_FAILED_MESSAGE, ERROR_CODES.SNAPSHOT_NOT_FOUND);
             return { kind: 'proceed', finalEnv: { ...localPlaintext } };
           }
           const encrypted = this.fileManager.parseEnvContent(blob.env_file);
@@ -1780,11 +1802,17 @@ export class CapyCommand {
               }
             }),
           );
+          // No `.env` to begin with and nothing in the snapshot this profile can read: write nothing, end with a code.
+          if (retrievesMissingEnv && Object.keys(fetchedEnv).length === 0) {
+            throw new CapyError(PINNED_FETCH_FAILED_MESSAGE, ERROR_CODES.DECRYPT_KEY_MISMATCH);
+          }
           return { kind: 'proceed', finalEnv: fetchedEnv };
         } catch (err) {
           this.debugError('retrieve_pinned fetch failed', err);
           if (isProjectDeletedError(err)) throw err;
-          console.log('Could not fetch pinned values from remote.');
+          // No `.env` to begin with: nothing is written and the run ends with the failure's own code.
+          if (retrievesMissingEnv) throw err instanceof CapyError ? err : new CapyError(PINNED_FETCH_FAILED_MESSAGE, ERROR_CODES.SERVICE_ERROR);
+          console.log(PINNED_FETCH_FAILED_MESSAGE);
           return { kind: 'abort' };
         }
       }
