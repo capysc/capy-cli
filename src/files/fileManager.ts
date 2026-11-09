@@ -269,6 +269,29 @@ export class FileManager {
   }
 
   /**
+   * Writes `keep` to BOTH the tracked `<projectRoot>/keep.lock` and the
+   * working copy at `.capy/keep.lock`, unconditionally — the tracked file is
+   * overwritten even when it already exists with different content.
+   *
+   * FIRST SETUP ONLY. Project setup is the one moment the tracked file is
+   * Capy's to create: `capy` has just made the project and nothing has been
+   * committed yet. Setup writes the tracked file once with identity and no
+   * pins (via `writeKeepFile`), and then, after pushing the user's `.env`,
+   * calls this so the file the user goes on to commit carries the pins
+   * instead of staying empty. Every other command keeps using
+   * `writeKeepFile`, which leaves an existing tracked file alone.
+   */
+  writeInitialKeepFile(keep: KeepFile): void {
+    const content = serializeKeep(keep);
+
+    this.writeKeepContentTo(join(this.projectRoot, 'keep.lock'), content);
+
+    const capyDir = join(this.projectRoot, '.capy');
+    this.ensureDirectoryExists(capyDir);
+    this.writeKeepContentTo(join(capyDir, 'keep.lock'), content);
+  }
+
+  /**
    * No-op guard + backup/restore, shared by both keep.lock copies
    * `writeKeepFile` writes. If the on-disk file is already byte-identical to
    * the canonical output, don't touch it — this keeps capy from churning

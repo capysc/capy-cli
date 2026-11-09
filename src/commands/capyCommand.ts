@@ -938,7 +938,7 @@ export class CapyCommand {
 
       try {
         // Prefer the server's copy — it carries server-assigned changed_at
-        this.fileManager.writeKeepFile(
+        this.fileManager.writeInitialKeepFile(
           SyncEngine.adoptServerKeep(initPushResult.keep_file, updatedKeep, initBranch),
         );
 
