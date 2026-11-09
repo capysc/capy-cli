@@ -72,6 +72,8 @@ export interface CreateDisplayInput {
   readonly name?: string;
   /** The branch already given, if any. */
   readonly branch?: string;
+  /** Whether the branch is protected, if already given. */
+  readonly isProtected?: boolean;
   /** What a branch is, shown under the table. */
   readonly branchDescription: string;
 }
@@ -79,12 +81,18 @@ export interface CreateDisplayInput {
 // COPY-FLAG: placeholder for a value still to be chosen.
 const TO_CHOOSE = 'to choose';
 
+function protectedCell(isProtected: boolean | undefined): string {
+  if (isProtected === undefined) return TO_CHOOSE;
+  return isProtected ? 'yes (invite-only)' : 'no'; // COPY-FLAG
+}
+
 /** The table for `capy org create-project` asking for its name and first branch: where it goes, what is chosen so far, and what a branch is. */
 export function createProjectDisplay(input: CreateDisplayInput): string {
   const summary = table(['', ''], [
     ['Org', input.org.name],
     ['Project', input.name ?? TO_CHOOSE],
     ['First branch', input.branch ?? TO_CHOOSE], // COPY-FLAG
+    ['Protected', protectedCell(input.isProtected)], // COPY-FLAG
   ]);
   return `${summary}\n\n${input.branchDescription}`;
 }

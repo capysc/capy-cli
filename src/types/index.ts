@@ -913,6 +913,10 @@ export const ERROR_CODES = {
   BRANCH_NAME_INVALID: 'BRANCH_NAME_INVALID',
   /** `capy org create-project`: the project was created but its first branch was not. The refusal carries the project. Exit 1. */
   BRANCH_CREATE_FAILED: 'BRANCH_CREATE_FAILED',
+  /** `capy org create-project` with a name and branch but no `--protected`, and nobody to ask (agent mode). The refusal carries an `elicitation` form. Exit 3. */
+  BRANCH_PROTECTION_REQUIRED: 'BRANCH_PROTECTION_REQUIRED',
+  /** `capy org create-project --protected` with something other than yes or no. Nothing is created. Exit 1. */
+  BRANCH_PROTECTION_INVALID: 'BRANCH_PROTECTION_INVALID',
   /** A command that acts on "the active organization" has none (no keep.lock here) and the person belongs to several, with nobody to ask. Exit 3. */
   ORG_SELECTION_REQUIRED: 'ORG_SELECTION_REQUIRED',
   /** `GET /orgs/:orgId/repos` answered 404: the service predates project -> repo links. Never a failure of the command that asked. */

@@ -10,13 +10,16 @@
  * an `elicitation` of kind "form" (`ui/elicitation.ts`) asking for both, that the agent puts to the human. In a
  * terminal it asks for the name with the init prompt and for the branch with the init branch question.
  *
+ * Whether the first branch is protected (invite-only) is asked the way `capy checkout -b` asks it: a yes/no in a
+ * terminal, and the same yes/no as a field of the elicitation (BRANCH_PROTECTION_REQUIRED when only that is missing).
+ *
  * Every refusal is coded, and every decision keys on a code, an HTTP status or a typed field, never on message
  * text. The service answers a duplicate name with a bare 409 and no `code`, so the STATUS decides that one.
  */
 import { resolveOrgContext } from '../core/orgContext';
 import { ProjectManager } from '../core/projectManager';
 import { PROJECT_NAME_PATTERN_SOURCE, projectNameProblem } from '../core/projectNameRule';
-import { BRANCH_DESCRIPTION, BRANCH_NAME_PATTERN_SOURCE, DEFAULT_FIRST_BRANCH, branchNameProblem } from '../core/branchNameRule';
+import { BRANCH_DESCRIPTION, BRANCH_NAME_PATTERN_SOURCE, DEFAULT_FIRST_BRANCH, FIRST_BRANCH_QUESTION, branchNameProblem } from '../core/branchNameRule';
 import { PromptEngine } from '../ui/promptEngine';
 import { isInteractive, EXIT_NEEDS_INPUT } from '../ui/interactive';
 import type { ElicitationForm } from '../ui/elicitation';
@@ -32,6 +35,8 @@ export interface CreateProjectOpts {
   dryRun?: boolean;
   /** `--branch <name>`: the project's first branch. */
   branch?: string;
+  /** `--protected yes|no` as typed: whether the first branch is invite-only. Checked before anything is sent. */
+  protectedAnswer?: string;
   apiUrl?: string;
   devMode?: boolean;
 }
@@ -49,6 +54,7 @@ export function createProjectOptsFrom(command: CommandWithGlobals): CreateProjec
     nonTty: merged.nonTty === true,
     dryRun: merged.dryRun === true,
     ...(typeof merged.branch === 'string' ? { branch: merged.branch.trim() } : {}),
+    ...(typeof merged.protected === 'string' ? { protectedAnswer: merged.protected.trim().toLowerCase() } : {}),
   };
 }
 
@@ -62,12 +68,35 @@ interface ProjectRef {
   readonly name: string;
 }
 
+/** The first branch as it will be created. */
+interface FirstBranch {
+  readonly name: string;
+  readonly protected: boolean;
+}
+
 type CreateOutcome =
-  | { readonly kind: 'needs-input'; readonly missing: 'name' | 'branch'; readonly elicitation: ElicitationForm; readonly org: OrgRef }
+  | { readonly kind: 'needs-input'; readonly missing: 'name' | 'branch' | 'protected'; readonly elicitation: ElicitationForm; readonly org: OrgRef }
   | { readonly kind: 'exists'; readonly existing: ProjectRef; readonly org: OrgRef }
-  | { readonly kind: 'dry-run'; readonly name: string; readonly branch: string; readonly org: OrgRef }
-  | { readonly kind: 'branch-failed'; readonly project: ProjectRef; readonly branch: string; readonly org: OrgRef }
-  | { readonly kind: 'created'; readonly project: ProjectRef; readonly branch: string; readonly org: OrgRef };
+  | { readonly kind: 'dry-run'; readonly name: string; readonly branch: FirstBranch; readonly org: OrgRef }
+  | { readonly kind: 'branch-failed'; readonly project: ProjectRef; readonly branch: FirstBranch; readonly org: OrgRef }
+  | { readonly kind: 'created'; readonly project: ProjectRef; readonly branch: FirstBranch; readonly org: OrgRef };
+
+/** `--protected` answers, as the elicitation's options carry them. */
+const PROTECTED_YES = 'yes';
+const PROTECTED_NO = 'no';
+
+/** The answer typed with `--protected`, as a boolean; undefined when none was typed. Checked to be yes or no first. */
+function protectedFrom(answer: string | undefined): boolean | undefined {
+  if (answer === undefined) return undefined;
+  return answer === PROTECTED_YES;
+}
+
+/** The yes/no question, worded as `capy checkout -b` asks it. Before the branch has a name it says "the first branch". */
+function protectedQuestion(branch: string | undefined): string {
+  return branch === undefined
+    ? 'Make the first branch a protected branch? (invite-only)' // COPY-FLAG: checkout's wording, adapted for an unnamed branch
+    : `Make "${branch}" a protected branch? (invite-only)`;
+}
 
 /**
  * The folder's name as a project name, when it is allowed as one and no live project in the org has it already.
@@ -86,6 +115,7 @@ function createForm(
   org: OrgRef,
   name: string | undefined,
   branch: string | undefined,
+  isProtected: boolean | undefined,
   isTaken: (name: string) => boolean,
 ): ElicitationForm {
   const nameDefault = name ?? suggestedName(isTaken);
@@ -95,23 +125,36 @@ function createForm(
       ? 'What should the project and its first branch be called?' // COPY-FLAG
       : 'What should the first branch be called?', // COPY-FLAG
     details: { org: { id: org.id, name: org.name } },
-    display: createProjectDisplay({ org, name, branch, branchDescription: BRANCH_DESCRIPTION }),
+    display: createProjectDisplay({ org, name, branch, isProtected, branchDescription: BRANCH_DESCRIPTION }),
     fields: [
       {
         name: 'name',
         type: 'string',
         pattern: PROJECT_NAME_PATTERN_SOURCE,
+        question: 'What should the project be called?', // COPY-FLAG
         ...(nameDefault === undefined ? {} : { default: nameDefault }),
       },
       {
         name: 'branch',
         type: 'string',
         pattern: BRANCH_NAME_PATTERN_SOURCE,
+        question: FIRST_BRANCH_QUESTION,
         default: branch ?? DEFAULT_FIRST_BRANCH,
         description: BRANCH_DESCRIPTION,
       },
+      {
+        name: 'protected',
+        type: 'string',
+        pattern: `^(${PROTECTED_YES}|${PROTECTED_NO})$`,
+        question: protectedQuestion(branch),
+        default: isProtected === true ? PROTECTED_YES : PROTECTED_NO,
+        options: [
+          { value: PROTECTED_YES, label: 'Yes' }, // COPY-FLAG
+          { value: PROTECTED_NO, label: 'No' }, // COPY-FLAG
+        ],
+      },
     ],
-    answer: { rerun: 'capy org create-project <name> --branch <branch> --json' },
+    answer: { rerun: 'capy org create-project <name> --branch <branch> --protected <protected> --json' },
   };
 }
 
@@ -127,6 +170,13 @@ async function chooseBranch(typed: string | undefined, agentMode: boolean): Prom
   if (typed !== undefined) return typed;
   if (agentMode) return undefined;
   return new PromptEngine().promptForFirstBranch();
+}
+
+/** Whether the first branch is protected: as typed, else (in a terminal) as asked, else none. */
+async function chooseProtected(typed: boolean | undefined, branch: string, agentMode: boolean): Promise<boolean | undefined> {
+  if (typed !== undefined) return typed;
+  if (agentMode) return undefined;
+  return new PromptEngine().promptForBranchProtected(branch);
 }
 
 /** The client calls `createFlow` makes: resolving the org hands it over already signed in. */
@@ -160,24 +210,30 @@ async function createFlow(typed: string | undefined, opts: CreateProjectOpts, ag
   const client: CreateClient = serviceClient;
   const projects = await client.listProjects();
   const isTaken = (candidate: string) => existingProjectNamed(projects, orgId, candidate) !== undefined;
+  const typedProtected = protectedFrom(opts.protectedAnswer);
   if (name === undefined) {
-    return { kind: 'needs-input', missing: 'name', elicitation: createForm(org, undefined, opts.branch, isTaken), org };
+    return { kind: 'needs-input', missing: 'name', elicitation: createForm(org, undefined, opts.branch, typedProtected, isTaken), org };
   }
 
   // The clash is checked before the branch is asked, so nobody picks a branch for a project that cannot be created.
   const existing = existingProjectNamed(projects, orgId, name);
   if (existing !== undefined) return { kind: 'exists', existing, org };
 
-  const branch = await chooseBranch(opts.branch, agentMode);
-  if (branch === undefined) {
-    return { kind: 'needs-input', missing: 'branch', elicitation: createForm(org, name, undefined, isTaken), org };
+  const branchName = await chooseBranch(opts.branch, agentMode);
+  if (branchName === undefined) {
+    return { kind: 'needs-input', missing: 'branch', elicitation: createForm(org, name, undefined, typedProtected, isTaken), org };
   }
+  const isProtected = await chooseProtected(typedProtected, branchName, agentMode);
+  if (isProtected === undefined) {
+    return { kind: 'needs-input', missing: 'protected', elicitation: createForm(org, name, branchName, undefined, isTaken), org };
+  }
+  const branch: FirstBranch = { name: branchName, protected: isProtected };
   if (opts.dryRun === true) return { kind: 'dry-run', name, branch, org };
 
   const created = await client.initializeProject(name, orgId);
   const project: ProjectRef = { id: created.project_id, name: created.project_name };
   // The project exists from here on: a failed branch is reported with the project, never as "nothing happened".
-  const branchMade = await settle(() => client.createBranch(project.id, branch, false));
+  const branchMade = await settle(() => client.createBranch(project.id, branch.name, branch.protected));
   return branchMade.ok
     ? { kind: 'created', project, branch, org }
     : { kind: 'branch-failed', project, branch, org };
@@ -195,13 +251,33 @@ function createRefusalFor(err: unknown): Refusal {
   return refusalFor(err);
 }
 
+/** The refusal for each thing that can still be missing, with nobody to ask. */
+const NEEDS_INPUT: Readonly<Record<'name' | 'branch' | 'protected', { readonly code: string; readonly message: string }>> = {
+  name: {
+    code: ERROR_CODES.PROJECT_NAME_REQUIRED,
+    message: '`capy org create-project` needs a project name. Pass it as an argument, or run it in a terminal.', // COPY-FLAG
+  },
+  branch: {
+    code: ERROR_CODES.BRANCH_NAME_REQUIRED,
+    message: '`capy org create-project` needs a first branch. Pass it with --branch, or run it in a terminal.', // COPY-FLAG
+  },
+  protected: {
+    code: ERROR_CODES.BRANCH_PROTECTION_REQUIRED,
+    message: '`capy org create-project` needs to know whether the first branch is protected. Pass --protected yes or no, or run it in a terminal.', // COPY-FLAG
+  },
+};
+
+/** The branch as JSON reports it. */
+function branchJson(branch: FirstBranch): { readonly name: string; readonly protected: boolean } {
+  return { name: branch.name, protected: branch.protected };
+}
+
 function emitCreateOutcome(json: boolean, outcome: CreateOutcome): void {
   if (outcome.kind === 'needs-input') {
+    const { code, message } = NEEDS_INPUT[outcome.missing];
     return refuse(json, {
-      code: outcome.missing === 'name' ? ERROR_CODES.PROJECT_NAME_REQUIRED : ERROR_CODES.BRANCH_NAME_REQUIRED,
-      message: outcome.missing === 'name'
-        ? '`capy org create-project` needs a project name. Pass it as an argument, or run it in a terminal.' // COPY-FLAG
-        : '`capy org create-project` needs a first branch. Pass it with --branch, or run it in a terminal.', // COPY-FLAG
+      code,
+      message,
       exitCode: EXIT_NEEDS_INPUT,
       extra: { elicitation: outcome.elicitation },
       lines: [`  Organization: ${outcome.org.name}`], // COPY-FLAG
@@ -210,9 +286,9 @@ function emitCreateOutcome(json: boolean, outcome: CreateOutcome): void {
   if (outcome.kind === 'branch-failed') {
     return refuse(json, {
       code: ERROR_CODES.BRANCH_CREATE_FAILED,
-      message: `Created project ${outcome.project.name}, but not its first branch ${outcome.branch}.`, // COPY-FLAG
+      message: `Created project ${outcome.project.name}, but not its first branch ${outcome.branch.name}.`, // COPY-FLAG
       exitCode: 1,
-      extra: { project: outcome.project, branch: { name: outcome.branch }, org: outcome.org },
+      extra: { project: outcome.project, branch: branchJson(outcome.branch), org: outcome.org },
     });
   }
   if (outcome.kind === 'exists') {
@@ -226,17 +302,18 @@ function emitCreateOutcome(json: boolean, outcome: CreateOutcome): void {
   }
   if (outcome.kind === 'dry-run') {
     if (json) {
-      console.log(JSON.stringify({ ok: true, dry_run: true, project: { name: outcome.name }, branch: { name: outcome.branch }, org: outcome.org }, null, 2));
+      console.log(JSON.stringify({ ok: true, dry_run: true, project: { name: outcome.name }, branch: branchJson(outcome.branch), org: outcome.org }, null, 2));
       return;
     }
-    console.log(`Dry run: would create project ${outcome.name} with branch ${outcome.branch} in ${outcome.org.name}. Nothing was created.`); // COPY-FLAG
+    console.log(`Dry run: would create project ${outcome.name} with branch ${outcome.branch.name} in ${outcome.org.name}. Nothing was created.`); // COPY-FLAG
     return;
   }
   if (json) {
-    console.log(JSON.stringify({ ok: true, project: outcome.project, branch: { name: outcome.branch }, org: outcome.org }, null, 2));
+    console.log(JSON.stringify({ ok: true, project: outcome.project, branch: branchJson(outcome.branch), org: outcome.org }, null, 2));
     return;
   }
-  console.log(`Created project ${outcome.project.name} with branch ${outcome.branch} in ${outcome.org.name}.`); // COPY-FLAG
+  console.log(`Created project ${outcome.project.name} with branch ${outcome.branch.name} in ${outcome.org.name}.`); // COPY-FLAG
+  if (outcome.branch.protected) console.log(`"${outcome.branch.name}" is a protected branch — access is invite-only`);
 }
 
 /** `capy org create-project [name] [--dry-run] [--json]` */
@@ -265,11 +342,21 @@ export async function createProjectCommand(name: string | undefined, opts: Creat
     });
   }
 
-  // A dry run asks nothing, and in a terminal the only thing left to do without a name or branch is ask.
-  if (opts.dryRun === true && (name === undefined || opts.branch === undefined) && !agentMode) {
+  if (opts.protectedAnswer !== undefined && opts.protectedAnswer !== PROTECTED_YES && opts.protectedAnswer !== PROTECTED_NO) {
+    return refuse(json, {
+      code: ERROR_CODES.BRANCH_PROTECTION_INVALID,
+      message: '--protected takes yes or no.', // COPY-FLAG
+      exitCode: 1,
+      extra: { options: [PROTECTED_YES, PROTECTED_NO] },
+    });
+  }
+
+  // A dry run asks nothing, and in a terminal the only thing left to do without a name, branch or protection is ask.
+  const missingSomething = name === undefined || opts.branch === undefined || opts.protectedAnswer === undefined;
+  if (opts.dryRun === true && missingSomething && !agentMode) {
     return refuse(json, {
       code: ERROR_CODES.DRY_RUN_UNSUPPORTED,
-      message: '`capy org create-project` would ask for the name or branch, so it cannot preview. Pass both.', // COPY-FLAG
+      message: '`capy org create-project` would ask for the name, branch or protection, so it cannot preview. Pass all three.', // COPY-FLAG
       exitCode: 1,
     });
   }

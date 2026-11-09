@@ -748,7 +748,8 @@ const orgCmd = program
 orgCmd
   .command('create-project [name]')
   .description('Create a project and its first branch in the active organization (owners and admins only; does not link this folder)') // COPY-FLAG
-  .option('--branch <name>', 'the first branch: an independent set of values for the project (offered by default: development)') // COPY-FLAG
+  .option('--branch <name>', 'the first branch; a Capy branch works like a git branch (offered by default: development)') // COPY-FLAG
+  .option('--protected <yes|no>', 'whether the first branch is protected (invite-only)') // COPY-FLAG
   .option('--non-tty', 'treat stdin as not a terminal: never ask for the name or branch; without them, refuse with a form to ask the human') // COPY-FLAG
   .option('--json', 'emit machine-readable JSON instead of the human UI')
   .action(async (name: string | undefined, _options: any, command: any) => {

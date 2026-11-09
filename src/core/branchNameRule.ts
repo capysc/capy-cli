@@ -16,8 +16,11 @@ export const BRANCH_NAME_MAX_LENGTH = 128;
 /** The branch a new project starts with unless someone picks another. Bare `capy` and `capy org` offer the same. */
 export const DEFAULT_FIRST_BRANCH = 'development';
 
-/** What a Capy branch is, word for word from the docs (using/branches/overview.mdx). */
-export const BRANCH_DESCRIPTION = 'A Capy branch is an independent set of values for the same project.';
+/** What a Capy branch is. Approved wording (Vince, 2026-11-09): use it verbatim. */
+export const BRANCH_DESCRIPTION = 'A Capy branch works like a git branch. Capy branches can be used to set different variables for different environments.';
+
+/** The question for the first branch. Approved wording (Vince, 2026-11-09): use it verbatim. */
+export const FIRST_BRANCH_QUESTION = 'What should its first branch be called?';
 
 export interface BranchNameProblem {
   readonly code: typeof ERROR_CODES.BRANCH_NAME_INVALID;

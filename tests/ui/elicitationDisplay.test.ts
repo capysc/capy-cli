@@ -44,13 +44,14 @@ describe('deleteProjectDisplay', () => {
 
 describe('createProjectDisplay', () => {
   const org = { id: 'org_1', name: 'Demos' };
-  const branchDescription = 'A Capy branch is an independent set of values for the same project.';
+  const branchDescription = 'A Capy branch works like a git branch. Capy branches can be used to set different variables for different environments.';
 
   it('shows the org, what is still to choose, and what a branch is', () => {
     const out = createProjectDisplay({ org, branchDescription });
     expect(out).toContain('| Org | Demos |');
     expect(out).toContain('| Project | to choose |');
     expect(out).toContain('| First branch | to choose |');
+    expect(out).toContain('| Protected | to choose |');
     expect(out.endsWith(`\n\n${branchDescription}`)).toBe(true);
   });
 

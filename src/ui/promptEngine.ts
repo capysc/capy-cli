@@ -51,6 +51,17 @@ export class PromptEngine {
     return String(branchName).trim();
   }
 
+  /** Asks whether a new branch is invite-only, with the same question `capy checkout -b` asks. Defaults to No. */
+  async promptForBranchProtected(branchName: string): Promise<boolean> {
+    const { protect } = await inquirer.prompt([{
+      type: 'confirm',
+      name: 'protect',
+      message: `Make "${branchName}" a protected branch? \x1b[90m(invite-only)\x1b[0m`,
+      default: false,
+    }]);
+    return protect === true;
+  }
+
   async promptForChanges(changeSet: ChangeSet, branch?: string): Promise<UserDecisions> {
     const decisions: UserDecisions = {
       pushVariables: [],
