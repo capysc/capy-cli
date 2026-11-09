@@ -421,12 +421,28 @@ export class CapyCommand {
     console.log(`Created local project "${projectName}" (this machine only).\n`);
 
     const projectState = await this.projectManager.detectProjectState();
-    await this.syncProject(projectState);
+    const outcome = await this.syncProject(projectState);
+
+    // First setup is the one moment the tracked keep.lock is Capy's to create: when the sync pinned the .env, the
+    // file the user commits carries those pins. "up-to-date" (nothing to pin) and "stopped" leave the first write.
+    if (outcome === 'changed' && !this.options.dryRun) this.writePinnedKeepOnFirstSetup();
 
     // One additional TTY-only prompt at the very end of a successful init —
     // skipped under --dry-run (a dry run must never prompt or write), and a
     // no-op if AGENTS.md/CLAUDE.md already has the section.
     if (!this.options.dryRun) await offerAgentsSetupAfterInit();
+  }
+
+  /**
+   * Local-only first setup: copies the keep.lock the sync just wrote (the working copy, which `readKeepFile` prefers)
+   * into the tracked file and stages it. `syncProject` is shared by every command and leaves the tracked file alone;
+   * only this first-setup path writes it.
+   */
+  private writePinnedKeepOnFirstSetup(): void {
+    const pinned = this.safeReadKeep();
+    if (pinned === null) return;
+    this.fileManager.writeInitialKeepFile(pinned);
+    this.stageKeepLock();
   }
 
   /** First run in this directory. */
