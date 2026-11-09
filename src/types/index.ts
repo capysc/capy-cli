@@ -897,7 +897,7 @@ export const ERROR_CODES = {
   PROJECT_NOT_DELETED: 'PROJECT_NOT_DELETED',
   /** Delete called on the org's system store (403). Reaches the client as a PERMISSION_DENIED whose `details.code` is this. */
   SYSTEM_STORE_IMMUTABLE: 'SYSTEM_STORE_IMMUTABLE',
-  /** `capy org delete-project` / `restore-project`: the name or id matched more than one project. The refusal lists the ids. */
+  /** `capy org delete-project` / `restore-project`: the name matched more than one project and there is no terminal to ask which. Exit 3 with a pick-one `elicitation` (a form whose field has `options`). */
   PROJECT_AMBIGUOUS: 'PROJECT_AMBIGUOUS',
   /** A destructive command needs a yes and there is no terminal to ask, and `--yes` was not passed. Exit 3. */
   CONFIRMATION_REQUIRED: 'CONFIRMATION_REQUIRED',

@@ -24,8 +24,9 @@ import { excludeSystemProject } from '../system/reservedProjectName';
 import { isInteractive, EXIT_NEEDS_INPUT } from '../ui/interactive';
 import { CapyError, ERROR_CODES } from '../types/index';
 import type { DeleteProjectResponse, LiveDeployTokenInfo } from '../service/serviceClient';
-import type { ElicitationConfirm } from '../ui/elicitation';
-import { deleteProjectDisplay } from '../ui/elicitationDisplay';
+import type { ElicitationConfirm, ElicitationForm } from '../ui/elicitation';
+import { chooseProjectDisplay, deleteProjectDisplay } from '../ui/elicitationDisplay';
+import { formatRelativeTime } from '../ui/relativeTime';
 import { variableBranchesFromKeep, type VariableBranches } from '../core/keepVariableNames';
 
 export interface ProjectLifecycleOpts {
@@ -71,6 +72,8 @@ interface ProjectRef {
   id: string;
   name: string;
   deleted_at?: string | null;
+  /** Absent from services that predate it. */
+  created_at?: string | null;
 }
 
 /** The 403 codes the service sends that reach the client as a PERMISSION_DENIED with the server's code in `details.code`. */
@@ -127,16 +130,6 @@ export function refusalFor(err: unknown): Refusal {
   if (code === ERROR_CODES.ORG_SELECTION_REQUIRED) {
     return { code, message: err.message, exitCode: EXIT_NEEDS_INPUT, extra: { orgs: Array.isArray(err.details?.orgs) ? err.details.orgs : [] } };
   }
-  if (code === ERROR_CODES.PROJECT_AMBIGUOUS) {
-    const matches: readonly ProjectRef[] = Array.isArray(err.details?.matches) ? err.details.matches : [];
-    return {
-      code,
-      message: err.message,
-      exitCode: 1,
-      extra: { matches: matches.map((m) => ({ id: m.id, name: m.name })) },
-      lines: matches.map((m) => `  ${m.id}  ${m.name}`),
-    };
-  }
   return { code, message: err.message, exitCode: 1 };
 }
 
@@ -189,19 +182,130 @@ function matchProjects(projects: readonly ProjectRef[], ref: string, preferDelet
   return preferDeleted && deleted.length > 0 ? deleted : matches;
 }
 
+/** A project id as the service mints them. */
+const PROJECT_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+type Resolved =
+  | { readonly kind: 'one'; readonly project: ProjectRef }
+  | { readonly kind: 'many'; readonly matches: readonly ProjectRef[] };
+
 /**
- * One project, or a coded refusal. No match is passed through as an id: the service answers PROJECT_NOT_FOUND for a typo,
- * and a non-owner (whose listing hides deleted projects) still gets the owner-only refusal rather than a vague "not found".
+ * What the name or id the person typed points at.
+ *
+ * A name that matches nothing is refused here with PROJECT_NOT_FOUND, before anything is read or asked. An id that
+ * matches nothing still goes to the service, which answers for it: not found, or the owner-only refusal for a non-owner
+ * (whose listing hides deleted projects).
  */
-function pickOne(projects: readonly ProjectRef[], ref: string, preferDeleted: boolean): ProjectRef {
+function resolveRef(projects: readonly ProjectRef[], ref: string, preferDeleted: boolean): Resolved {
   const matches = matchProjects(projects, ref, preferDeleted);
-  if (matches.length === 0) return { id: ref, name: ref };
-  if (matches.length === 1) return matches[0];
+  if (matches.length === 1) return { kind: 'one', project: matches[0] };
+  if (matches.length > 1) return { kind: 'many', matches };
+  if (PROJECT_ID_PATTERN.test(ref)) return { kind: 'one', project: { id: ref, name: ref } };
   throw new CapyError(
-    `More than one project matches "${ref}". Use the id.`, // COPY-FLAG
-    ERROR_CODES.PROJECT_AMBIGUOUS,
-    { matches },
+    `No project named ${ref} in this organization.`, // COPY-FLAG
+    ERROR_CODES.PROJECT_NOT_FOUND,
+    { name: ref },
   );
+}
+
+/** One of several projects with the same name, with what tells them apart. `variables` is undefined when it could not be read. */
+interface Candidate {
+  readonly project: ProjectRef;
+  readonly variables: number | undefined;
+}
+
+/** Each match with its variable count, oldest first. Best effort: an unreadable count is shown as such, never as 0. */
+async function candidatesOf(client: DeleteDetailsClient, matches: readonly ProjectRef[]): Promise<readonly Candidate[]> {
+  const candidates = await Promise.all(matches.map(async (project): Promise<Candidate> => {
+    const details = await readDeleteDetails(client, project.id);
+    return { project, variables: details.unavailable.includes('variables') ? undefined : details.variables.length };
+  }));
+  // A fresh copy sorted as it is built (the lib target predates toSorted); `candidates` itself is never changed.
+  return [...candidates].sort((a, b) => (a.project.created_at ?? '').localeCompare(b.project.created_at ?? ''));
+}
+
+/** "web · 45 variables · created 2 days ago": the name, the variable count, and how long ago it was created. */
+function candidateLabel(c: Candidate, now: Date): string {
+  const variables = c.variables === undefined
+    ? 'variables could not be read' // COPY-FLAG
+    : `${c.variables} ${c.variables === 1 ? 'variable' : 'variables'}`; // COPY-FLAG
+  const created = c.project.created_at ? [`created ${formatRelativeTime(c.project.created_at, now)}`] : []; // COPY-FLAG
+  return [c.project.name, variables, ...created].join(' · ');
+}
+
+/** The pick-one elicitation: the answer is a project id, and `rerun` carries it back into the same command. */
+function chooseElicitation(org: OrgRef, ref: string, candidates: readonly Candidate[], rerun: string): ElicitationForm {
+  const now = new Date();
+  const labels = candidates.map((c) => candidateLabel(c, now));
+  return {
+    kind: 'form',
+    question: `Which ${ref}?`, // COPY-FLAG
+    details: {
+      org: { id: org.id, name: org.name },
+      matches: candidates.map((c) => ({
+        id: c.project.id,
+        name: c.project.name,
+        created_at: c.project.created_at ?? null,
+        variables: c.variables ?? null,
+      })),
+    },
+    display: chooseProjectDisplay(labels),
+    fields: [{
+      name: 'project',
+      type: 'string',
+      pattern: `^(${candidates.map((c) => c.project.id).join('|')})$`,
+      options: candidates.map((c, i) => ({ value: c.project.id, label: labels[i] })),
+    }],
+    answer: { rerun },
+  };
+}
+
+type Picked =
+  | { readonly kind: 'picked'; readonly project: ProjectRef }
+  | { readonly kind: 'needs-choice'; readonly elicitation: ElicitationForm; readonly lines: readonly string[] };
+
+interface PickContext {
+  readonly json: boolean;
+  readonly agentMode: boolean;
+  readonly org: OrgRef;
+  readonly ref: string;
+  readonly client: DeleteDetailsClient;
+  /** The command that answers the choice, with `<project>` where the chosen id goes. */
+  readonly rerun: string;
+}
+
+/**
+ * The one project to act on. Several with the same name: in a terminal, an arrow-key list; with nobody to ask, the
+ * pick-one elicitation. Never a guess, and `--yes` never chooses.
+ */
+async function pickProject(resolved: Resolved, ctx: PickContext): Promise<Picked> {
+  if (resolved.kind === 'one') return { kind: 'picked', project: resolved.project };
+  const candidates = await candidatesOf(ctx.client, resolved.matches);
+  if (ctx.agentMode) {
+    const elicitation = chooseElicitation(ctx.org, ctx.ref, candidates, ctx.rerun);
+    return { kind: 'needs-choice', elicitation, lines: elicitation.fields[0].options?.map((o) => `  ${o.value}  ${o.label}`) ?? [] };
+  }
+  const now = new Date();
+  const { projectId } = await promptModuleFor(ctx.json)([{
+    type: 'list',
+    name: 'projectId',
+    message: `Which ${ctx.ref}?`, // COPY-FLAG
+    choices: candidates.map((c) => ({ name: candidateLabel(c, now), value: c.project.id })),
+  }]);
+  const chosen = candidates.find((c) => c.project.id === projectId);
+  if (chosen === undefined) throw new CapyError(`No project named ${ctx.ref} in this organization.`, ERROR_CODES.PROJECT_NOT_FOUND); // COPY-FLAG
+  return { kind: 'picked', project: chosen.project };
+}
+
+/** The refusal that hands the choice to the agent: PROJECT_AMBIGUOUS, exit 3, with the elicitation. */
+function choiceRefusal(picked: Extract<Picked, { kind: 'needs-choice' }>, ref: string): Refusal {
+  return {
+    code: ERROR_CODES.PROJECT_AMBIGUOUS,
+    message: `More than one project is named ${ref}.`, // COPY-FLAG
+    exitCode: EXIT_NEEDS_INPUT,
+    extra: { elicitation: picked.elicitation },
+    lines: picked.lines,
+  };
 }
 
 function refuseWithoutTerminal(json: boolean, what: string): never {
@@ -311,6 +415,7 @@ function deleteElicitation(
 type DeleteOutcome =
   | { readonly kind: 'dry-run'; readonly project: ProjectRef; readonly tokens: readonly LiveDeployTokenInfo[] }
   | { readonly kind: 'needs-confirmation'; readonly elicitation: ElicitationConfirm; readonly lines: readonly string[] }
+  | { readonly kind: 'needs-choice'; readonly refusal: Refusal }
   | { readonly kind: 'cancelled' }
   | { readonly kind: 'deleted'; readonly result: DeleteProjectResponse };
 
@@ -358,7 +463,16 @@ async function deleteFlow(ref: string, opts: DeleteProjectOpts): Promise<DeleteO
   // Agent mode never opens a prompt, not even to pick an organization.
   const { orgId, orgName, serviceClient } = await resolveOrgContext(opts.apiUrl, opts.devMode === true, { promptForOrg: !agentMode });
   const org: OrgRef = { id: orgId, name: orgName };
-  const project = pickOne(await serviceClient.listProjects(), ref, false);
+  const picked = await pickProject(resolveRef(await serviceClient.listProjects(), ref, false), {
+    json,
+    agentMode,
+    org,
+    ref,
+    client: serviceClient,
+    rerun: `capy org delete-project <project> ${force ? '--force ' : ''}--json`,
+  });
+  if (picked.kind === 'needs-choice') return { kind: 'needs-choice', refusal: choiceRefusal(picked, ref) };
+  const project = picked.project;
 
   // The token list is only read when it is shown: a dry run, or a person about to be asked.
   const asks = opts.dryRun !== true && opts.yes !== true;
@@ -403,6 +517,7 @@ function emitDeleteOutcome(json: boolean, force: boolean, outcome: DeleteOutcome
     console.log('Dry run: nothing was deleted.'); // COPY-FLAG
     return;
   }
+  if (outcome.kind === 'needs-choice') return refuse(json, outcome.refusal);
   if (outcome.kind === 'needs-confirmation') {
     return refuse(json, {
       code: ERROR_CODES.CONFIRMATION_REQUIRED,
@@ -434,13 +549,25 @@ export async function deleteProjectCommand(ref: string, opts: DeleteProjectOpts)
 
 type RestoreOutcome =
   | { readonly kind: 'cancelled' }
+  | { readonly kind: 'needs-choice'; readonly refusal: Refusal }
   | { readonly kind: 'restored'; readonly project: { readonly id: string; readonly name: string } };
 
 async function restoreFlow(ref: string, opts: ProjectLifecycleOpts): Promise<RestoreOutcome> {
   const json = opts.json === true;
-  const { orgId, serviceClient } = await resolveOrgContext(opts.apiUrl, opts.devMode === true);
+  const agentMode = !isInteractive(opts.nonTty);
+  const { orgId, orgName, serviceClient } = await resolveOrgContext(opts.apiUrl, opts.devMode === true);
   // Only an owner's `include_deleted` is honoured; for anyone else the service answers with the live projects, and the id still works.
-  const project = pickOne(await serviceClient.listProjects({ includeDeleted: true }), ref, true);
+  // With nobody to ask, this point is only reached with --yes (see restoreProjectCommand), so the rerun keeps it.
+  const picked = await pickProject(resolveRef(await serviceClient.listProjects({ includeDeleted: true }), ref, true), {
+    json,
+    agentMode,
+    org: { id: orgId, name: orgName },
+    ref,
+    client: serviceClient,
+    rerun: 'capy org restore-project <project> --yes --json',
+  });
+  if (picked.kind === 'needs-choice') return { kind: 'needs-choice', refusal: choiceRefusal(picked, ref) };
+  const project = picked.project;
 
   if (opts.yes !== true && !(await confirm(json, `Restore project ${project.name}?`))) return { kind: 'cancelled' }; // COPY-FLAG
 
@@ -449,6 +576,7 @@ async function restoreFlow(ref: string, opts: ProjectLifecycleOpts): Promise<Res
 }
 
 function emitRestoreOutcome(json: boolean, outcome: RestoreOutcome): void {
+  if (outcome.kind === 'needs-choice') return refuse(json, outcome.refusal);
   if (outcome.kind === 'cancelled') {
     if (json) console.log(JSON.stringify({ ok: false, code: ERROR_CODES.CANCELLED, error: 'Cancelled.' }, null, 2)); // COPY-FLAG
     else console.log('Cancelled.'); // COPY-FLAG
