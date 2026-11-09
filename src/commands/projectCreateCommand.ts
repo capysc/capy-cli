@@ -54,6 +54,7 @@ interface OrgRef {
 
 type CreateOutcome =
   | { readonly kind: 'needs-name'; readonly elicitation: ElicitationForm; readonly org: OrgRef }
+  | { readonly kind: 'exists'; readonly existing: { readonly id: string; readonly name: string }; readonly org: OrgRef }
   | { readonly kind: 'dry-run'; readonly name: string; readonly org: OrgRef }
   | { readonly kind: 'created'; readonly project: { readonly id: string; readonly name: string }; readonly org: OrgRef };
 
@@ -88,6 +89,27 @@ async function chooseName(typed: string | undefined, agentMode: boolean): Promis
   return new PromptEngine().promptForProjectName(new ProjectManager().getDefaultProjectName());
 }
 
+/** The client calls `createFlow` makes: resolving the org hands it over already signed in. */
+interface CreateClient {
+  listProjects(): Promise<ReadonlyArray<{ readonly id: string; readonly name: string; readonly organization_id: string }>>;
+  initializeProject(name: string, orgId: string): Promise<{ readonly project_id: string; readonly project_name: string }>;
+}
+
+/**
+ * A live project in `orgId` that already has this name, compared trimmed and ignoring case. The service itself
+ * allows two projects with one name, so this check is what stops a second one (an agent retrying, a typo in case).
+ * Deleted projects are not listed, so a deleted project's name can be used again.
+ */
+export function existingProjectNamed(
+  projects: ReadonlyArray<{ readonly id: string; readonly name: string; readonly organization_id: string }>,
+  orgId: string,
+  name: string,
+): { readonly id: string; readonly name: string } | undefined {
+  const wanted = name.trim().toLowerCase();
+  const match = projects.find((p) => p.organization_id === orgId && p.name.trim().toLowerCase() === wanted);
+  return match === undefined ? undefined : { id: match.id, name: match.name };
+}
+
 async function createFlow(typed: string | undefined, opts: CreateProjectOpts, agentMode: boolean): Promise<CreateOutcome> {
   // Agent mode never opens a prompt, not even to pick an organization.
   const { orgId, orgName, serviceClient } = await resolveOrgContext(opts.apiUrl, opts.devMode === true, { promptForOrg: !agentMode });
@@ -95,9 +117,13 @@ async function createFlow(typed: string | undefined, opts: CreateProjectOpts, ag
 
   const name = await chooseName(typed, agentMode);
   if (name === undefined) return { kind: 'needs-name', elicitation: nameForm(org), org };
+
+  const client: CreateClient = serviceClient;
+  const existing = existingProjectNamed(await client.listProjects(), orgId, name);
+  if (existing !== undefined) return { kind: 'exists', existing, org };
   if (opts.dryRun === true) return { kind: 'dry-run', name, org };
 
-  const created = await serviceClient.initializeProject(name, orgId);
+  const created = await client.initializeProject(name, orgId);
   return { kind: 'created', project: { id: created.project_id, name: created.project_name }, org };
 }
 
@@ -121,6 +147,15 @@ function emitCreateOutcome(json: boolean, outcome: CreateOutcome): void {
       exitCode: EXIT_NEEDS_INPUT,
       extra: { elicitation: outcome.elicitation },
       lines: [`  Organization: ${outcome.org.name}`], // COPY-FLAG
+    });
+  }
+  if (outcome.kind === 'exists') {
+    return refuse(json, {
+      code: ERROR_CODES.PROJECT_NAME_EXISTS,
+      message: 'This organization already has a project with that name.', // COPY-FLAG
+      exitCode: 1,
+      extra: { project: outcome.existing, org: outcome.org },
+      lines: [`  ${outcome.existing.id}  ${outcome.existing.name}`],
     });
   }
   if (outcome.kind === 'dry-run') {
