@@ -43,7 +43,18 @@ describe('deleteProjectDisplay', () => {
 });
 
 describe('createProjectDisplay', () => {
-  it('shows the org the project will be created in', () => {
-    expect(createProjectDisplay({ id: 'org_1', name: 'Demos' })).toContain('| Org | Demos |');
+  const org = { id: 'org_1', name: 'Demos' };
+  const branchDescription = 'A Capy branch is an independent set of values for the same project.';
+
+  it('shows the org, what is still to choose, and what a branch is', () => {
+    const out = createProjectDisplay({ org, branchDescription });
+    expect(out).toContain('| Org | Demos |');
+    expect(out).toContain('| Project | to choose |');
+    expect(out).toContain('| First branch | to choose |');
+    expect(out.endsWith(`\n\n${branchDescription}`)).toBe(true);
+  });
+
+  it('shows a name already given', () => {
+    expect(createProjectDisplay({ org, name: 'web', branchDescription })).toContain('| Project | web |');
   });
 });

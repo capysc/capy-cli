@@ -61,7 +61,25 @@ export function deleteProjectDisplay(input: DeleteDisplayInput): string {
   return `${summary}\n\n${variablesSection(input)}`;
 }
 
-/** The table for `capy org create-project` asking for a name: where the project will be created. */
-export function createProjectDisplay(org: { readonly id: string; readonly name: string }): string {
-  return table(['', ''], [['Org', org.name]]);
+export interface CreateDisplayInput {
+  readonly org: { readonly id: string; readonly name: string };
+  /** The name already given, if any. */
+  readonly name?: string;
+  /** The branch already given, if any. */
+  readonly branch?: string;
+  /** What a branch is, shown under the table. */
+  readonly branchDescription: string;
+}
+
+// COPY-FLAG: placeholder for a value still to be chosen.
+const TO_CHOOSE = 'to choose';
+
+/** The table for `capy org create-project` asking for its name and first branch: where it goes, what is chosen so far, and what a branch is. */
+export function createProjectDisplay(input: CreateDisplayInput): string {
+  const summary = table(['', ''], [
+    ['Org', input.org.name],
+    ['Project', input.name ?? TO_CHOOSE],
+    ['First branch', input.branch ?? TO_CHOOSE], // COPY-FLAG
+  ]);
+  return `${summary}\n\n${input.branchDescription}`;
 }

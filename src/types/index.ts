@@ -907,6 +907,12 @@ export const ERROR_CODES = {
   PROJECT_NAME_INVALID: 'PROJECT_NAME_INVALID',
   /** `capy org create-project`: the organization already has a project with that name (the service answered 409). Exit 1. */
   PROJECT_NAME_EXISTS: 'PROJECT_NAME_EXISTS',
+  /** `capy org create-project` with a name but no `--branch`, and nobody to ask (agent mode). The refusal carries an `elicitation` form. Exit 3. */
+  BRANCH_NAME_REQUIRED: 'BRANCH_NAME_REQUIRED',
+  /** `capy org create-project --branch`: a name the service would refuse (see `core/branchNameRule.ts`). Nothing is created. Exit 1. */
+  BRANCH_NAME_INVALID: 'BRANCH_NAME_INVALID',
+  /** `capy org create-project`: the project was created but its first branch was not. The refusal carries the project. Exit 1. */
+  BRANCH_CREATE_FAILED: 'BRANCH_CREATE_FAILED',
   /** A command that acts on "the active organization" has none (no keep.lock here) and the person belongs to several, with nobody to ask. Exit 3. */
   ORG_SELECTION_REQUIRED: 'ORG_SELECTION_REQUIRED',
   /** `GET /orgs/:orgId/repos` answered 404: the service predates project -> repo links. Never a failure of the command that asked. */

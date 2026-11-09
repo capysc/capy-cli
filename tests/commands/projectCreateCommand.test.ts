@@ -38,7 +38,17 @@ mock.module('../../src/core/orgContext', () => ({
   })),
 }));
 
-const fakePrompt = mock(async (_questions: unknown) => ({ projectName: 'typed-in-terminal' }));
+/** What the person "types" in a terminal, keyed by the prompt's `name`. */
+const TERMINAL_ANSWERS: Readonly<Record<string, string>> = {
+  projectName: 'typed-in-terminal',
+  initialBranchChoice: 'development',
+  branchName: 'typed-branch',
+};
+const answerFor = (questions: unknown, answers: Readonly<Record<string, string>>) => {
+  const name = (questions as ReadonlyArray<{ readonly name: string }>)[0].name;
+  return { [name]: answers[name] };
+};
+const fakePrompt = mock(async (questions: unknown) => answerFor(questions, TERMINAL_ANSWERS));
 mock.module('inquirer', () => ({
   default: { prompt: fakePrompt, createPromptModule: mock(() => fakePrompt) },
 }));
@@ -86,21 +96,29 @@ const setTTY = (value: boolean) => Object.defineProperty(process.stdin, 'isTTY',
 
 const requests = () => respond.mock.calls.map(([method, path, body]) => ({ method, path, body }));
 const creates = () => requests().filter((r) => r.method === 'POST' && r.path === '/projects');
+const branchCreates = () => requests()
+  .filter((r) => r.method === 'POST' && r.path === '/projects/proj_new/branches')
+  .map((r) => JSON.parse(r.body) as { name: string; is_protected: boolean });
+const BRANCH_DESCRIPTION = 'A Capy branch is an independent set of values for the same project.';
 
 const LIVE = [
   { id: 'proj_web', name: 'web', organization_id: 'org_1' },
   { id: 'proj_other_org', name: 'api', organization_id: 'org_2' },
 ];
 
-/** A service that lists `projects` and answers a create with `onCreate`. */
-function service(opts: { projects?: readonly object[]; onCreate?: (body: string) => Reply }) {
+/** A service that lists `projects`, answers a create with `onCreate` and a branch create with `onBranch`. */
+function service(opts: { projects?: readonly object[]; onCreate?: (body: string) => Reply; onBranch?: (body: string) => Reply }) {
   const { projects = LIVE, onCreate = (body: string) => {
     const { name } = JSON.parse(body) as { name: string };
     return reply(201, { id: 'proj_new', name, organization_id: 'org_1', s3_prefix: 'org_1/proj_new' });
+  }, onBranch = (body: string) => {
+    const { name, is_protected } = JSON.parse(body) as { name: string; is_protected: boolean };
+    return reply(201, { id: 'br_new', project_id: 'proj_new', name, is_protected });
   } } = opts;
   respond.mockImplementation((method, path, body) => {
     if (method === 'GET' && path.startsWith('/projects')) return reply(200, { projects });
     if (method === 'POST' && path === '/projects') return onCreate(body);
+    if (method === 'POST' && path === '/projects/proj_new/branches') return onBranch(body);
     return reply(500, { error: 'unexpected request' });
   });
 }
@@ -111,11 +129,12 @@ describe('capy org create-project', () => {
   beforeEach(() => {
     respond.mockReset();
     fakePrompt.mockClear();
+    fakePrompt.mockImplementation(async (questions: unknown) => answerFor(questions, TERMINAL_ANSWERS));
     setTTY(false);
   });
   afterEach(() => setTTY(false));
 
-  it('with no name in agent mode: PROJECT_NAME_REQUIRED (exit 3) and a form elicitation, creating nothing', async () => {
+  it('with no name in agent mode: PROJECT_NAME_REQUIRED (exit 3) and a form asking for name and branch, creating nothing', async () => {
     service({});
     const out = await capture(() => createProjectCommand(undefined, { json: true }));
 
@@ -123,19 +142,75 @@ describe('capy org create-project', () => {
     const body = JSON.parse(out.stdout);
     expect(body).toMatchObject({ ok: false, code: 'PROJECT_NAME_REQUIRED', elicitation: { kind: 'form' } });
     expect(body.elicitation.fields[0]).toMatchObject({ name: 'name', type: 'string', pattern: '^[a-zA-Z0-9-_]+$' });
+    expect(body.elicitation.fields[1]).toEqual({
+      name: 'branch',
+      type: 'string',
+      pattern: '^[a-zA-Z0-9][a-zA-Z0-9._-]*$',
+      default: 'development',
+      description: BRANCH_DESCRIPTION,
+    });
+    expect(body.elicitation.answer).toEqual({ rerun: 'capy org create-project <name> --branch <branch> --json' });
     expect(body.elicitation.details).toEqual({ org: { id: 'org_1', name: 'Acme' } });
     expect(body.elicitation.display).toContain('| Org | Acme |');
+    expect(body.elicitation.display).toContain(BRANCH_DESCRIPTION);
     expect(creates()).toEqual([]);
     expect(fakePrompt).not.toHaveBeenCalled();
   });
 
-  it('creates the project with the name given', async () => {
+  it('with a name but no --branch in agent mode: BRANCH_NAME_REQUIRED (exit 3), the form keeps the name, creating nothing', async () => {
     service({});
     const out = await capture(() => createProjectCommand('new-app', { json: true }));
 
+    expect(out.exitCode).toBe(3);
+    const body = JSON.parse(out.stdout);
+    expect(body).toMatchObject({ ok: false, code: 'BRANCH_NAME_REQUIRED', elicitation: { kind: 'form' } });
+    expect(body.elicitation.fields.map((f: { name: string; default?: string }) => [f.name, f.default])).toEqual([
+      ['name', 'new-app'],
+      ['branch', 'development'],
+    ]);
+    expect(body.elicitation.display).toContain('| Project | new-app |');
+    expect(creates()).toEqual([]);
+    expect(fakePrompt).not.toHaveBeenCalled();
+  });
+
+  it('creates the project, then its first branch, unprotected', async () => {
+    service({});
+    const out = await capture(() => createProjectCommand('new-app', { json: true, branch: 'staging' }));
+
     expect(out.exitCode).toBeUndefined();
-    expect(JSON.parse(out.stdout)).toEqual({ ok: true, project: { id: 'proj_new', name: 'new-app' }, org: { id: 'org_1', name: 'Acme' } });
+    expect(JSON.parse(out.stdout)).toEqual({
+      ok: true,
+      project: { id: 'proj_new', name: 'new-app' },
+      branch: { name: 'staging' },
+      org: { id: 'org_1', name: 'Acme' },
+    });
     expect(creates().map((r) => JSON.parse(r.body))).toEqual([{ name: 'new-app', organization_id: 'org_1' }]);
+    expect(branchCreates()).toEqual([{ name: 'staging', is_protected: false }]);
+  });
+
+  it('the project is made but its branch is not: BRANCH_CREATE_FAILED with the project, so nobody thinks nothing happened', async () => {
+    service({ onBranch: () => reply(500, { error: 'boom' }) });
+    const out = await capture(() => createProjectCommand('new-app', { json: true, branch: 'development' }));
+
+    expect(out.exitCode).toBe(1);
+    expect(JSON.parse(out.stdout)).toMatchObject({
+      ok: false,
+      code: 'BRANCH_CREATE_FAILED',
+      project: { id: 'proj_new', name: 'new-app' },
+      branch: { name: 'development' },
+    });
+  });
+
+  it('a branch name the service would refuse: BRANCH_NAME_INVALID before any request', async () => {
+    service({});
+    const bad = ['-dev', 'a..b', 'has space', 'x'.repeat(129)];
+    const outs = await bad.reduce<Promise<readonly Captured[]>>(
+      async (acc, branch) => [...(await acc), await capture(() => createProjectCommand('new-app', { json: true, branch }))],
+      Promise.resolve([]),
+    );
+
+    expect(outs.map((o) => [o.exitCode, JSON.parse(o.stdout).code])).toEqual(bad.map(() => [1, 'BRANCH_NAME_INVALID']));
+    expect(requests()).toEqual([]);
   });
 
   it('a name a live project in the org already has: PROJECT_NAME_EXISTS, creating nothing (ignores case and spaces)', async () => {
@@ -149,7 +224,7 @@ describe('capy org create-project', () => {
 
   it('a name used only in another org is not a clash', async () => {
     service({});
-    const out = await capture(() => createProjectCommand('api', { json: true }));
+    const out = await capture(() => createProjectCommand('api', { json: true, branch: 'development' }));
 
     expect(out.exitCode).toBeUndefined();
     expect(creates()).toHaveLength(1);
@@ -175,30 +250,56 @@ describe('capy org create-project', () => {
 
   it('--dry-run checks the name (including clashes) and creates nothing', async () => {
     service({});
-    const ok = await capture(() => createProjectCommand('new-app', { json: true, dryRun: true }));
-    expect(JSON.parse(ok.stdout)).toMatchObject({ ok: true, dry_run: true, project: { name: 'new-app' } });
+    const ok = await capture(() => createProjectCommand('new-app', { json: true, dryRun: true, branch: 'development' }));
+    expect(JSON.parse(ok.stdout)).toMatchObject({ ok: true, dry_run: true, project: { name: 'new-app' }, branch: { name: 'development' } });
 
-    const clash = await capture(() => createProjectCommand('web', { json: true, dryRun: true }));
+    const clash = await capture(() => createProjectCommand('web', { json: true, dryRun: true, branch: 'development' }));
     expect(JSON.parse(clash.stdout).code).toBe('PROJECT_NAME_EXISTS');
     expect(creates()).toEqual([]);
+    expect(branchCreates()).toEqual([]);
   });
 
   it('the free-tier limit keeps its code', async () => {
     service({ onCreate: () => reply(402, { error: 'limit', code: 'QUOTA_EXCEEDED', kind: 'project', limit: 3 }) });
-    const out = await capture(() => createProjectCommand('new-app', { json: true }));
+    const out = await capture(() => createProjectCommand('new-app', { json: true, branch: 'development' }));
 
     expect(out.exitCode).toBe(1);
     expect(JSON.parse(out.stdout).code).toBe('QUOTA_EXCEEDED');
+    expect(branchCreates()).toEqual([]);
   });
 
-  it('in a terminal with no name: asks with the init prompt, then creates', async () => {
+  it('in a terminal with nothing given: asks the name, says what a branch is, asks the branch, then creates both', async () => {
     setTTY(true);
     service({});
     const out = await capture(() => createProjectCommand(undefined, {}));
 
-    expect(fakePrompt).toHaveBeenCalledTimes(1);
+    expect(fakePrompt.mock.calls.map(([q]) => (q as ReadonlyArray<{ name: string }>)[0].name)).toEqual(['projectName', 'initialBranchChoice']);
+    expect(out.stdout).toContain(BRANCH_DESCRIPTION);
     expect(out.exitCode).toBeUndefined();
     expect(creates().map((r) => JSON.parse(r.body).name)).toEqual(['typed-in-terminal']);
+    expect(branchCreates()).toEqual([{ name: 'development', is_protected: false }]);
+  });
+
+  it('in a terminal, "another branch" asks for its name', async () => {
+    setTTY(true);
+    service({});
+    fakePrompt.mockImplementation(async (questions: unknown) =>
+      answerFor(questions, { ...TERMINAL_ANSWERS, initialBranchChoice: 'other' }));
+    const out = await capture(() => createProjectCommand('new-app', {}));
+    fakePrompt.mockImplementation(async (questions: unknown) => answerFor(questions, TERMINAL_ANSWERS));
+
+    expect(out.exitCode).toBeUndefined();
+    expect(branchCreates()).toEqual([{ name: 'typed-branch', is_protected: false }]);
+  });
+
+  it('in a terminal, a name that clashes is refused before the branch is asked', async () => {
+    setTTY(true);
+    service({});
+    const out = await capture(() => createProjectCommand('web', {}));
+
+    expect(out.exitCode).toBe(1);
+    expect(fakePrompt).not.toHaveBeenCalled();
+    expect(creates()).toEqual([]);
   });
 });
 
