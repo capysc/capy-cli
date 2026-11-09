@@ -735,7 +735,7 @@ program
 
 const orgCmd = program
   .command('org')
-  .description('Switch organization')
+  .description('Switch organization; create, delete or restore its projects') // COPY-FLAG
   .option('--non-tty', 'treat stdin as not a terminal; differences from Capy stop the switch with the conflict_id (agents/CI)') // COPY-FLAG
   .addOption(resolveOption())
   .addOption(conflictOption())

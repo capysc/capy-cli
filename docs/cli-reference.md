@@ -468,7 +468,7 @@ JSON support: yes (`--json`)
 
 ## `capy org`
 
-Switch organization
+Switch organization; create, delete or restore its projects
 
 ```
 capy org [options]
