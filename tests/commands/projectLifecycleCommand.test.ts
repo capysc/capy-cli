@@ -138,14 +138,14 @@ describe('capy org delete-project', () => {
   afterEach(() => setTTY(false));
 
   describe('confirmation', () => {
-    it('off a terminal without --yes: refuses with CONFIRMATION_REQUIRED (exit 3) before any request', async () => {
+    it('off a terminal without --yes: refuses with CONFIRMATION_REQUIRED (exit 3) and a confirm elicitation, writing nothing', async () => {
       service({ onWrite: () => deleted('proj_web', 'web') });
 
       const out = await capture(() => deleteProjectCommand('web', { json: true }));
 
       expect(out.exitCode).toBe(3);
-      expect(JSON.parse(out.stdout)).toMatchObject({ ok: false, code: 'CONFIRMATION_REQUIRED' });
-      expect(requests()).toEqual([]);
+      expect(JSON.parse(out.stdout)).toMatchObject({ ok: false, code: 'CONFIRMATION_REQUIRED', elicitation: { kind: 'confirm' } });
+      expect(writes()).toEqual([]);
       expect(fakePrompt).not.toHaveBeenCalled();
     });
 
@@ -157,7 +157,8 @@ describe('capy org delete-project', () => {
 
       expect(out.exitCode).toBe(3);
       expect(JSON.parse(out.stdout).code).toBe('CONFIRMATION_REQUIRED');
-      expect(requests()).toEqual([]);
+      expect(writes()).toEqual([]);
+      expect(fakePrompt).not.toHaveBeenCalled();
     });
 
     it('the prompt defaults to no, and shows the project and its live tokens first', async () => {
