@@ -159,6 +159,18 @@ afterEach(() => {
 
 // ── The worlds ──────────────────────────────────────────────────────────────
 
+/** `blob` with the lines of `names` taken from `foreign` (a blob of the same branch encrypted with another key). */
+function mixedBlob(blob: string, foreign: string, names: readonly string[]): string {
+  const foreignLines = Object.fromEntries(foreign.split('\n').map((line) => [line.slice(0, line.indexOf('=')), line]));
+  return blob
+    .split('\n')
+    .map((line) => {
+      const name = line.slice(0, line.indexOf('='));
+      return names.includes(name) ? (foreignLines[name] ?? line) : line;
+    })
+    .join('\n');
+}
+
 interface World {
   readonly server: ReturnType<typeof fakeCapyServer>;
   readonly folder: Folder;
@@ -179,8 +191,13 @@ function world(opts: {
   readonly branches?: Record<string, Record<string, string>>;
   /** What keep.lock pins, when it is not what Capy holds now (a teammate saved since). */
   readonly pinned?: Record<string, Record<string, string>>;
+  /** Names whose value on Capy was encrypted with a key this profile does not hold (the rest are readable). */
+  readonly unreadable?: readonly string[];
 }): World {
-  const seed = seedServer({ projectKey: opts.serverKey ?? KEY, values: opts.branches ?? { [DEV]: VALUES, [STAGING]: STAGING_VALUES } });
+  const values = opts.branches ?? { [DEV]: VALUES, [STAGING]: STAGING_VALUES };
+  const readable = seedServer({ projectKey: opts.serverKey ?? KEY, values });
+  const foreign = seedServer({ projectKey: OTHER_KEY, values });
+  const seed = opts.unreadable === undefined ? readable : { ...readable, blobs: Object.fromEntries(Object.entries(readable.blobs).map(([hash, blob]) => [hash, mixedBlob(blob, foreign.blobs[hash] ?? blob, opts.unreadable ?? [])])) };
   const server = fakeCapyServer({ initial: seed });
   serverOf.mockReturnValue(server);
   const pins = opts.pinned === undefined ? seed : seedServer({ projectKey: KEY, values: opts.pinned });
@@ -338,12 +355,15 @@ describe('A1. `.env` missing, `.capy/branch` set, off a terminal (--json / --non
     noWrites(w);
   });
 
-  test('when `--resolve` answers are given the person is deciding rows, so they are applied as before: `local` has no local value and is refused; nothing is sent', async () => {
+  test('when `--resolve` answers are given the person is deciding rows, so they are applied as before: `local` has no local value and is refused (SECRETS_RESOLVE_INVALID; as a command, exit 1); no file, nothing sent', async () => {
     const w = world({ env: 'missing' });
     const first = await run(() => new CapyCommand({ protocol: true, dryRun: true }).execute());
     const id = jsonOf(first.stdout).conflict_id;
-    const r = await run(() => new CapyCommand({ protocol: true, conflictFlags: { resolve: ['A=local', 'B=local', 'C=local'], conflict: id } }).execute());
-    expect(r.exit === undefined ? r.error?.code : 'exited').toBeDefined();
+    const flags = { resolve: ['A=local', 'B=local', 'C=local'], conflict: id };
+    const sync = await run(() => new CapyCommand({ protocol: true, conflictFlags: flags }).runSync());
+    expect(sync.error?.code).toBe(ERROR_CODES.SECRETS_RESOLVE_INVALID);
+    const command = await run(() => new CapyCommand({ protocol: true, conflictFlags: flags }).execute());
+    expect(command.exit).toBe(1);
     expect(existsSync(envPath(w.folder))).toBe(false);
     noWrites(w);
   });
@@ -355,6 +375,19 @@ describe('A1. `.env` missing, `.capy/branch` set, off a terminal (--json / --non
     const r = await run(() => new CapyCommand({ protocol: true, conflictFlags: { resolve: ['A=pinned', 'B=pinned', 'C=delete'], conflict: id } }).runSync());
     expect(r.exit).toBeUndefined();
     expect(serverValues(w.server.state(), DEV, KEY)).toEqual({ A: VALUES.A, B: VALUES.B });
+  });
+
+  test('`--env-path` pointing at a file that does not exist: nothing is retrieved, the default `.env` (with its local edit and local-only variable) is left byte for byte, and the run stops as before (exit 3, SECRETS_CONFLICT); nothing is sent', async () => {
+    const w = world({ env: 'present', local: { A: 'a-EDITED-HERE', B: VALUES.B, C: VALUES.C, LOCAL_ONLY: 'only-here' } });
+    const before = readFileSync(envPath(w.folder), 'utf-8');
+    const keepBefore = keepBytes(w.folder);
+    const r = await run(() => new CapyCommand({ protocol: true, envPath: join(w.folder.dir, 'custom.env') }).execute());
+    expect(r.exit).toBe(3);
+    expect(jsonOf(r.stdout)).toMatchObject({ ok: false, code: ERROR_CODES.SECRETS_CONFLICT });
+    expect(readFileSync(envPath(w.folder), 'utf-8')).toBe(before);
+    expect(existsSync(join(w.folder.dir, 'custom.env'))).toBe(false);
+    expect(keepBytes(w.folder)).toEqual(keepBefore);
+    noWrites(w);
   });
 
   test('`--env-path`: the file looked at is that path. A complete file there is a local copy, so nothing is retrieved', async () => {
@@ -710,6 +743,17 @@ describe('G. off a terminal, `.env` missing and the pinned snapshot cannot be fe
     expect(r.exit).toBe(1);
     expect(JSON.parse(r.stdout)).toMatchObject({ ok: false, code: ERROR_CODES.SNAPSHOT_NOT_FOUND });
     expect(existsSync(envPath(w.folder))).toBe(false);
+    noWrites(w);
+  });
+
+  test('only SOME pinned values can be read with this key (B is not): NO file is written, keep.lock is byte for byte, nothing is sent, and the same code ends the run (exit 1)', async () => {
+    const w = world({ env: 'missing', unreadable: ['B'] });
+    const keepBefore = keepBytes(w.folder);
+    const r = await run(() => new PushCommand().execute({ nonTty: true }));
+    expect(r.exit).toBe(1);
+    expect(r.stderr).toContain(ERROR_CODES.DECRYPT_KEY_MISMATCH);
+    expect(existsSync(envPath(w.folder))).toBe(false);
+    expect(keepBytes(w.folder)).toEqual(keepBefore);
     noWrites(w);
   });
 
