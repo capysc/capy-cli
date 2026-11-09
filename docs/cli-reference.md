@@ -484,7 +484,7 @@ JSON support: no
 
 ### `capy org create-project`
 
-Create a project in the active organization (owners and admins only; does not link this folder)
+Create a project and its first branch in the active organization (owners and admins only; does not link this folder)
 
 ```
 capy org create-project [name] [options]
@@ -492,7 +492,8 @@ capy org create-project [name] [options]
 
 | Option | Description | Default |
 |---|---|---|
-| `--non-tty` | treat stdin as not a terminal: never ask for the name; with no name, refuse with a form to ask the human |  |
+| `--branch <name>` | the first branch: an independent set of values for the project (offered by default: development) |  |
+| `--non-tty` | treat stdin as not a terminal: never ask for the name or branch; without them, refuse with a form to ask the human |  |
 | `--json` | emit machine-readable JSON instead of the human UI |  |
 
 JSON support: yes (`--json`)
@@ -1134,6 +1135,9 @@ Every refusal carries a stable `code` — branch on it, never on message text.
 - `PROJECT_NAME_REQUIRED`
 - `PROJECT_NAME_INVALID`
 - `PROJECT_NAME_EXISTS`
+- `BRANCH_NAME_REQUIRED`
+- `BRANCH_NAME_INVALID`
+- `BRANCH_CREATE_FAILED`
 - `ORG_SELECTION_REQUIRED`
 - `REPO_LINKS_UNSUPPORTED`
 - `DRY_RUN_UNSUPPORTED`
@@ -1161,4 +1165,4 @@ Every refusal carries a stable `code` — branch on it, never on message text.
 - **JSON**: Pass --json on any command whose supportsJson is true and parse stdout as JSON; prose (progress, prompts, errors) goes to stderr so stdout stays pure JSON.
 - **Codes**: Branch only on the machine-readable `code` field (from --json output or a CapyError), never on human-readable message text — messages may be reworded without notice.
 - **Conflicts**: Every command that writes from a folder (edit, add, remove, connect, rotate, push, checkout, org, deploy, deploy revoke, deploy targets-remove) runs bare `capy` first; `checkout -b` is the one exception (a new branch carries the uncommitted values of the folder). Off a terminal, if the folder and Capy differ on any variable, nothing is written, the exit code is 3, and stdout is {ok:false, code:"SECRETS_CONFLICT", conflict_id, conflicts:[{name, project, branch, type, pinned, local, remote}]} (fingerprints only, never values; a Dokploy value has {name, target, pinned, local, remote}). Ask the person, then rerun the same command with --resolve NAME=pinned|local|remote|delete for every row (NAME@TARGET=local|remote for a Dokploy value) and --conflict <conflict_id>. A state that moved since is SECRETS_CONFLICT_STALE with the fresh rows. There is no resolve-all.
-- **Elicitation**: A refusal with exit code 3 can carry an `elicitation` next to its `code`: a question for the human, never for you. End your reply with `display` (a markdown table) exactly as given, without shortening or reordering it, then the short `question`, and stop. Never use a question box or a preview for it; the human answers in chat. kind "confirm" is a yes/no ({kind, question, details, display, answer:{yes}}): ask the human; on yes, run the command in `answer.yes`; on no, stop. kind "form" asks for values ({kind, question, details, display, fields:[{name, type, pattern, default?}], answer:{rerun}}): ask the human for each field, then run `answer.rerun` with the values filled in. `details` holds names and ids only, never a value. Today: `capy org delete-project` without --yes refuses with CONFIRMATION_REQUIRED and a confirm (details: {org:{id,name}, project:{id,name}, branches:[name], variables:[{name, branches:[name]}], live_deploy_tokens:[{deploy_id, label}], unavailable?:["branches"|"variables"]}); `capy org create-project` with no name in agent mode refuses with PROJECT_NAME_REQUIRED and a form (details: {org:{id,name}}). Never answer it yourself and never add --yes on your own.
+- **Elicitation**: A refusal with exit code 3 can carry an `elicitation` next to its `code`: a question for the human, never for you. End your reply with `display` (a markdown table) exactly as given, without shortening or reordering it, then the short `question`, and stop. Never use a question box or a preview for it; the human answers in chat. kind "confirm" is a yes/no ({kind, question, details, display, answer:{yes}}): ask the human; on yes, run the command in `answer.yes`; on no, stop. kind "form" asks for values ({kind, question, details, display, fields:[{name, type, pattern, default?, description?, options?:[{value, label}]}], answer:{rerun}}): ask the human for each field, then run `answer.rerun` with the values filled in. A field with `options` is a choice: the human picks a `label`, and you fill in its `value`. `details` holds names and ids only, never a value. Today: `capy org delete-project` without --yes refuses with CONFIRMATION_REQUIRED and a confirm (details: {org:{id,name}, project:{id,name}, branches:[name], variables:[{name, branches:[name]}], live_deploy_tokens:[{deploy_id, label}], unavailable?:["branches"|"variables"]}); `capy org create-project` missing the name or `--branch` in agent mode refuses with PROJECT_NAME_REQUIRED or BRANCH_NAME_REQUIRED and a form (fields: name, branch; details: {org:{id,name}}); `capy org delete-project` / `restore-project` with a name several projects share refuses with PROJECT_AMBIGUOUS and a form with one `project` field whose options are the projects (details: {org:{id,name}, matches:[{id, name, created_at, variables}]}). Never answer it yourself and never add --yes on your own.
