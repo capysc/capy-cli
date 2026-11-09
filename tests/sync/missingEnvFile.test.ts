@@ -27,6 +27,9 @@ import { makeFolder, removeFolder, type Folder } from '../helpers/folderWorld';
 import { removeAndSync, type ResolvedContext } from '../../src/commands/connectors/shared';
 import { ensureInSync, gateFirst, syncFolder } from '../../src/sync/gate';
 import { findDirtyBranchIssue } from '../../src/commands/checkoutCommand';
+import { Encryptor } from '../../src/crypto/encryptor';
+import { deriveResourceId } from '../../src/crypto/resourceId';
+import { SyncEngine } from '../../src/sync/syncEngine';
 import { CapyError, ERROR_CODES, type KeepFile } from '../../src/types/index';
 
 const KEY = FIXED_PROJECT_KEY;
@@ -159,6 +162,28 @@ afterEach(() => {
 
 // ── The worlds ──────────────────────────────────────────────────────────────
 
+type Seed = ReturnType<typeof seedServer>;
+const MARKER = { provider: 'vercel', reason: 'sensitive_unreadable' } as const;
+
+/** `seed` where `names` are placeholders on `development` (keep.lock entries with a marker and no hash; no snapshot line). */
+function withPlaceholders(seed: Seed, names: readonly string[]): Seed {
+  if (names.length === 0 || seed.keep === undefined) return seed;
+  const before = SyncEngine.computeKeepHash(seed.keep, DEV);
+  const keep: KeepFile = {
+    ...seed.keep,
+    variables: { ...seed.keep.variables, ...Object.fromEntries(names.map((name) => [name, [{ resource_id: deriveResourceId(DEV, name), branch: DEV, value_hash: '', placeholder: MARKER }]])) },
+  };
+  return { keep, blobs: { ...seed.blobs, [SyncEngine.computeKeepHash(keep, DEV)]: seed.blobs[before] } };
+}
+
+/** `seed` whose `development` snapshot also holds lines for `extra` (name -> value) that keep.lock does not pin. */
+function withUnpinnedLines(seed: Seed, extra: Record<string, string>): Seed {
+  if (Object.keys(extra).length === 0 || seed.keep === undefined) return seed;
+  const hash = SyncEngine.computeKeepHash(seed.keep, DEV);
+  const lines = Object.entries(extra).map(([name, value]) => `${name}=capy:${deriveResourceId(DEV, name)}:${Encryptor.encrypt(value, KEY)}`);
+  return { ...seed, blobs: { ...seed.blobs, [hash]: [seed.blobs[hash], ...lines].join('\n') } };
+}
+
 /** `blob` with the lines of `names` taken from `foreign` (a blob of the same branch encrypted with another key). */
 function mixedBlob(blob: string, foreign: string, names: readonly string[]): string {
   const foreignLines = Object.fromEntries(foreign.split('\n').map((line) => [line.slice(0, line.indexOf('=')), line]));
@@ -193,10 +218,15 @@ function world(opts: {
   readonly pinned?: Record<string, Record<string, string>>;
   /** Names whose value on Capy was encrypted with a key this profile does not hold (the rest are readable). */
   readonly unreadable?: readonly string[];
+  /** Lines on `development`'s snapshot that keep.lock does NOT pin (name -> value). */
+  readonly unpinned?: Record<string, string>;
+  /** Names that are placeholders on `development` (a typed flag in keep.lock, no value, no line in the snapshot). */
+  readonly placeholders?: readonly string[];
 }): World {
   const values = opts.branches ?? { [DEV]: VALUES, [STAGING]: STAGING_VALUES };
-  const readable = seedServer({ projectKey: opts.serverKey ?? KEY, values });
+  const plain = seedServer({ projectKey: opts.serverKey ?? KEY, values });
   const foreign = seedServer({ projectKey: OTHER_KEY, values });
+  const readable = withUnpinnedLines(withPlaceholders(plain, opts.placeholders ?? []), opts.unpinned ?? {});
   const seed = opts.unreadable === undefined ? readable : { ...readable, blobs: Object.fromEntries(Object.entries(readable.blobs).map(([hash, blob]) => [hash, mixedBlob(blob, foreign.blobs[hash] ?? blob, opts.unreadable ?? [])])) };
   const server = fakeCapyServer({ initial: seed });
   serverOf.mockReturnValue(server);
@@ -755,6 +785,27 @@ describe('G. off a terminal, `.env` missing and the pinned snapshot cannot be fe
     expect(existsSync(envPath(w.folder))).toBe(false);
     expect(keepBytes(w.folder)).toEqual(keepBefore);
     noWrites(w);
+  });
+
+  test('the snapshot holds a name keep.lock does NOT pin (D): NO file is written (it would gain a pin), keep.lock is byte for byte, nothing is sent, the same code ends the run (exit 1)', async () => {
+    const w = world({ env: 'missing', unpinned: { D: 'd-1' } });
+    const keepBefore = keepBytes(w.folder);
+    const r = await run(() => new PushCommand().execute({ nonTty: true }));
+    expect(r.exit).toBe(1);
+    expect(r.stderr).toContain(ERROR_CODES.DECRYPT_KEY_MISMATCH);
+    expect(existsSync(envPath(w.folder))).toBe(false);
+    expect(keepBytes(w.folder)).toEqual(keepBefore);
+    noWrites(w);
+  });
+
+  test('a normal snapshot with a placeholder entry (P: pinned as a placeholder, no line in the snapshot) is NOT refused: the file gets exactly the real values, keep.lock byte for byte, nothing sent', async () => {
+    const w = world({ env: 'missing', placeholders: ['P'] });
+    expect(w.folder.keep().variables.P?.[0]?.placeholder).toBeDefined();
+    const keepBefore = keepBytes(w.folder);
+    const r = await run(() => new PushCommand().execute({ nonTty: true }));
+    expect(r.exit).toBeUndefined();
+    expect(r.error).toBeUndefined();
+    expectRetrieved(w, VALUES, keepBefore);
   });
 
   test('the service cannot be reached: the failure keeps its own code (NETWORK_ERROR), exit 1, no file', async () => {
