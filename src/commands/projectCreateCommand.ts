@@ -18,6 +18,7 @@ import { PROJECT_NAME_PATTERN_SOURCE, projectNameProblem } from '../core/project
 import { PromptEngine } from '../ui/promptEngine';
 import { isInteractive, EXIT_NEEDS_INPUT } from '../ui/interactive';
 import type { ElicitationForm } from '../ui/elicitation';
+import { createProjectDisplay } from '../ui/elicitationDisplay';
 import { CapyError, ERROR_CODES } from '../types/index';
 import { refuse, refusalFor, settle, type Refusal } from './projectLifecycleCommand';
 
@@ -69,6 +70,7 @@ function nameForm(org: OrgRef): ElicitationForm {
     kind: 'form',
     question: 'What should the project be called?', // COPY-FLAG
     details: { org: { id: org.id, name: org.name } },
+    display: createProjectDisplay(org),
     fields: [{
       name: 'name',
       type: 'string',

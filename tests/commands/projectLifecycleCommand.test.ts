@@ -36,6 +36,7 @@ client.setTokenProvider((async () => ({ access_token: 'test-token' })) as never)
 mock.module('../../src/core/orgContext', () => ({
   resolveOrgContext: mock(async () => ({
     orgId: 'org_1',
+    orgName: 'Acme',
     userId: 'user_1',
     userEmail: 'owner@example.com',
     authService: {},

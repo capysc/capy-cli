@@ -25,6 +25,7 @@ import { isInteractive, EXIT_NEEDS_INPUT } from '../ui/interactive';
 import { CapyError, ERROR_CODES } from '../types/index';
 import type { DeleteProjectResponse, LiveDeployTokenInfo } from '../service/serviceClient';
 import type { ElicitationConfirm } from '../ui/elicitation';
+import { deleteProjectDisplay } from '../ui/elicitationDisplay';
 import { variableBranchesFromKeep, type VariableBranches } from '../core/keepVariableNames';
 
 export interface ProjectLifecycleOpts {
@@ -295,6 +296,14 @@ function deleteElicitation(
       live_deploy_tokens: tokens.map((t) => ({ deploy_id: t.deploy_id, label: t.label })),
       ...(details.unavailable.length > 0 ? { unavailable: details.unavailable } : {}),
     },
+    display: deleteProjectDisplay({
+      org,
+      project,
+      branches: details.branches,
+      variables: details.variables,
+      liveDeployTokens: tokens,
+      unavailable: details.unavailable,
+    }),
     answer: { yes: deleteYesCommand(project.id, force) },
   };
 }
