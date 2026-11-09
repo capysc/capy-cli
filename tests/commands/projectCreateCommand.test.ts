@@ -9,6 +9,7 @@ import { describe, it, expect, spyOn, mock, afterAll, beforeEach, afterEach } fr
  */
 
 import { ServiceClient } from '../../src/service/serviceClient';
+import { ProjectManager } from '../../src/core/projectManager';
 
 type Reply = { readonly status: number; readonly body: unknown };
 const reply = (status: number, body: unknown): Reply => ({ status, body });
@@ -155,6 +156,20 @@ describe('capy org create-project', () => {
     expect(body.elicitation.display).toContain(BRANCH_DESCRIPTION);
     expect(creates()).toEqual([]);
     expect(fakePrompt).not.toHaveBeenCalled();
+  });
+
+  it('the folder name is suggested only when no live project in the org has it', async () => {
+    service({});
+    const folder = spyOn(ProjectManager.prototype, 'getDefaultProjectName');
+
+    folder.mockReturnValue('web');
+    const taken = JSON.parse((await capture(() => createProjectCommand(undefined, { json: true }))).stdout);
+    folder.mockReturnValue('fresh-folder');
+    const free = JSON.parse((await capture(() => createProjectCommand(undefined, { json: true }))).stdout);
+    folder.mockRestore();
+
+    expect(taken.elicitation.fields[0].default).toBeUndefined();
+    expect(free.elicitation.fields[0].default).toBe('fresh-folder');
   });
 
   it('with a name but no --branch in agent mode: BRANCH_NAME_REQUIRED (exit 3), the form keeps the name, creating nothing', async () => {

@@ -69,18 +69,26 @@ type CreateOutcome =
   | { readonly kind: 'branch-failed'; readonly project: ProjectRef; readonly branch: string; readonly org: OrgRef }
   | { readonly kind: 'created'; readonly project: ProjectRef; readonly branch: string; readonly org: OrgRef };
 
-/** The folder's name as a project name, when it is allowed as one. The init prompt offers the same. */
-function suggestedName(): string | undefined {
+/**
+ * The folder's name as a project name, when it is allowed as one and no live project in the org has it already.
+ * The init prompt offers the same name; a taken one would only be refused with PROJECT_NAME_EXISTS, so it is never offered.
+ */
+function suggestedName(isTaken: (name: string) => boolean): string | undefined {
   const folderName = new ProjectManager().getDefaultProjectName();
-  return projectNameProblem(folderName) === null ? folderName : undefined;
+  return projectNameProblem(folderName) === null && !isTaken(folderName) ? folderName : undefined;
 }
 
 /**
  * The form that asks for the name and the first branch. Both fields are always there, filled with what was already
  * given, so the human sees and confirms both. `answer.rerun` keeps `<name>` and `<branch>` as the places the answers go.
  */
-function createForm(org: OrgRef, name: string | undefined, branch: string | undefined): ElicitationForm {
-  const nameDefault = name ?? suggestedName();
+function createForm(
+  org: OrgRef,
+  name: string | undefined,
+  branch: string | undefined,
+  isTaken: (name: string) => boolean,
+): ElicitationForm {
+  const nameDefault = name ?? suggestedName(isTaken);
   return {
     kind: 'form',
     question: name === undefined
@@ -149,18 +157,20 @@ async function createFlow(typed: string | undefined, opts: CreateProjectOpts, ag
   const org: OrgRef = { id: orgId, name: orgName };
 
   const name = await chooseName(typed, agentMode);
+  const client: CreateClient = serviceClient;
+  const projects = await client.listProjects();
+  const isTaken = (candidate: string) => existingProjectNamed(projects, orgId, candidate) !== undefined;
   if (name === undefined) {
-    return { kind: 'needs-input', missing: 'name', elicitation: createForm(org, undefined, opts.branch), org };
+    return { kind: 'needs-input', missing: 'name', elicitation: createForm(org, undefined, opts.branch, isTaken), org };
   }
 
   // The clash is checked before the branch is asked, so nobody picks a branch for a project that cannot be created.
-  const client: CreateClient = serviceClient;
-  const existing = existingProjectNamed(await client.listProjects(), orgId, name);
+  const existing = existingProjectNamed(projects, orgId, name);
   if (existing !== undefined) return { kind: 'exists', existing, org };
 
   const branch = await chooseBranch(opts.branch, agentMode);
   if (branch === undefined) {
-    return { kind: 'needs-input', missing: 'branch', elicitation: createForm(org, name, undefined), org };
+    return { kind: 'needs-input', missing: 'branch', elicitation: createForm(org, name, undefined, isTaken), org };
   }
   if (opts.dryRun === true) return { kind: 'dry-run', name, branch, org };
 
