@@ -31,7 +31,7 @@ export const AGENTS_BLOCK = [
   '- Commands that write run bare `capy` first. If your folder and Capy differ they write nothing and exit 3 with `SECRETS_CONFLICT`, a `conflict_id`, and the differing names (fingerprints, never values).', // COPY-FLAG
   '- Show the human those names and ask, for each: pinned, local, remote or delete. Never answer for the human. Then rerun the same command with `--resolve NAME=<choice>` for every name (`NAME@TARGET=local|remote` for a platform row) and `--conflict <conflict_id>`.', // COPY-FLAG
   '- `SECRETS_CONFLICT_STALE` means Capy moved since: show the fresh rows and ask again.', // COPY-FLAG
-  '- If a JSON result has an `elicitation`, first print its `display` to the human exactly as given (never shorten or reorder it), then ask only its `question` (a yes/no for `confirm`, a form for `form`), then rerun with their answer. Never answer it yourself and never add `--yes` on your own.', // COPY-FLAG
+  '- If a JSON result has an `elicitation`, first write its `display` table into your reply text exactly as given (never shorten or reorder it, and never put it inside the question box or a preview), then ask only its short `question` (a yes/no for `confirm`, a form for `form`), then rerun with their answer. Never answer it yourself and never add `--yes` on your own.', // COPY-FLAG
   '- Never print, log, or commit secret values.',
   '- To set a value, pipe it from the command that produces it: `<cmd> | capy edit NAME --json`. Never put a value in a command argument, an `echo`, or a heredoc — it would land in your context and the shell history.',
   AGENTS_BLOCK_END,
