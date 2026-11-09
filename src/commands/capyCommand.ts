@@ -1100,10 +1100,6 @@ export class CapyCommand {
     this.installGitHooks();
   }
 
-  /**
-   * Install git hooks (post-checkout, post-merge) — see ../git/syncHooks.
-   * No pre-push hook.
-   */
   /** Stages keep.lock in git. Silent when this is not a git repository. */
   private stageKeepLock(): void {
     try {
@@ -1113,6 +1109,10 @@ export class CapyCommand {
     }
   }
 
+  /**
+   * Install git hooks (post-checkout, post-merge) — see ../git/syncHooks.
+   * No pre-push hook.
+   */
   private installGitHooks(): void {
     try {
       const gitDir = execSync('git rev-parse --git-dir', { stdio: 'pipe', encoding: 'utf-8' }).trim();
