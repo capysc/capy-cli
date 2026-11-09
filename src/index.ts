@@ -782,6 +782,18 @@ const orgCmd = program
   });
 
 orgCmd
+  .command('create-project [name]')
+  .description('Create a project in the active organization (owners and admins only; does not link this folder)') // COPY-FLAG
+  .option('--non-tty', 'treat stdin as not a terminal: never ask for the name; with no name, refuse with a form to ask the human') // COPY-FLAG
+  .option('--json', 'emit machine-readable JSON instead of the human UI')
+  .action(async (name: string | undefined, _options: any, command: any) => {
+    assertNotLocalOnly('org create-project');
+    const { createProjectCommand, createProjectOptsFrom } = await import('./commands/projectCreateCommand');
+    // Read from the merged view: `org`'s `--non-tty` and the program's `--dry-run` take those flags before this command sees them.
+    await createProjectCommand(name, createProjectOptsFrom(command));
+  });
+
+orgCmd
   .command('delete-project <name-or-id>')
   .description('Delete a project (owners only; hidden, not destroyed; an owner can restore it)') // COPY-FLAG
   .option('--force', 'delete even if the project has live deploy tokens (those deploys stop on their next restart)') // COPY-FLAG

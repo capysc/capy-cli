@@ -12,6 +12,11 @@
  *
  * `--dry-run` reads the project and its deploy tokens and stops. The service has
  * no dry run, so the DELETE is simply never sent.
+ *
+ * Without `--yes` and with nobody to ask (agent mode), `delete-project` refuses with CONFIRMATION_REQUIRED (exit 3)
+ * and an `elicitation` (kind "confirm", `ui/elicitation.ts`): the project, the org, its branches, its variable
+ * NAMES (never a value or a hash) and its live deploy tokens, so the agent can put the question to the human.
+ * In a terminal the same summary is printed before the Yes/No question.
  */
 import inquirer from 'inquirer';
 import { resolveOrgContext } from '../core/orgContext';
@@ -19,6 +24,8 @@ import { excludeSystemProject } from '../system/reservedProjectName';
 import { isInteractive, EXIT_NEEDS_INPUT } from '../ui/interactive';
 import { CapyError, ERROR_CODES } from '../types/index';
 import type { DeleteProjectResponse, LiveDeployTokenInfo } from '../service/serviceClient';
+import type { ElicitationConfirm } from '../ui/elicitation';
+import { variableBranchesFromKeep, type VariableBranches } from '../core/keepVariableNames';
 
 export interface ProjectLifecycleOpts {
   json?: boolean;
@@ -71,7 +78,7 @@ const CODED_FORBIDDEN: ReadonlySet<string> = new Set([
   ERROR_CODES.SYSTEM_STORE_IMMUTABLE,
 ]);
 
-interface Refusal {
+export interface Refusal {
   readonly code: string;
   readonly message: string;
   readonly exitCode: number;
@@ -98,7 +105,7 @@ function describeToken(t: LiveDeployTokenInfo): string {
   return `${t.deploy_id}${t.label ? `  ${t.label}` : ''}  (created ${t.created_at})`; // COPY-FLAG
 }
 
-function refusalFor(err: unknown): Refusal {
+export function refusalFor(err: unknown): Refusal {
   if (!(err instanceof CapyError)) {
     return { code: ERROR_CODES.SERVICE_ERROR, message: err instanceof Error ? err.message : String(err), exitCode: 1 };
   }
@@ -116,6 +123,9 @@ function refusalFor(err: unknown): Refusal {
       ],
     };
   }
+  if (code === ERROR_CODES.ORG_SELECTION_REQUIRED) {
+    return { code, message: err.message, exitCode: EXIT_NEEDS_INPUT, extra: { orgs: Array.isArray(err.details?.orgs) ? err.details.orgs : [] } };
+  }
   if (code === ERROR_CODES.PROJECT_AMBIGUOUS) {
     const matches: readonly ProjectRef[] = Array.isArray(err.details?.matches) ? err.details.matches : [];
     return {
@@ -130,7 +140,7 @@ function refusalFor(err: unknown): Refusal {
 }
 
 /** The refusal on the right stream: JSON on stdout under `--json`, prose on stderr otherwise. Never returns. */
-function refuse(json: boolean, r: Refusal): never {
+export function refuse(json: boolean, r: Refusal): never {
   if (json) {
     console.log(JSON.stringify({ ok: false, code: r.code, error: r.message, ...(r.extra ?? {}) }, null, 2));
   } else {
@@ -140,10 +150,10 @@ function refuse(json: boolean, r: Refusal): never {
   return process.exit(r.exitCode);
 }
 
-type Settled<T> = { readonly ok: true; readonly value: T } | { readonly ok: false; readonly error: unknown };
+export type Settled<T> = { readonly ok: true; readonly value: T } | { readonly ok: false; readonly error: unknown };
 
 /** Runs `fn` and returns what it threw as a value, so a refusal's `process.exit` is never caught by the code that raised it. */
-async function settle<T>(fn: () => Promise<T>): Promise<Settled<T>> {
+export async function settle<T>(fn: () => Promise<T>): Promise<Settled<T>> {
   return fn().then(
     (value) => ({ ok: true as const, value }),
     (error: unknown) => ({ ok: false as const, error }),
@@ -205,38 +215,154 @@ function liveOnly<T extends { revoked_at: string | null }>(tokens: readonly T[])
   return tokens.filter((t) => t.revoked_at === null);
 }
 
+/** What the person is shown, and the agent is told, about a project before it is deleted. Names only. */
+interface DeleteDetails {
+  readonly branches: readonly string[];
+  readonly variables: readonly VariableBranches[];
+  /** The parts that could not be read. Never "none": an unread part is not an empty one. */
+  readonly unavailable: readonly ('branches' | 'variables')[];
+}
+
+type KeepRead =
+  | { readonly kind: 'keep'; readonly variables: readonly VariableBranches[] }
+  | { readonly kind: 'none' }
+  | { readonly kind: 'unavailable' };
+
+/** The slice of the service client `readDeleteDetails` uses. */
+interface DeleteDetailsClient {
+  listBranches(projectId: string): Promise<ReadonlyArray<{ readonly name: string }>>;
+  getLatestSecrets(projectId: string, branch: string): Promise<{ readonly keep_hash: string; readonly keep_file?: string } | null>;
+}
+
+/**
+ * The variable names of the project's latest keep.lock, as the service returns it (it is one file for every branch).
+ * Tries each branch in turn until one returns it. Only names and branches leave this function: the blob that comes
+ * with the keep.lock is never read.
+ */
+async function readKeepVariables(
+  client: DeleteDetailsClient,
+  projectId: string,
+  branches: readonly string[],
+  failedBefore: boolean,
+): Promise<KeepRead> {
+  if (branches.length === 0) return { kind: failedBefore ? 'unavailable' : 'none' };
+  const [branch, ...rest] = branches;
+  const read = await settle(() => client.getLatestSecrets(projectId, branch));
+  if (!read.ok) return readKeepVariables(client, projectId, rest, true);
+  const variables = read.value === null ? undefined : variableBranchesFromKeep(read.value.keep_file);
+  return variables === undefined ? readKeepVariables(client, projectId, rest, failedBefore) : { kind: 'keep', variables };
+}
+
+/** Best effort: a part that cannot be read is reported as `unavailable`, and the question is still asked. */
+async function readDeleteDetails(client: DeleteDetailsClient, projectId: string): Promise<DeleteDetails> {
+  const listed = await settle(() => client.listBranches(projectId));
+  if (!listed.ok || !Array.isArray(listed.value)) return { branches: [], variables: [], unavailable: ['branches', 'variables'] };
+  const branches = listed.value.map((b) => b.name);
+  const keep = await readKeepVariables(client, projectId, branches, false);
+  return {
+    branches,
+    variables: keep.kind === 'keep' ? keep.variables : [],
+    unavailable: keep.kind === 'unavailable' ? ['variables'] : [],
+  };
+}
+
+interface OrgRef {
+  readonly id: string;
+  readonly name: string;
+}
+
+/** The exact command that answers Yes: the project's id (never its name), and `--force` only if it was passed. */
+function deleteYesCommand(projectId: string, force: boolean): string {
+  return `capy org delete-project ${projectId} ${force ? '--force ' : ''}--yes --json`;
+}
+
+/** The confirm elicitation for a delete. Names and ids only: a variable is its name and its branches, never more. */
+function deleteElicitation(
+  org: OrgRef,
+  project: ProjectRef,
+  tokens: readonly LiveDeployTokenInfo[],
+  details: DeleteDetails,
+  force: boolean,
+): ElicitationConfirm {
+  return {
+    kind: 'confirm',
+    question: `Delete project ${project.name}?`, // COPY-FLAG
+    details: {
+      org: { id: org.id, name: org.name },
+      project: { id: project.id, name: project.name },
+      branches: details.branches,
+      variables: details.variables.map((v) => ({ name: v.name, branches: v.branches })),
+      live_deploy_tokens: tokens.map((t) => ({ deploy_id: t.deploy_id, label: t.label })),
+      ...(details.unavailable.length > 0 ? { unavailable: details.unavailable } : {}),
+    },
+    answer: { yes: deleteYesCommand(project.id, force) },
+  };
+}
+
 type DeleteOutcome =
   | { readonly kind: 'dry-run'; readonly project: ProjectRef; readonly tokens: readonly LiveDeployTokenInfo[] }
+  | { readonly kind: 'needs-confirmation'; readonly elicitation: ElicitationConfirm; readonly lines: readonly string[] }
   | { readonly kind: 'cancelled' }
   | { readonly kind: 'deleted'; readonly result: DeleteProjectResponse };
 
-function showPreview(json: boolean, project: ProjectRef, tokens: readonly LiveDeployTokenInfo[], force: boolean): void {
-  say(json, '');
-  say(json, `  Project: ${project.name} (${project.id})`); // COPY-FLAG
-  say(json, tokens.length === 0 ? '  No live deploy tokens.' : `  Live deploy tokens: ${tokens.length}`); // COPY-FLAG
-  tokens.forEach((t) => say(json, `    ${describeToken(t)}`));
-  if (tokens.length > 0) {
-    say(json, force
+function summaryLines(org: OrgRef, details: DeleteDetails): readonly string[] {
+  return [
+    `  Organization: ${org.name}`, // COPY-FLAG
+    details.unavailable.includes('branches')
+      ? '  Branches: could not be read.' // COPY-FLAG
+      : details.branches.length === 0 ? '  No branches.' : `  Branches: ${details.branches.join(', ')}`, // COPY-FLAG
+    details.unavailable.includes('variables')
+      ? '  Variables: could not be read.' // COPY-FLAG
+      : `  Variables: ${details.variables.length}`, // COPY-FLAG
+    ...details.variables.map((v) => `    ${v.name}${v.branches.length === 0 ? '' : `  (${v.branches.join(', ')})`}`),
+  ];
+}
+
+/** What the person is shown about the project. Without `summary` (a dry run) it is the short preview. */
+function previewLines(
+  project: ProjectRef,
+  tokens: readonly LiveDeployTokenInfo[],
+  force: boolean,
+  summary?: { readonly org: OrgRef; readonly details: DeleteDetails },
+): readonly string[] {
+  return [
+    '',
+    `  Project: ${project.name} (${project.id})`, // COPY-FLAG
+    ...(summary === undefined ? [] : summaryLines(summary.org, summary.details)),
+    tokens.length === 0 ? '  No live deploy tokens.' : `  Live deploy tokens: ${tokens.length}`, // COPY-FLAG
+    ...tokens.map((t) => `    ${describeToken(t)}`),
+    ...(tokens.length === 0 ? [] : [force
       ? '  --force: those deploys stop on their next restart.' // COPY-FLAG
-      : '  Without --force the delete is refused while these exist.'); // COPY-FLAG
-  }
-  say(json, '');
+      : '  Without --force the delete is refused while these exist.']), // COPY-FLAG
+    '',
+  ];
+}
+
+function showPreview(json: boolean, lines: readonly string[]): void {
+  lines.forEach((l) => say(json, l));
 }
 
 async function deleteFlow(ref: string, opts: DeleteProjectOpts): Promise<DeleteOutcome> {
   const json = opts.json === true;
   const force = opts.force === true;
-  const { orgId, serviceClient } = await resolveOrgContext(opts.apiUrl, opts.devMode === true);
+  const agentMode = !isInteractive(opts.nonTty);
+  // Agent mode never opens a prompt, not even to pick an organization.
+  const { orgId, orgName, serviceClient } = await resolveOrgContext(opts.apiUrl, opts.devMode === true, { promptForOrg: !agentMode });
+  const org: OrgRef = { id: orgId, name: orgName };
   const project = pickOne(await serviceClient.listProjects(), ref, false);
 
   // The token list is only read when it is shown: a dry run, or a person about to be asked.
-  const showsPreview = opts.dryRun === true || opts.yes !== true;
-  const tokens = showsPreview ? liveOnly((await serviceClient.listDeployTokens(orgId, project.id)).tokens) : [];
+  const asks = opts.dryRun !== true && opts.yes !== true;
+  const tokens = opts.dryRun === true || asks ? liveOnly((await serviceClient.listDeployTokens(orgId, project.id)).tokens) : [];
 
   if (opts.dryRun === true) return { kind: 'dry-run', project, tokens };
 
-  if (opts.yes !== true) {
-    showPreview(json, project, tokens, force);
+  if (asks) {
+    const details = await readDeleteDetails(serviceClient, project.id);
+    const lines = previewLines(project, tokens, force, { org, details });
+    // Nobody to ask: hand the question to the agent that ran this, and write nothing.
+    if (agentMode) return { kind: 'needs-confirmation', elicitation: deleteElicitation(org, project, tokens, details, force), lines };
+    showPreview(json, lines);
     if (!(await confirm(json, `Delete project ${project.name}?`))) return { kind: 'cancelled' }; // COPY-FLAG
   }
   return { kind: 'deleted', result: await serviceClient.deleteProject(orgId, project.id, force) };
@@ -264,9 +390,18 @@ function emitDeleteOutcome(json: boolean, force: boolean, outcome: DeleteOutcome
       }, null, 2));
       return;
     }
-    showPreview(false, project, tokens, force);
+    showPreview(false, previewLines(project, tokens, force));
     console.log('Dry run: nothing was deleted.'); // COPY-FLAG
     return;
+  }
+  if (outcome.kind === 'needs-confirmation') {
+    return refuse(json, {
+      code: ERROR_CODES.CONFIRMATION_REQUIRED,
+      message: '`capy org delete-project` needs confirmation. Pass --yes, or run it in a terminal.', // COPY-FLAG
+      exitCode: EXIT_NEEDS_INPUT,
+      extra: { elicitation: outcome.elicitation },
+      lines: outcome.lines,
+    });
   }
   const { project, live_deploy_tokens } = outcome.result;
   if (json) {
@@ -281,11 +416,8 @@ function emitDeleteOutcome(json: boolean, force: boolean, outcome: DeleteOutcome
 export async function deleteProjectCommand(ref: string, opts: DeleteProjectOpts): Promise<void> {
   const json = opts.json === true;
 
-  // Before any network call: no terminal and no --yes means nobody can answer. A dry run asks nothing.
-  if (opts.dryRun !== true && opts.yes !== true && !isInteractive(opts.nonTty)) {
-    refuseWithoutTerminal(json, 'capy org delete-project');
-  }
-
+  // No terminal and no --yes means nobody can answer: the flow stops with the question as an elicitation (exit 3).
+  // It reads the project first, because the question has to say what would be deleted. A dry run asks nothing.
   const settled = await settle(() => deleteFlow(ref, opts));
   if (!settled.ok) return refuse(json, refusalFor(settled.error));
   emitDeleteOutcome(json, opts.force === true, settled.value);

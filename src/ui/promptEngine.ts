@@ -8,7 +8,7 @@ import {
   EnvVariable,
   UserDecisions
 } from '../types/index';
-import { isReservedProjectName, PROJECT_NAME_RESERVED_MESSAGE } from '../system/reservedProjectName';
+import { validateProjectNameInput } from '../core/projectNameRule';
 
 export class PromptEngine {
   async promptForProjectName(defaultName: string): Promise<string> {
@@ -18,18 +18,7 @@ export class PromptEngine {
         name: 'projectName',
         message: `📁 Project name (default: "${defaultName}"):`,
         default: defaultName,
-        validate: (input: string) => {
-          if (!input || input.trim().length === 0) {
-            return 'Project name cannot be empty';
-          }
-          if (!/^[a-zA-Z0-9-_]+$/.test(input)) {
-            return 'Project name can only contain letters, numbers, hyphens, and underscores';
-          }
-          if (isReservedProjectName(input)) {
-            return PROJECT_NAME_RESERVED_MESSAGE;
-          }
-          return true;
-        }
+        validate: validateProjectNameInput,
       }
     ]);
 

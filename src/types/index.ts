@@ -901,6 +901,14 @@ export const ERROR_CODES = {
   PROJECT_AMBIGUOUS: 'PROJECT_AMBIGUOUS',
   /** A destructive command needs a yes and there is no terminal to ask, and `--yes` was not passed. Exit 3. */
   CONFIRMATION_REQUIRED: 'CONFIRMATION_REQUIRED',
+  /** `capy org create-project` with no name and nobody to ask (agent mode). The refusal carries an `elicitation` form. Exit 3. */
+  PROJECT_NAME_REQUIRED: 'PROJECT_NAME_REQUIRED',
+  /** `capy org create-project`: the name is empty or has characters other than letters, numbers, hyphens and underscores. Exit 1. */
+  PROJECT_NAME_INVALID: 'PROJECT_NAME_INVALID',
+  /** `capy org create-project`: the organization already has a project with that name (the service answered 409). Exit 1. */
+  PROJECT_NAME_EXISTS: 'PROJECT_NAME_EXISTS',
+  /** A command that acts on "the active organization" has none (no keep.lock here) and the person belongs to several, with nobody to ask. Exit 3. */
+  ORG_SELECTION_REQUIRED: 'ORG_SELECTION_REQUIRED',
   /** `GET /orgs/:orgId/repos` answered 404: the service predates project -> repo links. Never a failure of the command that asked. */
   REPO_LINKS_UNSUPPORTED: 'REPO_LINKS_UNSUPPORTED',
   /** `--dry-run` on a path that would prompt (the `capy edit` TUI, an interactive `capy add`, `capy remove`'s confirmation): it cannot preview, and a dry run never runs for real. Exit 1. */
