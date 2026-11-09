@@ -1804,9 +1804,12 @@ export class CapyCommand {
               }
             }),
           );
-          // No `.env` to begin with: unless EVERY pinned name was read from the snapshot, write nothing (and keep.lock stays
-          // as it is), end with a code. A partly read snapshot would drop the unread names' pins.
-          if (retrievesMissingEnv && !Object.keys(pinned).every((name) => Object.hasOwn(fetchedEnv, name))) {
+          // No `.env` to begin with: unless the names read from the snapshot are EXACTLY the pinned names (`pinned` leaves
+          // placeholders out, and a snapshot holds no line for one), write nothing (and keep.lock stays as it is), end with a
+          // code. A name missing would lose its pin; a name keep.lock does not pin would gain one.
+          const pinnedNames = Object.keys(pinned);
+          const sameNames = pinnedNames.length === Object.keys(fetchedEnv).length && pinnedNames.every((name) => Object.hasOwn(fetchedEnv, name));
+          if (retrievesMissingEnv && !sameNames) {
             throw new CapyError(PINNED_FETCH_FAILED_MESSAGE, ERROR_CODES.DECRYPT_KEY_MISMATCH);
           }
           return { kind: 'proceed', finalEnv: fetchedEnv };
