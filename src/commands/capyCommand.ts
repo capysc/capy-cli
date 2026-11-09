@@ -1221,13 +1221,15 @@ export class CapyCommand {
   /**
    * Off a terminal (`--json`, `--non-tty`, an agent), whether this run retrieves the whole `.env` by itself: the file does
    * not exist (the file's existence is the signal, never its text), keep.lock pins something for the branch to retrieve,
-   * nobody is answering rows with `--resolve`, and it is not a `--dry-run` (which changes nothing). A file that exists,
+   * nobody is answering rows with `--resolve`, there is no `--env-path`, and it is not a `--dry-run` (which changes nothing). A file that exists,
    * even an empty one, is never retrieved this way: its differences are reported as always. At a terminal the menu is unchanged.
    */
   private retrievesMissingEnvByProtocol(pinnedCount: number, hasKeep: boolean): boolean {
     if (!this.protocol || this.options.dryRun === true || !hasKeep || pinnedCount === 0) return false;
+    // `--env-path` reads another file than the one the retrieve writes (the default `.env`): that case is left as it was.
+    if (this.options.envPath !== undefined) return false;
     if (hasConflictFlags(parseConflictFlags(this.options.conflictFlags ?? {}))) return false;
-    return !existsSync(this.projectManager.getEnvPath(this.options.envPath));
+    return !existsSync(this.projectManager.getEnvPath());
   }
 
   private async syncProject(projectState: ProjectState, retried: boolean = false): Promise<SyncOutcome> {
@@ -1802,8 +1804,9 @@ export class CapyCommand {
               }
             }),
           );
-          // No `.env` to begin with and nothing in the snapshot this profile can read: write nothing, end with a code.
-          if (retrievesMissingEnv && Object.keys(fetchedEnv).length === 0) {
+          // No `.env` to begin with: unless EVERY pinned name was read from the snapshot, write nothing (and keep.lock stays
+          // as it is), end with a code. A partly read snapshot would drop the unread names' pins.
+          if (retrievesMissingEnv && !Object.keys(pinned).every((name) => Object.hasOwn(fetchedEnv, name))) {
             throw new CapyError(PINNED_FETCH_FAILED_MESSAGE, ERROR_CODES.DECRYPT_KEY_MISMATCH);
           }
           return { kind: 'proceed', finalEnv: fetchedEnv };
