@@ -41,7 +41,7 @@ describe('AGENTS_BLOCK', () => {
         '- `SECRETS_CONFLICT_STALE` means Capy moved since: show the fresh rows and ask again.',
         '- If a JSON result has an `elicitation`, end your reply with its `display` table exactly as given (never shorten or reorder it), then its short `question`, and stop. Never use a question box or a preview for it. Wait for the human to answer in chat, then rerun with their answer. Never answer it yourself and never add `--yes` on your own.',
         '- Only when the human asks to delete a project, run `capy org delete-project <name> --json` without `--yes`. It changes nothing and returns an `elicitation`: that is how you ask the human, so do not ask your own question first. Only an org owner can delete or restore a project.',
-        "- `PROJECT_DELETED` means an org owner deleted this folder's project. Stop and tell the human. An org owner can restore it with `capy org restore-project <project_id>` (the id is in `keep.lock`). Never create a new project and never edit `keep.lock`.",
+        "- `PROJECT_DELETED`, or `project.state` `\"deleted\"` in `capy info --json`, means an org owner deleted this folder's project. Stop and tell the human. An org owner can restore it with `capy org restore-project <project_id>` (the id is in `keep.lock`). Never create a new project and never edit `keep.lock`.",
         '- Never print, log, or commit secret values.',
         '- To set a value, pipe it from the command that produces it: `<cmd> | capy edit NAME --json`. Never put a value in a command argument, an `echo`, or a heredoc — it would land in your context and the shell history.',
         '<!-- capy:agents:end -->',

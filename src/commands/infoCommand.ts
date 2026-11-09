@@ -1,6 +1,8 @@
 import { AuthService } from '../auth/authService';
 import { ProjectManager } from '../core/projectManager';
 import { ServiceClient } from '../service/serviceClient';
+import { isProjectDeletedError } from '../errors/projectDeleted';
+import type { AuthResult } from '../types/index';
 
 const DIM = '\x1b[90m';
 const RESET = '\x1b[0m';
@@ -14,6 +16,50 @@ const ROLE_LABELS: Record<string, string> = {
   'project-admin': 'Project Admin',
   member: 'Member',
 };
+
+/** Whether the folder's project is live, deleted (the service answers PROJECT_DELETED), or could not be checked. */
+export type ProjectStateLabel = 'live' | 'deleted' | 'unknown';
+
+interface ProjectStateClient {
+  listBranches(projectId: string): Promise<unknown>;
+}
+
+/** Asks the service about the project: a branch list answers live, the PROJECT_DELETED code answers deleted. */
+export async function projectStateFor(client: ProjectStateClient, projectId: string): Promise<ProjectStateLabel> {
+  try {
+    await client.listBranches(projectId);
+    return 'live';
+  } catch (err) {
+    return isProjectDeletedError(err) ? 'deleted' : 'unknown';
+  }
+}
+
+/** Silent sign-in for the folder's org, then any org; only a folder with a keep.lock may fall back to a browser sign-in. */
+async function authenticateForInfo(authService: AuthService, organizationId: string | undefined, hasKeep: boolean): Promise<AuthResult> {
+  const scoped = await authService.authenticateSilent(organizationId);
+  if (scoped.success) return scoped;
+  const any = await authService.authenticateSilent();
+  if (any.success || !hasKeep) return any;
+  return authService.authenticate(organizationId!);
+}
+
+/** The user's role in the org, best effort: `{ slug: null, label: '—' }` when it cannot be read. */
+async function roleIn(
+  serviceClient: ServiceClient,
+  orgId: string | undefined,
+  userId: string | undefined,
+  hasToken: boolean,
+): Promise<{ readonly slug: string | null; readonly label: string }> {
+  const none = { slug: null, label: '—' } as const;
+  if (!orgId || !hasToken || !userId) return none;
+  try {
+    const { members } = await serviceClient.listMembers(orgId);
+    const slug: unknown = members.find((m: any) => m.userId === userId)?.role?.slug;
+    return typeof slug === 'string' && slug !== '' ? { slug, label: ROLE_LABELS[slug] || slug } : none;
+  } catch {
+    return none;
+  }
+}
 
 export class InfoCommand {
   private apiUrl?: string;
@@ -34,11 +80,7 @@ export class InfoCommand {
     // belong to, etc. Fall through to a session-only view when there's no
     // keep.lock instead of forcing the user to init a project first.
     const authService = new AuthService(this.apiUrl, this.devMode, projectState.userId);
-    let authResult = await authService.authenticateSilent(projectState.organizationId);
-    if (!authResult.success) authResult = await authService.authenticateSilent();
-    if (!authResult.success && hasKeep) {
-      authResult = await authService.authenticate(projectState.organizationId!);
-    }
+    const authResult = await authenticateForInfo(authService, projectState.organizationId, hasKeep);
     if (!authResult.success) {
       console.error(`Not signed in. Run ${B('capy')} to authenticate.`);
       process.exit(1);
@@ -56,24 +98,11 @@ export class InfoCommand {
     const workosOrgId = activeOrg?.workos_org_id;
     const branch = projectState.activeBranch;
 
-    // Resolve the user's role in the active org (best effort).
-    let roleLabel = '—';
-    let roleSlug: string | null = null;
-    if (activeOrgId && authService.getToken() && authResult.user_id) {
-      try {
-        const serviceClient = new ServiceClient(this.apiUrl, this.devMode);
-        serviceClient.setTokenProvider(() => authService.getValidToken());
-        const { members } = await serviceClient.listMembers(activeOrgId);
-        const me = members.find((m: any) => m.userId === authResult.user_id);
-        const slug = me?.role?.slug;
-        if (slug) {
-          roleLabel = ROLE_LABELS[slug] || slug;
-          roleSlug = slug;
-        }
-      } catch {
-        // leave as —
-      }
-    }
+    const serviceClient = new ServiceClient(this.apiUrl, this.devMode);
+    serviceClient.setTokenProvider(() => authService.getValidToken());
+    const { slug: roleSlug, label: roleLabel } = await roleIn(serviceClient, activeOrgId, authResult.user_id, !!authService.getToken());
+    const projectId = projectState.projectId;
+    const projectStatus: ProjectStateLabel | null = projectId ? await projectStateFor(serviceClient, projectId) : null;
 
     if (opts.json) {
       console.log(
@@ -82,7 +111,7 @@ export class InfoCommand {
             user: { email: authResult.user_email ?? null, userId: authResult.user_id ?? null },
             org: { id: activeOrgId ?? null, name: activeOrgName ?? null, workosOrgId: workosOrgId ?? null, fromKeepLock: hasKeep },
             role: roleSlug,
-            project: { name: projectState.projectName ?? null, id: projectState.projectId ?? null },
+            project: { name: projectState.projectName ?? null, id: projectState.projectId ?? null, state: projectStatus },
             branch: hasKeep ? branch : null,
             memberships: allOrgs.map((o) => ({ id: o.id, name: o.name ?? null, workosOrgId: o.workos_org_id ?? null })),
           },
@@ -106,7 +135,7 @@ export class InfoCommand {
       ['Org ID', activeOrgId || '—'],
       ['WorkOS Org ID', workosOrgId || '—'],
       ['Role', roleLabel],
-      ['Project', projectState.projectName || '—'],
+      ['Project', projectStatus === 'deleted' ? `${projectState.projectName || '—'} ${YELLOW}(deleted)${RESET}` : projectState.projectName || '—'], // COPY-FLAG
       ['Project ID', projectState.projectId || '—'],
       ['Branch', (hasKeep && branch) || '—'],
     ];
