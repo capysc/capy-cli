@@ -10,6 +10,7 @@ import {
   buildLocationTable,
   filteredRows,
   filteredRowsWithReasons,
+  sortRows,
   formatUsersCell,
   formatBranchCell,
   formatProjectCell,
@@ -575,7 +576,7 @@ describe('search bar — always-on, fzf-style (no "/" mode)', () => {
     const s = pressKeys(type(initialSecretsScreenState(rows), 'db'), ESC);
     expect(s.search.query).toBe('');
     expect(s.quit).toBe(false);
-    expect(filteredRows(s)).toEqual(rows);
+    expect(filteredRows(s)).toEqual(sortRows(rows, 'name-asc')); // CAP-731: the default sort is name A-Z, no longer arrival order
   });
 
   test('Esc with an already-empty query quits', () => {
@@ -1195,5 +1196,18 @@ describe('CAP-679 rendering: "+N" survives truncation, INTEGRATIONS overflow, po
     const frame = render(s1, 100, 30);
     expect(frame).not.toContain('targets:');
     expect(stripAnsiForTest(frame)).not.toMatch(/\[[a-z-]+\]/); // no `[provider]` label anywhere
+  });
+});
+
+describe('a row with no value yet', () => {
+  test('the list says "no value yet" beside the name; a row with a value does not', () => {
+    const frame = stripAnsiForTest(render(initialSecretsScreenState([row({ name: 'EMPTY', value_hash: '' }), row({ name: 'FULL', value_hash: 'abc' })]), 100, 20));
+    expect(frame.split('\n').find((l) => l.includes('EMPTY'))).toContain('no value yet');
+    expect(frame.split('\n').find((l) => l.includes('FULL'))).not.toContain('no value yet');
+  });
+
+  test('the details view names the command that sets one, where the value would be', () => {
+    const frame = stripAnsiForTest(render(handleKey(initialSecretsScreenState([row({ name: 'EMPTY', value_hash: '' })]), ENTER).state, 100, 30));
+    expect(frame).toContain('no value yet — set it with: capy edit EMPTY');
   });
 });

@@ -4,7 +4,7 @@
  *
  * `--discover` is an option of `capy deploy`, not a sub-command: a sub-command named
  * `dokploy` would take `capy deploy dokploy` away from the target flow. Only the `dokploy`
- * target has a discovery; any other target is refused with a code.
+ * and `vercel` targets have a discovery; any other target is refused with a code.
  */
 import { ERROR_CODES } from '../../types/index';
 import { conflictFlagsOrExit, type RawConflictFlags } from '../../sync/conflicts';
@@ -36,8 +36,12 @@ export async function routeDeployDiscover(
   if (!discovering) {
     return printRefusal(ERROR_CODES.INVALID_FORMAT, '--plan, --confirm and --base-url need --discover.'); // COPY-FLAG
   }
-  if (target !== 'dokploy') {
-    return printRefusal(ERROR_CODES.DISCOVER_UNSUPPORTED_TARGET, '--discover is only available for the dokploy target: capy deploy dokploy --discover.'); // COPY-FLAG
+  if (target !== 'dokploy' && target !== 'vercel') {
+    return printRefusal(ERROR_CODES.DISCOVER_UNSUPPORTED_TARGET, '--discover is only available for the dokploy and vercel targets: capy deploy dokploy --discover, capy deploy vercel --discover.'); // COPY-FLAG
+  }
+  // Vercel has no dashboard URL to name: `--base-url` is a Dokploy flag.
+  if (target === 'vercel' && flags.baseUrl !== undefined) {
+    return printRefusal(ERROR_CODES.INVALID_FORMAT, '--base-url is only for the dokploy target.'); // COPY-FLAG
   }
   // Bare `capy` runs first, before anything is discovered, planned or written (docs/conflict-resolution.md). This run
   // writes no env: its only writes are `.capy/deploy.json` PRs into the discovered repos, through the GitHub API, so no
@@ -45,7 +49,10 @@ export async function routeDeployDiscover(
   // (exit 3, the payload alone on stdout) and answered by a rerun with `--resolve` + `--conflict`.
   conflictFlagsOrExit(conflictFlags, true);
   await gateFirst({ devMode, json: true, nonTty: true, conflictFlags, dryRun });
-  const { deployDokployDiscoverCommand } = await import('./index');
+  const { deployDokployDiscoverCommand, deployVercelDiscoverCommand } = await import('./index');
+  if (target === 'vercel') {
+    return deployVercelDiscoverCommand({ dryRun, plan: flags.plan, confirm: flags.confirm }, devMode);
+  }
   return deployDokployDiscoverCommand(
     { dryRun, plan: flags.plan, confirm: flags.confirm, baseUrl: flags.baseUrl },
     devMode,

@@ -12,6 +12,7 @@
 
 import type { Classification } from './classify';
 import type { ResolveDokployApiKeyResult, TargetCheck } from './dokployApi';
+import type { ResolveVercelTokenResult } from './vercelTargetApi';
 import type { TargetConflict } from '../sync/conflicts';
 import type { ErrorCode } from '../types/index';
 
@@ -37,6 +38,12 @@ export interface AdapterCallContext {
   interactive?: boolean;
   /** A Dokploy API key pre-resolved by the caller — see `AdapterCallContext`'s own doc. */
   resolvedApiKey?: ResolveDokployApiKeyResult;
+  /**
+   * A Vercel token pre-resolved by the caller, once per command — set only
+   * for a Vercel target in API mode (CAP-696). Same idea as `resolvedApiKey`:
+   * the system store is asked at most once, and an admin prompted at most once.
+   */
+  resolvedVercelToken?: ResolveVercelTokenResult;
 }
 
 export interface TargetConfig {
@@ -109,6 +116,10 @@ export interface PreflightResult {
    * set both.
    */
   code?: ErrorCode;
+  /** Where to get a missing or rejected API key (same shape as `Blocked.link`). Additive; set only by key refusals. */
+  link?: { label: string; url: string };
+  /** One plain instruction for the human that goes with `link`. */
+  remedy?: string;
   /** Non-blocking heads-up(s), shown whether or not ok is true. */
   warnings?: readonly DeployWarning[];
 }
@@ -121,6 +132,10 @@ export interface DeployStep {
   url?: string;
   /** Machine-readable companion to `detail` on a `'fail'` step — see `PreflightResult.code`'s own doc. */
   code?: ErrorCode;
+  /** Where to get a missing or rejected API key — see `PreflightResult.link`. */
+  link?: { label: string; url: string };
+  /** See `PreflightResult.remedy`. */
+  remedy?: string;
 }
 
 export interface DeployResult {
@@ -179,6 +194,21 @@ export interface DeployContext extends AdapterCallContext {
    * `conflicts` and writes nothing.
    */
   targetCheck?: TargetCheck;
+  /**
+   * Names on the branch that exist with no value yet (placeholders, core/placeholder.ts). A target var in this list
+   * is never written: the platform keeps its own value. Vercel only; absent: none.
+   */
+  placeholders?: readonly string[];
+  /**
+   * Vercel API mode: replacing a value Vercel holds as sensitive. `delivered` are the target vars Capy has delivered to
+   * this target before (a delivery record in keep.lock): the first replacement of the others needs a yes.
+   * `allowed` is `--replace-sensitive`. `ask` is set only where a person can answer; it resolves the answer.
+   */
+  sensitiveReplace?: {
+    readonly delivered: readonly string[];
+    readonly allowed: boolean;
+    readonly ask?: (names: readonly string[]) => Promise<boolean>;
+  };
   /**
    * Deliver only the names in `config.vars`, leaving every other line Capy already manages on the platform exactly
    * as it is (the batch deploy of picked variables, CAP-715). Absent: the managed block holds the target's vars.

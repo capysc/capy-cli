@@ -56,7 +56,8 @@ import {
   type DiscoveryPlanEnv,
   type DiscoveryPlanFolder,
 } from '../../src/commands/connectors/dokployDiscovery';
-import { createDokployConnector as createRealDokployConnector, computeOverwritePlan, DISCOVERY_NEW_PROJECT } from '../../src/commands/connectors/dokploy';
+import { createDokployConnector as createRealDokployConnector } from '../../src/commands/connectors/dokploy';
+import { computeOverwritePlan, DISCOVERY_NEW_PROJECT } from '../../src/commands/connectors/discoverySteps';
 import type { DokployConnectorDeps } from '../../src/commands/connectors/dokploy';
 
 // These tests drive discovery over throwaway folders with a fake service and no session; bare `capy` in each folder

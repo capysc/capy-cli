@@ -52,6 +52,13 @@ const SERVER_CODES = new Set<string>([
   // longer the server's latest: HTTP 409. The commit path (sync/commit.ts)
   // re-reads and re-plans on exactly this code.
   ERROR_CODES.SECRETS_STALE_BASE,
+  // CAP-729 — project soft delete. 410 on any route reached with a deleted
+  // project's id; 409s on delete (live deploy tokens) and restore (not deleted).
+  // The two 403 codes (owner only, system store) cannot be minted here: a 403 is
+  // thrown as PERMISSION_DENIED above, with the server's code in `details.code`.
+  ERROR_CODES.PROJECT_DELETED,
+  ERROR_CODES.PROJECT_HAS_LIVE_DEPLOY_TOKENS,
+  ERROR_CODES.PROJECT_NOT_DELETED,
 ]);
 
 /**
@@ -116,6 +123,20 @@ export type TransportStatusResult =
   | { readonly kind: 'redeemed' }
   | { readonly kind: 'expired' }
   | { readonly kind: 'unknown' };
+
+/** CAP-729: an unrevoked deploy token, as the project delete lists it. Never carries a secret. */
+export interface LiveDeployTokenInfo {
+  deploy_id: string;
+  label: string | null;
+  created_at: string;
+}
+
+/** CAP-729: `DELETE /orgs/:orgId/projects/:projectId` answered 200. */
+export interface DeleteProjectResponse {
+  ok: true;
+  project: { id: string; name: string; deleted_at: string };
+  live_deploy_tokens: LiveDeployTokenInfo[];
+}
 
 export interface MemberProjectBranch {
   id: string;
@@ -739,11 +760,23 @@ export class ServiceClient {
    * List all projects in the caller's organization. Used by the client to
    * bootstrap when running in a directory with no local keep.lock.
    */
-  async listProjects(): Promise<Array<{ id: string; name: string; organization_id: string }>> {
+  async listProjects(options?: { includeDeleted?: boolean }): Promise<Array<{ id: string; name: string; organization_id: string; deleted_at?: string | null }>> {
+    // CAP-729: only an org owner's `include_deleted=1` is honoured; for anyone else the service ignores it.
+    const query = options?.includeDeleted === true ? '?include_deleted=1' : '';
     const data = await this.request<{
-      projects: Array<{ id: string; name: string; organization_id: string }>;
-    }>('GET', '/projects');
+      projects: Array<{ id: string; name: string; organization_id: string; deleted_at?: string | null }>;
+    }>('GET', `/projects${query}`);
     return data.projects;
+  }
+
+  /** CAP-729: soft-delete a project (org owner only). Refused with 409 PROJECT_HAS_LIVE_DEPLOY_TOKENS unless `force`. */
+  async deleteProject(orgId: string, projectId: string, force: boolean): Promise<DeleteProjectResponse> {
+    return this.request('DELETE', `/orgs/${orgId}/projects/${encodeURIComponent(projectId)}`, force ? { force: true } : undefined);
+  }
+
+  /** CAP-729: bring a soft-deleted project back (org owner only). */
+  async restoreProject(orgId: string, projectId: string): Promise<{ ok: true; project: { id: string; name: string } }> {
+    return this.request('POST', `/orgs/${orgId}/projects/${encodeURIComponent(projectId)}/restore`, {});
   }
 
   async createBranch(projectId: string, name: string, isProtected: boolean = false): Promise<Branch> {

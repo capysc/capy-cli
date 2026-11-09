@@ -51,6 +51,7 @@
 import { execFileSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { restorePathsToHead, syncTrackedKeepFromWorkingCopy } from '../deploy/git';
+import { DOKPLOY_DISCOVERY_CODES, type DiscoveryCodes } from '../commands/connectors/discoveryCodes';
 
 function git(repoRoot: string, args: readonly string[]): string {
   // `env: process.env` explicitly: Bun's `execFileSync` (unlike Node's)
@@ -91,10 +92,10 @@ export function snapshotPathStatus(repoRoot: string, paths: readonly string[]): 
 }
 
 /** `capy/dokploy-import-<YYYYMMDD-HHMM>` — the default branch name, used whenever nothing asked for (or answered) a different one. */
-export function defaultDiscoveryCommitBranchName(now: Date = new Date()): string {
+export function defaultDiscoveryCommitBranchName(now: Date = new Date(), provider: string = 'dokploy'): string {
   const pad = (n: number): string => String(n).padStart(2, '0');
   const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}`;
-  return `capy/dokploy-import-${stamp}`;
+  return `capy/${provider}-import-${stamp}`;
 }
 
 /**
@@ -120,12 +121,7 @@ export type DiscoveryCommitOutcome =
   | {
       ok: false;
       /** Stable refusal code — branch on this, never on `message`. */
-      code:
-        | 'DOKPLOY_COMMIT_WOULD_MIX'
-        | 'DOKPLOY_COMMIT_BRANCH_INVALID'
-        | 'DOKPLOY_COMMIT_BRANCH_EXISTS'
-        | 'DOKPLOY_GIT_IDENTITY_MISSING'
-        | 'DOKPLOY_COMMIT_FAILED';
+      code: string;
       message: string;
     };
 
@@ -143,8 +139,17 @@ export function commitDiscoveryChanges(
   repoRoot: string,
   paths: readonly string[],
   beforeStatus: ReadonlySet<string>,
-  opts: { branchName: string; dryRun: boolean; summaryLines: readonly string[] },
+  opts: {
+    branchName: string;
+    dryRun: boolean;
+    summaryLines: readonly string[];
+    /** The commit subject. Default is the Dokploy one, so every existing caller's commit is unchanged. */
+    commitMessage?: string;
+    /** How the refusals are spelled. Default is Dokploy's, so every existing caller's codes are unchanged. */
+    codes?: Pick<DiscoveryCodes, 'commitWouldMix' | 'commitBranchInvalid' | 'commitBranchExists' | 'gitIdentityMissing' | 'commitFailed'>;
+  },
 ): DiscoveryCommitOutcome {
+  const codes = opts.codes ?? DOKPLOY_DISCOVERY_CODES;
   if (paths.length === 0) {
     return { ok: true, dryRun: true, branch: opts.branchName, wouldCommitFiles: [] };
   }
@@ -153,13 +158,13 @@ export function commitDiscoveryChanges(
   if (mixedFiles.length > 0) {
     return {
       ok: false,
-      code: 'DOKPLOY_COMMIT_WOULD_MIX',
+      code: codes.commitWouldMix,
       message: `${mixedFiles.join(', ')} already had uncommitted changes before this run — refusing to mix them into an automatic commit.`,
     };
   }
 
   if (!isValidDiscoveryCommitBranchName(opts.branchName)) {
-    return { ok: false, code: 'DOKPLOY_COMMIT_BRANCH_INVALID', message: `"${opts.branchName}" is not a valid git branch name.` };
+    return { ok: false, code: codes.commitBranchInvalid, message: `"${opts.branchName}" is not a valid git branch name.` };
   }
 
   if (opts.dryRun) {
@@ -168,7 +173,7 @@ export function commitDiscoveryChanges(
 
   const branchExists = tryGit(repoRoot, ['rev-parse', '--verify', '--quiet', `refs/heads/${opts.branchName}`]);
   if (branchExists.ok) {
-    return { ok: false, code: 'DOKPLOY_COMMIT_BRANCH_EXISTS', message: `Branch "${opts.branchName}" already exists.` };
+    return { ok: false, code: codes.commitBranchExists, message: `Branch "${opts.branchName}" already exists.` };
   }
 
   const identityName = tryGit(repoRoot, ['config', '--get', 'user.name']);
@@ -176,14 +181,14 @@ export function commitDiscoveryChanges(
   if (!identityName.ok || !identityName.stdout.trim() || !identityEmail.ok || !identityEmail.stdout.trim()) {
     return {
       ok: false,
-      code: 'DOKPLOY_GIT_IDENTITY_MISSING',
+      code: codes.gitIdentityMissing,
       message: 'git has no configured identity in this repo — set user.name and user.email, then re-run.',
     };
   }
 
   const created = tryGit(repoRoot, ['checkout', '-b', opts.branchName]);
   if (!created.ok) {
-    return { ok: false, code: 'DOKPLOY_COMMIT_FAILED', message: `Could not create branch "${opts.branchName}".` };
+    return { ok: false, code: codes.commitFailed, message: `Could not create branch "${opts.branchName}".` };
   }
 
   // The keep.lock path(s) among `paths` (one per folder this commit covers)
@@ -194,7 +199,7 @@ export function commitDiscoveryChanges(
   keepPaths.forEach((relPath) => syncTrackedKeepFromWorkingCopy(join(repoRoot, dirname(relPath))));
 
   const added = tryGit(repoRoot, ['add', '--', ...paths]);
-  const messageArgs = ['-m', 'chore(capy): import Dokploy environments', ...(opts.summaryLines.length > 0 ? ['-m', opts.summaryLines.join('\n')] : [])];
+  const messageArgs = ['-m', opts.commitMessage ?? 'chore(capy): import Dokploy environments', ...(opts.summaryLines.length > 0 ? ['-m', opts.summaryLines.join('\n')] : [])];
   const committed = added.ok ? tryGit(repoRoot, ['commit', ...messageArgs, '--', ...paths]) : { ok: false as const };
   if (!committed.ok) {
     // Never leaves the repo stranded on a half-made branch after a failed
@@ -213,7 +218,7 @@ export function commitDiscoveryChanges(
     if (keepPaths.length > 0) restorePathsToHead(repoRoot, [...keepPaths]);
     tryGit(repoRoot, ['checkout', '-']);
     tryGit(repoRoot, ['branch', '-D', opts.branchName]);
-    return { ok: false, code: 'DOKPLOY_COMMIT_FAILED', message: 'git commit failed.' };
+    return { ok: false, code: codes.commitFailed, message: 'git commit failed.' };
   }
 
   const sha = tryGit(repoRoot, ['rev-parse', 'HEAD']);

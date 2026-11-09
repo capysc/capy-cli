@@ -135,9 +135,9 @@ program
 
 program
   .command('edit [name]')
-  // COPY-FLAG — minimal-neutral; names the two modes.
-  .description('Inspect and edit secrets in an interactive TUI, or set one variable from a piped value')
-  .option('--no-push', 'piped value: write .env only; do not push to Capy')
+  // COPY-FLAG — minimal-neutral; names the three modes.
+  .description('Inspect and edit secrets in an interactive TUI, or set one variable from a hidden prompt or a piped value')
+  .option('--no-push', 'with a name: write .env only; do not push to Capy') // COPY-FLAG
   .option('--json', 'emit machine-readable JSON instead of the human UI (piped value)')
   .option('--non-tty', 'treat stdin as not a terminal; never prompt (agents/CI)')
   .option('--pr', 'create a PR with the keep.lock change (answers the prompt)') // COPY-FLAG
@@ -147,6 +147,7 @@ program
     'after',
     // COPY-FLAG
     '\n' +
+      'With a name on a terminal, asks for the value (hidden) and sets that variable, like: capy add NAME --force\n' +
       'With a name and a piped value, sets that one variable. The value is read from stdin only:\n' +
       '  <cmd> | capy edit NAME --json\n',
   )
@@ -382,11 +383,12 @@ const deploy = program
   .option('--scope <scope>', 'gh-actions: "repo" or "env"')
   .option('--env-name <name>', 'gh-actions: env name when --scope env')
   .option('--no-deploy', 'write and verify the target, but skip the platform deploy/redeploy (target mode)')
+  .option('--replace-sensitive', 'vercel: allow replacing a value Vercel holds as sensitive, for the first time for a target, without asking') // COPY-FLAG
   .option('--json', 'describe the route (unanswered stops + any known branch problem) as JSON instead of travelling it')
   // COPY-FLAG: the option descriptions of `deploy <target> --discover` are minimal and neutral.
-  .option('--discover', 'dokploy: find the services that match Capy projects and print JSON (never prompts)')
-  .option('--plan <file>', 'dokploy --discover: the plan file to check (see schemas.deploy_dokploy_plan in `capy help --json`)')
-  .option('--confirm <plan_id>', 'dokploy --discover: write the plan that --dry-run printed (one PR per repo)')
+  .option('--discover', 'dokploy/vercel: find the services that match Capy projects and print JSON (never prompts)')
+  .option('--plan <file>', 'dokploy/vercel --discover: the plan file to check (see schemas.deploy_dokploy_plan and schemas.deploy_vercel_plan in `capy help --json`)')
+  .option('--confirm <plan_id>', 'dokploy/vercel --discover: write the plan that --dry-run printed (one PR per repo)')
   .option('--base-url <url>', 'dokploy --discover: the Dokploy dashboard URL (else the org system variable _CONNECTOR_DOKPLOY_BASE_URL)')
   .addOption(resolveOption())
   .addOption(conflictOption())
@@ -409,11 +411,12 @@ const deploy = program
         yes: options.yes ?? merged.yes,
         dryRun: options.dryRun ?? merged.dryRun,
         edit: options.edit,
-        // Deploy-level flag only — the global `-f/--force` means "re-encrypt",
-        // a different thing, so it must NOT be merged in here.
-        force: options.force,
+        // `--force` is also the program's `-f/--force` ("re-encrypt"), and commander gives
+        // that flag to the program, never to `deploy`: only the merged view carries it.
+        force: options.force ?? merged.force,
         // commander negates `--no-deploy` onto the positive `deploy` property.
         noDeploy: options.deploy === false,
+        replaceSensitive: !!options.replaceSensitive,
         json: !!options.json,
         conflictFlags: rawConflictFlagsOf(cmd),
       });
@@ -434,7 +437,7 @@ const deploy = program
       scope: options.scope,
       envName: options.envName,
       yes: !!options.yes,
-      force: !!options.force,
+      force: !!(options.force ?? merged.force),
       json: !!options.json,
       dryRun: (options.dryRun ?? merged.dryRun) === true,
       conflictFlags: rawConflictFlagsOf(cmd),
@@ -768,9 +771,9 @@ systemCmd
     await systemRmCommand(name, { org: options.org, json: options.json, yes: options.yes });
   });
 
-program
+const orgCmd = program
   .command('org')
-  .description('Switch organization')
+  .description('Switch organization; create, delete or restore its projects') // COPY-FLAG
   .option('--non-tty', 'treat stdin as not a terminal; differences from Capy stop the switch with the conflict_id (agents/CI)') // COPY-FLAG
   .addOption(resolveOption())
   .addOption(conflictOption())
@@ -781,6 +784,58 @@ program
     // subcommand must read the inherited global rather than its own options.
     const cmd = new OrgCommand();
     await cmd.execute({ nonTty: options.nonTty === true, conflictFlags: rawConflictFlagsOf(command) });
+  });
+
+orgCmd
+  .command('create-project [name]')
+  .description('Create a project in the active organization (owners and admins only; does not link this folder)') // COPY-FLAG
+  .option('--non-tty', 'treat stdin as not a terminal: never ask for the name; with no name, refuse with a form to ask the human') // COPY-FLAG
+  .option('--json', 'emit machine-readable JSON instead of the human UI')
+  .action(async (name: string | undefined, _options: any, command: any) => {
+    assertNotLocalOnly('org create-project');
+    const { createProjectCommand, createProjectOptsFrom } = await import('./commands/projectCreateCommand');
+    // Read from the merged view: `org`'s `--non-tty` and the program's `--dry-run` take those flags before this command sees them.
+    await createProjectCommand(name, createProjectOptsFrom(command));
+  });
+
+orgCmd
+  .command('delete-project <name-or-id>')
+  .description('Delete a project (owners only; hidden, not destroyed; an owner can restore it)') // COPY-FLAG
+  .option('--force', 'delete even if the project has live deploy tokens (those deploys stop on their next restart)') // COPY-FLAG
+  .option('--yes', 'skip the confirmation question')
+  .option('--non-tty', 'treat stdin as not a terminal: refuse unless --yes is passed') // COPY-FLAG
+  .option('--json', 'emit machine-readable JSON instead of the human UI')
+  .action(async (ref: string, _options: any, command: any) => {
+    assertNotLocalOnly('org delete-project');
+    const { deleteProjectCommand, lifecycleOptsFrom } = await import('./commands/projectLifecycleCommand');
+    // Read from the merged view: the program's `-f/--force` and `org`'s `--non-tty` take those flags before this command sees them.
+    await deleteProjectCommand(ref, lifecycleOptsFrom(command));
+  });
+
+orgCmd
+  .command('restore-project <name-or-id>')
+  .description('Restore a deleted project (owners only)') // COPY-FLAG
+  .option('--yes', 'skip the confirmation question')
+  .option('--non-tty', 'treat stdin as not a terminal: refuse unless --yes is passed') // COPY-FLAG
+  .option('--json', 'emit machine-readable JSON instead of the human UI')
+  .action(async (ref: string, _options: any, command: any) => {
+    assertNotLocalOnly('org restore-project');
+    const { restoreProjectCommand, lifecycleOptsFrom } = await import('./commands/projectLifecycleCommand');
+    const { yes, nonTty, json } = lifecycleOptsFrom(command);
+    await restoreProjectCommand(ref, { yes, nonTty, json });
+  });
+
+orgCmd
+  .command('projects')
+  .description('List projects in the active organization; --deleted also lists deleted ones (owners only)') // COPY-FLAG
+  .option('--deleted', 'also list deleted projects, marked as deleted, with the date') // COPY-FLAG
+  .option('--json', 'emit machine-readable JSON instead of the human UI')
+  .action(async (_options: any, command: any) => {
+    assertNotLocalOnly('org projects');
+    const { ProjectsCommand } = await import('./commands/projectsCommand');
+    const cmd = new ProjectsCommand();
+    const merged = command.optsWithGlobals();
+    await cmd.execute({ json: merged.json, deleted: merged.deleted === true });
   });
 
 program
@@ -1060,7 +1115,9 @@ program
   .option('--base-url <url>', 'dokploy import: dashboard URL')
   .option('--application <id>', 'dokploy import: Application id (mutually exclusive with --compose)')
   .option('--compose <id>', 'dokploy import: Compose service id (mutually exclusive with --application)')
-  .option('--token-env <name>', 'dokploy import: env var holding the API token')
+  .option('--token-env <name>', 'dokploy/vercel import: env var holding the API token')
+  .option('--project <project>', 'vercel import: Vercel project id or name (under --discover: the project that wins a mapping collision)')
+  .option('--team <team>', 'vercel import/discover: Vercel team slug or id (default: the token\'s only team)')
   .option('--json', 'emit machine-readable JSON instead of the human UI (import connectors)')
   .option(
     '--dry-run',
@@ -1068,7 +1125,7 @@ program
   )
   .option(
     '--discover',
-    'dokploy: find every Dokploy service matching a repo under cwd, instead of one named --application/--compose',
+    'dokploy/vercel: find every Dokploy service / Vercel project matching a repo under cwd, instead of one named --application/--compose/--project',
   )
   .option(
     '-y, --yes',
@@ -1081,7 +1138,7 @@ program
   )
   .option(
     '--environment <names>',
-    'dokploy discover: restrict the plan to these Dokploy environment names, comma-separated (e.g. staging,preview)',
+    'dokploy/vercel discover: restrict the plan to these environment names, comma-separated (e.g. staging,preview); vercel import: which Vercel environment to read (default: the current branch\'s name)',
   )
   .addOption(resolveOption())
   .addOption(conflictOption())
@@ -1114,6 +1171,8 @@ program
       yes: options.yes === true,
       overwrite: options.overwrite === true,
       environment: options.environment,
+      project: options.project,
+      team: options.team,
       conflictFlags: rawConflictFlagsOf(command),
     });
   });

@@ -347,9 +347,9 @@ const deploy = program
   .option('--scope <scope>', 'gh-actions: "repo" or "env"')
   .option('--env-name <name>', 'gh-actions: env name when --scope env')
   // COPY-FLAG: the option descriptions of `deploy <target> --discover` are minimal and neutral.
-  .option('--discover', 'dokploy: find the services that match Capy projects and print JSON (never prompts)')
-  .option('--plan <file>', 'dokploy --discover: the plan file to check (see schemas.deploy_dokploy_plan in `capy help --json`)')
-  .option('--confirm <plan_id>', 'dokploy --discover: write the plan that --dry-run printed (one PR per repo)')
+  .option('--discover', 'dokploy/vercel: find the services that match Capy projects and print JSON (never prompts)')
+  .option('--plan <file>', 'dokploy/vercel --discover: the plan file to check (see schemas.deploy_dokploy_plan and schemas.deploy_vercel_plan in `capy help --json`)')
+  .option('--confirm <plan_id>', 'dokploy/vercel --discover: write the plan that --dry-run printed (one PR per repo)')
   .option('--base-url <url>', 'dokploy --discover: the Dokploy dashboard URL (else the org system variable _CONNECTOR_DOKPLOY_BASE_URL)')
   .addOption(resolveOption())
   .addOption(conflictOption())
@@ -738,9 +738,9 @@ program
     }
   });
 
-program
+const orgCmd = program
   .command('org')
-  .description('Switch organization')
+  .description('Switch organization; create, delete or restore its projects') // COPY-FLAG
   .option('--non-tty', 'treat stdin as not a terminal; differences from Capy stop the switch with the conflict_id (agents/CI)') // COPY-FLAG
   .addOption(resolveOption())
   .addOption(conflictOption())
@@ -748,6 +748,54 @@ program
     const { OrgCommand } = await import('./commands/orgCommand');
     const cmd = new OrgCommand(process.env.CAPY_API_URL, true);
     await cmd.execute({ nonTty: options.nonTty === true, conflictFlags: rawConflictFlagsOf(command) });
+  });
+
+orgCmd
+  .command('create-project [name]')
+  .description('Create a project in the active organization (owners and admins only; does not link this folder)') // COPY-FLAG
+  .option('--non-tty', 'treat stdin as not a terminal: never ask for the name; with no name, refuse with a form to ask the human') // COPY-FLAG
+  .option('--json', 'emit machine-readable JSON instead of the human UI')
+  .action(async (name: string | undefined, _options: any, command: any) => {
+    const { createProjectCommand, createProjectOptsFrom } = await import('./commands/projectCreateCommand');
+    // Read from the merged view: `org`'s `--non-tty` and the program's `--dry-run` take those flags before this command sees them.
+    await createProjectCommand(name, { ...createProjectOptsFrom(command), apiUrl: process.env.CAPY_API_URL, devMode: true });
+  });
+
+orgCmd
+  .command('delete-project <name-or-id>')
+  .description('Delete a project (owners only; hidden, not destroyed; an owner can restore it)') // COPY-FLAG
+  .option('--force', 'delete even if the project has live deploy tokens (those deploys stop on their next restart)') // COPY-FLAG
+  .option('--yes', 'skip the confirmation question')
+  .option('--non-tty', 'treat stdin as not a terminal: refuse unless --yes is passed') // COPY-FLAG
+  .option('--json', 'emit machine-readable JSON instead of the human UI')
+  .action(async (ref: string, _options: any, command: any) => {
+    const { deleteProjectCommand, lifecycleOptsFrom } = await import('./commands/projectLifecycleCommand');
+    // Read from the merged view: the program's `-f/--force` and `org`'s `--non-tty` take those flags before this command sees them.
+    await deleteProjectCommand(ref, { ...lifecycleOptsFrom(command), apiUrl: process.env.CAPY_API_URL, devMode: true });
+  });
+
+orgCmd
+  .command('restore-project <name-or-id>')
+  .description('Restore a deleted project (owners only)') // COPY-FLAG
+  .option('--yes', 'skip the confirmation question')
+  .option('--non-tty', 'treat stdin as not a terminal: refuse unless --yes is passed') // COPY-FLAG
+  .option('--json', 'emit machine-readable JSON instead of the human UI')
+  .action(async (ref: string, _options: any, command: any) => {
+    const { restoreProjectCommand, lifecycleOptsFrom } = await import('./commands/projectLifecycleCommand');
+    const { yes, nonTty, json } = lifecycleOptsFrom(command);
+    await restoreProjectCommand(ref, { yes, nonTty, json, apiUrl: process.env.CAPY_API_URL, devMode: true });
+  });
+
+orgCmd
+  .command('projects')
+  .description('List projects in the active organization; --deleted also lists deleted ones (owners only)') // COPY-FLAG
+  .option('--deleted', 'also list deleted projects, marked as deleted, with the date') // COPY-FLAG
+  .option('--json', 'emit machine-readable JSON instead of the human UI')
+  .action(async (_options: any, command: any) => {
+    const { ProjectsCommand } = await import('./commands/projectsCommand');
+    const cmd = new ProjectsCommand(process.env.CAPY_API_URL, true);
+    const merged = command.optsWithGlobals();
+    await cmd.execute({ json: merged.json, deleted: merged.deleted === true });
   });
 
 program

@@ -9,6 +9,7 @@ import type { ImportOutcome } from './registry';
 import { reportRepoLinkForCommand, type RepoLinkWarning } from '../../core/repoLinkReporter';
 import { currentInteraction } from '../../ui/interaction';
 import { flowConsole as console } from '../../ui/flowConsole';
+import { clearedPlaceholders, withPlaceholders, type PlaceholderRequest } from '../../core/placeholder';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -227,7 +228,9 @@ export async function writeAndSync(
   },
 ): Promise<void> {
   const { fileManager, branch, projectKey, keep, localPlaintext } = ctx;
-  const attach = (k: KeepFile): KeepFile => applyConnectors(k, branch, varName, opts.connector, opts.alsoConnect);
+  // A value is being written for `varName`: it is no longer a placeholder.
+  const attach = (k: KeepFile): KeepFile =>
+    clearedPlaceholders(applyConnectors(k, branch, varName, opts.connector, opts.alsoConnect), branch, value === undefined ? [] : [varName]);
 
   if (!opts.push) {
     // Local-only path. Even though we're not hitting the service, we still
@@ -264,6 +267,8 @@ export async function writeImportedAndSync(
   entries: ReadonlyArray<{ varName: string; value: string; entry: ConnectorMetadata }>,
   opts: {
     push: boolean;
+    /** Names to record as placeholders on the branch (no value). Written in the same save as `entries`. */
+    placeholders?: readonly PlaceholderRequest[];
     /**
      * `--overwrite` clear-only writes: proceed even when `entries` is empty.
      * Clearing removes names (`opts.clear`) rather than adding an entry, so a
@@ -276,7 +281,8 @@ export async function writeImportedAndSync(
     clear?: readonly string[];
   },
 ): Promise<void> {
-  if (entries.length === 0 && !opts.forceWrite) return;
+  const placeholders = opts.placeholders ?? [];
+  if (entries.length === 0 && placeholders.length === 0 && !opts.forceWrite) return;
   const { fileManager, branch, projectKey, keep, localPlaintext } = ctx;
   const clear = opts.clear ?? [];
   const also = entries.map((e) => ({ varName: e.varName, entry: e.entry }));
@@ -285,14 +291,19 @@ export async function writeImportedAndSync(
   // (always `undefined` here) is set — so on a clear-only call (`entries`
   // empty, `forceWrite: true`) this placeholder is never actually consulted,
   // but `entries[0].varName` would still throw evaluating it eagerly.
-  const attachAll = (k: KeepFile): KeepFile => applyConnectors(k, branch, entries[0]?.varName ?? '', undefined, also);
+  const attachAll = (k: KeepFile): KeepFile =>
+    withPlaceholders(
+      clearedPlaceholders(applyConnectors(k, branch, entries[0]?.varName ?? '', undefined, also), branch, entries.map((e) => e.varName)),
+      branch,
+      placeholders,
+    );
   const set = Object.fromEntries(entries.map((e) => [e.varName, e.value]));
 
   if (!opts.push) {
     const finalEnv = { ...Object.fromEntries(Object.entries(localPlaintext).filter(([k]) => !clear.includes(k))), ...set };
     const merged = attachAll(keep);
     if (merged !== keep) fileManager.writeKeepFile(merged);
-    fileManager.writeEncryptedEnvFile(finalEnv, projectKey, undefined, merged, branch);
+    fileManager.writeEncryptedEnvFile(finalEnv, projectKey, undefined, merged, branch, clear);
     return;
   }
 
@@ -329,13 +340,16 @@ export async function writeImportOutcome(
   // caller (link-kind connectors don't set it; hand-built outcomes in
   // existing tests don't either), so this is a strict no-op there.
   const unchangedEntries = outcome.unchangedEntries ?? [];
-  const hasWrite = outcome.imported.length > 0 || cleared.length > 0 || unchangedEntries.length > 0;
+  // A placeholder is a keep.lock entry with no value: recorded in the same save as the imported values.
+  const placeholders = (outcome.placeholders ?? []).map((p): PlaceholderRequest => ({ name: p.name, marker: { provider: p.provider, reason: p.code } }));
+  const hasWrite = outcome.imported.length > 0 || cleared.length > 0 || unchangedEntries.length > 0 || placeholders.length > 0;
   if (!hasWrite) return { wrote: false };
 
   await writeImportedAndSync(ctx, [...outcome.imported, ...unchangedEntries], {
     push: opts.push,
-    forceWrite: cleared.length > 0 || unchangedEntries.length > 0,
+    forceWrite: cleared.length > 0 || unchangedEntries.length > 0 || placeholders.length > 0,
     clear: cleared,
+    placeholders,
   });
   return { wrote: true };
 }

@@ -7,7 +7,7 @@ import { readSecretsLocal, LOCAL_USER_ID } from '../config/globalConfig';
 import { isLocalOnly } from '../config/profileConfig';
 import { resolveLocalProjectKey } from '../core/localUnlock';
 import { hashValue } from './statusCommand';
-import { EditScreen, EditRow, EditState, EditLoaded, classifiedRow, focusedOn, withPendingEdits } from '../ui/editScreen';
+import { EditScreen, EditRow, EditState, EditLoaded, classifiedRow, withPendingEdits } from '../ui/editScreen';
 import { deployedHashesFor } from '../core/deployStatus';
 import { readDefaultBranchTargets } from '../deploy/configuredTargets';
 import { KeepFile } from '../types/index';
@@ -16,7 +16,8 @@ import { conflictFlagsOrExit, type RawConflictFlags } from '../sync/conflicts';
 import { gateFirst, type GateOptions } from '../sync/gate';
 import { reportKeepLockHuman, refuseBadPrFlags, runKeepLockPrStep, type PrFlags } from './keepLockPr';
 import { startSaveLog } from './sessionSaveLog';
-import { decideEditMode, editPipedCommand, refuseEditNeedsTty } from './editPiped';
+import { decideEditMode, editPipedCommand, refuseEditNeedsTty, refuseEditPromptLocalOnly } from './editPiped';
+import { runPromptedSet } from './addCommand';
 import { DRY_RUN_UNSUPPORTED_MESSAGES, refuseDryRunUnsupported, refuseInvalidName } from './pipedValue';
 import { isValidVarName } from './pipedWrite';
 import { printRepoLinkWarnings, reportRepoLink } from '../core/repoLinkReporter';
@@ -218,9 +219,9 @@ export async function saveEdits(
 
 export interface EditOpts {
   /**
-   * The variable to work on (`capy edit NAME`). With a terminal: the TUI opens
-   * with the cursor on it, and an unknown name opens its new-variable entry.
-   * Without one: the value is read from stdin (piped mode).
+   * The variable to work on (`capy edit NAME`). With a terminal: the hidden value prompt of
+   * `capy add NAME --force` (a new name is created, an existing one overwritten). Without one:
+   * the value is read from stdin (piped mode).
    */
   name?: string;
   /** Piped mode: pure JSON on stdout. */
@@ -231,7 +232,7 @@ export interface EditOpts {
   nonTty?: boolean;
   /** `--pr` / `--no-pr` / `--pr-base`: answers the keep.lock PR step. */
   pr?: PrFlags;
-  /** The global `--dry-run`: piped mode previews; the TUI refuses (`DRY_RUN_UNSUPPORTED`). */
+  /** The global `--dry-run`: piped mode previews; the TUI and the value prompt refuse (`DRY_RUN_UNSUPPORTED`). */
   dryRun?: boolean;
   /** `--resolve` / `--conflict` as typed (CAP-717): they answer the differences bare `capy` finds first. */
   conflictFlags?: RawConflictFlags;
@@ -309,6 +310,10 @@ export class EditCommand {
     if (mode === 'tui' && opts.dryRun === true) {
       return refuseDryRunUnsupported(opts.json === true, DRY_RUN_UNSUPPORTED_MESSAGES.edit);
     }
+    // The value prompt would really save: a dry run never runs for real. Before any prompt.
+    if (mode === 'prompt' && opts.dryRun === true) {
+      return refuseDryRunUnsupported(opts.json === true, DRY_RUN_UNSUPPORTED_MESSAGES.editPrompt);
+    }
     if (opts.name !== undefined && !isValidVarName(opts.name)) return refuseInvalidName(opts.json === true);
     // A bad flag is refused here, before stdin is read or anything is authenticated.
     conflictFlagsOrExit(opts.conflictFlags ?? {}, opts.json === true);
@@ -321,6 +326,26 @@ export class EditCommand {
         pr: opts.pr,
         dryRun: opts.dryRun === true,
         gate,
+      });
+    }
+
+    // `capy edit NAME` on a terminal is `capy add NAME --force`: the same hidden prompt and the same write path.
+    if (mode === 'prompt' && opts.name !== undefined) {
+      if (isLocalOnly()) return refuseEditPromptLocalOnly(opts.json === true);
+      return runPromptedSet({
+        names: [opts.name],
+        opts: {
+          force: true,
+          noPush: opts.noPush,
+          nonTty: opts.nonTty,
+          json: opts.json,
+          pr: opts.pr,
+          dryRun: opts.dryRun,
+          conflictFlags: opts.conflictFlags,
+        },
+        devMode: this.devMode,
+        command: 'edit',
+        dryRunMessage: DRY_RUN_UNSUPPORTED_MESSAGES.editPrompt,
       });
     }
 
@@ -376,10 +401,6 @@ export class EditCommand {
       localMode,
       seen: loaded.seen,
     };
-    // `capy edit NAME` on a terminal: the cursor starts on NAME (a new name opens
-    // its value entry).
-    const state = opts.name !== undefined ? focusedOn(baseState, opts.name) : baseState;
-
     const screen = new EditScreen();
     const printExpiryAfter = async () => {
       const { printExpiryWarnings } = await import('./connectors/shared');
@@ -410,7 +431,7 @@ export class EditCommand {
       const fresh = await load();
       return session(withPendingEdits({ ...baseState, rows: fresh.rows, remoteAvailable: fresh.remoteAvailable, seen: fresh.seen }, exit.pending));
     };
-    await session(state);
+    await session(baseState);
     if (repoLinkPending) printRepoLinkWarnings(await repoLinkPending);
     // The TUI has already released stdin (raw mode off, its key listener
     // removed) by the time `run` resolves, so the prompts in keepLockPr.ts start

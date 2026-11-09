@@ -383,6 +383,19 @@ describe('SecretsCommand', () => {
     expect(noTargets.status).toBe('no target');
     expect(noTargets.status_locations).toBeUndefined();
   });
+
+  it('a row with an empty value hash (a name with no value yet) says so and how to set it; a row with a value does not', async () => {
+    getSecretIndexImpl.mockImplementation(async () => ({
+      org_id: 'org_1',
+      rows: [row({ name: 'NO_VALUE', value_hash: '' }), row({ name: 'HAS_VALUE', value_hash: 'abc123' })],
+      skipped: [],
+    }));
+    const { stdout } = await capture(() => new SecretsCommand().execute({ json: true }));
+    const [noValue, hasValue] = JSON.parse(stdout).rows;
+    expect(noValue).toMatchObject({ no_value: true, set_with: 'capy edit NO_VALUE' });
+    expect(hasValue).not.toHaveProperty('no_value');
+    expect(hasValue).not.toHaveProperty('set_with');
+  });
 });
 
 describe('SecretsCommand — interactive launch (CAP-680: full TTY, no --json)', () => {

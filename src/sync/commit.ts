@@ -27,6 +27,7 @@ import type { ProjectManager } from '../core/projectManager';
 import type { ServiceClient } from '../service/serviceClient';
 import { CapyError, ERROR_CODES, KeepFile, setSyncKeepHash } from '../types/index';
 import { hashValue } from './compareSecrets';
+import { placeholderOf } from '../core/placeholder';
 import { SyncEngine } from './syncEngine';
 import type { RateInfo } from '../utils/pool';
 
@@ -61,7 +62,8 @@ export function pinnedHashes(keep: KeepFile | null | undefined, branch: string):
   return Object.fromEntries(
     Object.entries(keep?.variables ?? {}).flatMap(([name, entries]) => {
       const entry = entries.find((e) => e.branch === branch);
-      return entry ? ([[name, entry.value_hash]] as const) : [];
+      // A placeholder pins no value: it is neither compared, restored nor dropped with the pinned names.
+      return entry && entry.placeholder === undefined ? ([[name, entry.value_hash]] as const) : [];
     }),
   );
 }
@@ -238,10 +240,26 @@ export function keepWithChanges(
   return removed.length === 0 ? merged : dropBranchEntries(merged, branch, removed);
 }
 
+/**
+ * What a branch with no variables is stored as. The blob is one `NAME=capy:<id>:<ciphertext>` line per variable, so a
+ * branch with none would be an empty string, and the service refuses an empty `env_blob` (it answers 400 to `!env_blob`).
+ * A branch can have none and still need a save: an import whose names are all placeholders, a `--overwrite` that clears
+ * the last name. A comment line is a non-empty blob that every reader (`dotenv` parse) reads as no variables; there is
+ * no per-variable ciphertext to put in it, because there is no variable.
+ */
+export const EMPTY_ENV_BLOB = '# capy: no variables';
+
 export const envBlobOf = (lines: Readonly<Record<string, string>>): string =>
-  Object.entries(lines)
-    .map(([name, line]) => `${name}=${line}`)
-    .join('\n');
+  Object.keys(lines).length === 0
+    ? EMPTY_ENV_BLOB
+    : Object.entries(lines)
+        .map(([name, line]) => `${name}=${line}`)
+        .join('\n');
+
+/** The names `changes` removes that are placeholders on `branch` (and are not being given a value in the same change). */
+function removedPlaceholders(keep: KeepFile, branch: string, changes: Changes): readonly string[] {
+  return changes.remove.filter((name) => !has(changes.set, name) && placeholderOf(keep, name, branch) !== undefined);
+}
 
 /** `keep` with this branch's slice rebuilt from `env`: every name set, every other pinned name dropped. */
 export function keepForEnv(keep: KeepFile, branch: string, env: Readonly<Record<string, string>>): KeepFile {
@@ -325,9 +343,11 @@ export async function uploadChanges(input: UploadInput): Promise<Uploaded> {
     changes,
     encryptLine: (name, value) => `capy:${resourceIdOf(name)}:${Encryptor.encrypt(value, projectKey)}`,
   });
-  const changed = keepWithChanges(latestKeep, branch, applied.written, applied.removed, resourceIdOf);
+  // A name that is only a placeholder has no blob line to remove, but removing it still drops its entry.
+  const removed = [...applied.removed, ...removedPlaceholders(latestKeep, branch, changes)];
+  const changed = keepWithChanges(latestKeep, branch, applied.written, removed, resourceIdOf);
   const keep = transformKeep ? transformKeep(changed) : changed;
-  const base = { snapshot, keep, lines: applied.lines, env: applied.env, written: Object.keys(applied.written), removed: applied.removed };
+  const base = { snapshot, keep, lines: applied.lines, env: applied.env, written: Object.keys(applied.written), removed };
   const readRate = 'rate' in read && read.rate !== undefined ? { read: read.rate } : {};
   if (keep === latestKeep) return { ...base, result: undefined, rates: readRate };
 
@@ -491,7 +511,7 @@ function commitLocalCopy(ctx: FolderContext, changes: Changes, transformKeep: Fo
   const lines = Object.fromEntries(
     Object.entries(env).map(([name, value]) => [name, `capy:${deriveResourceId(ctx.branch, name)}:${Encryptor.encrypt(value, ctx.projectKey)}`]),
   );
-  const rebuilt = keepForEnv(ctx.keep, ctx.branch, env);
+  const rebuilt = keepWithChanges(keepForEnv(ctx.keep, ctx.branch, env), ctx.branch, {}, removedPlaceholders(ctx.keep, ctx.branch, changes), (name) => deriveResourceId(ctx.branch, name));
   const keep = transformKeep ? transformKeep(rebuilt) : rebuilt;
   return {
     env,
@@ -537,7 +557,7 @@ export async function commitFolder(ctx: FolderContext, changes: Changes, opts: F
 
   writeKeepCache(ctx.orgId, ctx.projectId, done.cacheHash, envBlobOf(done.lines));
   ctx.fileManager.writeKeepFile(done.adopted);
-  ctx.fileManager.writeEncryptedEnvFile({ ...done.env }, ctx.projectKey, undefined, done.adopted, ctx.branch);
+  ctx.fileManager.writeEncryptedEnvFile({ ...done.env }, ctx.projectKey, undefined, done.adopted, ctx.branch, done.removed);
 
   const existingSyncState = ctx.pm.readSyncState();
   ctx.fileManager.writeSyncState({

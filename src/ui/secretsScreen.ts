@@ -25,6 +25,8 @@ import { CANCELLED_NOTHING, DRY_RUN_LABEL } from '../commands/secretsSetText';
 import type { RunProgress } from '../commands/secretsSet';
 import { clipLine } from './pickerTable';
 import { BEHIND_LABEL, DEPLOYED_LABEL, NO_TARGET_LABEL, TARGET_STATUS_HEADING, formatSecretRowStatus, locationState, secretRowStatus } from '../core/deployStatus';
+import type { SecretRowStatus } from '../core/deployStatus';
+import { NO_VALUE_YET, noValueYetLine } from '../core/placeholder';
 import { statusBadge, statusColor } from './statusBadge';
 import {
   EditEffect,
@@ -115,6 +117,8 @@ const KEY_CTRL_C = '\x03';
 const KEY_CTRL_E = '\x05';
 /** Ctrl+D: deploy the selected row's Dokploy targets, from the list while no filter is typed. The plain `d` is only a hotkey in the details view. */
 const KEY_CTRL_D = '\x04';
+/** Ctrl+S: cycle the list's sort. Ignored while the details view (or an edit/deploy screen) is open. */
+const KEY_CTRL_S = '\x13';
 const KEY_BACKSPACE = '\x7f';
 const KEY_BACKSPACE2 = '\b';
 
@@ -223,6 +227,94 @@ function nextColumn(column: ColumnMode, dir: 1 | -1): ColumnMode {
   return COLUMN_ORDER[nextIdx];
 }
 
+// ── Sorting (CAP-731) ────────────────────────────────────────────────────────
+//
+// Ctrl+S opens a sort menu listing SORT_ORDER; Enter applies the chosen sort and
+// goes back to the top of the list. Search still decides
+// WHICH rows show; the sort only orders them. Every comparison keys off a
+// machine value (the name string, the status `kind`, a timestamp), never the
+// words the screen prints. Ties always fall back to a deterministic key, so the
+// order never depends on how the server (or a previous sort) happened to arrive.
+
+export type SortMode = 'name-asc' | 'name-desc' | 'status-asc' | 'status-desc' | 'updated-newest' | 'updated-oldest';
+/** The order the sort menu lists; the first entry is the default. */
+export const SORT_ORDER: readonly SortMode[] = ['name-asc', 'name-desc', 'status-asc', 'status-desc', 'updated-newest', 'updated-oldest'];
+
+/** What the footer and the sort menu say each sort is. */
+const SORT_LABELS: Readonly<Record<SortMode, string>> = {
+  'name-asc': 'name A-Z', // COPY-FLAG
+  'name-desc': 'name Z-A', // COPY-FLAG
+  'status-asc': 'deploy status A-Z', // COPY-FLAG
+  'status-desc': 'deploy status Z-A', // COPY-FLAG
+  'updated-newest': 'updated newest', // COPY-FLAG
+  'updated-oldest': 'updated oldest', // COPY-FLAG
+};
+
+/**
+ * Deploy status order for the A-Z sort, keyed by `secretRowStatus(row).kind`
+ * (a code, not the displayed word). Z-A is this reversed. Typed as a full
+ * Record so a new kind will not compile until it has a rank.
+ */
+const STATUS_RANK: Readonly<Record<SecretRowStatus['kind'], number>> = {
+  deployed: 0,
+  behind: 1,
+  unknown: 2,
+  'no target': 3,
+};
+
+/** Case-insensitive, accent-insensitive, locale-aware ('en'): the same family of order the service uses for its own row order (`localeCompare`), but with a fixed locale so it does not change per machine. */
+const NAME_COLLATOR = new Intl.Collator('en', { sensitivity: 'base' });
+
+const compareText = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
+
+/** Name A-Z; a tie (same name ignoring case) breaks by value hash so the order is deterministic. */
+function compareByName(a: SecretIndexRow, b: SecretIndexRow): number {
+  return NAME_COLLATOR.compare(a.name, b.name) || compareText(a.name, b.name) || compareText(a.value_hash, b.value_hash);
+}
+
+/** Epoch milliseconds of the row's most recent change, or `null` when it has none (or one that is not a date). */
+function changedAtMs(row: SecretIndexRow): number | null {
+  const ts = mostRecentChangedAt(row);
+  const ms = ts === undefined ? Number.NaN : new Date(ts).getTime();
+  return Number.isNaN(ms) ? null : ms;
+}
+
+/** Updated sort: rows with no time go last in BOTH directions; equal times fall back to name A-Z. */
+function compareByUpdated(direction: 1 | -1): (a: SecretIndexRow, b: SecretIndexRow) => number {
+  return (a, b) => {
+    const am = changedAtMs(a);
+    const bm = changedAtMs(b);
+    if (am === null && bm === null) return compareByName(a, b);
+    if (am === null) return 1;
+    if (bm === null) return -1;
+    return (direction === 1 ? bm - am : am - bm) || compareByName(a, b);
+  };
+}
+
+/** Deploy status sort: by rank (reversed for Z-A); a tie breaks by name A-Z in both directions. */
+function compareByStatus(direction: 1 | -1): (a: SecretIndexRow, b: SecretIndexRow) => number {
+  return (a, b) => direction * (STATUS_RANK[secretRowStatus(a).kind] - STATUS_RANK[secretRowStatus(b).kind]) || compareByName(a, b);
+}
+
+function comparatorFor(sort: SortMode): (a: SecretIndexRow, b: SecretIndexRow) => number {
+  if (sort === 'name-desc') return (a, b) => compareByName(b, a);
+  if (sort === 'status-asc') return compareByStatus(1);
+  if (sort === 'status-desc') return compareByStatus(-1);
+  if (sort === 'updated-newest') return compareByUpdated(1);
+  if (sort === 'updated-oldest') return compareByUpdated(-1);
+  return compareByName;
+}
+
+/** A sorted copy of `items` (`toSorted` is ES2023 and this package supports Node 18): the input is never changed. */
+function sortedCopy<T>(items: readonly T[], cmp: (a: T, b: T) => number): readonly T[] {
+  return Array.from(items).sort(cmp);
+}
+
+/** `rows` in `sort` order, as a new array. */
+export function sortRows(rows: readonly SecretIndexRow[], sort: SortMode): readonly SecretIndexRow[] {
+  return sortedCopy(rows, comparatorFor(sort));
+}
+
 // ── State ────────────────────────────────────────────────────────────────────
 
 export type { ValueState };
@@ -252,9 +344,17 @@ export interface SearchState {
   readonly query: string;
 }
 
+export interface SortMenuState {
+  readonly cursor: number;
+}
+
 export interface SecretsScreenState {
   readonly rows: readonly SecretIndexRow[];
   readonly column: ColumnMode;
+  /** How the list is ordered (chosen in the Ctrl+S menu); search decides which rows show, this decides their order. */
+  readonly sort: SortMode;
+  /** The Ctrl+S sort menu, open while a sort is being chosen: `cursor` indexes `SORT_ORDER`. `null` when closed. */
+  readonly sortMenu: SortMenuState | null;
   readonly cursorIndex: number;
   readonly search: SearchState;
   readonly popup: PopupState | null;
@@ -275,6 +375,8 @@ export function initialSecretsScreenState(rows: readonly SecretIndexRow[], dryRu
   return {
     rows,
     column: COLUMN_ORDER[0],
+    sort: SORT_ORDER[0],
+    sortMenu: null,
     cursorIndex: 0,
     search: { query: '' },
     popup: null,
@@ -364,7 +466,13 @@ function rowMatchReasons(row: SecretIndexRow, qLower: string, rawHash: string, t
  * reasons" before any hashing happens (mirrors the old NAME-only filter's
  * behavior when the bar is empty).
  */
-function computeFilteredRows(rows: readonly SecretIndexRow[], query: string): readonly MatchedRow[] {
+function computeFilteredRows(rows: readonly SecretIndexRow[], query: string, sort: SortMode): readonly MatchedRow[] {
+  const order = comparatorFor(sort);
+  return sortedCopy(matchRows(rows, query), (a, b) => order(a.row, b.row));
+}
+
+/** The rows that match `query`, each with why, in the order they arrived (`computeFilteredRows` applies the sort). */
+function matchRows(rows: readonly SecretIndexRow[], query: string): readonly MatchedRow[] {
   const trimmed = query.trim();
   const qLower = normalizeQuery(query);
   if (!qLower) return rows.map((row) => ({ row, reasons: [] as const }));
@@ -380,12 +488,12 @@ function computeFilteredRows(rows: readonly SecretIndexRow[], query: string): re
 
 /** Rows currently visible, plus why each one matched — see the module note above `computeFilteredRows`. */
 export function filteredRowsWithReasons(state: SecretsScreenState): readonly MatchedRow[] {
-  return computeFilteredRows(state.rows, state.search.query);
+  return computeFilteredRows(state.rows, state.search.query, state.sort);
 }
 
 /** Rows currently visible, after the live filter (name, project, branch, connector, target, or exact value — see `computeFilteredRows`). */
 export function filteredRows(state: SecretsScreenState): readonly SecretIndexRow[] {
-  return computeFilteredRows(state.rows, state.search.query).map((m) => m.row);
+  return computeFilteredRows(state.rows, state.search.query, state.sort).map((m) => m.row);
 }
 
 function clampIndex(index: number, length: number): number {
@@ -416,6 +524,9 @@ export function handleKey(state: SecretsScreenState, rawKey: string): ReduceResu
 
   if (state.edit) return handleEditFlowKey(state, state.edit, key);
   if (state.deploy) return handleDeployFlowKey(state, state.deploy, key);
+
+  // The sort menu owns the keyboard: nothing reaches the search, edit, deploy or column keys.
+  if (state.sortMenu) return noEffect(handleSortMenuKey(state, state.sortMenu, key));
 
   if (state.popup) {
     if (key === 'd' || key === 'D' || key === KEY_CTRL_D) return openDeployOnCursor(state);
@@ -519,14 +630,37 @@ export function applyRunDone(state: SecretsScreenState, finished: RunFinished): 
   return { ...state, edit: applyRunFinished(state.edit, finished) };
 }
 
-function filteredRowsFor(rows: readonly SecretIndexRow[], query: string): readonly SecretIndexRow[] {
-  return computeFilteredRows(rows, query).map((m) => m.row);
+function filteredRowsFor(rows: readonly SecretIndexRow[], query: string, sort: SortMode): readonly SecretIndexRow[] {
+  return computeFilteredRows(rows, query, sort).map((m) => m.row);
 }
 
 /** Sets the search query and reclamps the cursor into the (possibly now-shorter) filtered set — never resets it to the top just because the query changed. */
 function applyQuery(state: SecretsScreenState, query: string): SecretsScreenState {
-  const rows = filteredRowsFor(state.rows, query);
+  const rows = filteredRowsFor(state.rows, query, state.sort);
   return { ...state, search: { query }, cursorIndex: clampIndex(state.cursorIndex, rows.length) };
+}
+
+/**
+ * Switches to `sort` and goes back to the top: the first row of the new order is
+ * highlighted, so the list shows from its start (Vince, 2026-11-06). The scroll
+ * window follows the cursor, so a cursor of 0 is the top of the list.
+ */
+function applySort(state: SecretsScreenState, sort: SortMode): SecretsScreenState {
+  return { ...state, sort, cursorIndex: 0 };
+}
+
+/** Moves the sort menu's cursor by `step`, wrapping at both ends. */
+function stepSortMenu(menu: SortMenuState, step: 1 | -1): SortMenuState {
+  return { cursor: (menu.cursor + step + SORT_ORDER.length) % SORT_ORDER.length };
+}
+
+/** The sort menu's keys: ↑/↓ move (wrapping), Enter applies and closes, Esc or `q` close unchanged. Every other key does nothing. */
+function handleSortMenuKey(state: SecretsScreenState, menu: SortMenuState, key: string): SecretsScreenState {
+  if (key === KEY_UP) return { ...state, sortMenu: stepSortMenu(menu, -1) };
+  if (key === KEY_DOWN) return { ...state, sortMenu: stepSortMenu(menu, 1) };
+  if (key === '\r') return applySort({ ...state, sortMenu: null }, SORT_ORDER[menu.cursor]);
+  if (key === KEY_ESC || key === KEY_ESC_ESC || key === 'q' || key === 'Q') return { ...state, sortMenu: null };
+  return state;
 }
 
 function handlePopupKey(state: SecretsScreenState, key: string): SecretsScreenState {
@@ -583,6 +717,9 @@ function handleListKey(state: SecretsScreenState, key: string): ReduceResult {
   // Never while a filter is typed: the search owns the keyboard then. Enter (details), then `e`, edits a filtered row.
   if (key === KEY_CTRL_E && state.search.query === '') return openEditOnCursor(state);
   if (key === KEY_CTRL_D && state.search.query === '') return openDeployOnCursor(state);
+
+  // Works with or without a typed filter: the sort only orders the rows the search shows.
+  if (key === KEY_CTRL_S) return noEffect({ ...state, sortMenu: { cursor: Math.max(0, SORT_ORDER.indexOf(state.sort)) } });
 
   if (key === KEY_TAB) {
     return noEffect({ ...state, column: nextColumn(state.column, 1) });
@@ -973,6 +1110,7 @@ export function mainTableLayout(available: number): { readonly nameW: number; re
 export function render(state: SecretsScreenState, termWidth: number, termHeight: number): string {
   if (state.edit) return renderEditScreen(state.edit, termWidth, termHeight, state.dryRun);
   if (state.deploy) return renderDeployScreen(state.deploy, termWidth, termHeight, state.dryRun);
+  if (state.sortMenu) return renderSortMenuScreen(state, state.sortMenu, termWidth, termHeight);
   const m = ' '.repeat(MARGIN);
   const available = Math.max(40, termWidth - MARGIN * 2);
   const matched = filteredRowsWithReasons(state);
@@ -1002,7 +1140,9 @@ export function render(state: SecretsScreenState, termWidth: number, termHeight:
     // empty query carries no reasons anyway, but this also guards
     // `matchActive` for callers that ever hand in a non-empty `reasons`
     // alongside a cleared query).
-    const tag = matchActive && reasons.length > 0 ? `${ACCENT}[${reasons[0]}]${RESET}` : '';
+    const matchTag = matchActive && reasons.length > 0 ? `${ACCENT}[${reasons[0]}]${RESET}` : '';
+    // A row with no value yet says so beside its name (a search-match tag takes the place when one is active).
+    const tag = matchTag !== '' || row.value_hash !== '' ? matchTag : `${DIM}${NO_VALUE_YET}${RESET}`;
     const nameCell = buildNameCell(pointer + row.name, tag, nameW);
     const middleCell = pad(formatMiddleCell(row, state.column, middleW), middleW);
     const updatedCell = pad(formatUpdatedCell(row), updatedW);
@@ -1025,7 +1165,7 @@ export function render(state: SecretsScreenState, termWidth: number, termHeight:
     rows.length === 0 ? [`${m}${DIM}No secrets match.${RESET}`] : slice.map((line) => m + line);
 
   const noteLines: readonly string[] = state.note === null ? [] : [`${m}${DIM}${state.note}${RESET}`];
-  const footerLines: readonly string[] = ['', ...noteLines, m + footerLine(state)];
+  const footerLines: readonly string[] = ['', ...noteLines, m + clipLine(footerLine(state, termWidth - MARGIN), Math.max(1, termWidth - MARGIN))];
 
   const lines: readonly string[] = [...preBodyLines, ...bodyOutputLines, ...footerLines];
 
@@ -1067,6 +1207,50 @@ function renderDeployScreen(flow: DeployFlow, termWidth: number, termHeight: num
   return out.map((l) => clipLine(l, termWidth) + CLEAR_EOL).join('\n');
 }
 
+const SORT_MENU_TITLE = 'sort by'; // COPY-FLAG
+const SORT_MENU_CURRENT = '●'; // COPY-FLAG
+
+/** The sort menu's key hints. */
+const SORT_MENU_HINTS: readonly FooterHint[] = [
+  { id: 'navigate', key: null, label: '↑↓ choose' }, // COPY-FLAG
+  { id: 'inspect', key: 'enter', label: 'sort' }, // COPY-FLAG
+  { id: 'esc', key: 'esc', label: 'cancel' }, // COPY-FLAG
+];
+
+/** The `size` menu entries to show around `cursor`: all of them when they fit, else a window that keeps the cursor in view. */
+function sortMenuWindowStart(cursor: number, size: number): number {
+  return Math.min(Math.max(0, cursor - size + 1), Math.max(0, SORT_ORDER.length - size));
+}
+
+/**
+ * The sort menu's screen, laid out like the edit and deploy screens: the header,
+ * then the menu, then its key hints. Each entry is drawn like a list row (`▶` and
+ * inverse on the cursor), and the sort now in use carries a `●`. On a short
+ * terminal only the entries around the cursor are shown, so it never overflows.
+ */
+function renderSortMenuScreen(state: SecretsScreenState, menu: SortMenuState, termWidth: number, termHeight: number): string {
+  const m = ' '.repeat(MARGIN);
+  const width = Math.max(1, termWidth - MARGIN);
+  const entryRoom = Math.max(1, termHeight - 5); // header, blank, title, blank, footer
+  const size = Math.min(SORT_ORDER.length, entryRoom);
+  const start = sortMenuWindowStart(menu.cursor, size);
+  const entries: readonly string[] = SORT_ORDER.slice(start, start + size).map((mode, i) => {
+    const selected = start + i === menu.cursor;
+    const text = `${selected ? '▶ ' : '  '}${mode === state.sort ? SORT_MENU_CURRENT : ' '} ${SORT_LABELS[mode]}`;
+    return selected ? INVERSE + padVis(truncate(text, width), Math.min(width, 32)) + RESET : text;
+  });
+  const out: readonly string[] = [
+    `${m}${BOLD}capy secrets${RESET}${dryRunTag(state.dryRun)}`,
+    '',
+    `${m}${BOLD}${SORT_MENU_TITLE}${RESET}`,
+    ...entries.map((l) => m + l),
+    '',
+    m + joinHints(SORT_MENU_HINTS),
+  ];
+  // No line is ever wider than the terminal, and the whole screen never taller than it.
+  return out.slice(0, Math.max(1, termHeight)).map((l) => clipLine(l, termWidth) + CLEAR_EOL).join('\n');
+}
+
 function spliceIn(bodyLines: readonly string[], afterIndex: number, insert: readonly string[]): string[] {
   return [...bodyLines.slice(0, afterIndex + 1), ...insert, ...bodyLines.slice(afterIndex + 1)];
 }
@@ -1099,7 +1283,7 @@ function buildPopupLines(row: SecretIndexRow, popup: PopupState, width: number):
     '',
     `${indent}${inner}${BOLD}${truncate(row.name, contentWidth)}${RESET}`,
     '',
-    field('value', renderValueLine(popup.value, popup.revealed, popup.panOffset, valueWidth)),
+    field('value', row.value_hash === '' ? noValueYetLine(row.name) : renderValueLine(popup.value, popup.revealed, popup.panOffset, valueWidth)),
     field('updated', formatUpdatedCell(row)),
     field(TARGET_STATUS_HEADING.toLowerCase(), secretRowStatusBadge(row)),
     '',
@@ -1192,12 +1376,51 @@ function fitLocation(project: string, tails: readonly string[], width: number): 
   return rest.length > 0 ? fitLocation(project, rest, width) : truncate(full, width);
 }
 
-function footerLine(state: SecretsScreenState): string {
+/** One key hint of the list footer. `key` is `null` for a hint that is all label. */
+interface FooterHint {
+  readonly id: 'navigate' | 'column' | 'inspect' | 'edit' | 'deploy' | 'esc' | 'sort';
+  readonly key: string | null;
+  readonly label: string;
+}
+
+/**
+ * When the footer is wider than the terminal, whole hints are dropped in this
+ * order (never cut mid-word) until it fits. `esc` and `sort` are never dropped.
+ */
+const FOOTER_DROP_ORDER: readonly FooterHint['id'][] = ['deploy', 'edit', 'navigate', 'inspect', 'column'];
+
+const renderHint = (h: FooterHint): string => (h.key === null ? `${DIM}${h.label}${RESET}` : `${BOLD}${h.key}${RESET}${DIM} ${h.label}${RESET}`);
+const joinHints = (hints: readonly FooterHint[]): string => hints.map(renderHint).join(`${DIM} · ${RESET}`);
+
+/** `hints` with the droppable ones removed, in `FOOTER_DROP_ORDER`, just until the joined line fits `width`. */
+function fitHints(hints: readonly FooterHint[], width: number): readonly FooterHint[] {
+  return FOOTER_DROP_ORDER.reduce<readonly FooterHint[]>(
+    (kept, id) => (visLen(joinHints(kept)) <= width ? kept : kept.filter((h) => h.id !== id)),
+    hints,
+  );
+}
+
+function footerLine(state: SecretsScreenState, width: number): string {
   if (state.popup) {
     const revealLabel = state.popup.revealed ? 'hide' : 'reveal';
     const panHint = state.popup.revealed ? `${DIM} · ${RESET}${BOLD}←/→${RESET}${DIM} pan${RESET}` : '';
     return `${BOLD}r${RESET}${DIM} ${revealLabel}${RESET}${panHint}${DIM} · ${RESET}${BOLD}tab${RESET}${DIM} column · ${RESET}${BOLD}e${RESET}${DIM} edit${RESET}${DIM} · ${RESET}${BOLD}d${RESET}${DIM} deploy${RESET}${DIM} · ${RESET}${BOLD}esc${RESET}${DIM}/${RESET}${BOLD}q${RESET}${DIM} close${RESET}`; // COPY-FLAG
   }
-  const editHint = state.search.query === '' ? `${BOLD}ctrl+e${RESET}${DIM} edit · ${RESET}${BOLD}ctrl+d${RESET}${DIM} deploy · ${RESET}` : ''; // COPY-FLAG
-  return `${DIM}↑↓ navigate · ${RESET}${BOLD}tab${RESET}${DIM} column · ${RESET}${BOLD}enter${RESET}${DIM} inspect · ${RESET}${editHint}${BOLD}esc${RESET}${DIM} clear/quit${RESET}`; // COPY-FLAG
+  // Edit and deploy are not offered while a filter is typed: the search owns the keyboard then.
+  const editHints: readonly FooterHint[] =
+    state.search.query === ''
+      ? [
+          { id: 'edit', key: 'ctrl+e', label: 'edit' }, // COPY-FLAG
+          { id: 'deploy', key: 'ctrl+d', label: 'deploy' }, // COPY-FLAG
+        ]
+      : [];
+  const hints: readonly FooterHint[] = [
+    { id: 'navigate', key: null, label: '↑↓ navigate' }, // COPY-FLAG
+    { id: 'column', key: 'tab', label: 'column' }, // COPY-FLAG
+    { id: 'inspect', key: 'enter', label: 'inspect' }, // COPY-FLAG
+    ...editHints,
+    { id: 'esc', key: 'esc', label: 'clear/quit' }, // COPY-FLAG
+    { id: 'sort', key: 'ctrl+s', label: `sort: ${SORT_LABELS[state.sort]}` }, // COPY-FLAG
+  ];
+  return joinHints(fitHints(hints, width));
 }

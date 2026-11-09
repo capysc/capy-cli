@@ -43,6 +43,7 @@ import { excludeSystemProject, assertProjectNameAllowed } from '../system/reserv
 import { isLocalOnly } from '../config/profileConfig';
 import { resolveLocalProjectKey } from '../core/localUnlock';
 import { isMembershipRevokedError } from '../errors/membershipRevoked';
+import { isProjectDeletedError } from '../errors/projectDeleted';
 import { cleanupOrgData } from '../cleanup/orgCleanup';
 import { formatSnippet } from './statusCommand';
 import { compareSecrets, hashValue, type DiffResult } from '../sync/compareSecrets';
@@ -1527,6 +1528,11 @@ export class CapyCommand {
         return { currentKeep: bootstrappedKeep, networkAvailable: true, remotePlaintext, remoteHashes, seenSnapshot: snapshot };
       } catch (err: any) {
         this.debugError('remote fetch failed', err);
+        // CAP-729: a deleted project is not "offline". Stop here: the error screen names it and says how to restore it.
+        if (isProjectDeletedError(err)) {
+          fetchSpinner.stop();
+          throw err;
+        }
         // 403 may be one of two different cases:
         //   (a) User was kicked from the org — confirmed by an explicit
         //       `code: 'MEMBERSHIP_REVOKED'` from the server. Destructive
@@ -1661,6 +1667,7 @@ export class CapyCommand {
               return { ...localMatches, ...fetched };
             } catch (err) {
               this.debugError('pinned fetch failed', err);
+              if (isProjectDeletedError(err)) throw err;
               return localMatches;
             }
           })()
@@ -1827,6 +1834,7 @@ export class CapyCommand {
           return { kind: 'proceed', finalEnv: fetchedEnv };
         } catch (err) {
           this.debugError('retrieve_pinned fetch failed', err);
+          if (isProjectDeletedError(err)) throw err;
           console.log('Could not fetch pinned values from remote.');
           return { kind: 'abort' };
         }

@@ -78,12 +78,12 @@ describe('interactive paths refuse under --dry-run, before anything else', () =>
     expect(out.raw).not.toContain('\x1b[?1049h'); // the alt screen was never entered
   });
 
-  test('the same with a name (the TUI would open on it), in human mode: the sentence on stderr', async () => {
+  test('the same with a name (the hidden value prompt would ask), in human mode: the sentence on stderr', async () => {
     setTTY(true);
     const out = await capture(() => new EditCommand().execute({ name: 'SOME_VAR', dryRun: true }));
     expect(out.exitCode).toBe(1);
     expect(out.stdout).toBe('');
-    expect(out.stderr).toBe("--dry-run isn't available in the interactive editor. Pipe a value with capy edit NAME --dry-run.");
+    expect(out.stderr).toBe(DRY_RUN_UNSUPPORTED_MESSAGES.editPrompt);
     expect(out.raw).not.toContain('\x1b[?1049h');
   });
 
