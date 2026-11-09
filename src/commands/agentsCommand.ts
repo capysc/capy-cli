@@ -96,10 +96,13 @@ function existingAgentsFileNames(root: string): string[] {
   return AGENTS_FILE_NAMES.filter((name) => existsSync(join(root, name)));
 }
 
-/** Which file(s) a write targets: whichever of AGENTS.md/CLAUDE.md exist; if neither exists, AGENTS.md only. */
-function writeTargetFileNames(root: string): string[] {
-  const existing = existingAgentsFileNames(root);
-  return existing.length > 0 ? existing : ['AGENTS.md'];
+/**
+ * Which file(s) a write targets: always both AGENTS.md and CLAUDE.md, creating whichever is missing. Agents read
+ * different files (Claude Code reads CLAUDE.md, others read AGENTS.md), and an agent that never sees the block asks its
+ * own questions instead of letting the CLI's elicitations ask.
+ */
+function writeTargetFileNames(_root: string): string[] {
+  return [...AGENTS_FILE_NAMES];
 }
 
 function malformedError(name: string): CapyError {
