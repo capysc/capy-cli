@@ -670,11 +670,7 @@ export class CapyCommand {
     console.log('> .gitignore updated (added .env, .capy/)');
 
     // Stage keep.lock in git so collaborators don't hit "untracked file" errors on pull
-    try {
-      execSync('git add keep.lock', { stdio: 'pipe' });
-    } catch {
-      // Not a git repo — fine
-    }
+    this.stageKeepLock();
 
     // Check if there's an existing .env file with variables to sync
     const localEnvPath = this.projectManager.getEnvPath(this.options.envPath);
@@ -724,6 +720,9 @@ export class CapyCommand {
 
         if (syncResult.ok) {
           syncSpinner.succeed(`keep.lock created (pinned to ${initBranch}, ${localVarCount} secrets)`);
+
+          // The pins were written after the first staging above — stage again so the staged copy carries them
+          this.stageKeepLock();
 
           // Install git hooks
           this.installGitHooks();
@@ -1105,6 +1104,15 @@ export class CapyCommand {
    * Install git hooks (post-checkout, post-merge) — see ../git/syncHooks.
    * No pre-push hook.
    */
+  /** Stages keep.lock in git. Silent when this is not a git repository. */
+  private stageKeepLock(): void {
+    try {
+      execSync('git add keep.lock', { stdio: 'pipe' });
+    } catch {
+      // Not a git repo — fine
+    }
+  }
+
   private installGitHooks(): void {
     try {
       const gitDir = execSync('git rev-parse --git-dir', { stdio: 'pipe', encoding: 'utf-8' }).trim();

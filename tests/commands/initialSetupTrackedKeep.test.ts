@@ -5,12 +5,13 @@
  * `.env` has been pushed, again with the pins. `FileManager.writeKeepFile` only creates the tracked file when it is
  * absent, so the second write must go through `writeInitialKeepFile` or the file the user commits carries zero pins.
  *
- * Real `FileManager`, `ProjectManager` and `SyncEngine` in a temp directory, so the assertions are about files on
- * disk. The service, auth, prompts, key resolution and the global cache are faked.
+ * Real `FileManager`, `ProjectManager` and `SyncEngine` in a temp directory that is a real git repository, so the
+ * assertions are about files on disk and about what is STAGED (what a bare `git commit` would commit). The service, auth, prompts, key resolution and the global cache are faked.
  *
  * Isolated: `mock.module()` is process-wide (tests/run-tests.sh).
  */
 import { describe, test, expect, mock, beforeEach, afterEach, spyOn } from 'bun:test';
+import { execFileSync } from 'child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
@@ -52,9 +53,11 @@ const ORIGIN = process.cwd();
 const dirs = mock((_: string) => undefined);
 
 beforeEach(() => {
-  // A folder that is not a git repository, so no hooks or staging reach a real repository.
+  // A throwaway git repository: setup stages keep.lock with `git add` in the working directory, and nothing here may
+  // reach the repository this test runs from. Nothing is committed, so no git identity is needed.
   const dir = mkdtempSync(join(tmpdir(), 'capy-initial-setup-'));
   dirs(dir);
+  execFileSync('git', ['init', '-q'], { cwd: dir });
   process.chdir(dir);
   confirmEncryptAnswer.mockReturnValue(true);
 });
@@ -95,6 +98,8 @@ const runSetup = (): Promise<void> =>
 const readJson = (path: string): KeepFile => JSON.parse(readFileSync(path, 'utf-8')) as KeepFile;
 const trackedPath = (): string => join(process.cwd(), 'keep.lock');
 const workingPath = (): string => join(process.cwd(), '.capy', 'keep.lock');
+/** keep.lock as STAGED in the index (`git show :keep.lock`) in the temp repository. */
+const stagedText = (): string => execFileSync('git', ['show', ':keep.lock'], { cwd: process.cwd(), encoding: 'utf-8' });
 
 describe('first setup with a .env', () => {
   test('the tracked keep.lock pins every pushed variable on the initial branch', async () => {
@@ -126,6 +131,13 @@ describe('first setup with a .env', () => {
     expect(tracked.variables).toEqual(pushedKeep.variables);
     expect(readFileSync(trackedPath(), 'utf-8')).toBe(readFileSync(workingPath(), 'utf-8'));
 
+    // And the STAGED copy carries the pins too, identical to the working tree: a bare `git commit` commits them.
+    expect(stagedText()).toBe(readFileSync(trackedPath(), 'utf-8'));
+    const staged = JSON.parse(stagedText()) as KeepFile;
+    expect(Object.keys(staged.variables).sort()).toEqual(['API_KEY', 'DB_URL']);
+    expect(staged.variables.API_KEY[0].branch).toBe('development');
+    expect(staged.variables.DB_URL[0].branch).toBe('development');
+
     // The second write goes through the first-setup method.
     expect(writeInitial).toHaveBeenCalledTimes(1);
     const written = writeInitial.mock.calls[0][0];
@@ -152,6 +164,7 @@ describe('first setup that does not push', () => {
     });
     expect(push).not.toHaveBeenCalled();
     expect(writeInitial).not.toHaveBeenCalled();
+    expect((JSON.parse(stagedText()) as KeepFile).variables).toEqual({});
   });
 
   test('declined to encrypt: the tracked keep.lock still holds identity and zero pins, and the .env is untouched', async () => {
@@ -173,6 +186,7 @@ describe('first setup that does not push', () => {
     });
     expect(push).not.toHaveBeenCalled();
     expect(writeInitial).not.toHaveBeenCalled();
+    expect((JSON.parse(stagedText()) as KeepFile).variables).toEqual({});
     expect(readFileSync(join(process.cwd(), '.env'), 'utf-8')).toBe(envText);
   });
 });
