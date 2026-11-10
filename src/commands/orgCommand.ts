@@ -13,6 +13,7 @@ import { ACCENT } from '../ui/colors';
 import { orgProjectQuestion } from '../ui/projectQuestions';
 import { gateFirst, type GateOptions } from '../sync/gate';
 import { conflictFlagsOrExit } from '../sync/conflicts';
+import { switchRepoOrgRefusal, exitWithRepoOrgRefusal } from '../core/repoOrgGuard';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -62,6 +63,7 @@ export class OrgCommand {
       await this._execute();
     } catch (error: any) {
       if (error?.name === 'ExitPromptError') throw error;
+      if (error instanceof CapyError && error.code === ERROR_CODES.REPO_ORG_MISMATCH) exitWithRepoOrgRefusal(error);
       const { displayErrorAndExit } = await import('../ui/errorScreen');
       await displayErrorAndExit(error);
     }
@@ -101,6 +103,12 @@ export class OrgCommand {
       ],
       default: currentOrgId,
     }]);
+
+    // A git repo belongs to one organization (the tracked keep.lock's org_id): switching to another one, an
+    // existing one or a new one, must not touch this folder. Refuse at the pick, before the re-auth, before any
+    // organization is created, before anything is written. `currentOrgId` is read from the tracked file.
+    const repoRefusal = switchRepoOrgRefusal(currentOrgId, currentOrg?.name, orgId === CREATE_NEW_ORG ? undefined : orgId);
+    if (repoRefusal) throw repoRefusal;
 
     if (orgId === currentOrgId && currentOrg) {
       console.log(`Already on ${B(currentOrg.name)}.`);

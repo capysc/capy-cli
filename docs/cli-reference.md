@@ -1164,6 +1164,7 @@ Every refusal carries a stable `code` — branch on it, never on message text.
 - `DEPLOY_VARS_MISSING`
 - `DEPLOY_PREFLIGHT_FAILED`
 - `DEPLOY_PUSH_FAILED`
+- `REPO_ORG_MISMATCH`
 
 ## Conventions
 

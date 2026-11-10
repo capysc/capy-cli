@@ -28,6 +28,8 @@ ISOLATED_FILES=(
   tests/commands/capyCommand.test.ts
   tests/commands/readOnlyRun.e2e.test.ts
   tests/commands/kickCommand.test.ts
+  tests/commands/orgSwitchRepoOrgGuard.test.ts
+  tests/commands/redeemRepoOrgGuard.test.ts
   tests/commands/inviteCommand.test.ts
   tests/config/globalConfig.test.ts
   tests/core/projectManager.test.ts
