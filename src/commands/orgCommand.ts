@@ -33,6 +33,9 @@ async function resolveAuthResultWithFallback(authService: AuthService, currentOr
   return authService.authenticate(currentOrgId);
 }
 
+/** The error `detectProjectState` already raises for a keep.lock it cannot use. */
+const invalidKeepLockError = (): CapyError => new CapyError('Invalid keep.lock file format', ERROR_CODES.INVALID_FORMAT);
+
 /** The branch a first project is bootstrapped with. */
 const FIRST_BRANCH = 'development';
 
@@ -110,6 +113,12 @@ export class OrgCommand {
     const repoRefusal = switchRepoOrgRefusal(currentOrgId, currentOrg?.name, orgId === CREATE_NEW_ORG ? undefined : orgId);
     if (repoRefusal) throw repoRefusal;
 
+    // A tracked keep.lock that exists but names no organization (an empty or falsy org_id) gives the guard nothing
+    // to compare, and a first project would then be written into the folder. Refuse only those writes, as the
+    // existing invalid-keep.lock error; every other path is as before.
+    const keepNamesNoOrg = projectState.hasKeepFile && !currentOrgId;
+    if (keepNamesNoOrg && orgId === CREATE_NEW_ORG) throw invalidKeepLockError();
+
     if (orgId === currentOrgId && currentOrg) {
       console.log(`Already on ${B(currentOrg.name)}.`);
       return;
@@ -185,6 +194,7 @@ export class OrgCommand {
     const orgProjects = projects.filter(p => p.organization_id === selectedOrg.id);
 
     if (orgProjects.length === 0) {
+      if (keepNamesNoOrg) throw invalidKeepLockError();
       await this.createFirstProjectInOrg(selectedOrg, authResult.user_id!, hasProject);
       return;
     }

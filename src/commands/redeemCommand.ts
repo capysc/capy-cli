@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, unlinkSync } from 'fs';
+import { existsSync, unlinkSync } from 'fs';
 import { join } from 'path';
 import { AuthService } from '../auth/authService';
 import { ServiceClient } from '../service/serviceClient';
@@ -8,7 +8,7 @@ import { FileManager } from '../files/fileManager';
 import { isMembershipRevokedError } from '../errors/membershipRevoked';
 import { cleanupOrgData } from '../cleanup/orgCleanup';
 import { AuthResult } from '../types/index';
-import { redeemRepoOrgRefusal, exitWithRepoOrgRefusal } from '../core/repoOrgGuard';
+import { redeemRepoOrgRefusal, exitWithRepoOrgRefusal, readTrackedRepoOrgId } from '../core/repoOrgGuard';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -186,8 +186,8 @@ export class RedeemCommand {
 
   /**
    * Update sync-state to point to the redeemed org. A keep.lock for a different org never reaches here: `execute`
-   * refuses that before anything is written (a git repo belongs to one organization). An unparseable keep.lock is
-   * still removed, so the next `capy` run goes through init instead of failing on it.
+   * refuses that before anything is written (a git repo belongs to one organization). A keep.lock that is unparseable
+   * or names no organization is still removed, so the next `capy` run goes through init instead of failing on it.
    */
   private switchLocalContext(orgId: string, userId: string, orgName: string): void {
     const fileManager = new FileManager();
@@ -204,14 +204,12 @@ export class RedeemCommand {
     // stale copy left behind here would make readKeepFile() keep preferring
     // it over the freshly re-initialized tracked file.
     const workingKeepPath = join(process.cwd(), '.capy', 'keep.lock');
-    if (existsSync(keepPath)) {
-      try {
-        JSON.parse(readFileSync(keepPath, 'utf-8'));
-      } catch {
-        unlinkSync(keepPath);
-        if (existsSync(workingKeepPath)) unlinkSync(workingKeepPath);
-        console.log('  Removed invalid keep.lock');
-      }
+    // Unparseable, or parseable but naming no organization (no non-empty string org_id): neither can be a repo's
+    // identity, so both copies go and the next `capy` run goes through init.
+    if (existsSync(keepPath) && readTrackedRepoOrgId(process.cwd()) === undefined) {
+      unlinkSync(keepPath);
+      if (existsSync(workingKeepPath)) unlinkSync(workingKeepPath);
+      console.log('  Removed invalid keep.lock');
     }
   }
 }

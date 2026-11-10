@@ -200,3 +200,49 @@ describe('switching where nothing contradicts it', () => {
     expect(existsSync(join(dir, 'keep.lock'))).toBe(false);
   });
 });
+
+/** A tracked keep.lock that exists but whose org_id is falsy: the guard has no repo organization to compare. */
+function folderWithEmptyOrgKeep(): string {
+  const dir = folder(undefined);
+  const content = JSON.stringify({ version: '3.0', org_id: '', project_id: 'p', project_name: 'demo', variables: {} }) + '\n';
+  writeFileSync(join(dir, 'keep.lock'), content);
+  writeFileSync(join(dir, '.capy', 'keep.lock'), content);
+  return dir;
+}
+
+describe('a tracked keep.lock that names no organization (empty org_id)', () => {
+  test('a NEW organization is refused before it is created, and the folder is byte-identical', async () => {
+    const dir = folderWithEmptyOrgKeep();
+    const f = fakes('__create_new__');
+    const before = snapshot(dir);
+    const result = await runOrg();
+
+    expect(result.exit).toBe(1);
+    expect(createOrganization).not.toHaveBeenCalled();
+    expect(f.refresh).not.toHaveBeenCalled();
+    expect(snapshot(dir)).toEqual(before);
+  });
+
+  test('an organization with no projects is refused before a first project is written, folder byte-identical', async () => {
+    const dir = folderWithEmptyOrgKeep();
+    const f = fakes(ORG_B.id);
+    f.listProjects.mockResolvedValue([] as never);
+    const before = snapshot(dir);
+    const result = await runOrg();
+
+    expect(result.exit).toBe(1);
+    expect(f.initializeProject).not.toHaveBeenCalled();
+    expect(snapshot(dir)).toEqual(before);
+  });
+
+  test('an organization with projects: today\'s behaviour (nothing written, project picked)', async () => {
+    const dir = folderWithEmptyOrgKeep();
+    const f = fakes(ORG_B.id);
+    const before = snapshot(dir);
+    const result = await runOrg();
+
+    expect(result.exit).toBeUndefined();
+    expect(f.refresh).toHaveBeenCalledTimes(1);
+    expect(snapshot(dir)).toEqual(before);
+  });
+});

@@ -185,3 +185,46 @@ describe('redeeming where nothing contradicts it', () => {
     expect(existsSync(join(dir, 'keep.lock'))).toBe(false);
   });
 });
+
+/** Parses, but names no organization: not a repo's identity. */
+const NO_ORG_SHAPES: ReadonlyArray<readonly [string, string]> = [
+  ['null', 'null'],
+  ['an array', '[]'],
+  ['a number', '5'],
+  ['a string', '"keep"'],
+  ['an object with no org_id', '{"version":"3.0","project_id":"p","project_name":"demo","variables":{}}'],
+  ['an empty org_id', '{"version":"3.0","org_id":"","project_id":"p","project_name":"demo","variables":{}}'],
+  ['a non-string org_id', '{"version":"3.0","org_id":5,"project_id":"p","project_name":"demo","variables":{}}'],
+];
+
+describe.each(NO_ORG_SHAPES)('a keep.lock that is %s', (_name, content) => {
+  test('is neither a refusal nor kept: both copies removed with the existing line, and the redeem proceeds', async () => {
+    const dir = folder(undefined);
+    writeFileSync(join(dir, 'keep.lock'), content);
+    writeFileSync(join(dir, '.capy', 'keep.lock'), content);
+    const f = fakes();
+    const result = await redeem(redeemCodeFor(INVITED_ORG));
+
+    expect(result.exit).toBeUndefined();
+    expect(result.stderr).not.toContain(ERROR_CODES.REPO_ORG_MISMATCH);
+    expect(result.stdout).toContain('Removed invalid keep.lock');
+    expect(existsSync(join(dir, 'keep.lock'))).toBe(false);
+    expect(existsSync(join(dir, '.capy', 'keep.lock'))).toBe(false);
+    expect(f.coDecrypt).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(readFileSync(join(dir, '.capy', 'sync-state'), 'utf-8')).org_id).toBe(INVITED_ORG);
+  });
+});
+
+describe('a keep.lock with a valid org_id that differs from the invite', () => {
+  test('still refuses up front and deletes nothing (the working copy included)', async () => {
+    const dir = folder(REPO_ORG);
+    fakes();
+    const before = snapshot(dir);
+    const result = await redeem(redeemCodeFor(INVITED_ORG));
+
+    expect(result.exit).toBe(1);
+    expect(result.stderr).toContain(ERROR_CODES.REPO_ORG_MISMATCH);
+    expect(result.stdout).not.toContain('Removed');
+    expect(snapshot(dir)).toEqual(before);
+  });
+});
