@@ -826,19 +826,6 @@ projectCmd
     await restoreProjectCommand(ref, { yes, nonTty, json, dryRun });
   });
 
-orgCmd
-  .command('projects')
-  .description('List projects in the active organization; --deleted also lists deleted ones (owners only)') // COPY-FLAG
-  .option('--deleted', 'also list deleted projects, marked as deleted, with the date') // COPY-FLAG
-  .option('--json', 'emit machine-readable JSON instead of the human UI')
-  .action(async (_options: any, command: any) => {
-    assertNotLocalOnly('org projects');
-    const { ProjectsCommand } = await import('./commands/projectsCommand');
-    const cmd = new ProjectsCommand();
-    const merged = command.optsWithGlobals();
-    await cmd.execute({ json: merged.json, deleted: merged.deleted === true });
-  });
-
 program
   .command('info')
   .description('Show current session info')
@@ -875,12 +862,13 @@ program
 program
   .command('projects')
   .description('List projects in the active organization and their branches')
+  .option('--deleted', 'also list deleted projects, marked as deleted, with the date (owners only)') // COPY-FLAG
   .option('--json', 'emit machine-readable JSON instead of the human UI')
   .action(async (options) => {
     assertNotLocalOnly('projects');
     const { ProjectsCommand } = await import('./commands/projectsCommand');
     const cmd = new ProjectsCommand();
-    await cmd.execute({ json: options.json });
+    await cmd.execute({ json: options.json, deleted: options.deleted === true });
   });
 
 const secretsCmd = program

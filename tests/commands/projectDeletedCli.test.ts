@@ -28,7 +28,7 @@ async function deletedFolder(h: Harness): Promise<void> {
   h.markProjectDeleted();
 }
 
-describe('project delete / project restore / org projects: flags the program also defines', () => {
+describe('project delete / project restore / projects: flags the program also defines', () => {
   test('--force arrives: the DELETE body is {"force":true}; without it there is no body', async () => {
     await withHarness(async (h) => {
       const forced = await h.run(['project', 'delete', PROJECT_ID, '--force', '--yes', '--json']);
@@ -67,12 +67,22 @@ describe('project delete / project restore / org projects: flags the program als
     });
   });
 
-  test('org projects --deleted asks the service for the deleted ones too', async () => {
+  test('projects --deleted asks the service for the deleted ones too', async () => {
     await withHarness(async (h) => {
       h.setBranches(PROJECT_ID, [{ id: 'br_1', name: 'production', is_protected: false }]);
-      const out = await h.run(['org', 'projects', '--deleted', '--json']);
+      const out = await h.run(['projects', '--deleted', '--json']);
       expect(out.code).toBe(0);
       expect(h.requests().some((r) => r.method === 'GET' && r.path === '/projects?include_deleted=1')).toBe(true);
+    });
+  });
+
+  test('projects without --deleted sends the plain listing request', async () => {
+    await withHarness(async (h) => {
+      h.setBranches(PROJECT_ID, [{ id: 'br_1', name: 'production', is_protected: false }]);
+      const out = await h.run(['projects', '--json']);
+      expect(out.code).toBe(0);
+      const lists = h.requests().filter((r) => r.method === 'GET' && (r.path === '/projects' || r.path.startsWith('/projects?')));
+      expect(lists.map((r) => r.path)).toEqual(['/projects']);
     });
   });
 });
