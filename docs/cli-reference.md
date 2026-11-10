@@ -482,21 +482,6 @@ capy org [options]
 
 JSON support: no
 
-### `capy org projects`
-
-List projects in the active organization; --deleted also lists deleted ones (owners only)
-
-```
-capy org projects [options]
-```
-
-| Option | Description | Default |
-|---|---|---|
-| `--deleted` | also list deleted projects, marked as deleted, with the date |  |
-| `--json` | emit machine-readable JSON instead of the human UI |  |
-
-JSON support: yes (`--json`)
-
 ## `capy project`
 
 Create, delete or restore a project in the active organization
@@ -617,6 +602,7 @@ capy projects [options]
 
 | Option | Description | Default |
 |---|---|---|
+| `--deleted` | also list deleted projects, marked as deleted, with the date (owners only) |  |
 | `--json` | emit machine-readable JSON instead of the human UI |  |
 
 JSON support: yes (`--json`)

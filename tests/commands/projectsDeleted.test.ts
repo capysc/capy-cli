@@ -1,7 +1,7 @@
 import { describe, it, expect, spyOn, mock, afterAll, beforeEach } from 'bun:test';
 
 /**
- * `capy org projects --deleted` (CAP-729): the listing includes deleted
+ * `capy projects --deleted`: the listing includes deleted
  * projects, each marked deleted with its date; a plain listing is unchanged.
  *
  * Org resolution and the spinner are replaced; `projectsCommand` and the
