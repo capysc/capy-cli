@@ -31,5 +31,5 @@ export function keepLockProject(dir: string): { name?: string; id?: string } | u
 /** The command an owner runs to bring the folder's project back, or `undefined` when keep.lock names no project id. */
 export function restoreCommandFor(dir: string): string | undefined {
   const id = keepLockProject(dir)?.id;
-  return id === undefined ? undefined : `capy org restore-project ${id}`;
+  return id === undefined ? undefined : `capy project restore ${id}`;
 }

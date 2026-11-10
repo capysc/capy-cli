@@ -102,6 +102,7 @@ export function renderCliReferenceMarkdown(doc: CliHelpDoc): string {
     `- **JSON**: ${doc.conventions.json}`,
     `- **Codes**: ${doc.conventions.codes}`,
     ...(doc.conventions.conflicts === undefined ? [] : [`- **Conflicts**: ${doc.conventions.conflicts}`]),
+    ...(doc.conventions.elicitation === undefined ? [] : [`- **Elicitation**: ${doc.conventions.elicitation}`]),
     '',
   ];
   return lines.join('\n');

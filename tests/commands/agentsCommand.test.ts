@@ -138,7 +138,7 @@ describe('agentsCommand', () => {
     it('write plan reports the change and writes nothing', async () => {
       await withTempRoot((root) => {
         const files = writeAgentsBlock(root, false);
-        expect(files).toEqual([{ path: 'AGENTS.md', action: 'created' }]);
+        expect(files).toEqual([{ path: 'AGENTS.md', action: 'created' }, { path: 'CLAUDE.md', action: 'created' }]);
         expect(existsSync(join(root, 'AGENTS.md'))).toBe(false);
       });
     });
@@ -148,37 +148,46 @@ describe('agentsCommand', () => {
         writeAgentsBlock(root);
         const before = readFileSync(join(root, 'AGENTS.md'), 'utf-8');
         const files = removeAgentsBlockFromFiles(root, false);
-        expect(files).toEqual([{ path: 'AGENTS.md', action: 'removed' }]);
+        expect(files).toEqual([{ path: 'AGENTS.md', action: 'removed' }, { path: 'CLAUDE.md', action: 'removed' }]);
         expect(readFileSync(join(root, 'AGENTS.md'), 'utf-8')).toBe(before);
       });
     });
   });
 
   describe('writeAgentsBlock (file targeting)', () => {
-    it('neither AGENTS.md nor CLAUDE.md exists: creates AGENTS.md only', async () => {
+    it('neither AGENTS.md nor CLAUDE.md exists: creates both, so every agent sees the block', async () => {
       await withTempRoot((root) => {
         const files = writeAgentsBlock(root);
-        expect(files).toEqual([{ path: 'AGENTS.md', action: 'created' }]);
-        expect(existsSync(join(root, 'CLAUDE.md'))).toBe(false);
+        expect(files).toEqual([
+          { path: 'AGENTS.md', action: 'created' },
+          { path: 'CLAUDE.md', action: 'created' },
+        ]);
         expect(readFileSync(join(root, 'AGENTS.md'), 'utf-8')).toContain('<!-- capy:agents:begin -->');
+        expect(readFileSync(join(root, 'CLAUDE.md'), 'utf-8')).toContain('<!-- capy:agents:begin -->');
       });
     });
 
-    it('only AGENTS.md exists: updates AGENTS.md only, never creates CLAUDE.md', async () => {
+    it('only AGENTS.md exists: updates it and creates CLAUDE.md (Claude Code reads CLAUDE.md)', async () => {
       await withTempRoot((root) => {
         writeFileSync(join(root, 'AGENTS.md'), '# Repo\n');
         const files = writeAgentsBlock(root);
-        expect(files).toEqual([{ path: 'AGENTS.md', action: 'updated' }]);
-        expect(existsSync(join(root, 'CLAUDE.md'))).toBe(false);
+        expect(files).toEqual([
+          { path: 'AGENTS.md', action: 'updated' },
+          { path: 'CLAUDE.md', action: 'created' },
+        ]);
+        expect(readFileSync(join(root, 'AGENTS.md'), 'utf-8').startsWith('# Repo\n')).toBe(true);
       });
     });
 
-    it('only CLAUDE.md exists: updates CLAUDE.md only, never creates AGENTS.md', async () => {
+    it('only CLAUDE.md exists: updates it and creates AGENTS.md', async () => {
       await withTempRoot((root) => {
         writeFileSync(join(root, 'CLAUDE.md'), '# Repo\n');
         const files = writeAgentsBlock(root);
-        expect(files).toEqual([{ path: 'CLAUDE.md', action: 'updated' }]);
-        expect(existsSync(join(root, 'AGENTS.md'))).toBe(false);
+        expect(files).toEqual([
+          { path: 'AGENTS.md', action: 'created' },
+          { path: 'CLAUDE.md', action: 'updated' },
+        ]);
+        expect(readFileSync(join(root, 'CLAUDE.md'), 'utf-8').startsWith('# Repo\n')).toBe(true);
       });
     });
 
@@ -201,7 +210,7 @@ describe('agentsCommand', () => {
         writeAgentsBlock(root);
         const before = readFileSync(join(root, 'AGENTS.md'), 'utf-8');
         const files = writeAgentsBlock(root);
-        expect(files).toEqual([{ path: 'AGENTS.md', action: 'unchanged' }]);
+        expect(files).toEqual([{ path: 'AGENTS.md', action: 'unchanged' }, { path: 'CLAUDE.md', action: 'unchanged' }]);
         expect(readFileSync(join(root, 'AGENTS.md'), 'utf-8')).toBe(before);
       });
     });
@@ -276,7 +285,7 @@ describe('agentsCommand', () => {
         writeAgentsBlock(root); // AGENTS.md now holds ONLY the block
         expect(existsSync(join(root, 'AGENTS.md'))).toBe(true);
         const files = removeAgentsBlockFromFiles(root);
-        expect(files).toEqual([{ path: 'AGENTS.md', action: 'removed' }]);
+        expect(files).toEqual([{ path: 'AGENTS.md', action: 'removed' }, { path: 'CLAUDE.md', action: 'removed' }]);
         expect(existsSync(join(root, 'AGENTS.md'))).toBe(false);
       });
     });
@@ -399,7 +408,7 @@ describe('agentsCommand', () => {
         const { exitCode, stdout } = await capture(() => agentsCommand({ json: true }));
         expect(exitCode).toBeUndefined();
         const payload = JSON.parse(stdout);
-        expect(payload).toEqual({ ok: true, files: [{ path: 'AGENTS.md', action: 'created' }] });
+        expect(payload).toEqual({ ok: true, files: [{ path: 'AGENTS.md', action: 'created' }, { path: 'CLAUDE.md', action: 'created' }] });
         expect(existsSync(join(root, 'AGENTS.md'))).toBe(true);
         // --json keeps stdout pure JSON, so the confirm prompt must not render there.
         expect(createPromptModuleMock.mock.calls.length).toBeGreaterThan(0);
@@ -433,7 +442,7 @@ describe('agentsCommand', () => {
         fakePrompt.mockImplementationOnce(async () => ({ confirmed: true }));
         const { stdout } = await capture(() => agentsCommand({ remove: true, json: true }));
         const payload = JSON.parse(stdout);
-        expect(payload).toEqual({ ok: true, files: [{ path: 'AGENTS.md', action: 'removed' }] });
+        expect(payload).toEqual({ ok: true, files: [{ path: 'AGENTS.md', action: 'removed' }, { path: 'CLAUDE.md', action: 'removed' }] });
         expect(existsSync(join(root, 'AGENTS.md'))).toBe(false);
       });
     });
@@ -551,13 +560,13 @@ describe('agentsCommand', () => {
         expect(first.exitCode).toBeUndefined();
         expect(fakePrompt).not.toHaveBeenCalled();
         const payload = JSON.parse(first.stdout.trim()); // throws if stdout carries anything but one JSON value
-        expect(payload).toEqual({ ok: true, files: [{ path: 'AGENTS.md', action: 'created' }] });
+        expect(payload).toEqual({ ok: true, files: [{ path: 'AGENTS.md', action: 'created' }, { path: 'CLAUDE.md', action: 'created' }] });
         expect(existsSync(join(root, 'AGENTS.md'))).toBe(true);
 
         const before = readFileSync(join(root, 'AGENTS.md'), 'utf-8');
         const second = await runCli(['agents', '--json', '--yes']);
         const secondPayload = JSON.parse(second.stdout.trim());
-        expect(secondPayload).toEqual({ ok: true, files: [{ path: 'AGENTS.md', action: 'unchanged' }] });
+        expect(secondPayload).toEqual({ ok: true, files: [{ path: 'AGENTS.md', action: 'unchanged' }, { path: 'CLAUDE.md', action: 'unchanged' }] });
         expect(readFileSync(join(root, 'AGENTS.md'), 'utf-8')).toBe(before);
       });
     });

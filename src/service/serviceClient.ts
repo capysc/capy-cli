@@ -758,11 +758,12 @@ export class ServiceClient {
    * List all projects in the caller's organization. Used by the client to
    * bootstrap when running in a directory with no local keep.lock.
    */
-  async listProjects(options?: { includeDeleted?: boolean }): Promise<Array<{ id: string; name: string; organization_id: string; deleted_at?: string | null }>> {
+  async listProjects(options?: { includeDeleted?: boolean }): Promise<Array<{ id: string; name: string; organization_id: string; deleted_at?: string | null; created_at?: string | null }>> {
     // CAP-729: only an org owner's `include_deleted=1` is honoured; for anyone else the service ignores it.
+    // `created_at` is absent from services that predate it; callers treat it as unknown.
     const query = options?.includeDeleted === true ? '?include_deleted=1' : '';
     const data = await this.request<{
-      projects: Array<{ id: string; name: string; organization_id: string; deleted_at?: string | null }>;
+      projects: Array<{ id: string; name: string; organization_id: string; deleted_at?: string | null; created_at?: string | null }>;
     }>('GET', `/projects${query}`);
     return data.projects;
   }

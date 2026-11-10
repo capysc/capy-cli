@@ -1,7 +1,7 @@
 import { describe, it, expect, spyOn, mock, afterAll, beforeEach, afterEach } from 'bun:test';
 
 /**
- * `capy org delete-project` and `capy org restore-project` (CAP-729).
+ * `capy project delete` and `capy project restore` (CAP-729).
  *
  * The REAL `ServiceClient` talks HTTP to a local fake of the service, so these
  * tests see exactly what goes on the wire (the method, the path, the body) and
@@ -33,15 +33,19 @@ const server = Bun.serve({
 const client = new ServiceClient(`http://localhost:${server.port}`);
 client.setTokenProvider((async () => ({ access_token: 'test-token' })) as never);
 
-mock.module('../../src/core/orgContext', () => ({
-  resolveOrgContext: mock(async () => ({
-    orgId: 'org_1',
-    userId: 'user_1',
-    userEmail: 'owner@example.com',
-    authService: {},
-    serviceClient: client,
-  })),
+/** The org context every test gets. Its calls show whether a command allowed the organization picker. */
+const resolveOrgContext = mock(async (..._args: unknown[]) => ({
+  orgId: 'org_1',
+  orgName: 'Acme',
+  userId: 'user_1',
+  userEmail: 'owner@example.com',
+  authService: {},
+  serviceClient: client,
 }));
+mock.module('../../src/core/orgContext', () => ({ resolveOrgContext }));
+
+/** The options the last command passed to resolveOrgContext. */
+const lastOrgContextOptions = (): unknown => resolveOrgContext.mock.calls.at(-1)?.[2];
 
 /** What the person answers when asked. Replaced per test. */
 const fakePrompt = mock(async (_questions: unknown) => ({ confirmed: true }));
@@ -106,13 +110,31 @@ const TOKEN = { deploy_id: 'dep_1', label: 'prod web', created_at: '2026-10-01T0
 const OWNER_ONLY = reply(403, { error: 'Only the organization owner can delete a project', code: 'PROJECT_DELETE_OWNER_ONLY' });
 
 /** A service that lists `projects`, reports `tokens` as unrevoked, and answers the write with `onWrite`. */
+/** A keep.lock with `count` variables, each on `branch`. Names only matter; nothing else is read. */
+const keepWith = (count: number, branch: string) => JSON.stringify({
+  version: '3.0',
+  variables: Object.fromEntries(Array.from({ length: count }, (_, i) => [`VAR_${i}`, [{ branch }]])),
+});
+
 function service(opts: {
   projects?: readonly object[];
   tokens?: readonly object[];
+  /** Per project id: its branches and how many variables its keep.lock has. Absent = unreadable. */
+  contents?: Readonly<Record<string, { readonly branches: readonly string[]; readonly variables: number }>>;
   onWrite?: (method: string, path: string, body: string) => Reply;
 }) {
-  const { projects = LIVE, tokens = [], onWrite = () => reply(500, { error: 'no write expected' }) } = opts;
+  const { projects = LIVE, tokens = [], contents = {}, onWrite = () => reply(500, { error: 'no write expected' }) } = opts;
   respond.mockImplementation((method, path, body) => {
+    const branchList = method === 'GET' ? /^\/projects\/([^/?]+)\/branches$/.exec(path) : null;
+    if (branchList) {
+      const c = contents[branchList[1]];
+      return c ? reply(200, { branches: c.branches.map((name) => ({ name })) }) : reply(500, { error: 'unreadable' });
+    }
+    const latest = method === 'GET' ? /^\/secrets\/([^/?]+)\?branch=([^&]+)$/.exec(path) : null;
+    if (latest) {
+      const c = contents[latest[1]];
+      return c ? reply(200, { env_file: '', keep_hash: 'h', keep_file: keepWith(c.variables, decodeURIComponent(latest[2])) }) : reply(500, { error: 'unreadable' });
+    }
     if (method === 'GET' && path.startsWith('/projects')) return reply(200, { projects });
     if (method === 'GET' && path.endsWith('/deploy-tokens')) {
       return reply(200, { tokens: tokens.map((t) => ({ created_by: 'user_1', revoked_at: null, ...t })) });
@@ -127,7 +149,7 @@ const deleted = (id: string, name: string) =>
 // After the mocks above: the command module picks up the replaced org resolution and prompt.
 const { deleteProjectCommand, restoreProjectCommand } = await import('../../src/commands/projectLifecycleCommand');
 
-describe('capy org delete-project', () => {
+describe('capy project delete', () => {
   beforeEach(() => {
     respond.mockReset();
     fakePrompt.mockReset();
@@ -138,14 +160,14 @@ describe('capy org delete-project', () => {
   afterEach(() => setTTY(false));
 
   describe('confirmation', () => {
-    it('off a terminal without --yes: refuses with CONFIRMATION_REQUIRED (exit 3) before any request', async () => {
+    it('off a terminal without --yes: refuses with CONFIRMATION_REQUIRED (exit 3) and a confirm elicitation, writing nothing', async () => {
       service({ onWrite: () => deleted('proj_web', 'web') });
 
       const out = await capture(() => deleteProjectCommand('web', { json: true }));
 
       expect(out.exitCode).toBe(3);
-      expect(JSON.parse(out.stdout)).toMatchObject({ ok: false, code: 'CONFIRMATION_REQUIRED' });
-      expect(requests()).toEqual([]);
+      expect(JSON.parse(out.stdout)).toMatchObject({ ok: false, code: 'CONFIRMATION_REQUIRED', elicitation: { kind: 'confirm' } });
+      expect(writes()).toEqual([]);
       expect(fakePrompt).not.toHaveBeenCalled();
     });
 
@@ -157,7 +179,8 @@ describe('capy org delete-project', () => {
 
       expect(out.exitCode).toBe(3);
       expect(JSON.parse(out.stdout).code).toBe('CONFIRMATION_REQUIRED');
-      expect(requests()).toEqual([]);
+      expect(writes()).toEqual([]);
+      expect(fakePrompt).not.toHaveBeenCalled();
     });
 
     it('the prompt defaults to no, and shows the project and its live tokens first', async () => {
@@ -178,16 +201,15 @@ describe('capy org delete-project', () => {
       expect(deletes()).toEqual([]);
     });
 
-    it('answering no with --json says CANCELLED on stdout, deletes nothing, and asks on stderr', async () => {
+    it('--json in a terminal is agent mode, as for create: the confirm elicitation, no prompt, nothing deleted', async () => {
       setTTY(true);
       service({});
-      fakePrompt.mockImplementation(async () => ({ confirmed: false }));
 
       const out = await capture(() => deleteProjectCommand('web', { json: true }));
 
-      expect(JSON.parse(out.stdout)).toMatchObject({ ok: false, code: 'CANCELLED' });
-      expect(createPromptModule.mock.calls[0][0]).toEqual({ output: process.stderr });
-      expect(out.stdout).not.toContain('Project:');
+      expect(out.exitCode).toBe(3);
+      expect(JSON.parse(out.stdout)).toMatchObject({ ok: false, code: 'CONFIRMATION_REQUIRED', elicitation: { kind: 'confirm' } });
+      expect(fakePrompt).not.toHaveBeenCalled();
       expect(deletes()).toEqual([]);
     });
 
@@ -199,7 +221,7 @@ describe('capy org delete-project', () => {
 
       expect(deletes()).toEqual([{ method: 'DELETE', path: '/orgs/org_1/projects/proj_web', body: '' }]);
       expect(out.stdout).toContain('Deleted project web');
-      expect(out.stdout).toContain('capy org restore-project proj_web');
+      expect(out.stdout).toContain('capy project restore proj_web');
     });
 
     it('--yes skips the question and the token read, even off a terminal', async () => {
@@ -371,34 +393,97 @@ describe('capy org delete-project', () => {
       expect(JSON.parse(out.stdout).code).toBe('PROJECT_DELETED');
     });
 
-    it('no such project: the name is sent on as an id and the service answers PROJECT_NOT_FOUND', async () => {
+    it('a name that matches no project: PROJECT_NOT_FOUND before anything is read, asked or sent', async () => {
       service({ onWrite: () => reply(404, { error: 'Project not found', code: 'PROJECT_NOT_FOUND' }) });
 
-      const out = await capture(() => deleteProjectCommand('nope', { yes: true, json: true }));
+      const out = await capture(() => deleteProjectCommand('nope', { json: true }));
 
-      expect(deletes()[0].path).toBe('/orgs/org_1/projects/nope');
+      expect(out.exitCode).toBe(1);
+      expect(JSON.parse(out.stdout)).toMatchObject({ ok: false, code: 'PROJECT_NOT_FOUND' });
+      expect(JSON.parse(out.stdout).elicitation).toBeUndefined();
+      expect(requests().filter((r) => r.path !== '/projects')).toEqual([]);
+    });
+
+    it('an id that matches no listed project still goes to the service, which answers for it', async () => {
+      const id = '5b0c1d2e-3f40-4a5b-8c6d-7e8f90a1b2c3';
+      service({ onWrite: () => reply(404, { error: 'Project not found', code: 'PROJECT_NOT_FOUND' }) });
+
+      const out = await capture(() => deleteProjectCommand(id, { yes: true, json: true }));
+
+      expect(deletes()[0].path).toBe(`/orgs/org_1/projects/${id}`);
       expect(JSON.parse(out.stdout).code).toBe('PROJECT_NOT_FOUND');
     });
   });
 
   describe('resolving the name', () => {
-    it('an ambiguous name is refused with every id listed, and nothing is deleted', async () => {
-      const twins = [
-        { id: 'proj_a1', name: 'web', organization_id: 'org_1' },
-        { id: 'proj_a2', name: 'web', organization_id: 'org_1' },
-      ];
-      service({ projects: twins, onWrite: () => deleted('proj_a1', 'web') });
+    const DAY = 24 * 60 * 60 * 1000;
+    const daysAgo = (n: number) => new Date(Date.now() - n * DAY).toISOString();
+    const TWINS = [
+      { id: 'proj_new', name: 'web', organization_id: 'org_1', created_at: daysAgo(1) },
+      { id: 'proj_old', name: 'web', organization_id: 'org_1', created_at: daysAgo(3) },
+    ];
+    const TWIN_CONTENTS = {
+      proj_old: { branches: ['development'], variables: 45 },
+      proj_new: { branches: ['development'], variables: 1 },
+    };
+
+    it('an ambiguous name, agent: PROJECT_AMBIGUOUS (exit 3) with a pick-one elicitation, oldest first, nothing deleted even with --yes', async () => {
+      service({ projects: TWINS, contents: TWIN_CONTENTS, onWrite: () => deleted('proj_old', 'web') });
 
       const out = await capture(() => deleteProjectCommand('web', { yes: true, json: true }));
 
-      expect(out.exitCode).toBe(1);
-      expect(JSON.parse(out.stdout)).toEqual({
-        ok: false,
-        code: 'PROJECT_AMBIGUOUS',
-        error: expect.any(String),
-        matches: [{ id: 'proj_a1', name: 'web' }, { id: 'proj_a2', name: 'web' }],
-      });
+      expect(out.exitCode).toBe(3);
+      const body = JSON.parse(out.stdout);
+      expect(body).toMatchObject({ ok: false, code: 'PROJECT_AMBIGUOUS', elicitation: { kind: 'form', question: 'Which web?' } });
+      expect(body.elicitation.fields).toEqual([{
+        name: 'project',
+        type: 'string',
+        pattern: '^(proj_old|proj_new)$',
+        options: [
+          { value: 'proj_old', label: 'web · 45 variables · created 3 days ago' },
+          { value: 'proj_new', label: 'web · 1 variable · created 1 day ago' },
+        ],
+      }]);
+      expect(body.elicitation.answer).toEqual({ rerun: 'capy project delete <project> --json' });
+      expect(body.elicitation.display).toContain('| 1 | web · 45 variables · created 3 days ago |');
       expect(deletes()).toEqual([]);
+    });
+
+    it('an ambiguous name keeps --force in the rerun, and an unreadable count is said, never 0', async () => {
+      service({ projects: TWINS, contents: { proj_old: TWIN_CONTENTS.proj_old } });
+
+      const out = await capture(() => deleteProjectCommand('web', { force: true, json: true }));
+
+      const body = JSON.parse(out.stdout);
+      expect(body.elicitation.answer.rerun).toBe('capy project delete <project> --force --json');
+      expect(body.elicitation.fields[0].options[1].label).toBe('web · variables could not be read · created 1 day ago');
+      expect(body.elicitation.details.matches[1]).toMatchObject({ id: 'proj_new', variables: null });
+    });
+
+    it('an ambiguous name with no creation dates (an older service) still asks, without the dates', async () => {
+      service({ projects: TWINS.map(({ created_at: _c, ...p }) => p), contents: TWIN_CONTENTS });
+
+      const out = await capture(() => deleteProjectCommand('web', { json: true }));
+
+      expect(JSON.parse(out.stdout).elicitation.fields[0].options.map((o: { label: string }) => o.label))
+        .toEqual(['web · 1 variable', 'web · 45 variables']);
+    });
+
+    it('an ambiguous name, terminal: an arrow-key list, then the usual yes/no, then the chosen one is deleted', async () => {
+      setTTY(true);
+      service({ projects: TWINS, contents: TWIN_CONTENTS, onWrite: () => deleted('proj_old', 'web') });
+      fakePrompt.mockImplementation(async (questions: unknown) => {
+        const q = (questions as ReadonlyArray<{ name: string; choices?: ReadonlyArray<{ name: string; value: string }> }>)[0];
+        return q.name === 'projectId' ? { projectId: q.choices?.[0].value } : { confirmed: true };
+      });
+
+      await capture(() => deleteProjectCommand('web', {}));
+
+      const asked = fakePrompt.mock.calls.map(([q]) => (q as ReadonlyArray<{ name: string; message: string; choices?: ReadonlyArray<{ name: string }> }>)[0]);
+      expect(asked.map((q) => q.name)).toEqual(['projectId', 'confirmed']);
+      expect(asked[0].message).toBe('Which web?');
+      expect(asked[0].choices?.map((c) => c.name)).toEqual(['web · 45 variables · created 3 days ago', 'web · 1 variable · created 1 day ago']);
+      expect(deletes().map((d) => d.path)).toEqual(['/orgs/org_1/projects/proj_old']);
     });
 
     it('an ambiguous name, human: both ids on stderr', async () => {
@@ -427,18 +512,18 @@ describe('capy org delete-project', () => {
       expect(deletes()[0].path).toBe('/orgs/org_1/projects/proj_web');
     });
 
-    it('the org system store is never a match', async () => {
+    it('the org system store is never a match: its name is not found, and nothing is sent', async () => {
       service({ projects: [{ id: 'proj_sys', name: '_system', organization_id: 'org_1' }], onWrite: () => reply(404, { error: 'Project not found', code: 'PROJECT_NOT_FOUND' }) });
 
-      await capture(() => deleteProjectCommand('_system', { yes: true, json: true }));
+      const out = await capture(() => deleteProjectCommand('_system', { yes: true, json: true }));
 
-      // Not resolved from the listing: it goes on as a bare id and the service decides.
-      expect(deletes()[0].path).toBe('/orgs/org_1/projects/_system');
+      expect(JSON.parse(out.stdout).code).toBe('PROJECT_NOT_FOUND');
+      expect(deletes()).toEqual([]);
     });
   });
 });
 
-describe('capy org restore-project', () => {
+describe('capy project restore', () => {
   beforeEach(() => {
     respond.mockReset();
     fakePrompt.mockReset();
@@ -493,14 +578,60 @@ describe('capy org restore-project', () => {
     expect(writes()).toEqual([]);
   });
 
-  it('off a terminal without --yes: CONFIRMATION_REQUIRED before any request', async () => {
+  it('off a terminal without --yes: CONFIRMATION_REQUIRED (exit 3) with a confirm elicitation, restoring nothing', async () => {
     service({ projects: [DELETED], onWrite: () => restored });
 
     const out = await capture(() => restoreProjectCommand('old', { json: true }));
 
     expect(out.exitCode).toBe(3);
-    expect(JSON.parse(out.stdout).code).toBe('CONFIRMATION_REQUIRED');
-    expect(requests()).toEqual([]);
+    const body = JSON.parse(out.stdout);
+    expect(body).toMatchObject({ ok: false, code: 'CONFIRMATION_REQUIRED' });
+    expect(body.elicitation).toMatchObject({
+      kind: 'confirm',
+      question: 'Restore project old?',
+      details: { org: { id: 'org_1' }, project: { id: 'proj_old', name: 'old', deleted_at: '2026-11-05T12:00:00.000Z' } },
+      answer: { yes: 'capy project restore proj_old --yes --json' },
+    });
+    expect(body.elicitation.display).toContain('| Project | old (proj_old) |');
+    expect(body.elicitation.display).toContain('| Deleted | 2026-11-05T12:00:00.000Z |');
+    expect(fakePrompt).not.toHaveBeenCalled();
+    expect(writes()).toEqual([]);
+  });
+
+  it('--dry-run, even with --yes: names the project and sends nothing that writes', async () => {
+    service({ projects: [DELETED], onWrite: () => restored });
+
+    const out = await capture(() => restoreProjectCommand('old', { yes: true, dryRun: true, json: true }));
+    expect(out.exitCode).toBeUndefined();
+    expect(JSON.parse(out.stdout)).toEqual({ ok: true, dry_run: true, project: { id: 'proj_old', name: 'old' } });
+    expect(writes()).toEqual([]);
+
+    const text = await capture(() => restoreProjectCommand('old', { yes: true, dryRun: true }));
+    expect(text.stdout).toContain('Dry run: nothing was restored.');
+    expect(writes()).toEqual([]);
+  });
+
+  it('agent mode never allows the organization picker; a terminal does', async () => {
+    service({ projects: [DELETED], onWrite: () => restored });
+
+    await capture(() => restoreProjectCommand('old', { json: true }));
+    expect(lastOrgContextOptions()).toEqual({ promptForOrg: false });
+
+    await capture(() => restoreProjectCommand('old', { yes: true, nonTty: true }));
+    expect(lastOrgContextOptions()).toEqual({ promptForOrg: false });
+
+    setTTY(true);
+    await capture(() => restoreProjectCommand('old', { yes: true }));
+    expect(lastOrgContextOptions()).toEqual({ promptForOrg: true });
+  });
+
+  it('two deleted projects with one name, no --yes: the pick-one rerun has no --yes, so the yes/no comes next', async () => {
+    service({ projects: [DELETED, { ...DELETED, id: 'proj_old2' }], onWrite: () => restored });
+
+    const out = await capture(() => restoreProjectCommand('old', { json: true }));
+
+    expect(JSON.parse(out.stdout).elicitation.answer.rerun).toBe('capy project restore <project> --json');
+    expect(writes()).toEqual([]);
   });
 
   it('a project that is not deleted: 409 PROJECT_NOT_DELETED', async () => {
@@ -516,11 +647,12 @@ describe('capy org restore-project', () => {
   });
 
   it('owner only: PROJECT_DELETE_OWNER_ONLY, and an id still reaches the service when the listing hides deleted projects', async () => {
+    const id = '9d8c7b6a-5f4e-4d3c-8b2a-1f0e9d8c7b6a';
     service({ projects: [], onWrite: () => reply(403, { error: 'Only the organization owner can restore a project', code: 'PROJECT_DELETE_OWNER_ONLY' }) });
 
-    const out = await capture(() => restoreProjectCommand('proj_old', { yes: true, json: true }));
+    const out = await capture(() => restoreProjectCommand(id, { yes: true, json: true }));
 
-    expect(writes()[0].path).toBe('/orgs/org_1/projects/proj_old/restore');
+    expect(writes()[0].path).toBe(`/orgs/org_1/projects/${id}/restore`);
     expect(JSON.parse(out.stdout).code).toBe('PROJECT_DELETE_OWNER_ONLY');
   });
 
@@ -535,12 +667,25 @@ describe('capy org restore-project', () => {
     expect(writes()[0].path).toBe('/orgs/org_1/projects/proj_old/restore');
   });
 
-  it('two deleted projects with the same name: PROJECT_AMBIGUOUS with the ids', async () => {
+  it('two deleted projects with the same name: PROJECT_AMBIGUOUS (exit 3) with a pick-one elicitation whose rerun keeps --yes', async () => {
     service({ projects: [DELETED, { ...DELETED, id: 'proj_old2' }], onWrite: () => restored });
 
     const out = await capture(() => restoreProjectCommand('old', { yes: true, json: true }));
 
-    expect(JSON.parse(out.stdout)).toMatchObject({ code: 'PROJECT_AMBIGUOUS', matches: [{ id: 'proj_old' }, { id: 'proj_old2' }] });
+    expect(out.exitCode).toBe(3);
+    const body = JSON.parse(out.stdout);
+    expect(body).toMatchObject({ code: 'PROJECT_AMBIGUOUS', elicitation: { kind: 'form' } });
+    expect(body.elicitation.fields[0].options.map((o: { value: string }) => o.value)).toEqual(['proj_old', 'proj_old2']);
+    expect(body.elicitation.answer.rerun).toBe('capy project restore <project> --yes --json');
+    expect(writes()).toEqual([]);
+  });
+
+  it('a name that matches no project: PROJECT_NOT_FOUND, nothing sent', async () => {
+    service({ projects: [DELETED], onWrite: () => restored });
+
+    const out = await capture(() => restoreProjectCommand('nope', { yes: true, json: true }));
+
+    expect(JSON.parse(out.stdout).code).toBe('PROJECT_NOT_FOUND');
     expect(writes()).toEqual([]);
   });
 });

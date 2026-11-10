@@ -236,7 +236,7 @@ function renderProjectDeleted(ctx: ErrorContext): string {
     id ? `  ${grey(`ID: ${id}`)}` : '', // COPY-FLAG
     '',
     `  To restore it, an organization owner runs:`, // COPY-FLAG
-    `    ${bold(`capy org restore-project ${target}`)}`,
+    `    ${bold(`capy project restore ${target}`)}`,
     '',
     `  ${grey('Only an owner can restore a project.')}`, // COPY-FLAG
     '',

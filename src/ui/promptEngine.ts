@@ -8,7 +8,8 @@ import {
   EnvVariable,
   UserDecisions
 } from '../types/index';
-import { isReservedProjectName, PROJECT_NAME_RESERVED_MESSAGE } from '../system/reservedProjectName';
+import { validateProjectNameInput } from '../core/projectNameRule';
+import { BRANCH_DESCRIPTION, DEFAULT_FIRST_BRANCH, FIRST_BRANCH_QUESTION, validateBranchNameInput } from '../core/branchNameRule';
 
 export class PromptEngine {
   async promptForProjectName(defaultName: string): Promise<string> {
@@ -18,22 +19,47 @@ export class PromptEngine {
         name: 'projectName',
         message: `📁 Project name (default: "${defaultName}"):`,
         default: defaultName,
-        validate: (input: string) => {
-          if (!input || input.trim().length === 0) {
-            return 'Project name cannot be empty';
-          }
-          if (!/^[a-zA-Z0-9-_]+$/.test(input)) {
-            return 'Project name can only contain letters, numbers, hyphens, and underscores';
-          }
-          if (isReservedProjectName(input)) {
-            return PROJECT_NAME_RESERVED_MESSAGE;
-          }
-          return true;
-        }
+        validate: validateProjectNameInput,
       }
     ]);
 
     return projectName;
+  }
+
+  /**
+   * Asks for a new project's first branch with the approved question, the one the agent elicitation asks too,
+   * saying first what a branch is. `development` unless the person types another.
+   */
+  async promptForFirstBranch(): Promise<string> {
+    console.log(BRANCH_DESCRIPTION);
+    const { initialBranchChoice } = await inquirer.prompt([{
+      type: 'list',
+      name: 'initialBranchChoice',
+      message: FIRST_BRANCH_QUESTION,
+      choices: [
+        { name: `${DEFAULT_FIRST_BRANCH} (default)`, value: DEFAULT_FIRST_BRANCH },
+        { name: 'another branch', value: 'other' },
+      ],
+    }]);
+    if (initialBranchChoice !== 'other') return String(initialBranchChoice);
+    const { branchName } = await inquirer.prompt([{
+      type: 'input',
+      name: 'branchName',
+      message: 'Branch name:',
+      validate: validateBranchNameInput,
+    }]);
+    return String(branchName).trim();
+  }
+
+  /** Asks whether a new branch is invite-only, with the same question `capy checkout -b` asks. Defaults to No. */
+  async promptForBranchProtected(branchName: string): Promise<boolean> {
+    const { protect } = await inquirer.prompt([{
+      type: 'confirm',
+      name: 'protect',
+      message: `Make "${branchName}" a protected branch? \x1b[90m(invite-only)\x1b[0m`,
+      default: false,
+    }]);
+    return protect === true;
   }
 
   async promptForChanges(changeSet: ChangeSet, branch?: string): Promise<UserDecisions> {

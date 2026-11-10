@@ -11,6 +11,7 @@
  */
 import type { Argument, Command, Option } from 'commander';
 import { ERROR_CODES } from '../types/index';
+import { ELICITATION_HELP } from '../ui/elicitation';
 import { DEPLOY_DOKPLOY_PLAN_SCHEMA, DEPLOY_VERCEL_PLAN_SCHEMA } from '../commands/deployDiscover/schema';
 
 export interface CliArgumentDoc {
@@ -74,6 +75,8 @@ export interface CliHelpDoc {
     codes: string;
     /** What a command that writes from a folder does first, and how a difference is answered off a terminal (CAP-717). */
     conflicts?: string;
+    /** What an `elicitation` in a refusal is and what to do with it (CAP-748). */
+    elicitation?: string;
   };
 }
 
@@ -115,6 +118,9 @@ export const DRY_RUN_COMMANDS: ReadonlySet<string> = new Set([
   'connect',
   'deploy',
   'edit',
+  'project create',
+  'project delete',
+  'project restore',
   'remove',
   'secrets',
   'secrets set',
@@ -183,6 +189,7 @@ export function buildCliHelpDoc(program: Command): CliHelpDoc {
       // COPY-FLAG: minimal and neutral; the contract is docs/conflict-resolution.md.
       conflicts:
         'Every command that writes from a folder (edit, add, remove, connect, rotate, push, checkout, org, deploy, deploy revoke, deploy targets-remove) runs bare `capy` first; `checkout -b` is the one exception (a new branch carries the uncommitted values of the folder). Off a terminal, if the folder and Capy differ on any variable, nothing is written, the exit code is 3, and stdout is {ok:false, code:"SECRETS_CONFLICT", conflict_id, conflicts:[{name, project, branch, type, pinned, local, remote}]} (fingerprints only, never values; a Dokploy value has {name, target, pinned, local, remote}). Ask the person, then rerun the same command with --resolve NAME=pinned|local|remote|delete for every row (NAME@TARGET=local|remote for a Dokploy value) and --conflict <conflict_id>. A state that moved since is SECRETS_CONFLICT_STALE with the fresh rows. There is no resolve-all.',
+      elicitation: ELICITATION_HELP,
     },
   };
 }

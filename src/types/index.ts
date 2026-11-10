@@ -897,10 +897,28 @@ export const ERROR_CODES = {
   PROJECT_NOT_DELETED: 'PROJECT_NOT_DELETED',
   /** Delete called on the org's system store (403). Reaches the client as a PERMISSION_DENIED whose `details.code` is this. */
   SYSTEM_STORE_IMMUTABLE: 'SYSTEM_STORE_IMMUTABLE',
-  /** `capy org delete-project` / `restore-project`: the name or id matched more than one project. The refusal lists the ids. */
+  /** `capy project delete` / `project restore`: the name matched more than one project and there is no terminal to ask which. Exit 3 with a pick-one `elicitation` (a form whose field has `options`). */
   PROJECT_AMBIGUOUS: 'PROJECT_AMBIGUOUS',
   /** A destructive command needs a yes and there is no terminal to ask, and `--yes` was not passed. Exit 3. */
   CONFIRMATION_REQUIRED: 'CONFIRMATION_REQUIRED',
+  /** `capy project create` with no name and nobody to ask (agent mode). The refusal carries an `elicitation` form. Exit 3. */
+  PROJECT_NAME_REQUIRED: 'PROJECT_NAME_REQUIRED',
+  /** `capy project create`: the name is empty or has characters other than letters, numbers, hyphens and underscores. Exit 1. */
+  PROJECT_NAME_INVALID: 'PROJECT_NAME_INVALID',
+  /** `capy project create`: the organization already has a project with that name (the service answered 409). Exit 1. */
+  PROJECT_NAME_EXISTS: 'PROJECT_NAME_EXISTS',
+  /** `capy project create` with a name but no `--branch`, and nobody to ask (agent mode). The refusal carries an `elicitation` form. Exit 3. */
+  BRANCH_NAME_REQUIRED: 'BRANCH_NAME_REQUIRED',
+  /** `capy project create --branch`: a name the service would refuse (see `core/branchNameRule.ts`). Nothing is created. Exit 1. */
+  BRANCH_NAME_INVALID: 'BRANCH_NAME_INVALID',
+  /** `capy project create`: the project was created but its first branch was not. The refusal carries the project. Exit 1. */
+  BRANCH_CREATE_FAILED: 'BRANCH_CREATE_FAILED',
+  /** `capy project create` with a name and branch but no `--protected`, and nobody to ask (agent mode). The refusal carries an `elicitation` form. Exit 3. */
+  BRANCH_PROTECTION_REQUIRED: 'BRANCH_PROTECTION_REQUIRED',
+  /** `capy project create --protected` with something other than yes or no. Nothing is created. Exit 1. */
+  BRANCH_PROTECTION_INVALID: 'BRANCH_PROTECTION_INVALID',
+  /** A command that acts on "the active organization" has none (no keep.lock here) and the person belongs to several, with nobody to ask. Exit 3. */
+  ORG_SELECTION_REQUIRED: 'ORG_SELECTION_REQUIRED',
   /** `GET /orgs/:orgId/repos` answered 404: the service predates project -> repo links. Never a failure of the command that asked. */
   REPO_LINKS_UNSUPPORTED: 'REPO_LINKS_UNSUPPORTED',
   /** `--dry-run` on a path that would prompt (the `capy edit` TUI, an interactive `capy add`, `capy remove`'s confirmation): it cannot preview, and a dry run never runs for real. Exit 1. */
