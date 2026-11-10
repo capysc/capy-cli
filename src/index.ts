@@ -822,8 +822,8 @@ projectCmd
   .action(async (ref: string, _options: any, command: any) => {
     assertNotLocalOnly('project restore');
     const { restoreProjectCommand, lifecycleOptsFrom } = await import('./commands/projectLifecycleCommand');
-    const { yes, nonTty, json } = lifecycleOptsFrom(command);
-    await restoreProjectCommand(ref, { yes, nonTty, json });
+    const { yes, nonTty, json, dryRun } = lifecycleOptsFrom(command);
+    await restoreProjectCommand(ref, { yes, nonTty, json, dryRun });
   });
 
 orgCmd

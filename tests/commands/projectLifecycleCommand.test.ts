@@ -598,6 +598,19 @@ describe('capy project restore', () => {
     expect(writes()).toEqual([]);
   });
 
+  it('--dry-run, even with --yes: names the project and sends nothing that writes', async () => {
+    service({ projects: [DELETED], onWrite: () => restored });
+
+    const out = await capture(() => restoreProjectCommand('old', { yes: true, dryRun: true, json: true }));
+    expect(out.exitCode).toBeUndefined();
+    expect(JSON.parse(out.stdout)).toEqual({ ok: true, dry_run: true, project: { id: 'proj_old', name: 'old' } });
+    expect(writes()).toEqual([]);
+
+    const text = await capture(() => restoreProjectCommand('old', { yes: true, dryRun: true }));
+    expect(text.stdout).toContain('Dry run: nothing was restored.');
+    expect(writes()).toEqual([]);
+  });
+
   it('agent mode never allows the organization picker; a terminal does', async () => {
     service({ projects: [DELETED], onWrite: () => restored });
 

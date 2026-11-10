@@ -45,6 +45,11 @@ export interface DeleteProjectOpts extends ProjectLifecycleOpts {
   dryRun?: boolean;
 }
 
+export interface RestoreProjectOpts extends ProjectLifecycleOpts {
+  /** The global `--dry-run`: show which project would be restored; send nothing that writes. */
+  dryRun?: boolean;
+}
+
 /** What commander hands an action's `command`: only the merged view is needed. */
 interface CommandWithGlobals {
   optsWithGlobals(): Record<string, unknown>;
@@ -540,6 +545,7 @@ export async function deleteProjectCommand(ref: string, opts: DeleteProjectOpts)
 }
 
 type RestoreOutcome =
+  | { readonly kind: 'dry-run'; readonly project: ProjectRef }
   | { readonly kind: 'cancelled' }
   | { readonly kind: 'needs-choice'; readonly refusal: Refusal }
   | { readonly kind: 'needs-confirmation'; readonly elicitation: ElicitationConfirm }
@@ -560,7 +566,7 @@ function restoreElicitation(org: OrgRef, project: ProjectRef): ElicitationConfir
   };
 }
 
-async function restoreFlow(ref: string, opts: ProjectLifecycleOpts): Promise<RestoreOutcome> {
+async function restoreFlow(ref: string, opts: RestoreProjectOpts): Promise<RestoreOutcome> {
   const json = opts.json === true;
   const agentMode = json || !isInteractive(opts.nonTty);
   // Agent mode never opens a prompt, not even to pick an organization.
@@ -577,6 +583,8 @@ async function restoreFlow(ref: string, opts: ProjectLifecycleOpts): Promise<Res
   });
   if (picked.kind === 'needs-choice') return { kind: 'needs-choice', refusal: choiceRefusal(picked, ref) };
   const project = picked.project;
+  // A dry run reads which project would come back and stops before anything that writes.
+  if (opts.dryRun === true) return { kind: 'dry-run', project };
 
   if (opts.yes !== true) {
     // Nobody to ask: hand the question to the agent that ran this, and restore nothing.
@@ -589,6 +597,16 @@ async function restoreFlow(ref: string, opts: ProjectLifecycleOpts): Promise<Res
 }
 
 function emitRestoreOutcome(json: boolean, outcome: RestoreOutcome): void {
+  if (outcome.kind === 'dry-run') {
+    const { project } = outcome;
+    if (json) {
+      console.log(JSON.stringify({ ok: true, dry_run: true, project: { id: project.id, name: project.name } }, null, 2));
+      return;
+    }
+    console.log(`Would restore project ${project.name} (${project.id}).`); // COPY-FLAG
+    console.log('Dry run: nothing was restored.'); // COPY-FLAG
+    return;
+  }
   if (outcome.kind === 'needs-choice') return refuse(json, outcome.refusal);
   if (outcome.kind === 'needs-confirmation') {
     return refuse(json, {
@@ -610,8 +628,8 @@ function emitRestoreOutcome(json: boolean, outcome: RestoreOutcome): void {
   console.log(`Restored project ${outcome.project.name}.`); // COPY-FLAG
 }
 
-/** `capy project restore <name-or-id> [--yes] [--json]` */
-export async function restoreProjectCommand(ref: string, opts: ProjectLifecycleOpts): Promise<void> {
+/** `capy project restore <name-or-id> [--yes] [--dry-run] [--json]` */
+export async function restoreProjectCommand(ref: string, opts: RestoreProjectOpts): Promise<void> {
   const json = opts.json === true;
 
   // No terminal and no --yes means nobody can answer: the flow stops with the question as an elicitation (exit 3).

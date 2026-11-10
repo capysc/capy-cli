@@ -563,6 +563,8 @@ capy project restore <name-or-id> [options]
 
 JSON support: yes (`--json`)
 
+Dry run: yes (`--dry-run`)
+
 ## `capy info`
 
 Show current session info

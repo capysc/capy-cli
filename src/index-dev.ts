@@ -783,8 +783,8 @@ projectCmd
   .option('--json', 'emit machine-readable JSON instead of the human UI')
   .action(async (ref: string, _options: any, command: any) => {
     const { restoreProjectCommand, lifecycleOptsFrom } = await import('./commands/projectLifecycleCommand');
-    const { yes, nonTty, json } = lifecycleOptsFrom(command);
-    await restoreProjectCommand(ref, { yes, nonTty, json, apiUrl: process.env.CAPY_API_URL, devMode: true });
+    const { yes, nonTty, json, dryRun } = lifecycleOptsFrom(command);
+    await restoreProjectCommand(ref, { yes, nonTty, json, dryRun, apiUrl: process.env.CAPY_API_URL, devMode: true });
   });
 
 orgCmd
