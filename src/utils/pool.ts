@@ -10,6 +10,9 @@
  *
  *  - Items start in input order. Results come back in INPUT order, whatever order
  *    they finished in.
+ *  - `lane` (optional): items with the same lane never run at the same time. An item whose lane is
+ *    busy is passed over for the next item whose lane is free, and starts when its lane frees up
+ *    (still in input order within its lane). No `lane`: every item is its own lane.
  *  - A stop (`stop` aborts) starts nothing further; the items in flight finish.
  *    `cancelled` is exactly the items that were never started.
  *  - Pacing: when an item reports `remaining <= reserve` for a window that has not
@@ -44,6 +47,8 @@ export interface PoolOptions<T, R> {
   /** At most this many items run at once. */
   readonly limit: number;
   readonly run: (item: T, index: number) => Promise<PoolItem<R>>;
+  /** Items with the same lane never run at the same time. Absent: no lanes. */
+  readonly lane?: (item: T) => string;
   readonly stop?: AbortSignal;
   /** Pace new starts off the rate-limit readings; absent: no pacing. */
   readonly reserve?: number;
@@ -80,7 +85,8 @@ type Wake<R> =
   | { readonly kind: 'timer' };
 
 interface State<R> {
-  readonly next: number;
+  /** The indexes of the items that have been started. */
+  readonly started: ReadonlySet<number>;
   readonly flying: ReadonlyMap<number, Promise<Wake<R>>>;
   readonly done: ReadonlyMap<number, R>;
   readonly pace: RateInfo | undefined;
@@ -101,10 +107,18 @@ export async function runPool<T, R>(opts: PoolOptions<T, R>): Promise<PoolResult
 
   const report = (s: State<R>): void => onChange?.({ done: s.done.size, inFlight: s.flying.size, total });
 
-  const start = (s: State<R>): State<R> => {
-    const index = s.next;
+  const laneOf = (index: number): string | undefined => (opts.lane === undefined ? undefined : opts.lane(items[index]));
+
+  /** The first item not started whose lane has nothing running; `undefined` when none can start now. */
+  const startable = (s: State<R>): number | undefined => {
+    const busy = new Set([...s.flying.keys()].map(laneOf));
+    const found = items.findIndex((_, i) => !s.started.has(i) && (laneOf(i) === undefined || !busy.has(laneOf(i))));
+    return found === -1 ? undefined : found;
+  };
+
+  const start = (s: State<R>, index: number): State<R> => {
     const flying = run(items[index], index).then((item): Wake<R> => ({ kind: 'settled', index, item }));
-    return { ...s, next: index + 1, flying: new Map([...s.flying, [index, flying]]) };
+    return { ...s, started: new Set([...s.started, index]), flying: new Map([...s.flying, [index, flying]]) };
   };
 
   const wait = async (s: State<R>, holdMs: number): Promise<State<R>> => {
@@ -127,23 +141,24 @@ export async function runPool<T, R>(opts: PoolOptions<T, R>): Promise<PoolResult
   };
 
   const step = async (s: State<R>): Promise<PoolResult<T, R>> => {
-    const canStart = s.next < total && !isStopped();
+    const next = isStopped() ? undefined : startable(s);
+    const canStart = next !== undefined;
     if (isStopped() && !s.announced && s.flying.size > 0) {
       onStopping?.(s.flying.size);
       report(s);
       return step({ ...s, announced: true });
     }
     if (!canStart && s.flying.size === 0) {
-      return { results: [...s.done].sort(([a], [b]) => a - b).map(([, r]) => r), cancelled: items.slice(s.next) };
+      return { results: [...s.done].sort(([a], [b]) => a - b).map(([, r]) => r), cancelled: items.filter((_, i) => !s.started.has(i)) };
     }
     if (canStart && s.flying.size < size) {
       const hold = paceWaitMs(s.pace, now(), reserve);
-      return step(hold === 0 ? start(s) : await wait(s, hold));
+      return step(hold === 0 ? start(s, next) : await wait(s, hold));
     }
     return step(await wait(s, 0));
   };
 
-  const initial: State<R> = { next: 0, flying: new Map(), done: new Map(), pace: undefined, announced: false };
+  const initial: State<R> = { started: new Set(), flying: new Map(), done: new Map(), pace: undefined, announced: false };
   report(initial);
   return step(initial);
 }

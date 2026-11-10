@@ -961,6 +961,17 @@ export const ERROR_CODES = {
   DEPLOY_PREFLIGHT_FAILED: 'DEPLOY_PREFLIGHT_FAILED',
   /** A batch deploy target's delivery to the platform failed and gave no code of its own. */
   DEPLOY_PUSH_FAILED: 'DEPLOY_PUSH_FAILED',
+  // --- capy secrets set: a write is only done once the server holds it ---
+  /**
+   * `capy secrets set`: the server answered a push for a location but, read back after it (and once more after a second push),
+   * did not hold the new value for that branch. The location is reported failed; nothing is reported updated that did not read back.
+   */
+  SECRET_NOT_PERSISTED: 'SECRET_NOT_PERSISTED',
+  /**
+   * The server could not save a keep write because other writes to the same project's keep kept conflicting with it (HTTP 409).
+   * Nothing was saved by that call. `capy secrets set` pushes the location once more, then reports it failed with this code.
+   */
+  KEEP_WRITE_CONFLICT: 'KEEP_WRITE_CONFLICT',
 } as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES];
