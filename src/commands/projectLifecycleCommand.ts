@@ -25,7 +25,7 @@ import { isInteractive, EXIT_NEEDS_INPUT } from '../ui/interactive';
 import { CapyError, ERROR_CODES } from '../types/index';
 import type { DeleteProjectResponse, LiveDeployTokenInfo } from '../service/serviceClient';
 import type { ElicitationConfirm, ElicitationForm } from '../ui/elicitation';
-import { chooseProjectDisplay, deleteProjectDisplay } from '../ui/elicitationDisplay';
+import { chooseProjectDisplay, deleteProjectDisplay, restoreProjectDisplay } from '../ui/elicitationDisplay';
 import { formatRelativeTime } from '../ui/relativeTime';
 import { variableBranchesFromKeep, type VariableBranches } from '../core/keepVariableNames';
 
@@ -308,14 +308,6 @@ function choiceRefusal(picked: Extract<Picked, { kind: 'needs-choice' }>, ref: s
   };
 }
 
-function refuseWithoutTerminal(json: boolean, what: string): never {
-  return refuse(json, {
-    code: ERROR_CODES.CONFIRMATION_REQUIRED,
-    message: `\`${what}\` needs confirmation. Pass --yes, or run it in a terminal.`, // COPY-FLAG
-    exitCode: EXIT_NEEDS_INPUT,
-  });
-}
-
 function liveOnly<T extends { revoked_at: string | null }>(tokens: readonly T[]): readonly T[] {
   return tokens.filter((t) => t.revoked_at === null);
 }
@@ -459,7 +451,7 @@ function showPreview(json: boolean, lines: readonly string[]): void {
 async function deleteFlow(ref: string, opts: DeleteProjectOpts): Promise<DeleteOutcome> {
   const json = opts.json === true;
   const force = opts.force === true;
-  const agentMode = !isInteractive(opts.nonTty);
+  const agentMode = json || !isInteractive(opts.nonTty);
   // Agent mode never opens a prompt, not even to pick an organization.
   const { orgId, orgName, serviceClient } = await resolveOrgContext(opts.apiUrl, opts.devMode === true, { promptForOrg: !agentMode });
   const org: OrgRef = { id: orgId, name: orgName };
@@ -550,26 +542,46 @@ export async function deleteProjectCommand(ref: string, opts: DeleteProjectOpts)
 type RestoreOutcome =
   | { readonly kind: 'cancelled' }
   | { readonly kind: 'needs-choice'; readonly refusal: Refusal }
+  | { readonly kind: 'needs-confirmation'; readonly elicitation: ElicitationConfirm }
   | { readonly kind: 'restored'; readonly project: { readonly id: string; readonly name: string } };
+
+/** The confirm elicitation for a restore: the project, its org and when it was deleted. The yes command names the project by id. */
+function restoreElicitation(org: OrgRef, project: ProjectRef): ElicitationConfirm {
+  const deletedAt = project.deleted_at ?? null;
+  return {
+    kind: 'confirm',
+    question: `Restore project ${project.name}?`, // COPY-FLAG: the terminal question, word for word
+    details: {
+      org: { id: org.id, name: org.name },
+      project: { id: project.id, name: project.name, deleted_at: deletedAt },
+    },
+    display: restoreProjectDisplay({ org, project: { id: project.id, name: project.name }, deletedAt }),
+    answer: { yes: `capy project restore ${project.id} --yes --json` },
+  };
+}
 
 async function restoreFlow(ref: string, opts: ProjectLifecycleOpts): Promise<RestoreOutcome> {
   const json = opts.json === true;
-  const agentMode = !isInteractive(opts.nonTty);
+  const agentMode = json || !isInteractive(opts.nonTty);
   const { orgId, orgName, serviceClient } = await resolveOrgContext(opts.apiUrl, opts.devMode === true);
+  const org: OrgRef = { id: orgId, name: orgName };
   // Only an owner's `include_deleted` is honoured; for anyone else the service answers with the live projects, and the id still works.
-  // With nobody to ask, this point is only reached with --yes (see restoreProjectCommand), so the rerun keeps it.
   const picked = await pickProject(resolveRef(await serviceClient.listProjects({ includeDeleted: true }), ref, true), {
     json,
     agentMode,
-    org: { id: orgId, name: orgName },
+    org,
     ref,
     client: serviceClient,
-    rerun: 'capy project restore <project> --yes --json',
+    rerun: `capy project restore <project> ${opts.yes === true ? '--yes ' : ''}--json`,
   });
   if (picked.kind === 'needs-choice') return { kind: 'needs-choice', refusal: choiceRefusal(picked, ref) };
   const project = picked.project;
 
-  if (opts.yes !== true && !(await confirm(json, `Restore project ${project.name}?`))) return { kind: 'cancelled' }; // COPY-FLAG
+  if (opts.yes !== true) {
+    // Nobody to ask: hand the question to the agent that ran this, and restore nothing.
+    if (agentMode) return { kind: 'needs-confirmation', elicitation: restoreElicitation(org, project) };
+    if (!(await confirm(json, `Restore project ${project.name}?`))) return { kind: 'cancelled' }; // COPY-FLAG
+  }
 
   const result = await serviceClient.restoreProject(orgId, project.id);
   return { kind: 'restored', project: result.project };
@@ -577,6 +589,14 @@ async function restoreFlow(ref: string, opts: ProjectLifecycleOpts): Promise<Res
 
 function emitRestoreOutcome(json: boolean, outcome: RestoreOutcome): void {
   if (outcome.kind === 'needs-choice') return refuse(json, outcome.refusal);
+  if (outcome.kind === 'needs-confirmation') {
+    return refuse(json, {
+      code: ERROR_CODES.CONFIRMATION_REQUIRED,
+      message: '`capy project restore` needs confirmation. Pass --yes, or run it in a terminal.', // COPY-FLAG
+      exitCode: EXIT_NEEDS_INPUT,
+      extra: { elicitation: outcome.elicitation },
+    });
+  }
   if (outcome.kind === 'cancelled') {
     if (json) console.log(JSON.stringify({ ok: false, code: ERROR_CODES.CANCELLED, error: 'Cancelled.' }, null, 2)); // COPY-FLAG
     else console.log('Cancelled.'); // COPY-FLAG
@@ -593,10 +613,8 @@ function emitRestoreOutcome(json: boolean, outcome: RestoreOutcome): void {
 export async function restoreProjectCommand(ref: string, opts: ProjectLifecycleOpts): Promise<void> {
   const json = opts.json === true;
 
-  if (opts.yes !== true && !isInteractive(opts.nonTty)) {
-    refuseWithoutTerminal(json, 'capy project restore');
-  }
-
+  // No terminal and no --yes means nobody can answer: the flow stops with the question as an elicitation (exit 3).
+  // It reads the project first, because the question has to say what would be restored.
   const settled = await settle(() => restoreFlow(ref, opts));
   if (!settled.ok) return refuse(json, refusalFor(settled.error));
   emitRestoreOutcome(json, settled.value);

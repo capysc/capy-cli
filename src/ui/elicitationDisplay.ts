@@ -61,6 +61,19 @@ export function deleteProjectDisplay(input: DeleteDisplayInput): string {
   return `${summary}\n\n${variablesSection(input)}`;
 }
 
+/** The table for `capy project restore`: the org, the project and when it was deleted. */
+export function restoreProjectDisplay(input: {
+  readonly org: { readonly id: string; readonly name: string };
+  readonly project: { readonly id: string; readonly name: string };
+  readonly deletedAt: string | null;
+}): string {
+  return table(['', ''], [
+    ['Org', input.org.name],
+    ['Project', `${input.project.name} (${input.project.id})`],
+    ['Deleted', input.deletedAt ?? UNREADABLE], // COPY-FLAG
+  ]);
+}
+
 /** The table for a name that matches several projects: one numbered row per project, labelled as the options are. */
 export function chooseProjectDisplay(labels: readonly string[]): string {
   return table(['', 'Project'], labels.map((label, i) => [String(i + 1), label] as const)); // COPY-FLAG

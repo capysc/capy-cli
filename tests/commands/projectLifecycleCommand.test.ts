@@ -198,16 +198,15 @@ describe('capy project delete', () => {
       expect(deletes()).toEqual([]);
     });
 
-    it('answering no with --json says CANCELLED on stdout, deletes nothing, and asks on stderr', async () => {
+    it('--json in a terminal is agent mode, as for create: the confirm elicitation, no prompt, nothing deleted', async () => {
       setTTY(true);
       service({});
-      fakePrompt.mockImplementation(async () => ({ confirmed: false }));
 
       const out = await capture(() => deleteProjectCommand('web', { json: true }));
 
-      expect(JSON.parse(out.stdout)).toMatchObject({ ok: false, code: 'CANCELLED' });
-      expect(createPromptModule.mock.calls[0][0]).toEqual({ output: process.stderr });
-      expect(out.stdout).not.toContain('Project:');
+      expect(out.exitCode).toBe(3);
+      expect(JSON.parse(out.stdout)).toMatchObject({ ok: false, code: 'CONFIRMATION_REQUIRED', elicitation: { kind: 'confirm' } });
+      expect(fakePrompt).not.toHaveBeenCalled();
       expect(deletes()).toEqual([]);
     });
 
@@ -576,14 +575,33 @@ describe('capy project restore', () => {
     expect(writes()).toEqual([]);
   });
 
-  it('off a terminal without --yes: CONFIRMATION_REQUIRED before any request', async () => {
+  it('off a terminal without --yes: CONFIRMATION_REQUIRED (exit 3) with a confirm elicitation, restoring nothing', async () => {
     service({ projects: [DELETED], onWrite: () => restored });
 
     const out = await capture(() => restoreProjectCommand('old', { json: true }));
 
     expect(out.exitCode).toBe(3);
-    expect(JSON.parse(out.stdout).code).toBe('CONFIRMATION_REQUIRED');
-    expect(requests()).toEqual([]);
+    const body = JSON.parse(out.stdout);
+    expect(body).toMatchObject({ ok: false, code: 'CONFIRMATION_REQUIRED' });
+    expect(body.elicitation).toMatchObject({
+      kind: 'confirm',
+      question: 'Restore project old?',
+      details: { org: { id: 'org_1' }, project: { id: 'proj_old', name: 'old', deleted_at: '2026-11-05T12:00:00.000Z' } },
+      answer: { yes: 'capy project restore proj_old --yes --json' },
+    });
+    expect(body.elicitation.display).toContain('| Project | old (proj_old) |');
+    expect(body.elicitation.display).toContain('| Deleted | 2026-11-05T12:00:00.000Z |');
+    expect(fakePrompt).not.toHaveBeenCalled();
+    expect(writes()).toEqual([]);
+  });
+
+  it('two deleted projects with one name, no --yes: the pick-one rerun has no --yes, so the yes/no comes next', async () => {
+    service({ projects: [DELETED, { ...DELETED, id: 'proj_old2' }], onWrite: () => restored });
+
+    const out = await capture(() => restoreProjectCommand('old', { json: true }));
+
+    expect(JSON.parse(out.stdout).elicitation.answer.rerun).toBe('capy project restore <project> --json');
+    expect(writes()).toEqual([]);
   });
 
   it('a project that is not deleted: 409 PROJECT_NOT_DELETED', async () => {

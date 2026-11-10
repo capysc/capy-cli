@@ -9,7 +9,7 @@ import {
   UserDecisions
 } from '../types/index';
 import { validateProjectNameInput } from '../core/projectNameRule';
-import { BRANCH_DESCRIPTION, DEFAULT_FIRST_BRANCH, validateBranchNameInput } from '../core/branchNameRule';
+import { BRANCH_DESCRIPTION, DEFAULT_FIRST_BRANCH, FIRST_BRANCH_QUESTION, validateBranchNameInput } from '../core/branchNameRule';
 
 export class PromptEngine {
   async promptForProjectName(defaultName: string): Promise<string> {
@@ -27,15 +27,15 @@ export class PromptEngine {
   }
 
   /**
-   * Asks for a new project's first branch with the same question bare `capy` asks (capyCommand
-   * `resolveInitialBranchChoice`), saying first what a branch is. `development` unless the person types another.
+   * Asks for a new project's first branch with the approved question, the one the agent elicitation asks too,
+   * saying first what a branch is. `development` unless the person types another.
    */
   async promptForFirstBranch(): Promise<string> {
     console.log(BRANCH_DESCRIPTION);
     const { initialBranchChoice } = await inquirer.prompt([{
       type: 'list',
       name: 'initialBranchChoice',
-      message: 'What branch should this project start with?',
+      message: FIRST_BRANCH_QUESTION,
       choices: [
         { name: `${DEFAULT_FIRST_BRANCH} (default)`, value: DEFAULT_FIRST_BRANCH },
         { name: 'another branch', value: 'other' },
