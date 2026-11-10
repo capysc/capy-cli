@@ -28,6 +28,7 @@ import {
   fakeService,
   makeEnv,
   manyLocs,
+  manyProjectLocs,
   manyRepos,
   type Loc,
 } from '../helpers/secretsWorld';
@@ -57,20 +58,25 @@ const maxOpen = (events: readonly string[]): number =>
 type Delay = (key: string) => number;
 const ZERO: Delay = () => 0;
 
-/** The fake service with latency per call and an event log: `+key` when a location's first call starts, `-key` when its push is done. */
+/**
+ * The fake service with latency per call and an event log: `+key` when a location's first call starts, `-key` when its
+ * read-back (the read after its push) is done: that is when the location is no longer in flight.
+ */
 function gaugedService(locs: readonly Loc[], delayOf: Delay = ZERO) {
   const base = fakeService({ locs });
   const log = mock((_event: string) => undefined);
+  const pushedTo = (projectId: string, branch?: string): boolean => pushSecrets.mock.calls.some((c) => c[0] === projectId && c[3] === branch);
   const getDecryptData = mock(async (projectId: string, branch?: string, keepHash?: string, latest?: boolean, onRate?: unknown) => {
-    log(`+${projectId}/${branch}`);
+    const readingBack = pushedTo(projectId, branch);
+    if (!readingBack) log(`+${projectId}/${branch}`);
     await sleepMs(delayOf(`${projectId}/${branch}`));
-    return (base.getDecryptData as (...a: unknown[]) => Promise<unknown>)(projectId, branch, keepHash, latest, onRate) as ReturnType<typeof base.getDecryptData>;
+    const read = await (base.getDecryptData as (...a: unknown[]) => Promise<unknown>)(projectId, branch, keepHash, latest, onRate) as ReturnType<typeof base.getDecryptData>;
+    if (readingBack) log(`-${projectId}/${branch}`);
+    return read;
   });
   const pushSecrets = mock(async (projectId: string, keep: string, blob: string, branch: string, _onRate?: unknown) => {
     await sleepMs(delayOf(`${projectId}/${branch}`));
-    const pushed = await base.pushSecrets(projectId, keep, blob, branch);
-    log(`-${projectId}/${branch}`);
-    return pushed;
+    return base.pushSecrets(projectId, keep, blob, branch);
   });
   return { getDecryptData, pushSecrets, log, events: () => log.mock.calls.map((c) => c[0]) };
 }
@@ -82,7 +88,7 @@ describe('location pushes: bounded concurrency', () => {
   });
 
   test('with enough locations exactly 6 are in flight, never more', async () => {
-    const locs = manyLocs(20);
+    const locs = manyProjectLocs(20); // one project each: locations of one project are pushed one at a time
     const service = gaugedService(locs, () => 8);
     const result = await runSecretSet(requestFor(locs), makeEnv(service as never, undefined));
     expect(result.updated).toHaveLength(20);
@@ -98,9 +104,9 @@ describe('location pushes: bounded concurrency', () => {
   });
 
   test('15 locations with latency run about 3x faster or better than one at a time', async () => {
-    const locs = manyLocs(15);
-    const latency = 20; // a read and a push per location
-    const sequentialMs = locs.length * 2 * latency;
+    const locs = manyProjectLocs(15);
+    const latency = 20; // a read, a push and a read-back per location
+    const sequentialMs = locs.length * 3 * latency;
     const service = gaugedService(locs, () => latency);
     const t0 = performance.now();
     const result = await runSecretSet(requestFor(locs), makeEnv(service as never, undefined));
@@ -133,7 +139,7 @@ describe('location pushes: bounded concurrency', () => {
   });
 
   test('progress counts FINISHED items, one event per finish, and the in-flight number stays under 6', async () => {
-    const locs = manyLocs(14);
+    const locs = manyProjectLocs(14);
     const onProgress = mock((_p: RunProgress) => undefined);
     await runSecretSet(requestFor(locs), makeEnv(gaugedService(locs, () => 3) as never, undefined), { onProgress });
     const events = onProgress.mock.calls.map((c) => c[0]).filter((e) => e.phase === 'pushing');
@@ -297,7 +303,8 @@ describe('Capy 429: wait and retry, then fail only that item with RATE_LIMITED',
     expect(result.failed).toEqual([]);
     expect(result.updated).toHaveLength(8);
     expect(sleep.mock.calls.map((c) => c[0])).toEqual([1500, 1500]);
-    expect(service.getDecryptData.mock.calls.filter((c) => c[1] === target.branch)).toHaveLength(3);
+    // Two limited reads, the read that worked, and the read-back after the push.
+    expect(service.getDecryptData.mock.calls.filter((c) => c[1] === target.branch)).toHaveLength(4);
   });
 
   test('without a hint the wait grows 2s, 4s, 8s', async () => {
@@ -352,7 +359,7 @@ describe('Capy 429: wait and retry, then fail only that item with RATE_LIMITED',
 // ── Pacing from the RateLimit headers ───────────────────────────────────────
 
 describe('pacing: stop starting pushes when the window is nearly used up, until it resets', () => {
-  const locs = manyLocs(12);
+  const locs = manyProjectLocs(12); // one project each: locations of one project are pushed one at a time
   const RESET_AT = 6000;
 
   /** A world with a fake clock: it reads 1000 until the run first waits, then 6000 (the window has reset). */
@@ -391,9 +398,10 @@ describe('pacing: stop starting pushes when the window is nearly used up, until 
     const firstSleep = events.findIndex((e) => e.startsWith('sleep:'));
     expect(firstSleep).toBeGreaterThan(-1);
     expect(events[firstSleep]).toBe('sleep:5000'); // resetAt - now
-    const startsBefore = events.slice(0, firstSleep).filter((e) => e.startsWith('start:'));
-    expect(startsBefore).toHaveLength(LOCATION_CONCURRENCY); // the first window of 6 only
-    expect(events.slice(firstSleep).filter((e) => e.startsWith('start:'))).toHaveLength(6); // the rest, after the reset
+    // Each location reads twice (its plan read and its read-back), so count the locations started, not the reads.
+    const startedBefore = new Set(events.slice(0, firstSleep).filter((e) => e.startsWith('start:')));
+    expect(startedBefore.size).toBe(LOCATION_CONCURRENCY); // the first window of 6 only
+    expect(new Set(events.slice(firstSleep).filter((e) => e.startsWith('start:') && !startedBefore.has(e))).size).toBe(6); // the rest, after the reset
   });
 
   test('plenty remaining: no waiting at all', async () => {
@@ -419,7 +427,7 @@ describe('pacing: stop starting pushes when the window is nearly used up, until 
 
 describe('cancel with several in flight', () => {
   test('every running push finishes, none starts after, `cancelled` is exactly the never-started ones, in input order', async () => {
-    const locs = manyLocs(16);
+    const locs = manyProjectLocs(16);
     const stop = new AbortController();
     const service = gaugedService(locs, () => 10);
     const stopLater = mock(async (...a: Parameters<typeof service.getDecryptData>) => {
@@ -442,7 +450,7 @@ describe('cancel with several in flight', () => {
   });
 
   test('a second stop request while waiting changes nothing: the running ones are still waited for', async () => {
-    const locs = manyLocs(10);
+    const locs = manyProjectLocs(10);
     const stop = new AbortController();
     const service = gaugedService(locs, () => 10);
     const stopTwice = mock(async (...a: Parameters<typeof service.getDecryptData>) => {

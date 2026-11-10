@@ -6,7 +6,7 @@
  * overlap in time can overwrite each other while both answer success. The engine used to call a location `updated` as
  * soon as its push was answered, and it started six pushes at once whatever the projects.
  *
- * The service here is tests/helpers/secretsStatefulWorld.ts: it remembers the pushes it accepted and answers reads from
+ * The service here is tests/helpers/secretsWorld.ts (fakeService): it remembers the pushes it accepted and answers reads from
  * them, and it can be told to answer a push and not keep it. Nothing touches a network, `gh`, git or a home directory.
  */
 import { describe, test, expect, spyOn } from 'bun:test';
@@ -16,20 +16,26 @@ import { runSecretSet, type SetEnv, type SetLocation } from '../../src/commands/
 import { runSecretsSet, type SecretsSetIo, type SecretsSetOpts } from '../../src/commands/secretsSetCommand';
 import { MAX_PIPED_BYTES, readPipedValue } from '../../src/commands/pipedValue';
 import { CapyError, ERROR_CODES } from '../../src/types/index';
+import { hashValue } from '../../src/deploy/keepGate';
 import {
   KEYS,
   LINKS,
   LOCATIONS,
   NAME,
+  OLD_VALUE,
   PROJECT_NAMES,
   SENTINEL,
   fakeGithub,
+  fakeService,
+  locationKey,
+  overlap,
+  windowsOf,
   indexRows,
   makeEnv,
   standardRepos,
   type ProjectId,
+  type ServiceOpts,
 } from '../helpers/secretsWorld';
-import { locationKey, overlap, statefulService, windowsOf, type StatefulOpts } from '../helpers/secretsStatefulWorld';
 
 const loc = (project: ProjectId, branch: string, isProtected = false): SetLocation => ({
   project_id: project,
@@ -43,17 +49,17 @@ const ALL: readonly SetLocation[] = [loc('pA', 'production', true), loc('pA', 's
 
 const STAGING = 'pA/staging';
 
-const envFor = (service: ReturnType<typeof statefulService>) => {
+const envFor = (service: ReturnType<typeof fakeService>) => {
   const github = fakeGithub(standardRepos(LOCATIONS));
   const made = makeEnv(service as never, github);
   return { ...made, client: service as unknown as SetEnv['client'] };
 };
 
-const run = (service: ReturnType<typeof statefulService>, locations: readonly SetLocation[] = ALL) =>
+const run = (service: ReturnType<typeof fakeService>, locations: readonly SetLocation[] = ALL) =>
   runSecretSet({ name: NAME, value: SENTINEL, locations, repos: [] }, envFor(service));
 
 /** What NAME holds at a location on the service now, decrypted with the project's key; `undefined` when the line is missing. */
-async function heldValue(service: ReturnType<typeof statefulService>, l: SetLocation): Promise<string | undefined> {
+async function heldValue(service: ReturnType<typeof fakeService>, l: SetLocation): Promise<string | undefined> {
   const data = await service.getDecryptData(l.project_id, l.branch);
   const line = data.env_content.split('\n').find((x) => x.startsWith(`${NAME}=`));
   return line === undefined ? undefined : new FileManager().decryptValue(line.slice(NAME.length + 1), KEYS[l.project_id as ProjectId]);
@@ -64,7 +70,7 @@ const labelOf = (r: { readonly project: string; readonly branch: string }) => `$
 
 describe('read-back: what is reported updated is what the service holds', () => {
   test('control: every push kept, every location is updated, read back once each, pushed once each', async () => {
-    const service = statefulService();
+    const service = fakeService();
     const result = await run(service);
     expect(result.failed).toEqual([]);
     expect(result.updated.map(labelOf)).toEqual(ALL.map(label));
@@ -75,7 +81,7 @@ describe('read-back: what is reported updated is what the service holds', () => 
   });
 
   test('a push the service answers and does not keep is pushed once more; still missing: failed SECRET_NOT_PERSISTED, never updated', async () => {
-    const service = statefulService({ loses: (location) => location === STAGING });
+    const service = fakeService({ loses: (location) => location === STAGING });
     const result = await run(service);
     expect(result.failed).toEqual([{ kind: 'location', project: PROJECT_NAMES.pA, branch: 'staging', protected: false, code: ERROR_CODES.SECRET_NOT_PERSISTED }]);
     expect(result.updated.map(labelOf)).not.toContain(`${PROJECT_NAMES.pA}/staging`);
@@ -90,7 +96,7 @@ describe('read-back: what is reported updated is what the service holds', () => 
   });
 
   test('a failed read-back leaves no cache that says the push worked', async () => {
-    const service = statefulService({ loses: (location) => location === STAGING });
+    const service = fakeService({ loses: (location) => location === STAGING });
     const env = envFor(service);
     await runSecretSet({ name: NAME, value: SENTINEL, locations: ALL, repos: [] }, env);
     const cachedProjects = env.writeCache.mock.calls.map((c) => `${String(c[1])}`);
@@ -99,7 +105,7 @@ describe('read-back: what is reported updated is what the service holds', () => 
   });
 
   test('a location that reads back correctly on the retry is updated (the first push was lost)', async () => {
-    const service = statefulService({ loses: (location, n) => location === STAGING && n === 0 });
+    const service = fakeService({ loses: (location, n) => location === STAGING && n === 0 });
     const result = await run(service);
     expect(result.failed).toEqual([]);
     expect(result.updated.map(labelOf)).toContain(`${PROJECT_NAMES.pA}/staging`);
@@ -108,7 +114,7 @@ describe('read-back: what is reported updated is what the service holds', () => 
   });
 
   test('the blob is right but the pin was wiped: pushed again with the blob line rewritten, then updated', async () => {
-    const service = statefulService({ wipesPin: (location, n) => location === STAGING && n === 0 });
+    const service = fakeService({ wipesPin: (location, n) => location === STAGING && n === 0 });
     const result = await run(service);
     expect(result.failed).toEqual([]);
     expect(result.updated.map(labelOf)).toContain(`${PROJECT_NAMES.pA}/staging`);
@@ -119,7 +125,7 @@ describe('read-back: what is reported updated is what the service holds', () => 
   });
 
   test('the pin stays wiped on the retry too: failed SECRET_NOT_PERSISTED', async () => {
-    const service = statefulService({ wipesPin: (location) => location === STAGING });
+    const service = fakeService({ wipesPin: (location) => location === STAGING });
     const result = await run(service);
     expect(result.failed.map((f) => (f.kind === 'location' ? f.code : undefined))).toEqual([ERROR_CODES.SECRET_NOT_PERSISTED]);
     expect(service.pushesTo(STAGING)).toBe(2);
@@ -127,7 +133,7 @@ describe('read-back: what is reported updated is what the service holds', () => 
 
   test('a read-back that cannot be read is failed with that read error code and is not retried', async () => {
     // Read number 0 is the plan read, number 1 is the read-back.
-    const service = statefulService({
+    const service = fakeService({
       readError: (location, n) => (location === STAGING && n === 1 ? new CapyError('x', ERROR_CODES.PERMISSION_DENIED) : undefined),
     });
     const result = await run(service);
@@ -137,11 +143,62 @@ describe('read-back: what is reported updated is what the service holds', () => 
   });
 });
 
+describe('a removal (the answer `delete` at a location that moved) is read back too', () => {
+  const MOVED = 'moved-by-someone-else-2222';
+  const world: ServiceOpts['locs'] = [{ project: 'pA', branch: 'staging', value: MOVED }];
+  const removeRequest = {
+    name: NAME,
+    value: SENTINEL,
+    locations: [loc('pA', 'staging')],
+    repos: [],
+    shown: { [STAGING]: hashValue(OLD_VALUE) },
+    answers: { [STAGING]: { choice: 'delete' as const, remote: hashValue(MOVED), local: hashValue(SENTINEL) } },
+  };
+  const heldPin = async (service: ReturnType<typeof fakeService>) =>
+    (JSON.parse((await service.getDecryptData('pA', 'staging')).keep_file) as { variables: Record<string, Array<{ branch: string }>> }).variables[NAME]?.some((e) => e.branch === 'staging');
+
+  test('control: the line and the pin are gone after one push: removed, read back once', async () => {
+    const service = fakeService({ locs: world });
+    const result = await runSecretSet(removeRequest, envFor(service));
+    expect(result.failed).toEqual([]);
+    expect(result.removed?.map(labelOf)).toEqual([`${PROJECT_NAMES.pA}/staging`]);
+    expect(service.pushesTo(STAGING)).toBe(1);
+    expect(service.readsOf(STAGING)).toBe(2);
+  });
+
+  test('the blob line is gone but the pin stayed: pushed again with the pin dropped, then removed (never "unchanged")', async () => {
+    const service = fakeService({ locs: world, wipesPin: (location, n) => location === STAGING && n === 0 });
+    const result = await runSecretSet(removeRequest, envFor(service));
+    expect(result.failed).toEqual([]);
+    expect(result.unchanged).toEqual([]);
+    expect(result.removed?.map(labelOf)).toEqual([`${PROJECT_NAMES.pA}/staging`]);
+    expect(service.pushesTo(STAGING)).toBe(2);
+    expect(await heldPin(service)).toBeFalsy();
+  });
+
+  test('the pin stays on the retry too: failed SECRET_NOT_PERSISTED, never removed or unchanged', async () => {
+    const service = fakeService({ locs: world, wipesPin: (location) => location === STAGING });
+    const result = await runSecretSet(removeRequest, envFor(service));
+    expect(result.failed).toEqual([{ kind: 'location', project: PROJECT_NAMES.pA, branch: 'staging', protected: false, code: ERROR_CODES.SECRET_NOT_PERSISTED }]);
+    expect(result.removed).toBeUndefined();
+    expect(result.unchanged).toEqual([]);
+    expect(service.pushesTo(STAGING)).toBe(2);
+  });
+
+  test('the push was lost: pushed once more and removed', async () => {
+    const service = fakeService({ locs: world, loses: (location, n) => location === STAGING && n === 0 });
+    const result = await runSecretSet(removeRequest, envFor(service));
+    expect(result.removed?.map(labelOf)).toEqual([`${PROJECT_NAMES.pA}/staging`]);
+    expect(service.pushesTo(STAGING)).toBe(2);
+    expect(await heldPin(service)).toBeFalsy();
+  });
+});
+
 describe('KEEP_WRITE_CONFLICT: a save the service could not complete', () => {
   const conflict = () => new CapyError('the words do not matter', ERROR_CODES.KEEP_WRITE_CONFLICT);
 
   test('refused once: pushed once more and updated', async () => {
-    const service = statefulService({ pushError: (location, n) => (location === STAGING && n === 0 ? conflict() : undefined) });
+    const service = fakeService({ pushError: (location, n) => (location === STAGING && n === 0 ? conflict() : undefined) });
     const result = await run(service);
     expect(result.failed).toEqual([]);
     expect(result.updated.map(labelOf)).toContain(`${PROJECT_NAMES.pA}/staging`);
@@ -150,7 +207,7 @@ describe('KEEP_WRITE_CONFLICT: a save the service could not complete', () => {
   });
 
   test('refused twice: failed with KEEP_WRITE_CONFLICT after exactly one retry, the others untouched', async () => {
-    const service = statefulService({ pushError: (location) => (location === STAGING ? conflict() : undefined) });
+    const service = fakeService({ pushError: (location) => (location === STAGING ? conflict() : undefined) });
     const result = await run(service);
     expect(result.failed).toEqual([{ kind: 'location', project: PROJECT_NAMES.pA, branch: 'staging', protected: false, code: ERROR_CODES.KEEP_WRITE_CONFLICT }]);
     expect(service.pushesTo(STAGING)).toBe(2);
@@ -158,14 +215,14 @@ describe('KEEP_WRITE_CONFLICT: a save the service could not complete', () => {
   });
 
   test('a refusal that is a conflict in words only (another code) is not retried', async () => {
-    const service = statefulService({ pushError: (location) => (location === STAGING ? new CapyError('KEEP_WRITE_CONFLICT conflict', ERROR_CODES.SERVICE_ERROR) : undefined) });
+    const service = fakeService({ pushError: (location) => (location === STAGING ? new CapyError('KEEP_WRITE_CONFLICT conflict', ERROR_CODES.SERVICE_ERROR) : undefined) });
     const result = await run(service);
     expect(result.failed.map((f) => (f.kind === 'location' ? f.code : undefined))).toEqual([ERROR_CODES.SERVICE_ERROR]);
     expect(service.pushesTo(STAGING)).toBe(1);
   });
 
   test('a refused push after a lost one shares the one retry: failed, not a third push', async () => {
-    const service = statefulService({
+    const service = fakeService({
       loses: (location, n) => location === STAGING && n === 0,
       pushError: (location, n) => (location === STAGING && n === 1 ? conflict() : undefined),
     });
@@ -181,10 +238,10 @@ describe('one project at a time, projects in parallel', () => {
     ...['a', 'b', 'c'].map((b) => loc('pB', `b-${b}`)),
     ...['a', 'b', 'c'].map((b) => loc('pC', `c-${b}`)),
   ];
-  const world: StatefulOpts['locs'] = MANY.map((l) => ({ project: l.project_id as ProjectId, branch: l.branch }));
+  const world: ServiceOpts['locs'] = MANY.map((l) => ({ project: l.project_id as ProjectId, branch: l.branch }));
 
   test('the locations of one project never overlap in time (from first read to read-back)', async () => {
-    const service = statefulService({ locs: world, delayMs: () => 6 });
+    const service = fakeService({ locs: world, delayMs: () => 6 });
     const result = await run(service, MANY);
     expect(result.failed).toEqual([]);
     expect(result.updated).toHaveLength(MANY.length);
@@ -195,7 +252,7 @@ describe('one project at a time, projects in parallel', () => {
   });
 
   test('different projects do run at the same time (the parallelism is kept)', async () => {
-    const service = statefulService({ locs: world, delayMs: () => 6 });
+    const service = fakeService({ locs: world, delayMs: () => 6 });
     await run(service, MANY);
     const windows = windowsOf(service.events());
     const different = windows.flatMap((a, i) => windows.slice(i + 1).filter((b) => a.location.split('/')[0] !== b.location.split('/')[0]).map((b) => [a, b] as const));
@@ -203,14 +260,14 @@ describe('one project at a time, projects in parallel', () => {
   });
 
   test('results stay in input order whatever the lanes finish in', async () => {
-    const service = statefulService({ locs: world, delayMs: (location) => (location.startsWith('pA') ? 8 : 1) });
+    const service = fakeService({ locs: world, delayMs: (location) => (location.startsWith('pA') ? 8 : 1) });
     const result = await run(service, MANY);
     expect(result.updated.map(labelOf)).toEqual(MANY.map(label));
   });
 
   test('a stop starts no further push; the one running finishes and the rest are cancelled, in input order', async () => {
     const stop = new AbortController();
-    const service = statefulService({ locs: world, delayMs: () => 4 });
+    const service = fakeService({ locs: world, delayMs: () => 4 });
     const env = envFor(service);
     const started = runSecretSet({ name: NAME, value: SENTINEL, locations: MANY, repos: [] }, env, { stopPushes: stop.signal });
     await new Promise((resolve) => setTimeout(resolve, 2));
@@ -249,7 +306,7 @@ async function capture(fn: () => Promise<number>) {
   return { returned: outcome.returned, stdout };
 }
 
-function commandRig(service: ReturnType<typeof statefulService>) {
+function commandRig(service: ReturnType<typeof fakeService>) {
   const github = fakeGithub(standardRepos(LOCATIONS));
   const env = { ...makeEnv(service as never, github), client: service as unknown as SetEnv['client'] };
   const io: SecretsSetIo = {
@@ -269,7 +326,7 @@ function commandRig(service: ReturnType<typeof statefulService>) {
 
 describe('the command', () => {
   test('a location that did not read back is ok:false SECRETS_PARTIAL, exit 1, listed in failed with its code', async () => {
-    const service = statefulService({ loses: (location) => location === STAGING });
+    const service = fakeService({ loses: (location) => location === STAGING });
     const { go } = commandRig(service);
     const plan = JSON.parse((await go({ dryRun: true })).stdout);
     const out = await go({ confirm: plan.plan_id });
@@ -283,7 +340,7 @@ describe('the command', () => {
   });
 
   test('every push kept: ok:true, exit 0, the same JSON keys as before', async () => {
-    const service = statefulService();
+    const service = fakeService();
     const { go } = commandRig(service);
     const plan = JSON.parse((await go({ dryRun: true })).stdout);
     const out = await go({ confirm: plan.plan_id });
@@ -295,7 +352,7 @@ describe('the command', () => {
   });
 
   test('--dry-run pushes nothing and reads each location once (the plan), with no read-back', async () => {
-    const service = statefulService();
+    const service = fakeService();
     const { go } = commandRig(service);
     const out = await go({ dryRun: true });
     expect(out.returned).toBe(0);
