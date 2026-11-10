@@ -1,5 +1,5 @@
 /**
- * `capy org delete-project` and `capy org restore-project` (CAP-729).
+ * `capy project delete` and `capy project restore` (CAP-729).
  *
  * A delete hides a project; it destroys nothing, and an org owner can restore
  * it. The service decides everything that matters (who may delete, whether live
@@ -13,7 +13,7 @@
  * `--dry-run` reads the project and its deploy tokens and stops. The service has
  * no dry run, so the DELETE is simply never sent.
  *
- * Without `--yes` and with nobody to ask (agent mode), `delete-project` refuses with CONFIRMATION_REQUIRED (exit 3)
+ * Without `--yes` and with nobody to ask (agent mode), `project delete` refuses with CONFIRMATION_REQUIRED (exit 3)
  * and an `elicitation` (kind "confirm", `ui/elicitation.ts`): the project, the org, its branches, its variable
  * NAMES (never a value or a hash) and its live deploy tokens, so the agent can put the question to the human.
  * In a terminal the same summary is printed before the Yes/No question.
@@ -51,7 +51,7 @@ interface CommandWithGlobals {
 }
 
 /**
- * The options of `delete-project` / `restore-project` as typed, wherever commander put them.
+ * The options of `project delete` / `project restore` as typed, wherever commander put them.
  *
  * A flag that the program or `org` also defines (`--force`, `--non-tty`, `--dry-run`) is taken by that outer command
  * and never reaches the subcommand's own options, so reading `options.force` there is always undefined. The merged view
@@ -378,7 +378,7 @@ interface OrgRef {
 
 /** The exact command that answers Yes: the project's id (never its name), and `--force` only if it was passed. */
 function deleteYesCommand(projectId: string, force: boolean): string {
-  return `capy org delete-project ${projectId} ${force ? '--force ' : ''}--yes --json`;
+  return `capy project delete ${projectId} ${force ? '--force ' : ''}--yes --json`;
 }
 
 /** The confirm elicitation for a delete. Names and ids only: a variable is its name and its branches, never more. */
@@ -469,7 +469,7 @@ async function deleteFlow(ref: string, opts: DeleteProjectOpts): Promise<DeleteO
     org,
     ref,
     client: serviceClient,
-    rerun: `capy org delete-project <project> ${force ? '--force ' : ''}--json`,
+    rerun: `capy project delete <project> ${force ? '--force ' : ''}--json`,
   });
   if (picked.kind === 'needs-choice') return { kind: 'needs-choice', refusal: choiceRefusal(picked, ref) };
   const project = picked.project;
@@ -492,7 +492,7 @@ async function deleteFlow(ref: string, opts: DeleteProjectOpts): Promise<DeleteO
 }
 
 function restoreHint(id: string): string {
-  return `capy org restore-project ${id}`;
+  return `capy project restore ${id}`;
 }
 
 function emitDeleteOutcome(json: boolean, force: boolean, outcome: DeleteOutcome): void {
@@ -521,7 +521,7 @@ function emitDeleteOutcome(json: boolean, force: boolean, outcome: DeleteOutcome
   if (outcome.kind === 'needs-confirmation') {
     return refuse(json, {
       code: ERROR_CODES.CONFIRMATION_REQUIRED,
-      message: '`capy org delete-project` needs confirmation. Pass --yes, or run it in a terminal.', // COPY-FLAG
+      message: '`capy project delete` needs confirmation. Pass --yes, or run it in a terminal.', // COPY-FLAG
       exitCode: EXIT_NEEDS_INPUT,
       extra: { elicitation: outcome.elicitation },
       lines: outcome.lines,
@@ -536,7 +536,7 @@ function emitDeleteOutcome(json: boolean, force: boolean, outcome: DeleteOutcome
   console.log(`An owner can restore it with: ${restoreHint(project.id)}`); // COPY-FLAG
 }
 
-/** `capy org delete-project <name-or-id> [--force] [--yes] [--dry-run] [--json]` */
+/** `capy project delete <name-or-id> [--force] [--yes] [--dry-run] [--json]` */
 export async function deleteProjectCommand(ref: string, opts: DeleteProjectOpts): Promise<void> {
   const json = opts.json === true;
 
@@ -564,7 +564,7 @@ async function restoreFlow(ref: string, opts: ProjectLifecycleOpts): Promise<Res
     org: { id: orgId, name: orgName },
     ref,
     client: serviceClient,
-    rerun: 'capy org restore-project <project> --yes --json',
+    rerun: 'capy project restore <project> --yes --json',
   });
   if (picked.kind === 'needs-choice') return { kind: 'needs-choice', refusal: choiceRefusal(picked, ref) };
   const project = picked.project;
@@ -589,12 +589,12 @@ function emitRestoreOutcome(json: boolean, outcome: RestoreOutcome): void {
   console.log(`Restored project ${outcome.project.name}.`); // COPY-FLAG
 }
 
-/** `capy org restore-project <name-or-id> [--yes] [--json]` */
+/** `capy project restore <name-or-id> [--yes] [--json]` */
 export async function restoreProjectCommand(ref: string, opts: ProjectLifecycleOpts): Promise<void> {
   const json = opts.json === true;
 
   if (opts.yes !== true && !isInteractive(opts.nonTty)) {
-    refuseWithoutTerminal(json, 'capy org restore-project');
+    refuseWithoutTerminal(json, 'capy project restore');
   }
 
   const settled = await settle(() => restoreFlow(ref, opts));

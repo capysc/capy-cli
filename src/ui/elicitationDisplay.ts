@@ -49,7 +49,7 @@ function variablesSection(input: DeleteDisplayInput): string {
   );
 }
 
-/** The table for `capy org delete-project`: the project, then every variable, one row each, in keep.lock order. */
+/** The table for `capy project delete`: the project, then every variable, one row each, in keep.lock order. */
 export function deleteProjectDisplay(input: DeleteDisplayInput): string {
   const summary = table(['', ''], [
     ['Org', input.org.name],
@@ -86,7 +86,7 @@ function protectedCell(isProtected: boolean | undefined): string {
   return isProtected ? 'yes (invite-only)' : 'no'; // COPY-FLAG
 }
 
-/** The table for `capy org create-project` asking for its name and first branch: where it goes, what is chosen so far, and what a branch is. */
+/** The table for `capy project create` asking for its name and first branch: where it goes, what is chosen so far, and what a branch is. */
 export function createProjectDisplay(input: CreateDisplayInput): string {
   const summary = table(['', ''], [
     ['Org', input.org.name],

@@ -1,5 +1,5 @@
 /**
- * `capy org create-project [name]` (CAP-748).
+ * `capy project create [name]` (CAP-748).
  *
  * Creates a project in the ACTIVE organization with the same service call the init flow uses
  * (`ServiceClient.initializeProject`), then its first branch (`createBranch`), and nothing else: it does not link the
@@ -154,7 +154,7 @@ function createForm(
         ],
       },
     ],
-    answer: { rerun: 'capy org create-project <name> --branch <branch> --protected <protected> --json' },
+    answer: { rerun: 'capy project create <name> --branch <branch> --protected <protected> --json' },
   };
 }
 
@@ -255,15 +255,15 @@ function createRefusalFor(err: unknown): Refusal {
 const NEEDS_INPUT: Readonly<Record<'name' | 'branch' | 'protected', { readonly code: string; readonly message: string }>> = {
   name: {
     code: ERROR_CODES.PROJECT_NAME_REQUIRED,
-    message: '`capy org create-project` needs a project name. Pass it as an argument, or run it in a terminal.', // COPY-FLAG
+    message: '`capy project create` needs a project name. Pass it as an argument, or run it in a terminal.', // COPY-FLAG
   },
   branch: {
     code: ERROR_CODES.BRANCH_NAME_REQUIRED,
-    message: '`capy org create-project` needs a first branch. Pass it with --branch, or run it in a terminal.', // COPY-FLAG
+    message: '`capy project create` needs a first branch. Pass it with --branch, or run it in a terminal.', // COPY-FLAG
   },
   protected: {
     code: ERROR_CODES.BRANCH_PROTECTION_REQUIRED,
-    message: '`capy org create-project` needs to know whether the first branch is protected. Pass --protected yes or no, or run it in a terminal.', // COPY-FLAG
+    message: '`capy project create` needs to know whether the first branch is protected. Pass --protected yes or no, or run it in a terminal.', // COPY-FLAG
   },
 };
 
@@ -316,7 +316,7 @@ function emitCreateOutcome(json: boolean, outcome: CreateOutcome): void {
   if (outcome.branch.protected) console.log(`"${outcome.branch.name}" is a protected branch — access is invite-only`);
 }
 
-/** `capy org create-project [name] [--dry-run] [--json]` */
+/** `capy project create [name] [--dry-run] [--json]` */
 export async function createProjectCommand(name: string | undefined, opts: CreateProjectOpts): Promise<void> {
   const json = opts.json === true;
   const agentMode = json || !isInteractive(opts.nonTty);
@@ -356,7 +356,7 @@ export async function createProjectCommand(name: string | undefined, opts: Creat
   if (opts.dryRun === true && missingSomething && !agentMode) {
     return refuse(json, {
       code: ERROR_CODES.DRY_RUN_UNSUPPORTED,
-      message: '`capy org create-project` would ask for the name, branch or protection, so it cannot preview. Pass all three.', // COPY-FLAG
+      message: '`capy project create` would ask for the name, branch or protection, so it cannot preview. Pass all three.', // COPY-FLAG
       exitCode: 1,
     });
   }

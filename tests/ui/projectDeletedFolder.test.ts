@@ -117,7 +117,7 @@ describe('a folder whose project was deleted', () => {
     expect(screen).toContain('Project deleted');
     expect(screen).toContain('web');
     expect(screen).toContain('proj_web');
-    expect(screen).toContain('capy org restore-project proj_web');
+    expect(screen).toContain('capy project restore proj_web');
     expect(screen.toLowerCase()).toContain('only an owner');
   });
 
@@ -129,7 +129,7 @@ describe('a folder whose project was deleted', () => {
 
     expect(out.stdout).toContain('Project deleted');
     expect(out.stdout).toContain('"web"');
-    expect(out.stdout).toContain('capy org restore-project proj_web');
+    expect(out.stdout).toContain('capy project restore proj_web');
     rmSync(dir, { recursive: true, force: true });
   });
 
@@ -208,7 +208,7 @@ describe('a folder whose project was deleted', () => {
 
     expect(out.exitCode).toBe(1);
     expect(out.stdout).toContain('Project deleted');
-    expect(out.stdout).toContain('capy org restore-project proj_web');
+    expect(out.stdout).toContain('capy project restore proj_web');
     expect(out.stdout.toLowerCase()).not.toContain('recreate');
     rmSync(dir, { recursive: true, force: true });
   });

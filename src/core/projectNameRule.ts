@@ -1,6 +1,6 @@
 /**
  * The rule for a project name, in one place: the init prompt (`PromptEngine.promptForProjectName`) and
- * `capy org create-project` both use it, so they only ever change together.
+ * `capy project create` both use it, so they only ever change together.
  *
  * Non-empty, letters/numbers/hyphens/underscores only, and not the reserved system store name.
  */

@@ -2,8 +2,8 @@
  * CAP-729, through the BUILT cli and its real argument parser (the piped harness: an isolated HOME and a mock service).
  * Needs `bun run build` first.
  *
- *   1. `org delete-project --force` reaches the command. The program defines `-f/--force` and `org` defines `--non-tty`,
- *      so commander gives those flags to the outer command and the subcommand's own options never hold them.
+ *   1. `project delete --force` reaches the command. The program defines `-f/--force`, so commander gives that flag to
+ *      the outer command and the subcommand's own options never hold it.
  *   2. A folder whose project was deleted (the service answers 410 `PROJECT_DELETED`): bare `capy`, `capy status` and
  *      `capy push` end non-zero with that code, offer no recreate, and leave keep.lock byte-identical.
  */
@@ -15,7 +15,7 @@ import { withHarness, PROJECT_ID, type Harness } from '../helpers/pipedHarness';
 import { lifecycleOptsFrom } from '../../src/commands/projectLifecycleCommand';
 
 const NAME = 'DELETED_FOLDER_TOKEN';
-const RESTORE = `capy org restore-project ${PROJECT_ID}`;
+const RESTORE = `capy project restore ${PROJECT_ID}`;
 const QUIET = { CAPY_NO_REPO_LINK: '1' } as const;
 
 const requests = (h: Harness, method: string) => h.requests().filter((r) => r.method === method && r.path.includes('/projects/'));
@@ -28,12 +28,12 @@ async function deletedFolder(h: Harness): Promise<void> {
   h.markProjectDeleted();
 }
 
-describe('org delete-project / restore-project / projects: flags the program or `org` also defines', () => {
+describe('project delete / project restore / org projects: flags the program also defines', () => {
   test('--force arrives: the DELETE body is {"force":true}; without it there is no body', async () => {
     await withHarness(async (h) => {
-      const forced = await h.run(['org', 'delete-project', PROJECT_ID, '--force', '--yes', '--json']);
+      const forced = await h.run(['project', 'delete', PROJECT_ID, '--force', '--yes', '--json']);
       expect(forced.code).toBe(0);
-      const without = await h.run(['org', 'delete-project', PROJECT_ID, '--yes', '--json']);
+      const without = await h.run(['project', 'delete', PROJECT_ID, '--yes', '--json']);
       expect(without.code).toBe(0);
 
       const deletes = requests(h, 'DELETE');
@@ -43,24 +43,24 @@ describe('org delete-project / restore-project / projects: flags the program or 
 
   test('-f, typed before the subcommand or after it, is the same flag', async () => {
     await withHarness(async (h) => {
-      await h.run(['-f', 'org', 'delete-project', PROJECT_ID, '--yes', '--json']);
-      await h.run(['org', 'delete-project', PROJECT_ID, '-f', '--yes', '--json']);
+      await h.run(['-f', 'project', 'delete', PROJECT_ID, '--yes', '--json']);
+      await h.run(['project', 'delete', PROJECT_ID, '-f', '--yes', '--json']);
       expect(requests(h, 'DELETE').map((r) => r.body)).toEqual([JSON.stringify({ force: true }), JSON.stringify({ force: true })]);
     });
   });
 
   test('--dry-run still sends no DELETE', async () => {
     await withHarness(async (h) => {
-      const out = await h.run(['org', 'delete-project', PROJECT_ID, '--dry-run', '--json']);
+      const out = await h.run(['project', 'delete', PROJECT_ID, '--dry-run', '--json']);
       expect(out.code).toBe(0);
       expect(JSON.parse(out.stdout)).toMatchObject({ ok: true, dry_run: true });
       expect(requests(h, 'DELETE')).toHaveLength(0);
     });
   });
 
-  test('restore-project --yes --json posts the restore', async () => {
+  test('project restore --yes --json posts the restore', async () => {
     await withHarness(async (h) => {
-      const out = await h.run(['org', 'restore-project', PROJECT_ID, '--yes', '--json']);
+      const out = await h.run(['project', 'restore', PROJECT_ID, '--yes', '--json']);
       expect(out.code).toBe(0);
       expect(JSON.parse(out.stdout)).toMatchObject({ ok: true, project: { id: PROJECT_ID } });
       expect(requests(h, 'POST').map((r) => r.path)).toEqual([`/orgs/org_test_piped/projects/${PROJECT_ID}/restore`]);
@@ -78,13 +78,13 @@ describe('org delete-project / restore-project / projects: flags the program or 
 });
 
 describe('lifecycleOptsFrom: --non-tty and --force, wherever the outer command took them', () => {
-  /** The same shape as src/index.ts: the program has -f/--force and -d/--dry-run, `org` has --non-tty. */
+  /** The same shape as src/index.ts: the program has -f/--force and -d/--dry-run; `project` has no options of its own. */
   const parse = (argv: readonly string[]) => {
     const seen: Array<ReturnType<typeof lifecycleOptsFrom>> = [];
     const program = new Command().option('-f, --force').option('-d, --dry-run').exitOverride();
-    const org = program.command('org').option('--non-tty').action(() => undefined);
-    org
-      .command('delete-project <ref>')
+    const project = program.command('project');
+    project
+      .command('delete <ref>')
       .option('--force')
       .option('--yes')
       .option('--non-tty')
@@ -94,18 +94,17 @@ describe('lifecycleOptsFrom: --non-tty and --force, wherever the outer command t
     return seen[0];
   };
 
-  test('--non-tty reaches the command (org takes it)', () => {
-    expect(parse(['org', 'delete-project', 'web', '--non-tty'])?.nonTty).toBe(true);
-    expect(parse(['org', '--non-tty', 'delete-project', 'web'])?.nonTty).toBe(true);
+  test('--non-tty reaches the command', () => {
+    expect(parse(['project', 'delete', 'web', '--non-tty'])?.nonTty).toBe(true);
   });
 
   test('--force reaches the command (the program takes it)', () => {
-    expect(parse(['org', 'delete-project', 'web', '--force'])?.force).toBe(true);
-    expect(parse(['org', 'delete-project', 'web'])?.force).toBe(false);
+    expect(parse(['project', 'delete', 'web', '--force'])?.force).toBe(true);
+    expect(parse(['project', 'delete', 'web'])?.force).toBe(false);
   });
 
   test('--yes, --json and --dry-run come through too', () => {
-    expect(parse(['org', 'delete-project', 'web', '--yes', '--json', '--dry-run'])).toEqual({
+    expect(parse(['project', 'delete', 'web', '--yes', '--json', '--dry-run'])).toEqual({
       force: false,
       yes: true,
       nonTty: false,

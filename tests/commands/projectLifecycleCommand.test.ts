@@ -1,7 +1,7 @@
 import { describe, it, expect, spyOn, mock, afterAll, beforeEach, afterEach } from 'bun:test';
 
 /**
- * `capy org delete-project` and `capy org restore-project` (CAP-729).
+ * `capy project delete` and `capy project restore` (CAP-729).
  *
  * The REAL `ServiceClient` talks HTTP to a local fake of the service, so these
  * tests see exactly what goes on the wire (the method, the path, the body) and
@@ -146,7 +146,7 @@ const deleted = (id: string, name: string) =>
 // After the mocks above: the command module picks up the replaced org resolution and prompt.
 const { deleteProjectCommand, restoreProjectCommand } = await import('../../src/commands/projectLifecycleCommand');
 
-describe('capy org delete-project', () => {
+describe('capy project delete', () => {
   beforeEach(() => {
     respond.mockReset();
     fakePrompt.mockReset();
@@ -219,7 +219,7 @@ describe('capy org delete-project', () => {
 
       expect(deletes()).toEqual([{ method: 'DELETE', path: '/orgs/org_1/projects/proj_web', body: '' }]);
       expect(out.stdout).toContain('Deleted project web');
-      expect(out.stdout).toContain('capy org restore-project proj_web');
+      expect(out.stdout).toContain('capy project restore proj_web');
     });
 
     it('--yes skips the question and the token read, even off a terminal', async () => {
@@ -442,7 +442,7 @@ describe('capy org delete-project', () => {
           { value: 'proj_new', label: 'web · 1 variable · created 1 day ago' },
         ],
       }]);
-      expect(body.elicitation.answer).toEqual({ rerun: 'capy org delete-project <project> --json' });
+      expect(body.elicitation.answer).toEqual({ rerun: 'capy project delete <project> --json' });
       expect(body.elicitation.display).toContain('| 1 | web · 45 variables · created 3 days ago |');
       expect(deletes()).toEqual([]);
     });
@@ -453,7 +453,7 @@ describe('capy org delete-project', () => {
       const out = await capture(() => deleteProjectCommand('web', { force: true, json: true }));
 
       const body = JSON.parse(out.stdout);
-      expect(body.elicitation.answer.rerun).toBe('capy org delete-project <project> --force --json');
+      expect(body.elicitation.answer.rerun).toBe('capy project delete <project> --force --json');
       expect(body.elicitation.fields[0].options[1].label).toBe('web · variables could not be read · created 1 day ago');
       expect(body.elicitation.details.matches[1]).toMatchObject({ id: 'proj_new', variables: null });
     });
@@ -521,7 +521,7 @@ describe('capy org delete-project', () => {
   });
 });
 
-describe('capy org restore-project', () => {
+describe('capy project restore', () => {
   beforeEach(() => {
     respond.mockReset();
     fakePrompt.mockReset();
@@ -628,7 +628,7 @@ describe('capy org restore-project', () => {
     const body = JSON.parse(out.stdout);
     expect(body).toMatchObject({ code: 'PROJECT_AMBIGUOUS', elicitation: { kind: 'form' } });
     expect(body.elicitation.fields[0].options.map((o: { value: string }) => o.value)).toEqual(['proj_old', 'proj_old2']);
-    expect(body.elicitation.answer.rerun).toBe('capy org restore-project <project> --yes --json');
+    expect(body.elicitation.answer.rerun).toBe('capy project restore <project> --yes --json');
     expect(writes()).toEqual([]);
   });
 

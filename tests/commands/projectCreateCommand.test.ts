@@ -1,7 +1,7 @@
 import { describe, it, expect, spyOn, mock, afterAll, beforeEach, afterEach } from 'bun:test';
 
 /**
- * `capy org create-project` (CAP-748).
+ * `capy project create` (CAP-748).
  *
  * The REAL `ServiceClient` talks HTTP to a local fake of the service, so "creates nothing" is asserted as
  * "no POST /projects ever arrived". Only org resolution (auth) and the inquirer prompt are replaced.
@@ -127,7 +127,7 @@ function service(opts: { projects?: readonly object[]; onCreate?: (body: string)
 
 const { createProjectCommand, existingProjectNamed } = await import('../../src/commands/projectCreateCommand');
 
-describe('capy org create-project', () => {
+describe('capy project create', () => {
   beforeEach(() => {
     respond.mockReset();
     fakePrompt.mockClear();
@@ -161,7 +161,7 @@ describe('capy org create-project', () => {
       default: 'no',
       options: [{ value: 'yes', label: 'Yes' }, { value: 'no', label: 'No' }],
     });
-    expect(body.elicitation.answer).toEqual({ rerun: 'capy org create-project <name> --branch <branch> --protected <protected> --json' });
+    expect(body.elicitation.answer).toEqual({ rerun: 'capy project create <name> --branch <branch> --protected <protected> --json' });
     expect(body.elicitation.display).toContain('| Protected | to choose |');
     expect(body.elicitation.details).toEqual({ org: { id: 'org_1', name: 'Acme' } });
     expect(body.elicitation.display).toContain('| Org | Acme |');
