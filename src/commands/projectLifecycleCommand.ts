@@ -563,7 +563,8 @@ function restoreElicitation(org: OrgRef, project: ProjectRef): ElicitationConfir
 async function restoreFlow(ref: string, opts: ProjectLifecycleOpts): Promise<RestoreOutcome> {
   const json = opts.json === true;
   const agentMode = json || !isInteractive(opts.nonTty);
-  const { orgId, orgName, serviceClient } = await resolveOrgContext(opts.apiUrl, opts.devMode === true);
+  // Agent mode never opens a prompt, not even to pick an organization.
+  const { orgId, orgName, serviceClient } = await resolveOrgContext(opts.apiUrl, opts.devMode === true, { promptForOrg: !agentMode });
   const org: OrgRef = { id: orgId, name: orgName };
   // Only an owner's `include_deleted` is honoured; for anyone else the service answers with the live projects, and the id still works.
   const picked = await pickProject(resolveRef(await serviceClient.listProjects({ includeDeleted: true }), ref, true), {

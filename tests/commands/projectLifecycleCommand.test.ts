@@ -33,16 +33,19 @@ const server = Bun.serve({
 const client = new ServiceClient(`http://localhost:${server.port}`);
 client.setTokenProvider((async () => ({ access_token: 'test-token' })) as never);
 
-mock.module('../../src/core/orgContext', () => ({
-  resolveOrgContext: mock(async () => ({
-    orgId: 'org_1',
-    orgName: 'Acme',
-    userId: 'user_1',
-    userEmail: 'owner@example.com',
-    authService: {},
-    serviceClient: client,
-  })),
+/** The org context every test gets. Its calls show whether a command allowed the organization picker. */
+const resolveOrgContext = mock(async (..._args: unknown[]) => ({
+  orgId: 'org_1',
+  orgName: 'Acme',
+  userId: 'user_1',
+  userEmail: 'owner@example.com',
+  authService: {},
+  serviceClient: client,
 }));
+mock.module('../../src/core/orgContext', () => ({ resolveOrgContext }));
+
+/** The options the last command passed to resolveOrgContext. */
+const lastOrgContextOptions = (): unknown => resolveOrgContext.mock.calls.at(-1)?.[2];
 
 /** What the person answers when asked. Replaced per test. */
 const fakePrompt = mock(async (_questions: unknown) => ({ confirmed: true }));
@@ -593,6 +596,20 @@ describe('capy project restore', () => {
     expect(body.elicitation.display).toContain('| Deleted | 2026-11-05T12:00:00.000Z |');
     expect(fakePrompt).not.toHaveBeenCalled();
     expect(writes()).toEqual([]);
+  });
+
+  it('agent mode never allows the organization picker; a terminal does', async () => {
+    service({ projects: [DELETED], onWrite: () => restored });
+
+    await capture(() => restoreProjectCommand('old', { json: true }));
+    expect(lastOrgContextOptions()).toEqual({ promptForOrg: false });
+
+    await capture(() => restoreProjectCommand('old', { yes: true, nonTty: true }));
+    expect(lastOrgContextOptions()).toEqual({ promptForOrg: false });
+
+    setTTY(true);
+    await capture(() => restoreProjectCommand('old', { yes: true }));
+    expect(lastOrgContextOptions()).toEqual({ promptForOrg: true });
   });
 
   it('two deleted projects with one name, no --yes: the pick-one rerun has no --yes, so the yes/no comes next', async () => {
