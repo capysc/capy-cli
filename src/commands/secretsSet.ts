@@ -42,7 +42,7 @@
  * and nothing here ever prints, returns or throws the value or any hash of it.
  */
 import { SyncEngine } from '../sync/syncEngine';
-import { UploadIo, envBlobOf, isStaleBase, snapshotFrom, uploadChanges, type Changes, type Snapshot } from '../sync/commit';
+import { UploadIo, envBlobOf, isStaleBase, keepWithChanges, snapshotFrom, uploadChanges, type Changes, type Snapshot } from '../sync/commit';
 import type { SourceConflict } from '../sync/conflicts';
 import { BoundAnswer, actionFor, holdsFor, movedRow, shownValueUnavailable } from '../sync/noFolder';
 import { hashValue } from '../deploy/keepGate';
@@ -399,11 +399,16 @@ async function pushLocation(
           remote: entry?.hash,
           serverKeepHash: SyncEngine.computeKeepHash(snapshot.keep, loc.branch),
         });
-  const answered = moved === undefined ? { ok: true as const, value: 'write' as const } : answerAt(check, moved);
+  // The retry after a read-back miss of a removal sees the variable already gone: that is the first push's own doing, not
+  // someone else's change, so the answer (`delete`, validated on the first try against the state it was made for) stands.
+  const ownRemoval = retried.rewrite && entry === undefined && check.answer !== undefined && actionFor(check.answer.choice) === 'remove';
+  const answered =
+    moved === undefined ? { ok: true as const, value: 'write' as const } : ownRemoval ? { ok: true as const, value: actionFor(check.answer?.choice ?? 'delete') } : answerAt(check, moved);
   if (!answered.ok) return failedItem(loc, answered.error, readRate);
   const action = answered.value;
-  // Nothing to remove where the variable is already gone.
-  if (action === 'leave' || (action === 'remove' && entry === undefined)) return withRate<LocationOutcome>({ kind: 'unchanged', location: loc }, readRate);
+  // Nothing to remove where the variable is already gone. On the retry after a read-back miss a pin that is still there is not "gone": it is pushed away.
+  const pinStays = retried.rewrite && pinOn(snapshot, name, loc.branch) !== undefined;
+  if (action === 'leave' || (action === 'remove' && entry === undefined && !pinStays)) return withRate<LocationOutcome>({ kind: 'unchanged', location: loc }, readRate);
   // `pinned` writes back the value that was shown; no plaintext for it is a refusal, never a guess.
   if (action === 'restore' && check.restore === undefined) return failedItem(loc, shownValueUnavailable(name), readRate);
 
@@ -424,6 +429,8 @@ async function pushLocation(
       changes: changesFor(action, name, value, check.restore),
       seen: planned,
       io,
+      // A removal whose blob line is already gone but whose pin is not: the keep to push drops the pin (the shared upload would not).
+      ...(action === 'remove' && pinStays ? { transformKeep: (keep: KeepFile) => keepWithChanges(keep, loc.branch, {}, [name], (n) => n) } : {}),
     }),
   );
   if (!uploaded.ok) {
@@ -478,12 +485,16 @@ const FIRST_TRY: Retried = { stale: false, miss: false, rewrite: false };
 
 const isWriteConflict = (err: unknown): boolean => err instanceof CapyError && err.code === ERROR_CODES.KEEP_WRITE_CONFLICT;
 
+/** The keep's pin (fingerprint) for `name` on `branch` in a read; `undefined` when there is none. */
+const pinOn = (snapshot: Snapshot, name: string, branch: string): string | undefined =>
+  snapshot.keep?.variables[name]?.find((e) => e.branch === branch)?.value_hash;
+
 /**
  * Whether a read of a branch shows what was sent: `sent` is the blob's value AND the keep's pin for that branch is the
  * fingerprint of it; `undefined` (the variable was removed) is no blob line AND no pin.
  */
 function holds(snapshot: Snapshot, name: string, branch: string, sent: string | undefined): boolean {
-  const pin = snapshot.keep?.variables[name]?.find((e) => e.branch === branch)?.value_hash;
+  const pin = pinOn(snapshot, name, branch);
   const entry = snapshot.entries[name];
   return sent === undefined ? entry === undefined && pin === undefined : entry?.plaintext === sent && pin === hashValue(sent);
 }
