@@ -98,6 +98,11 @@ describe('lifecycleOptsFrom: --non-tty and --force, wherever the outer command t
     expect(parse(['project', 'delete', 'web', '--non-tty'])?.nonTty).toBe(true);
   });
 
+  test('--non-tty means --json: agent mode always answers in JSON', () => {
+    expect(parse(['project', 'delete', 'web', '--non-tty'])?.json).toBe(true);
+    expect(parse(['project', 'delete', 'web'])?.json).toBe(false);
+  });
+
   test('--force reaches the command (the program takes it)', () => {
     expect(parse(['project', 'delete', 'web', '--force'])?.force).toBe(true);
     expect(parse(['project', 'delete', 'web'])?.force).toBe(false);

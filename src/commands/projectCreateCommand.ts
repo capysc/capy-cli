@@ -50,7 +50,8 @@ interface CommandWithGlobals {
 export function createProjectOptsFrom(command: CommandWithGlobals): CreateProjectOpts {
   const merged = command.optsWithGlobals();
   return {
-    json: merged.json === true,
+    // `--non-tty` is agent mode, and agent mode always answers in JSON: it means the same as `--json`.
+    json: merged.json === true || merged.nonTty === true,
     nonTty: merged.nonTty === true,
     dryRun: merged.dryRun === true,
     ...(typeof merged.branch === 'string' ? { branch: merged.branch.trim() } : {}),

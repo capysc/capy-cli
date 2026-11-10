@@ -125,7 +125,7 @@ function service(opts: { projects?: readonly object[]; onCreate?: (body: string)
   });
 }
 
-const { createProjectCommand, existingProjectNamed } = await import('../../src/commands/projectCreateCommand');
+const { createProjectCommand, createProjectOptsFrom, existingProjectNamed } = await import('../../src/commands/projectCreateCommand');
 
 describe('capy project create', () => {
   beforeEach(() => {
@@ -375,5 +375,15 @@ describe('existingProjectNamed', () => {
     expect(existingProjectNamed(LIVE, 'org_1', ' Web ')).toEqual({ id: 'proj_web', name: 'web' });
     expect(existingProjectNamed(LIVE, 'org_1', 'api')).toBeUndefined();
     expect(existingProjectNamed(LIVE, 'org_1', 'webs')).toBeUndefined();
+  });
+});
+
+describe('createProjectOptsFrom', () => {
+  const merged = (opts: Record<string, unknown>) => createProjectOptsFrom({ optsWithGlobals: () => opts });
+
+  it('--non-tty means --json: agent mode always answers in JSON', () => {
+    expect(merged({ nonTty: true }).json).toBe(true);
+    expect(merged({ json: true }).json).toBe(true);
+    expect(merged({}).json).toBe(false);
   });
 });

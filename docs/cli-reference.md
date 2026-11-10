@@ -521,7 +521,7 @@ capy project create [name] [options]
 |---|---|---|
 | `--branch <name>` | the first branch; a Capy branch works like a git branch (offered by default: development) |  |
 | `--protected <yes|no>` | whether the first branch is protected (invite-only) |  |
-| `--non-tty` | treat stdin as not a terminal: never ask for the name or branch; without them, refuse with a form to ask the human |  |
+| `--non-tty` | same as --json: never ask, and answer in JSON (agents/CI) |  |
 | `--json` | emit machine-readable JSON instead of the human UI |  |
 
 JSON support: yes (`--json`)
@@ -540,7 +540,7 @@ capy project delete <name-or-id> [options]
 |---|---|---|
 | `--force` | delete even if the project has live deploy tokens (those deploys stop on their next restart) |  |
 | `--yes` | skip the confirmation question |  |
-| `--non-tty` | treat stdin as not a terminal: refuse unless --yes is passed |  |
+| `--non-tty` | same as --json: never ask, and answer in JSON (agents/CI) |  |
 | `--json` | emit machine-readable JSON instead of the human UI |  |
 
 JSON support: yes (`--json`)
@@ -558,7 +558,7 @@ capy project restore <name-or-id> [options]
 | Option | Description | Default |
 |---|---|---|
 | `--yes` | skip the confirmation question |  |
-| `--non-tty` | treat stdin as not a terminal: refuse unless --yes is passed |  |
+| `--non-tty` | same as --json: never ask, and answer in JSON (agents/CI) |  |
 | `--json` | emit machine-readable JSON instead of the human UI |  |
 
 JSON support: yes (`--json`)

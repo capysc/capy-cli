@@ -790,7 +790,7 @@ projectCmd
   .description('Create a project and its first branch in the active organization (owners and admins only; does not link this folder)') // COPY-FLAG
   .option('--branch <name>', 'the first branch; a Capy branch works like a git branch (offered by default: development)') // COPY-FLAG
   .option('--protected <yes|no>', 'whether the first branch is protected (invite-only)') // COPY-FLAG
-  .option('--non-tty', 'treat stdin as not a terminal: never ask for the name or branch; without them, refuse with a form to ask the human') // COPY-FLAG
+  .option('--non-tty', 'same as --json: never ask, and answer in JSON (agents/CI)') // COPY-FLAG
   .option('--json', 'emit machine-readable JSON instead of the human UI')
   .action(async (name: string | undefined, _options: any, command: any) => {
     assertNotLocalOnly('project create');
@@ -804,7 +804,7 @@ projectCmd
   .description('Delete a project (owners only; hidden, not destroyed; an owner can restore it)') // COPY-FLAG
   .option('--force', 'delete even if the project has live deploy tokens (those deploys stop on their next restart)') // COPY-FLAG
   .option('--yes', 'skip the confirmation question')
-  .option('--non-tty', 'treat stdin as not a terminal: refuse unless --yes is passed') // COPY-FLAG
+  .option('--non-tty', 'same as --json: never ask, and answer in JSON (agents/CI)') // COPY-FLAG
   .option('--json', 'emit machine-readable JSON instead of the human UI')
   .action(async (ref: string, _options: any, command: any) => {
     assertNotLocalOnly('project delete');
@@ -817,7 +817,7 @@ projectCmd
   .command('restore <name-or-id>')
   .description('Restore a deleted project (owners only)') // COPY-FLAG
   .option('--yes', 'skip the confirmation question')
-  .option('--non-tty', 'treat stdin as not a terminal: refuse unless --yes is passed') // COPY-FLAG
+  .option('--non-tty', 'same as --json: never ask, and answer in JSON (agents/CI)') // COPY-FLAG
   .option('--json', 'emit machine-readable JSON instead of the human UI')
   .action(async (ref: string, _options: any, command: any) => {
     assertNotLocalOnly('project restore');

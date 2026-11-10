@@ -68,7 +68,8 @@ export function lifecycleOptsFrom(command: CommandWithGlobals): DeleteProjectOpt
     force: merged.force === true,
     yes: merged.yes === true,
     nonTty: merged.nonTty === true,
-    json: merged.json === true,
+    // `--non-tty` is agent mode, and agent mode always answers in JSON: it means the same as `--json`.
+    json: merged.json === true || merged.nonTty === true,
     dryRun: merged.dryRun === true,
   };
 }
