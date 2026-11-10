@@ -120,6 +120,10 @@ export interface ServiceOpts {
   readonly wipesPin?: (location: string, pushNumber: number) => boolean;
   readonly pushError?: (location: string, pushNumber: number) => CapyError | undefined;
   readonly readError?: (location: string, readNumber: number) => CapyError | undefined;
+  /** This read answers as if the last accepted push had not happened yet (a stale read; the push itself is kept). */
+  readonly staleRead?: (location: string, readNumber: number) => boolean;
+  /** This read answers these fields instead (someone else changed the branch). */
+  readonly heldOverride?: (location: string, readNumber: number) => Partial<{ env_content: string; keep_file: string }> | undefined;
   readonly delayMs?: (location: string) => number;
 }
 
@@ -165,13 +169,15 @@ export function fakeService(opts: ServiceOpts = {}) {
     if (readFailure !== undefined) throw readFailure;
     if (!l) throw new CapyError('no such branch', ERROR_CODES.BRANCH_NOT_FOUND);
     const fixture = { env_content: blobs[keyOf(l)], decrypt_key: '', expires_at: '', keep_file: JSON.stringify(serverKeep(l.project, locs)) };
-    return attemptsAt(location).reduce(
-      (held, a, n) =>
+    const seen = opts.staleRead?.(location, readNumber) === true ? attemptsAt(location).slice(0, -1) : attemptsAt(location);
+    const held = seen.reduce(
+      (state, a, n) =>
         refused(location, n) || opts.loses?.(location, n) === true
-          ? held
-          : { ...held, env_content: a.blob, keep_file: opts.wipesPin?.(location, n) === true ? held.keep_file : a.keepFile },
+          ? state
+          : { ...state, env_content: a.blob, keep_file: opts.wipesPin?.(location, n) === true ? state.keep_file : a.keepFile },
       fixture,
     );
+    return { ...held, ...(opts.heldOverride?.(location, readNumber) ?? {}) };
   });
   const pushSecrets = mock(async (projectId: string, keepFile: string, blob: string, branch: string) => {
     const location = locationKey(projectId, branch);

@@ -399,25 +399,33 @@ async function pushLocation(
           remote: entry?.hash,
           serverKeepHash: SyncEngine.computeKeepHash(snapshot.keep, loc.branch),
         });
-  // The retry after a read-back miss of a removal sees the variable already gone: that is the first push's own doing, not
-  // someone else's change, so the answer (`delete`, validated on the first try against the state it was made for) stands.
-  const ownRemoval = retried.rewrite && entry === undefined && check.answer !== undefined && actionFor(check.answer.choice) === 'remove';
-  const answered =
-    moved === undefined ? { ok: true as const, value: 'write' as const } : ownRemoval ? { ok: true as const, value: actionFor(check.answer?.choice ?? 'delete') } : answerAt(check, moved);
+  // The first try decides (and validates the person's answer); the retry after a read-back miss does exactly what it decided.
+  const answered: Tried<ReturnType<typeof actionFor>> =
+    retried.plan !== undefined
+      ? sameAction(retried.plan, entry, check, value)
+      : moved === undefined
+        ? { ok: true, value: 'write' }
+        : answerAt(check, moved);
   if (!answered.ok) return failedItem(loc, answered.error, readRate);
   const action = answered.value;
-  // Nothing to remove where the variable is already gone. On the retry after a read-back miss a pin that is still there is not "gone": it is pushed away.
-  const pinStays = retried.rewrite && pinOn(snapshot, name, loc.branch) !== undefined;
-  if (action === 'leave' || (action === 'remove' && entry === undefined && !pinStays)) return withRate<LocationOutcome>({ kind: 'unchanged', location: loc }, readRate);
+  if (action === 'leave') return withRate<LocationOutcome>({ kind: 'unchanged', location: loc }, readRate);
+  // Nothing to remove where the variable is already gone. On the retry after a read-back miss that is the removal done (and a pin
+  // that is still there is not "gone": it is pushed away).
+  const pinNow = pinOn(snapshot, name, loc.branch) !== undefined;
+  if (action === 'remove' && entry === undefined && !(retried.rewrite && pinNow)) {
+    return withRate<LocationOutcome>({ kind: retried.rewrite ? 'removed' : 'unchanged', location: loc }, readRate);
+  }
+  const pinStays = retried.rewrite && pinNow;
   // `pinned` writes back the value that was shown; no plaintext for it is a refusal, never a guess.
   if (action === 'restore' && check.restore === undefined) return failedItem(loc, shownValueUnavailable(name), readRate);
 
   // What the server must hold for this branch after the push: the value sent, or nothing (a removal).
   const sent = action === 'remove' ? undefined : action === 'restore' ? check.restore : value;
-  // A rewrite plans against a read that shows no line for `name`, so the line and the pin are written even if the read already holds the value.
+  // A rewrite plans against a read that cannot say what `name` holds (the line keeps its place), so the line and the pin are
+  // written even if the read already holds the value.
   const planned: Snapshot =
-    retried.rewrite && action !== 'remove'
-      ? { ...snapshot, entries: Object.fromEntries(Object.entries(snapshot.entries).filter(([n]) => n !== name)) }
+    retried.rewrite && action !== 'remove' && entry !== undefined
+      ? { ...snapshot, entries: { ...snapshot.entries, [name]: { ...entry, plaintext: undefined } } }
       : snapshot;
   const uploaded = await settled(
     uploadChanges({
@@ -455,7 +463,7 @@ async function pushLocation(
   if (!holds(back.value.snapshot, name, loc.branch, sent)) {
     return retried.miss
       ? failedItem(loc, new CapyError('the server does not hold the new value', ERROR_CODES.SECRET_NOT_PERSISTED), rate) // COPY-FLAG
-      : pushLocation(env, keys, loc, name, value, check, { ...retried, miss: true, rewrite: true });
+      : pushLocation(env, keys, loc, name, value, check, { ...retried, miss: true, rewrite: true, plan: { action, before: entry?.hash } });
   }
 
   const done = attemptSync(() => {
@@ -479,9 +487,31 @@ interface Retried {
   readonly miss: boolean;
   /** The retry after a read-back miss writes the value again even if the read now shows it (its pin may be what is missing). */
   readonly rewrite: boolean;
+  /** Set on exactly that retry: what the first try decided and validated. The retry does the same and never decides again. */
+  readonly plan?: Planned;
+}
+
+/** What the first try validated: the action it took, and what the location held when it was read (a fingerprint; `undefined`: no such variable). */
+interface Planned {
+  readonly action: 'write' | 'restore' | 'remove';
+  readonly before: string | undefined;
 }
 
 const FIRST_TRY: Retried = { stale: false, miss: false, rewrite: false };
+
+/**
+ * The retry's action: exactly the one the first try validated. The location may now hold the old state (the push was lost), what
+ * the push sent (it landed, only the pin or the read did not), or, if the person's check was on, nothing else: any other state
+ * is someone else's change since, which is a conflict as it would have been on the first try. Never a different action.
+ */
+function sameAction(plan: Planned, entry: { readonly hash: string } | undefined, check: { readonly shown?: string; readonly restore?: string }, value: string): Tried<Planned['action']> {
+  const sent = plan.action === 'remove' ? undefined : plan.action === 'restore' ? check.restore : value;
+  const ours = sent === undefined ? entry === undefined : entry?.hash === hashValue(sent);
+  const untouched = entry?.hash === plan.before;
+  return check.shown === undefined || ours || untouched
+    ? { ok: true, value: plan.action }
+    : { ok: false, error: new CapyError('changed since it was read', ERROR_CODES.SECRETS_CONFLICT) };
+}
 
 const isWriteConflict = (err: unknown): boolean => err instanceof CapyError && err.code === ERROR_CODES.KEEP_WRITE_CONFLICT;
 

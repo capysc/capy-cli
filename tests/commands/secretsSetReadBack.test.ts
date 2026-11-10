@@ -22,6 +22,7 @@ import {
   LINKS,
   LOCATIONS,
   NAME,
+  OTHER_NAME,
   OLD_VALUE,
   PROJECT_NAMES,
   SENTINEL,
@@ -191,6 +192,154 @@ describe('a removal (the answer `delete` at a location that moved) is read back 
     expect(result.removed?.map(labelOf)).toEqual([`${PROJECT_NAMES.pA}/staging`]);
     expect(service.pushesTo(STAGING)).toBe(2);
     expect(await heldPin(service)).toBeFalsy();
+  });
+});
+
+describe('the retry after a miss does exactly what the first try validated', () => {
+  const MOVED = 'moved-by-someone-else-2222';
+  const THIRD = 'a-third-value-3333';
+  const stagingKey = 'pA/staging';
+  const movedWorld: ServiceOpts['locs'] = [{ project: 'pA', branch: 'staging', value: MOVED }];
+  const oldWorld: ServiceOpts['locs'] = [{ project: 'pA', branch: 'staging', value: OLD_VALUE }];
+  const L = [loc('pA', 'staging')];
+
+  /** What a service holding `value` at pA/staging answers to a read: a ready-made "someone else's state". */
+  const holding = (value: string) => fakeService({ locs: [{ project: 'pA', branch: 'staging', value }] }).getDecryptData('pA', 'staging');
+  const withoutName = async (value: string) => {
+    const data = await holding(value);
+    return { env_content: data.env_content.split('\n').filter((l) => !l.startsWith(`${NAME}=`)).join('\n'), keep_file: data.keep_file };
+  };
+
+  /** The value of NAME in every blob that was pushed, decrypted with the project's key. */
+  const pushedValues = (service: ReturnType<typeof fakeService>): readonly (string | undefined)[] =>
+    service.pushSecrets.mock.calls.map((c) => {
+      const line = String(c[2]).split('\n').find((x) => x.startsWith(`${NAME}=`));
+      return line === undefined ? undefined : new FileManager().decryptValue(line.slice(NAME.length + 1), KEYS.pA);
+    });
+  const heldPin = async (service: ReturnType<typeof fakeService>): Promise<string | undefined> =>
+    (JSON.parse((await service.getDecryptData('pA', 'staging')).keep_file) as { variables: Record<string, Array<{ branch: string; value_hash: string }>> }).variables[NAME]?.find((e) => e.branch === 'staging')?.value_hash;
+
+  const answerOf = (choice: 'pinned' | 'delete' | 'local', remote: string) => ({ choice, remote: hashValue(remote), local: hashValue(SENTINEL) });
+  const base = { name: NAME, value: SENTINEL, locations: L, repos: [], shown: { [stagingKey]: hashValue(OLD_VALUE) } };
+  const restoreRequest = { ...base, answers: { [stagingKey]: answerOf('pinned', MOVED) }, restore: { [stagingKey]: OLD_VALUE } };
+  const deleteRequest = { ...base, answers: { [stagingKey]: answerOf('delete', MOVED) } };
+  const codes = (r: Awaited<ReturnType<typeof runSecretSet>>) => r.failed.map((f) => (f.kind === 'location' ? f.code : f.kind));
+
+  test('restore, the blob landed but the pin did not: the retry restores the SHOWN value and its pin, the new value is never pushed', async () => {
+    const service = fakeService({ locs: movedWorld, wipesPin: (location, n) => location === stagingKey && n === 0 });
+    const result = await runSecretSet(restoreRequest, envFor(service));
+    expect(result.failed).toEqual([]);
+    expect(result.updated.map(labelOf)).toEqual([`${PROJECT_NAMES.pA}/staging`]);
+    expect(service.pushesTo(stagingKey)).toBe(2);
+    expect(pushedValues(service)).toEqual([OLD_VALUE, OLD_VALUE]);
+    expect(await heldValue(service, L[0])).toBe(OLD_VALUE);
+    expect(await heldPin(service)).toBe(hashValue(OLD_VALUE));
+  });
+
+  test('restore, the pin stays wiped: failed SECRET_NOT_PERSISTED after the one retry, and the new value is never pushed', async () => {
+    const service = fakeService({ locs: movedWorld, wipesPin: (location) => location === stagingKey });
+    const result = await runSecretSet(restoreRequest, envFor(service));
+    expect(codes(result)).toEqual([ERROR_CODES.SECRET_NOT_PERSISTED]);
+    expect(result.updated).toEqual([]);
+    expect(service.pushesTo(stagingKey)).toBe(2);
+    expect(pushedValues(service)).toEqual([OLD_VALUE, OLD_VALUE]);
+  });
+
+  test('restore, the push landed but the first read-back was stale: the retry restores again, the new value is never pushed', async () => {
+    const service = fakeService({ locs: movedWorld, staleRead: (location, n) => location === stagingKey && n === 1 });
+    const result = await runSecretSet(restoreRequest, envFor(service));
+    expect(result.failed).toEqual([]);
+    expect(result.updated.map(labelOf)).toEqual([`${PROJECT_NAMES.pA}/staging`]);
+    expect(pushedValues(service)).toEqual([OLD_VALUE, OLD_VALUE]);
+    expect(await heldValue(service, L[0])).toBe(OLD_VALUE);
+  });
+
+  test('first try a plain write (not moved), a stale `delete` answer around, the push lost, the line gone at the retry: a conflict, not a removal, the pin stays', async () => {
+    const gone = await withoutName(OLD_VALUE);
+    const service = fakeService({
+      locs: oldWorld,
+      loses: (location, n) => location === stagingKey && n === 0,
+      heldOverride: (location, n) => (location === stagingKey && n === 2 ? gone : undefined),
+    });
+    const result = await runSecretSet({ ...base, answers: { [stagingKey]: answerOf('delete', MOVED) } }, envFor(service));
+    expect(codes(result)).toEqual([ERROR_CODES.SECRETS_CONFLICT]);
+    expect(result.removed).toBeUndefined();
+    expect(result.updated).toEqual([]);
+    expect(service.pushesTo(stagingKey)).toBe(1); // no second push, so no pin dropped
+    expect(pushedValues(service)).toEqual([SENTINEL]);
+    expect(await heldPin(service)).toBe(hashValue(OLD_VALUE));
+  });
+
+  test('a `delete` answer that does not hold for the state it meets on the FIRST try is a conflict: nothing is removed', async () => {
+    const gone = await withoutName(OLD_VALUE);
+    const service = fakeService({ locs: oldWorld, heldOverride: (location, n) => (location === stagingKey && n === 0 ? gone : undefined) });
+    const result = await runSecretSet({ ...base, answers: { [stagingKey]: answerOf('delete', MOVED) } }, envFor(service));
+    expect(codes(result)).toEqual([ERROR_CODES.SECRETS_CONFLICT]);
+    expect(result.removed).toBeUndefined();
+    expect(service.pushesTo(stagingKey)).toBe(0);
+  });
+
+  test('a removal whose push landed but whose read-back was stale, and the retry finds line and pin both gone: reported removed (not unchanged), no second push', async () => {
+    const service = fakeService({ locs: movedWorld, staleRead: (location, n) => location === stagingKey && n === 1 });
+    const result = await runSecretSet(deleteRequest, envFor(service));
+    expect(result.failed).toEqual([]);
+    expect(result.removed?.map(labelOf)).toEqual([`${PROJECT_NAMES.pA}/staging`]);
+    expect(result.unchanged).toEqual([]);
+    expect(result.updated).toEqual([]);
+    expect(service.pushesTo(stagingKey)).toBe(1);
+    expect(await heldPin(service)).toBeUndefined();
+  });
+
+  test('a write: someone else set a third value between the push and the retry read: a conflict, no overwrite', async () => {
+    const third = await holding(THIRD);
+    const service = fakeService({
+      locs: oldWorld,
+      loses: (location, n) => location === stagingKey && n === 0,
+      heldOverride: (location, n) => (location === stagingKey && n === 2 ? third : undefined),
+    });
+    const result = await runSecretSet(base, envFor(service));
+    expect(codes(result)).toEqual([ERROR_CODES.SECRETS_CONFLICT]);
+    expect(result.updated).toEqual([]);
+    expect(service.pushesTo(stagingKey)).toBe(1);
+  });
+
+  test('a restore: someone else set a third value between the push and the retry read: a conflict, no overwrite', async () => {
+    const third = await holding(THIRD);
+    const service = fakeService({
+      locs: movedWorld,
+      loses: (location, n) => location === stagingKey && n === 0,
+      heldOverride: (location, n) => (location === stagingKey && n === 2 ? third : undefined),
+    });
+    const result = await runSecretSet(restoreRequest, envFor(service));
+    expect(codes(result)).toEqual([ERROR_CODES.SECRETS_CONFLICT]);
+    expect(service.pushesTo(stagingKey)).toBe(1);
+  });
+
+  test('a removal: someone else set a third value between the push and the retry read: a conflict, no removal', async () => {
+    const third = await holding(THIRD);
+    const service = fakeService({
+      locs: movedWorld,
+      loses: (location, n) => location === stagingKey && n === 0,
+      heldOverride: (location, n) => (location === stagingKey && n === 2 ? third : undefined),
+    });
+    const result = await runSecretSet(deleteRequest, envFor(service));
+    expect(codes(result)).toEqual([ERROR_CODES.SECRETS_CONFLICT]);
+    expect(result.removed).toBeUndefined();
+    expect(service.pushesTo(stagingKey)).toBe(1);
+  });
+
+  test('the retry keeps the variable\'s line where it was, and every other line is carried over byte for byte', async () => {
+    // OTHER_VAR is the FIRST line of the branch's blob: a rewritten line must not move to the end.
+    const service = fakeService({ locs: oldWorld, loses: (location, n) => location === stagingKey && n === 0 });
+    const original = (await service.getDecryptData('pA', 'staging')).env_content.split('\n');
+    expect(original[0].startsWith(`${OTHER_NAME}=`)).toBe(true);
+    const result = await runSecretSet({ name: OTHER_NAME, value: SENTINEL, locations: L, repos: [] }, envFor(service));
+    expect(result.failed).toEqual([]);
+    expect(service.pushesTo(stagingKey)).toBe(2);
+    const retried = String(service.pushSecrets.mock.calls[1][2]).split('\n');
+    expect(retried).toHaveLength(2);
+    expect(retried[0].startsWith(`${OTHER_NAME}=`)).toBe(true);
+    expect(retried[1]).toBe(original[1]); // NAME's line, untouched
   });
 });
 
