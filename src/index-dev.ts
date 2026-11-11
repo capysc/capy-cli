@@ -822,10 +822,10 @@ program
   .description('List projects in the active organization and their branches')
   .option('--deleted', 'also list deleted projects, marked as deleted, with the date (owners only)') // COPY-FLAG
   .option('--json', 'emit machine-readable JSON instead of the human UI')
-  .action(async (options) => {
+  .action(async (options, command) => {
     const { ProjectsCommand } = await import('./commands/projectsCommand');
     const cmd = new ProjectsCommand(process.env.CAPY_API_URL, true);
-    await cmd.execute({ json: options.json, deleted: options.deleted === true });
+    await cmd.execute({ json: options.json, deleted: options.deleted === true, dryRun: command.optsWithGlobals().dryRun === true });
   });
 
 const secretsCmd = program

@@ -1,4 +1,5 @@
 import { ServiceClient, type OrgRepoLink } from '../service/serviceClient';
+import type { ProjectItem, ProjectsData, ProjectsIndex } from '../ui/projectsScreen';
 import { resolveOrgContext } from '../core/orgContext';
 import { excludeSystemProject } from '../system/reservedProjectName';
 import { Spinner } from '../ui/spinner';
@@ -63,6 +64,64 @@ function withRepos(projects: readonly ProjectSummary[], links: readonly OrgRepoL
   }));
 }
 
+/** A read the caller may not be allowed: `null` when the service refuses it with 403 PERMISSION_DENIED (the screen then hides what it feeds). Anything else still fails. */
+async function readUnlessForbidden<T>(read: () => Promise<T>): Promise<T | null> {
+  try {
+    return await read();
+  } catch (err) {
+    if (err instanceof CapyError && err.code === ERROR_CODES.PERMISSION_DENIED) return null;
+    throw err;
+  }
+}
+
+/** The projects the caller administers (`admin_projects` of `GET /orgs/:id/me`), or `null` when that cannot be read. */
+async function loadAdminProjectIds(serviceClient: ServiceClient, orgId: string): Promise<readonly string[] | null> {
+  try {
+    return (await serviceClient.getOrgMe(orgId)).admin_projects.map((p) => p.id);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Everything the interactive screen shows, each part read once. A part the
+ * service does not return to the caller is `null`, and the screen hides it.
+ * Linked repos are attached only to projects the caller administers (only
+ * those are returned), so a project with none attached hides its Git repos tab.
+ */
+export async function loadScreenData(serviceClient: ServiceClient, orgId: string): Promise<ProjectsData> {
+  const listed = excludeSystemProject(await serviceClient.listProjects());
+  const [withBranches, links, index, adminIds, members] = await Promise.all([
+    Promise.all(listed.map(async (p) => ({
+      p,
+      branches: (await serviceClient.listBranches(p.id)).map((b) => ({ name: b.name, protected: b.is_protected })),
+    }))),
+    loadOrgRepos(serviceClient, orgId),
+    readUnlessForbidden(() => serviceClient.getSecretIndex(orgId)),
+    loadAdminProjectIds(serviceClient, orgId),
+    readUnlessForbidden(async () => (await serviceClient.listMemberDetails(orgId)).members),
+  ]);
+  const reposFor = (projectId: string): Pick<ProjectItem, 'repos'> => {
+    if (links === null || (adminIds !== null && !adminIds.includes(projectId))) return {};
+    return {
+      repos: links
+        .filter((l) => l.project_id === projectId)
+        .map((l) => ({ host: l.host, owner: l.owner, name: l.name, path: l.path, github_repo_id: l.github_repo_id ?? null })),
+    };
+  };
+  const projects: readonly ProjectItem[] = withBranches.map(({ p, branches }) => ({
+    id: p.id,
+    name: p.name,
+    createdAt: p.created_at ?? null,
+    branches,
+    ...reposFor(p.id),
+  }));
+  const screenIndex: ProjectsIndex | null = index === null
+    ? null
+    : { rows: index.rows, skipped: index.skipped, coveredProjectIds: adminIds };
+  return { projects, index: screenIndex, members, reposShown: links !== null };
+}
+
 /**
  * `capy projects` — read-only listing of every project in the caller's active
  * organization, with each project's branches. No subcommands, no writes.
@@ -84,9 +143,14 @@ export class ProjectsCommand {
     private readonly devMode: boolean = false,
   ) {}
 
-  async execute(opts: { json?: boolean; deleted?: boolean } = {}): Promise<void> {
+  async execute(opts: { json?: boolean; deleted?: boolean; dryRun?: boolean } = {}): Promise<void> {
     const json = opts.json === true;
     const includeDeleted = opts.deleted === true;
+    // A terminal on both ends, no --json and no --deleted: the interactive screen. Everything else is today's output.
+    if (!json && !includeDeleted && process.stdout.isTTY === true && process.stdin.isTTY === true) {
+      await this.runInteractive(opts.dryRun === true);
+      return;
+    }
     // Same CAP-273 contract as `usersCommand`/`listCommand`: under --json, no
     // progress output at all, so stdout stays pure JSON even on a TTY.
     const spinner = json ? null : new Spinner('Loading projects...');
@@ -102,6 +166,31 @@ export class ProjectsCommand {
     } catch (err) {
       spinner?.fail('Failed to load projects');
       this.exitWithError(err, json);
+    }
+  }
+
+  /** The interactive screen (`ui/projectsScreen.ts`): live projects only, with the same loading spinner. */
+  private async runInteractive(dryRun: boolean): Promise<void> {
+    const spinner = new Spinner('Loading projects...');
+    spinner.start();
+    try {
+      const { orgId, userId, serviceClient } = await resolveOrgContext(this.apiUrl, this.devMode);
+      const data = await loadScreenData(serviceClient, orgId);
+      const { createLocationDecryptor } = await import('./secretsValueDecryptor');
+      const { createEditActions } = await import('./secretsEditActions');
+      const { createDeployActions } = await import('./secretsDeployActions');
+      const { runProjectsScreen } = await import('../ui/projectsScreenDriver');
+      spinner.stop();
+      await runProjectsScreen(
+        data,
+        createLocationDecryptor(orgId, userId, serviceClient),
+        createEditActions(orgId, userId, serviceClient, dryRun),
+        dryRun,
+        createDeployActions(orgId, userId, serviceClient, dryRun, this.devMode),
+      );
+    } catch (err) {
+      spinner.fail('Failed to load projects');
+      this.exitWithError(err, false);
     }
   }
 

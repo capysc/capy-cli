@@ -348,8 +348,46 @@ export interface SortMenuState {
   readonly cursor: number;
 }
 
+/**
+ * Set when the screen is embedded in another one (`capy projects`, inside one
+ * project): the rows are that project's, the title is the project's name, and
+ * the embedding screen owns Tab (the list's column moves with ←/→ instead,
+ * which the embedding screen translates). Absent for `capy secrets` itself,
+ * which then behaves exactly as before.
+ */
+export interface SecretsScreenScope {
+  /** Replaces `capy secrets` at the top of every screen. */
+  readonly title: string;
+  /** How many OTHER projects each row's (name, value) is also in, by `scopeRowKey`. Absent or 0: none. */
+  readonly otherProjects: Readonly<Record<string, number>>;
+  /** Key hints the embedding screen adds to the list footer (dropped first when narrow). */
+  readonly hints: readonly { readonly key: string; readonly label: string }[];
+}
+
+/** The key `SecretsScreenScope.otherProjects` uses for a row: its (name, value hash) pair. */
+export function scopeRowKey(row: { readonly name: string; readonly value_hash: string }): string {
+  return JSON.stringify([row.name, row.value_hash]);
+}
+
+/** "also in 2 other projects" — said of a row whose value is also used in other projects. */
+export function alsoInOtherProjectsText(count: number): string {
+  return `also in ${count} other project${count === 1 ? '' : 's'}`; // COPY-FLAG
+}
+
+/** The scope's count for `row`, 0 when it has none (or there is no scope). */
+function otherProjectsOf(state: SecretsScreenState, row: SecretIndexRow): number {
+  return state.scope?.otherProjects[scopeRowKey(row)] ?? 0;
+}
+
+/** What the top of every screen says: `capy secrets`, or the embedding screen's title. */
+function screenTitle(state: Pick<SecretsScreenState, 'scope'>): string {
+  return state.scope?.title ?? 'capy secrets';
+}
+
 export interface SecretsScreenState {
   readonly rows: readonly SecretIndexRow[];
+  /** Present only when embedded (see `SecretsScreenScope`). */
+  readonly scope?: SecretsScreenScope;
   readonly column: ColumnMode;
   /** How the list is ordered (chosen in the Ctrl+S menu); search decides which rows show, this decides their order. */
   readonly sort: SortMode;
@@ -371,9 +409,14 @@ export interface SecretsScreenState {
   readonly note: string | null;
 }
 
-export function initialSecretsScreenState(rows: readonly SecretIndexRow[], dryRun: boolean = false): SecretsScreenState {
+export function initialSecretsScreenState(
+  rows: readonly SecretIndexRow[],
+  dryRun: boolean = false,
+  scope?: SecretsScreenScope,
+): SecretsScreenState {
   return {
     rows,
+    ...(scope === undefined ? {} : { scope }),
     column: COLUMN_ORDER[0],
     sort: SORT_ORDER[0],
     sortMenu: null,
@@ -1108,8 +1151,8 @@ export function mainTableLayout(available: number): { readonly nameW: number; re
 
 /** Pure render — a total function of state + terminal size. Never mutates `state`; any "clamping" of a display-only quantity (e.g. panning past the end of a value) is a local `const`, never written back. */
 export function render(state: SecretsScreenState, termWidth: number, termHeight: number): string {
-  if (state.edit) return renderEditScreen(state.edit, termWidth, termHeight, state.dryRun);
-  if (state.deploy) return renderDeployScreen(state.deploy, termWidth, termHeight, state.dryRun);
+  if (state.edit) return renderEditScreen(state.edit, termWidth, termHeight, state.dryRun, screenTitle(state));
+  if (state.deploy) return renderDeployScreen(state.deploy, termWidth, termHeight, state.dryRun, screenTitle(state));
   if (state.sortMenu) return renderSortMenuScreen(state, state.sortMenu, termWidth, termHeight);
   const m = ' '.repeat(MARGIN);
   const available = Math.max(40, termWidth - MARGIN * 2);
@@ -1119,7 +1162,7 @@ export function render(state: SecretsScreenState, termWidth: number, termHeight:
   const cursorIndex = clampIndex(state.cursorIndex, rows.length);
 
   const headerLines: readonly string[] = [
-    `${m}${BOLD}capy secrets${RESET}${dryRunTag(state.dryRun)} ${DIM}(${state.rows.length} secret${state.rows.length === 1 ? '' : 's'})${RESET}`,
+    `${m}${BOLD}${screenTitle(state)}${RESET}${dryRunTag(state.dryRun)} ${DIM}(${state.rows.length} secret${state.rows.length === 1 ? '' : 's'})${RESET}`,
     m + searchBarLine(state, rows.length),
     '',
   ];
@@ -1143,7 +1186,11 @@ export function render(state: SecretsScreenState, termWidth: number, termHeight:
     const matchTag = matchActive && reasons.length > 0 ? `${ACCENT}[${reasons[0]}]${RESET}` : '';
     // A row with no value yet says so beside its name (a search-match tag takes the place when one is active).
     const tag = matchTag !== '' || row.value_hash !== '' ? matchTag : `${DIM}${NO_VALUE_YET}${RESET}`;
-    const nameCell = buildNameCell(pointer + row.name, tag, nameW);
+    // Embedded in one project: a value also used in other projects says so, when it fits beside the name.
+    const others = otherProjectsOf(state, row);
+    const alsoTag = others > 0 ? `${DIM}${alsoInOtherProjectsText(others)}${RESET}` : '';
+    const fitsBeside = visLen(pointer + row.name) + 1 + visLen(alsoTag) <= nameW;
+    const nameCell = buildNameCell(pointer + row.name, tag === '' && fitsBeside ? alsoTag : tag, nameW);
     const middleCell = pad(formatMiddleCell(row, state.column, middleW), middleW);
     const updatedCell = pad(formatUpdatedCell(row), updatedW);
     const line = nameCell + gap + middleCell + gap + updatedCell;
@@ -1153,7 +1200,7 @@ export function render(state: SecretsScreenState, termWidth: number, termHeight:
 
   const withPopup: readonly string[] =
     state.popup && rows[cursorIndex]
-      ? spliceIn(bodyLines, cursorIndex, buildPopupLines(rows[cursorIndex], state.popup, available))
+      ? spliceIn(bodyLines, cursorIndex, buildPopupLines(rows[cursorIndex], state.popup, available, otherProjectsOf(state, rows[cursorIndex])))
       : bodyLines;
 
   const reserved = preBodyLines.length + 1 /* table header already pushed above */ + 2 /* footer */;
@@ -1178,11 +1225,11 @@ function dryRunTag(dryRun: boolean): string {
 }
 
 /** The edit flow's screen: a header, the step's body, and its key hints. */
-function renderEditScreen(flow: EditFlow, termWidth: number, termHeight: number, dryRun: boolean): string {
+function renderEditScreen(flow: EditFlow, termWidth: number, termHeight: number, dryRun: boolean, title: string): string {
   const m = ' '.repeat(MARGIN);
   const { lines, footer } = renderEdit(flow, termWidth, termHeight, dryRun);
   const out: readonly string[] = [
-    `${m}${BOLD}capy secrets${RESET}${dryRunTag(dryRun)}`,
+    `${m}${BOLD}${title}${RESET}${dryRunTag(dryRun)}`,
     '',
     ...lines.map((l) => m + l),
     '',
@@ -1193,11 +1240,11 @@ function renderEditScreen(flow: EditFlow, termWidth: number, termHeight: number,
 }
 
 /** The deploy flow's screen: a header, the step's body, and its key hints. */
-function renderDeployScreen(flow: DeployFlow, termWidth: number, termHeight: number, dryRun: boolean): string {
+function renderDeployScreen(flow: DeployFlow, termWidth: number, termHeight: number, dryRun: boolean, title: string): string {
   const m = ' '.repeat(MARGIN);
   const { lines, footer } = renderDeploy(flow, termWidth, termHeight);
   const out: readonly string[] = [
-    `${m}${BOLD}capy secrets${RESET}${dryRunTag(dryRun)}`,
+    `${m}${BOLD}${title}${RESET}${dryRunTag(dryRun)}`,
     '',
     ...lines.map((l) => m + l),
     '',
@@ -1240,7 +1287,7 @@ function renderSortMenuScreen(state: SecretsScreenState, menu: SortMenuState, te
     return selected ? INVERSE + padVis(truncate(text, width), Math.min(width, 32)) + RESET : text;
   });
   const out: readonly string[] = [
-    `${m}${BOLD}capy secrets${RESET}${dryRunTag(state.dryRun)}`,
+    `${m}${BOLD}${screenTitle(state)}${RESET}${dryRunTag(state.dryRun)}`,
     '',
     `${m}${BOLD}${SORT_MENU_TITLE}${RESET}`,
     ...entries.map((l) => m + l),
@@ -1267,7 +1314,7 @@ function computeScrollOffset(lines: readonly string[], cursorIndex: number, body
   return Math.min(target, Math.max(0, lines.length - bodyHeight));
 }
 
-function buildPopupLines(row: SecretIndexRow, popup: PopupState, width: number): readonly string[] {
+function buildPopupLines(row: SecretIndexRow, popup: PopupState, width: number, otherProjects: number = 0): readonly string[] {
   const indent = '  ';
   const inner = '   ';
   const ruleWidth = Math.max(10, width - indent.length);
@@ -1282,6 +1329,7 @@ function buildPopupLines(row: SecretIndexRow, popup: PopupState, width: number):
     rule,
     '',
     `${indent}${inner}${BOLD}${truncate(row.name, contentWidth)}${RESET}`,
+    ...(otherProjects > 0 ? [`${indent}${inner}${DIM}${alsoInOtherProjectsText(otherProjects)}${RESET}`] : []),
     '',
     field('value', row.value_hash === '' ? noValueYetLine(row.name) : renderValueLine(popup.value, popup.revealed, popup.panOffset, valueWidth)),
     field('updated', formatUpdatedCell(row)),
@@ -1378,7 +1426,7 @@ function fitLocation(project: string, tails: readonly string[], width: number): 
 
 /** One key hint of the list footer. `key` is `null` for a hint that is all label. */
 interface FooterHint {
-  readonly id: 'navigate' | 'column' | 'inspect' | 'edit' | 'deploy' | 'esc' | 'sort';
+  readonly id: 'navigate' | 'column' | 'inspect' | 'edit' | 'deploy' | 'esc' | 'sort' | 'scope';
   readonly key: string | null;
   readonly label: string;
 }
@@ -1387,7 +1435,7 @@ interface FooterHint {
  * When the footer is wider than the terminal, whole hints are dropped in this
  * order (never cut mid-word) until it fits. `esc` and `sort` are never dropped.
  */
-const FOOTER_DROP_ORDER: readonly FooterHint['id'][] = ['deploy', 'edit', 'navigate', 'inspect', 'column'];
+const FOOTER_DROP_ORDER: readonly FooterHint['id'][] = ['scope', 'deploy', 'edit', 'navigate', 'inspect', 'column'];
 
 const renderHint = (h: FooterHint): string => (h.key === null ? `${DIM}${h.label}${RESET}` : `${BOLD}${h.key}${RESET}${DIM} ${h.label}${RESET}`);
 const joinHints = (hints: readonly FooterHint[]): string => hints.map(renderHint).join(`${DIM} · ${RESET}`);
@@ -1414,12 +1462,16 @@ function footerLine(state: SecretsScreenState, width: number): string {
           { id: 'deploy', key: 'ctrl+d', label: 'deploy' }, // COPY-FLAG
         ]
       : [];
+  // Embedded (`SecretsScreenScope`): the column moves with ←/→ (Tab belongs to the embedding screen), Esc goes back, and the scope's own hints come before Esc.
+  const scope = state.scope;
+  const scopeHints: readonly FooterHint[] = (scope?.hints ?? []).map((h) => ({ id: 'scope', key: h.key, label: h.label }));
   const hints: readonly FooterHint[] = [
     { id: 'navigate', key: null, label: '↑↓ navigate' }, // COPY-FLAG
-    { id: 'column', key: 'tab', label: 'column' }, // COPY-FLAG
+    scope === undefined ? { id: 'column', key: 'tab', label: 'column' } : { id: 'column', key: '←→', label: 'column' }, // COPY-FLAG
     { id: 'inspect', key: 'enter', label: 'inspect' }, // COPY-FLAG
     ...editHints,
-    { id: 'esc', key: 'esc', label: 'clear/quit' }, // COPY-FLAG
+    ...scopeHints,
+    { id: 'esc', key: 'esc', label: scope === undefined ? 'clear/quit' : 'clear/back' }, // COPY-FLAG
     { id: 'sort', key: 'ctrl+s', label: `sort: ${SORT_LABELS[state.sort]}` }, // COPY-FLAG
   ];
   return joinHints(fitHints(hints, width));
