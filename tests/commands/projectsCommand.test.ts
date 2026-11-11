@@ -124,6 +124,18 @@ const branch = (id: string, name: string, isProtected: boolean): FakeBranch => (
   is_protected: isProtected,
 });
 
+// These tests check the plain (non-terminal) output. `capy projects` opens its
+// interactive screen when stdout and stdin are both terminals, so pin both to
+// "not a terminal" here, whatever the shell running the suite is.
+const ORIGINAL_STDOUT_TTY = process.stdout.isTTY;
+const ORIGINAL_STDIN_TTY = process.stdin.isTTY;
+const setTty = (stdoutIsTty: boolean | undefined, stdinIsTty: boolean | undefined): void => {
+  Object.defineProperty(process.stdout, 'isTTY', { value: stdoutIsTty, configurable: true, writable: true });
+  Object.defineProperty(process.stdin, 'isTTY', { value: stdinIsTty, configurable: true, writable: true });
+};
+beforeEach(() => setTty(false, false));
+afterAll(() => setTty(ORIGINAL_STDOUT_TTY, ORIGINAL_STDIN_TTY));
+
 describe('ProjectsCommand', () => {
   beforeEach(async () => {
     if (!ProjectsCommand) await importCommand();
