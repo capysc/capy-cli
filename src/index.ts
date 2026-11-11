@@ -876,6 +876,7 @@ const secretsCmd = program
   .description('List every secret name across the active organization, grouped by value (read-only, never shows a value)')
   .option('--json', 'emit machine-readable JSON instead of the human UI')
   .option('--project <name>', 'only rows with a location in this project')
+  .option('--project-id <id>', 'only rows with a location in the project with this id') // COPY-FLAG
   .option('--branch <name>', 'only rows with a location on this branch')
   .option('--name <NAME>', 'only rows with exactly this secret name') // COPY-FLAG
   .action(async (options, command) => {
@@ -885,6 +886,7 @@ const secretsCmd = program
     await cmd.execute({
       json: options.json,
       project: options.project,
+      projectId: options.projectId,
       branch: options.branch,
       name: options.name,
       // The program-level `--dry-run`, wherever it was typed.

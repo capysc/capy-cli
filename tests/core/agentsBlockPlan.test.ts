@@ -36,6 +36,7 @@ describe('AGENTS_BLOCK', () => {
         '- Before a command that writes, run `capy info --json` and check its `org`, `project` and `branch`. If they are not the ones the human means, stop and ask.',
         '- If a command starts a browser sign-in, this folder belongs to an organization this machine is not signed in to. Stop and tell the human. Never complete the sign-in yourself.',
         '- To find where a secret lives, run `capy secrets --json --name NAME`. It lists locations in the signed-in organization only, and never shows a value.',
+        "- Use `capy secrets --json --project-id <id>` when the project is known (from `capy info --json` or an earlier result). Use `--project <name>` to look a project up by name, and expect several matches: then ask the human which project, or use each match's `project_id`.",
         '- Commands that write run bare `capy` first. If your folder and Capy differ they write nothing and exit 3 with `SECRETS_CONFLICT`, a `conflict_id`, and the differing names (fingerprints, never values).',
         '- Show the human those names and ask, for each: pinned, local, remote or delete. Never answer for the human. Then rerun the same command with `--resolve NAME=<choice>` for every name (`NAME@TARGET=local|remote` for a platform row) and `--conflict <conflict_id>`.',
         '- `SECRETS_CONFLICT_STALE` means Capy moved since: show the fresh rows and ask again.',

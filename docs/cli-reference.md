@@ -619,6 +619,7 @@ capy secrets [options]
 |---|---|---|
 | `--json` | emit machine-readable JSON instead of the human UI |  |
 | `--project <name>` | only rows with a location in this project |  |
+| `--project-id <id>` | only rows with a location in the project with this id |  |
 | `--branch <name>` | only rows with a location on this branch |  |
 | `--name <NAME>` | only rows with exactly this secret name |  |
 
