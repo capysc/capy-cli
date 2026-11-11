@@ -343,6 +343,166 @@ describe('the retry after a miss does exactly what the first try validated', () 
   });
 });
 
+describe('every later attempt does the action the first one validated, whatever caused the retry', () => {
+  const MOVED = 'moved-by-someone-else-2222';
+  const THIRD = 'a-third-value-3333';
+  const stagingKey = 'pA/staging';
+  const L = [loc('pA', 'staging')];
+  const movedWorld: ServiceOpts['locs'] = [{ project: 'pA', branch: 'staging', value: MOVED }];
+  const oldWorld: ServiceOpts['locs'] = [{ project: 'pA', branch: 'staging', value: OLD_VALUE }];
+  const refusals = [
+    ['SECRETS_STALE_BASE', ERROR_CODES.SECRETS_STALE_BASE],
+    ['KEEP_WRITE_CONFLICT', ERROR_CODES.KEEP_WRITE_CONFLICT],
+  ] as const;
+  const refuse = (code: string) => new CapyError('the words do not matter', code);
+
+  const holding = (value: string) => fakeService({ locs: [{ project: 'pA', branch: 'staging', value }] }).getDecryptData('pA', 'staging');
+  const pushedValues = (service: ReturnType<typeof fakeService>): readonly (string | undefined)[] =>
+    service.pushSecrets.mock.calls.map((c) => {
+      const line = String(c[2]).split('\n').find((x) => x.startsWith(`${NAME}=`));
+      return line === undefined ? undefined : new FileManager().decryptValue(line.slice(NAME.length + 1), KEYS.pA);
+    });
+  const heldPin = async (service: ReturnType<typeof fakeService>): Promise<string | undefined> =>
+    (JSON.parse((await service.getDecryptData('pA', 'staging')).keep_file) as { variables: Record<string, Array<{ branch: string; value_hash: string }>> }).variables[NAME]?.find((e) => e.branch === 'staging')?.value_hash;
+  const answerOf = (choice: 'pinned' | 'delete' | 'local', remote: string) => ({ choice, remote: hashValue(remote), local: hashValue(SENTINEL) });
+  const base = { name: NAME, value: SENTINEL, locations: L, repos: [], shown: { [stagingKey]: hashValue(OLD_VALUE) } };
+  const restoreRequest = { ...base, answers: { [stagingKey]: answerOf('pinned', MOVED) }, restore: { [stagingKey]: OLD_VALUE } };
+  const deleteRequest = { ...base, answers: { [stagingKey]: answerOf('delete', MOVED) } };
+  const codes = (r: Awaited<ReturnType<typeof runSecretSet>>) => r.failed.map((f) => (f.kind === 'location' ? f.code : f.kind));
+  /** Push 0 is refused with `code`; the retry's own read (read 1) answers `fresh`, the other reads and pushes behave. */
+  const refusedThenSees = (code: string, fresh: Partial<{ env_content: string; keep_file: string }>) =>
+    fakeService({
+      locs: movedWorld,
+      pushError: (location, n) => (location === stagingKey && n === 0 ? refuse(code) : undefined),
+      heldOverride: (location, n) => (location === stagingKey && n === 1 ? fresh : undefined),
+    });
+
+  describe.each(refusals)('push 0 refused with %s', (_label, code) => {
+    test('restore, and the fresh read holds exactly the SHOWN value: restored again (line and pin), the new value is never pushed', async () => {
+      const service = refusedThenSees(code, await holding(OLD_VALUE));
+      const result = await runSecretSet(restoreRequest, envFor(service));
+      expect(result.failed).toEqual([]);
+      expect(result.updated.map(labelOf)).toEqual([`${PROJECT_NAMES.pA}/staging`]);
+      expect(pushedValues(service)).toEqual([OLD_VALUE, OLD_VALUE]);
+      expect(await heldPin(service)).toBe(hashValue(OLD_VALUE));
+    });
+
+    test('delete, and the fresh read holds the SHOWN value (someone put it back): a conflict, nothing is written, the new value is never pushed', async () => {
+      const service = refusedThenSees(code, await holding(OLD_VALUE));
+      const result = await runSecretSet(deleteRequest, envFor(service));
+      expect(codes(result)).toEqual([ERROR_CODES.SECRETS_CONFLICT]);
+      expect(result.updated).toEqual([]);
+      expect(result.removed).toBeUndefined();
+      expect(pushedValues(service).filter((v) => v === SENTINEL)).toEqual([]);
+      expect(service.pushesTo(stagingKey)).toBe(1);
+    });
+
+    test('delete, and the fresh read shows the line gone but its pin still there: pushed again with the pin dropped, reported removed', async () => {
+      const data = await holding(MOVED);
+      const gone = { env_content: data.env_content.split('\n').filter((l) => !l.startsWith(`${NAME}=`)).join('\n'), keep_file: data.keep_file };
+      const service = refusedThenSees(code, gone);
+      const result = await runSecretSet(deleteRequest, envFor(service));
+      expect(result.failed).toEqual([]);
+      expect(result.removed?.map(labelOf)).toEqual([`${PROJECT_NAMES.pA}/staging`]);
+      expect(result.updated).toEqual([]);
+      expect(pushedValues(service).filter((v) => v === SENTINEL)).toEqual([]);
+      expect(await heldPin(service)).toBeUndefined();
+    });
+
+    test('delete, and the fresh read is the state first read: removed', async () => {
+      const service = refusedThenSees(code, await holding(MOVED));
+      const result = await runSecretSet(deleteRequest, envFor(service));
+      expect(result.failed).toEqual([]);
+      expect(result.removed?.map(labelOf)).toEqual([`${PROJECT_NAMES.pA}/staging`]);
+      expect(await heldPin(service)).toBeUndefined();
+    });
+
+    test.each([['restore', restoreRequest], ['delete', deleteRequest], ['a plain write', base]] as const)('%s, and the fresh read holds a THIRD value: a conflict, no push at all after the refused one', async (_what, request) => {
+      const third = await holding(THIRD);
+      const seesThird = fakeService({
+        locs: request === base ? oldWorld : movedWorld,
+        pushError: (location, n) => (location === stagingKey && n === 0 ? refuse(code) : undefined),
+        heldOverride: (location, n) => (location === stagingKey && n === 1 ? third : undefined),
+      });
+      const result = await runSecretSet(request, envFor(seesThird));
+      expect(codes(result)).toEqual([ERROR_CODES.SECRETS_CONFLICT]);
+      expect(result.updated).toEqual([]);
+      expect(result.removed).toBeUndefined();
+      expect(seesThird.pushesTo(stagingKey)).toBe(1);
+    });
+
+    test('a plain write still works as before: the retry writes the new value', async () => {
+      const service = fakeService({ locs: oldWorld, pushError: (location, n) => (location === stagingKey && n === 0 ? refuse(code) : undefined) });
+      const result = await runSecretSet(base, envFor(service));
+      expect(result.failed).toEqual([]);
+      expect(result.updated.map(labelOf)).toEqual([`${PROJECT_NAMES.pA}/staging`]);
+      expect(pushedValues(service)).toEqual([SENTINEL, SENTINEL]);
+    });
+
+    test('a plain write whose retry read already holds the new value is unchanged, as before', async () => {
+      const already = await holding(SENTINEL);
+      const sees = fakeService({
+        locs: oldWorld,
+        pushError: (location, n) => (location === stagingKey && n === 0 ? refuse(code) : undefined),
+        heldOverride: (location, n) => (location === stagingKey && n === 1 ? already : undefined),
+      });
+      const result = await runSecretSet(base, envFor(sees));
+      expect(result.unchanged.map(labelOf)).toEqual([`${PROJECT_NAMES.pA}/staging`]);
+      expect(sees.pushesTo(stagingKey)).toBe(1);
+    });
+  });
+
+  describe('all three at once: a stale base, then KEEP_WRITE_CONFLICT, then a read-back miss', () => {
+    test('restore: the action never changes, three pushes at most, and the new value is never pushed', async () => {
+      const service = fakeService({
+        locs: movedWorld,
+        pushError: (location, n) => (location === stagingKey ? (n === 0 ? refuse(ERROR_CODES.SECRETS_STALE_BASE) : n === 1 ? refuse(ERROR_CODES.KEEP_WRITE_CONFLICT) : undefined) : undefined),
+        loses: (location, n) => location === stagingKey && n === 2,
+      });
+      const result = await runSecretSet(restoreRequest, envFor(service));
+      expect(codes(result)).toEqual([ERROR_CODES.SECRET_NOT_PERSISTED]);
+      expect(service.pushesTo(stagingKey)).toBe(3);
+      expect(pushedValues(service)).toEqual([OLD_VALUE, OLD_VALUE, OLD_VALUE]);
+    });
+
+    test('delete: the action never changes, three pushes at most, never a write of the new value', async () => {
+      const service = fakeService({
+        locs: movedWorld,
+        pushError: (location, n) => (location === stagingKey ? (n === 0 ? refuse(ERROR_CODES.SECRETS_STALE_BASE) : n === 1 ? refuse(ERROR_CODES.KEEP_WRITE_CONFLICT) : undefined) : undefined),
+        loses: (location, n) => location === stagingKey && n === 2,
+      });
+      const result = await runSecretSet(deleteRequest, envFor(service));
+      expect(codes(result)).toEqual([ERROR_CODES.SECRET_NOT_PERSISTED]);
+      expect(service.pushesTo(stagingKey)).toBe(3);
+      expect(pushedValues(service).filter((v) => v === SENTINEL)).toEqual([]);
+    });
+
+    test('a lost push, then a stale base, then it works: restored, three pushes, the new value never pushed', async () => {
+      const service = fakeService({
+        locs: movedWorld,
+        loses: (location, n) => location === stagingKey && n === 0,
+        pushError: (location, n) => (location === stagingKey && n === 1 ? refuse(ERROR_CODES.SECRETS_STALE_BASE) : undefined),
+      });
+      const result = await runSecretSet(restoreRequest, envFor(service));
+      expect(result.failed).toEqual([]);
+      expect(result.updated.map(labelOf)).toEqual([`${PROJECT_NAMES.pA}/staging`]);
+      expect(service.pushesTo(stagingKey)).toBe(3);
+      expect(pushedValues(service)).toEqual([OLD_VALUE, OLD_VALUE, OLD_VALUE]);
+    });
+
+    test('a plain write bounded the same way: never more than three pushes however they fail', async () => {
+      const service = fakeService({
+        locs: oldWorld,
+        pushError: (location, n) => (location === stagingKey ? (n === 0 ? refuse(ERROR_CODES.SECRETS_STALE_BASE) : n === 1 ? refuse(ERROR_CODES.KEEP_WRITE_CONFLICT) : n === 3 ? refuse(ERROR_CODES.SECRETS_STALE_BASE) : undefined) : undefined),
+        loses: (location, n) => location === stagingKey && n === 2,
+      });
+      const result = await runSecretSet(base, envFor(service));
+      expect(codes(result)).toEqual([ERROR_CODES.SECRET_NOT_PERSISTED]);
+      expect(service.pushesTo(stagingKey)).toBe(3);
+    });
+  });
+});
+
 describe('KEEP_WRITE_CONFLICT: a save the service could not complete', () => {
   const conflict = () => new CapyError('the words do not matter', ERROR_CODES.KEEP_WRITE_CONFLICT);
 
