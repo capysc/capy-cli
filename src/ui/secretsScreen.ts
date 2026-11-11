@@ -1024,6 +1024,18 @@ export function formatMiddleCell(row: SecretIndexRow, column: ColumnMode, width:
   return formatProjectCell(row);
 }
 
+/**
+ * The middle cell. Embedded in one project (`SecretsScreenScope`), the PROJECT
+ * column is always that project, so it also says when the row's value is used
+ * in other projects: `web · also in 2 other projects`.
+ */
+function scopedMiddleCell(state: SecretsScreenState, row: SecretIndexRow, width: number): string {
+  const cell = formatMiddleCell(row, state.column, width);
+  const others = otherProjectsOf(state, row);
+  if (state.scope === undefined || state.column !== 'project' || others === 0) return cell;
+  return `${cell} ${DIM}· ${alsoInOtherProjectsText(others)}${RESET}`;
+}
+
 /** The STATUS cell: the same coloured `● status` badge `capy edit` shows (CAP-702). */
 function secretRowStatusBadge(row: SecretIndexRow): string {
   const status = secretRowStatus(row);
@@ -1116,7 +1128,9 @@ function buildNameCell(left: string, tag: string, width: number): string {
   return fittedLeft + ' '.repeat(separatorWidth) + tag;
 }
 
-function columnHeaderLabel(column: ColumnMode): string {
+function columnHeaderLabel(column: ColumnMode, scoped: boolean = false): string {
+  // Embedded, ←/→ move the column (Tab belongs to the embedding screen).
+  if (scoped) return `${COLUMN_HEADINGS[column]} ←→`;
   return `${COLUMN_HEADINGS[column]} ⇥`;
 }
 
@@ -1169,7 +1183,7 @@ export function render(state: SecretsScreenState, termWidth: number, termHeight:
 
   const { nameW, middleW, updatedW, gap } = mainTableLayout(available);
 
-  const headerLine = pad('NAME', nameW) + gap + pad(columnHeaderLabel(state.column), middleW) + gap + pad('UPDATED', updatedW);
+  const headerLine = pad('NAME', nameW) + gap + pad(columnHeaderLabel(state.column, state.scope !== undefined), middleW) + gap + pad('UPDATED', updatedW);
   // Everything pushed before the body, in one array — `preBodyLines.length`
   // below stands in for what used to be `lines.length` read mid-mutation.
   const preBodyLines: readonly string[] = [...headerLines, m + DIM + headerLine + RESET];
@@ -1186,12 +1200,8 @@ export function render(state: SecretsScreenState, termWidth: number, termHeight:
     const matchTag = matchActive && reasons.length > 0 ? `${ACCENT}[${reasons[0]}]${RESET}` : '';
     // A row with no value yet says so beside its name (a search-match tag takes the place when one is active).
     const tag = matchTag !== '' || row.value_hash !== '' ? matchTag : `${DIM}${NO_VALUE_YET}${RESET}`;
-    // Embedded in one project: a value also used in other projects says so, when it fits beside the name.
-    const others = otherProjectsOf(state, row);
-    const alsoTag = others > 0 ? `${DIM}${alsoInOtherProjectsText(others)}${RESET}` : '';
-    const fitsBeside = visLen(pointer + row.name) + 1 + visLen(alsoTag) <= nameW;
-    const nameCell = buildNameCell(pointer + row.name, tag === '' && fitsBeside ? alsoTag : tag, nameW);
-    const middleCell = pad(formatMiddleCell(row, state.column, middleW), middleW);
+    const nameCell = buildNameCell(pointer + row.name, tag, nameW);
+    const middleCell = pad(scopedMiddleCell(state, row, middleW), middleW);
     const updatedCell = pad(formatUpdatedCell(row), updatedW);
     const line = nameCell + gap + middleCell + gap + updatedCell;
     // A coloured cell's own RESET would end the highlight mid-row, so the highlight is re-applied after each one.

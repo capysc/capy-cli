@@ -205,3 +205,120 @@ describe('inside a project: the embedded secrets screen', () => {
     expect(press(opened(), '\x03').quit).toBe(true);
   });
 });
+
+describe('inside a project: tabs', () => {
+  const TAB = '\t';
+  const SHIFT_TAB = `${ESC}[Z`;
+  const members = [
+    { membershipId: 'm1', userId: 'u1', email: 'owner@acme.dev', role: 'owner', status: 'active', createdAt: 'x', projects: [] },
+    { membershipId: 'm2', userId: 'u2', email: 'pa@acme.dev', role: 'project-admin', status: 'active', createdAt: 'x', projects: [{ id: 'p1', name: 'web', role: 'project-admin' as const, branches: [] }] },
+    { membershipId: 'm3', userId: 'u3', email: 'other@acme.dev', role: 'member', status: 'active', createdAt: 'x', projects: [{ id: 'p2', name: 'api', role: 'member' as const, branches: [] }] },
+  ];
+  const withTargets: readonly SecretIndexRow[] = [
+    row('API_KEY', [
+      loc({ branch: 'production', targets: [{ provider: 'vercel', target: 'web-app', deployed_at: '2026-04-01T00:00:00.000Z', stale: false }], connector: { provider: 'dokploy' }, service: { provider: 'dokploy', name: 'web-svc' } }),
+      loc({ branch: 'development', service: { provider: 'dokploy' } }),
+    ]),
+    row('DB_URL', [loc({ branch: 'production', targets: [{ provider: 'vercel', target: 'web-app', deployed_at: '2026-03-01T00:00:00.000Z', stale: true, pending: true }] })]),
+  ];
+  const full = (): ProjectsData => data({ members, index: { rows: withTargets, skipped: [], coveredProjectIds: ['p1', 'p2', 'p3', 'p4'] } });
+  const openFirst = (d: ProjectsData): ProjectsScreenState => press(initialProjectsScreenState(d), '\r');
+  const tabs = (n: number): readonly string[] => Array.from({ length: n }, () => TAB);
+
+  test('Secrets is selected when a project opens; Tab walks every tab in order and wraps, Shift-Tab goes back', () => {
+    const s0 = openFirst(full());
+    expect(s0.open?.tab).toBe('secrets');
+    const order = [1, 2, 3, 4, 5, 6].map((n) => press(s0, ...tabs(n)).open?.tab);
+    expect(order).toEqual(['users', 'repos', 'branches', 'deployments', 'connectors', 'secrets']);
+    expect(press(s0, SHIFT_TAB).open?.tab).toBe('connectors');
+  });
+
+  test('the tab bar names every tab, and Esc on any tab goes back to the list', () => {
+    const s = press(openFirst(full()), TAB);
+    const frame = strip(render(s, 140, 24));
+    ['Secrets', 'Users', 'Git repos', 'Capy branches', 'Deployments', 'Connectors'].forEach((label) => expect(frame).toContain(label));
+    expect(press(s, ESC).open).toBeNull();
+  });
+
+  test('a member: tabs whose data the service did not return are hidden, not shown empty', () => {
+    const member = data({ index: null, reposShown: false, members, projects: [project({ repos: undefined })] });
+    const s = openFirst(member);
+    expect(s.open?.tab).toBe('users');
+    expect([s, press(s, TAB), press(s, TAB, TAB)].map((x) => x.open?.tab)).toEqual(['users', 'branches', 'users']);
+    const frame = strip(render(s, 140, 24));
+    expect(frame).not.toContain('Secrets');
+    expect(frame).not.toContain('Git repos');
+    expect(frame).not.toContain('Deployments');
+    expect(frame).not.toContain('Connectors');
+  });
+
+  test('without the member list, the Users tab is hidden', () => {
+    const s = openFirst(data({ members: null }));
+    expect(press(s, TAB).open?.tab).toBe('repos');
+  });
+
+  test('Users: the project\'s members with their project role, plus org owners and admins', () => {
+    const s = press(openFirst(full()), TAB);
+    const frame = strip(render(s, 140, 24));
+    expect(frame).toContain('owner@acme.dev');
+    expect(frame).toMatch(/pa@acme\.dev\s+project-admin/);
+    expect(frame).not.toContain('other@acme.dev');
+  });
+
+  test('Capy branches and Git repos come from GET /projects', () => {
+    const d = data({ projects: [project({ branches: [{ name: 'production', protected: true }], repos: [{ host: 'github.com', owner: 'acme', name: 'web', path: 'apps/web', github_repo_id: 3 }] })] });
+    const s = openFirst(d);
+    expect(strip(render(press(s, TAB, TAB), 120, 20))).toContain('acme/web/apps/web');
+    expect(strip(render(press(s, TAB, TAB, TAB), 120, 20))).toContain('production (protected)');
+  });
+
+  test('Deployments: one line per target and branch, latest delivery, behind and pending as capy secrets says them', () => {
+    const s = press(openFirst(full()), ...tabs(4));
+    expect(s.open?.tab).toBe('deployments');
+    const frame = strip(render(s, 140, 24));
+    const target = frame.split('\n').filter((l) => l.includes('[vercel] web-app'));
+    expect(target).toHaveLength(1);
+    expect(target[0]).toContain('production');
+    expect(target[0]).toContain('needs deploy (pending)');
+    expect(frame).not.toMatch(/token/i);
+  });
+
+  test('Connectors: per variable and branch, connector.provider first, service.provider as the fallback', () => {
+    const s = press(openFirst(full()), SHIFT_TAB);
+    expect(s.open?.tab).toBe('connectors');
+    const frame = strip(render(s, 140, 24));
+    expect(frame).toMatch(/API_KEY\s+production\s+\[dokploy\] web-svc/);
+    expect(frame).toMatch(/API_KEY\s+development\s+\[dokploy\]/);
+    expect(frame).not.toContain('DB_URL');
+  });
+
+  test('a project with no secrets yet: the Secrets tab says so and how to fix it', () => {
+    const s = press(initialProjectsScreenState(data()), DOWN, DOWN, DOWN, '\r');
+    expect(s.open?.projectId).toBe('p4');
+    expect(s.open?.tab).toBe('secrets');
+    const frame = strip(render(s, 120, 20));
+    expect(frame).toContain('This project has no secrets yet.');
+    expect(frame).toContain('capy push');
+    // Typing does nothing there; Tab still moves on.
+    expect(type(s, 'abc').open?.secrets.search.query).toBe('');
+    expect(press(s, TAB).open?.tab).toBe('users');
+  });
+
+  test('while the secrets details are open, Tab is theirs (it cycles their column), not the project\'s', () => {
+    const s = press(openFirst(full()), '\r', TAB);
+    expect(s.open?.tab).toBe('secrets');
+    expect(s.open?.secrets.popup?.locationColumn).toBe('connector');
+  });
+
+  test('the secrets search survives a trip to another tab', () => {
+    const s = press(type(openFirst(full()), 'DB'), TAB, SHIFT_TAB);
+    expect(s.open?.tab).toBe('secrets');
+    expect(s.open?.secrets.search.query).toBe('DB');
+  });
+
+  test('no line of any tab is wider than the terminal', () => {
+    const s0 = openFirst(full());
+    const frames = [0, 1, 2, 3, 4, 5].map((n) => render(press(s0, ...tabs(n)), 50, 16));
+    expect(frames.every((f) => strip(f).split('\n').every((l) => Array.from(l).length <= 50))).toBe(true);
+  });
+});
