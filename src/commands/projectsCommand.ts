@@ -174,11 +174,12 @@ export class ProjectsCommand {
     const spinner = new Spinner('Loading projects...');
     spinner.start();
     try {
-      const { orgId, userId, serviceClient } = await resolveOrgContext(this.apiUrl, this.devMode);
+      const { orgId, orgName, userId, serviceClient } = await resolveOrgContext(this.apiUrl, this.devMode);
       const data = await loadScreenData(serviceClient, orgId);
       const { createLocationDecryptor } = await import('./secretsValueDecryptor');
       const { createEditActions } = await import('./secretsEditActions');
       const { createDeployActions } = await import('./secretsDeployActions');
+      const { createProjectDeleteActions } = await import('./projectDeleteActions');
       const { runProjectsScreen } = await import('../ui/projectsScreenDriver');
       spinner.stop();
       await runProjectsScreen(
@@ -187,6 +188,7 @@ export class ProjectsCommand {
         createEditActions(orgId, userId, serviceClient, dryRun),
         dryRun,
         createDeployActions(orgId, userId, serviceClient, dryRun, this.devMode),
+        createProjectDeleteActions(serviceClient, { id: orgId, name: orgName }),
       );
     } catch (err) {
       spinner.fail('Failed to load projects');

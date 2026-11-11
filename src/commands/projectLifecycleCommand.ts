@@ -74,7 +74,7 @@ export function lifecycleOptsFrom(command: CommandWithGlobals): DeleteProjectOpt
   };
 }
 
-interface ProjectRef {
+export interface ProjectRef {
   id: string;
   name: string;
   deleted_at?: string | null;
@@ -369,7 +369,7 @@ async function readDeleteDetails(client: DeleteDetailsClient, projectId: string)
   };
 }
 
-interface OrgRef {
+export interface OrgRef {
   readonly id: string;
   readonly name: string;
 }
@@ -389,7 +389,7 @@ function deleteElicitation(
 ): ElicitationConfirm {
   return {
     kind: 'confirm',
-    question: `Delete project ${project.name}?`, // COPY-FLAG
+    question: deleteQuestion(project.name),
     details: {
       org: { id: org.id, name: org.name },
       project: { id: project.id, name: project.name },
@@ -484,7 +484,7 @@ async function deleteFlow(ref: string, opts: DeleteProjectOpts): Promise<DeleteO
     // Nobody to ask: hand the question to the agent that ran this, and write nothing.
     if (agentMode) return { kind: 'needs-confirmation', elicitation: deleteElicitation(org, project, tokens, details, force), lines };
     showPreview(json, lines);
-    if (!(await confirm(json, `Delete project ${project.name}?`))) return { kind: 'cancelled' }; // COPY-FLAG
+    if (!(await confirm(json, deleteQuestion(project.name)))) return { kind: 'cancelled' };
   }
   return { kind: 'deleted', result: await serviceClient.deleteProject(orgId, project.id, force) };
 }
@@ -493,10 +493,44 @@ function restoreHint(id: string): string {
   return `capy project restore ${id}`;
 }
 
+/** The yes/no question asked before a delete, in a terminal and in `capy projects`. */
+export function deleteQuestion(projectName: string): string {
+  return `Delete project ${projectName}?`; // COPY-FLAG
+}
+
+/** What a person is told once a project is deleted. */
+export function deletedLines(project: { readonly id: string; readonly name: string }): readonly string[] {
+  return [
+    `Deleted project ${project.name}.`, // COPY-FLAG
+    `An owner can restore it with: ${restoreHint(project.id)}`, // COPY-FLAG
+  ];
+}
+
+/** The slice of the service client `deletePreviewLines` uses. */
+export interface DeletePreviewClient extends DeleteDetailsClient {
+  listDeployTokens(orgId: string, projectId: string): Promise<{ readonly tokens: ReadonlyArray<LiveDeployTokenInfo & { readonly revoked_at: string | null }> }>;
+}
+
+/**
+ * What a person is shown about one project before being asked whether to delete
+ * it (the terminal `capy project delete` summary): the project, its org, its
+ * branches, its variable names and its live deploy tokens. Without `--force`.
+ */
+export async function deletePreviewLines(client: DeletePreviewClient, org: OrgRef, project: ProjectRef): Promise<readonly string[]> {
+  const tokens = liveOnly((await client.listDeployTokens(org.id, project.id)).tokens);
+  const details = await readDeleteDetails(client, project.id);
+  return previewLines(project, tokens, false, { org, details });
+}
+
+/** What a delete answered No says. */
+export const DELETE_CANCELLED_TEXT = 'Cancelled.'; // COPY-FLAG
+/** What a dry-run delete says once it has shown the project. */
+export const DELETE_DRY_RUN_TEXT = 'Dry run: nothing was deleted.'; // COPY-FLAG
+
 function emitDeleteOutcome(json: boolean, force: boolean, outcome: DeleteOutcome): void {
   if (outcome.kind === 'cancelled') {
-    if (json) console.log(JSON.stringify({ ok: false, code: ERROR_CODES.CANCELLED, error: 'Cancelled.' }, null, 2)); // COPY-FLAG
-    else console.log('Cancelled.'); // COPY-FLAG
+    if (json) console.log(JSON.stringify({ ok: false, code: ERROR_CODES.CANCELLED, error: DELETE_CANCELLED_TEXT }, null, 2));
+    else console.log(DELETE_CANCELLED_TEXT);
     return;
   }
   if (outcome.kind === 'dry-run') {
@@ -512,7 +546,7 @@ function emitDeleteOutcome(json: boolean, force: boolean, outcome: DeleteOutcome
       return;
     }
     showPreview(false, previewLines(project, tokens, force));
-    console.log('Dry run: nothing was deleted.'); // COPY-FLAG
+    console.log(DELETE_DRY_RUN_TEXT);
     return;
   }
   if (outcome.kind === 'needs-choice') return refuse(json, outcome.refusal);
@@ -530,8 +564,7 @@ function emitDeleteOutcome(json: boolean, force: boolean, outcome: DeleteOutcome
     console.log(JSON.stringify({ ok: true, project, live_deploy_tokens }, null, 2));
     return;
   }
-  console.log(`Deleted project ${project.name}.`); // COPY-FLAG
-  console.log(`An owner can restore it with: ${restoreHint(project.id)}`); // COPY-FLAG
+  deletedLines(project).forEach((line) => console.log(line));
 }
 
 /** `capy project delete <name-or-id> [--force] [--yes] [--dry-run] [--json]` */

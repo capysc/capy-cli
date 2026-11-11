@@ -29,6 +29,7 @@ import { ACCENT } from './colors';
 import { filterByQuery } from './searchMatch';
 import { clipLine, truncateCell } from './pickerTable';
 import { BEHIND_LABEL, DEPLOYED_LABEL, TARGET_STATUS_HEADING } from '../core/deployStatus';
+import { DELETE_CANCELLED_TEXT, DELETE_DRY_RUN_TEXT, deleteQuestion } from '../commands/projectLifecycleCommand';
 import {
   type SecretsScreenEffect,
   type SecretsScreenState,
@@ -59,6 +60,8 @@ const KEY_SHIFT_TAB = `${ESC}[Z`;
 const KEY_ESC = ESC;
 const KEY_ESC_ESC = `${ESC}${ESC}`;
 const KEY_CTRL_C = '\x03';
+/** Ctrl+X: delete the project (the one under the cursor on the list, or the one that is open). */
+const KEY_CTRL_X = '\x18';
 const KEY_ENTER = '\r';
 const KEY_BACKSPACE = '\x7f';
 const KEY_BACKSPACE2 = '\b';
@@ -326,13 +329,17 @@ export interface ProjectsScreenState {
   readonly cursor: number;
   /** The project that is open, or `null` on the list. */
   readonly open: ProjectView | null;
+  /** The delete question (Ctrl+X), over the list or the open project; `null` when closed. */
+  readonly dialog: DeleteDialog | null;
+  /** Short lines shown above the footer until the next key (what a delete did). */
+  readonly notes: readonly string[];
   readonly quit: boolean;
   /** Printed after the screen is left (the embedded edit and deploy confirmations). */
   readonly exitText: string | null;
 }
 
 export function initialProjectsScreenState(data: ProjectsData, dryRun: boolean = false): ProjectsScreenState {
-  return { data, dryRun, query: '', cursor: 0, open: null, quit: false, exitText: null };
+  return { data, dryRun, query: '', cursor: 0, open: null, dialog: null, notes: [], quit: false, exitText: null };
 }
 
 /** The projects the search shows, in the service's order. */
@@ -351,8 +358,98 @@ function projectById(data: ProjectsData, id: string): ProjectItem | undefined {
 
 // ── Reducer ───────────────────────────────────────────────────────────────────
 
-/** The screen's own effects (none yet: everything it starts belongs to the embedded secrets screen). */
-export type ProjectsOwnEffect = { readonly type: 'projectsNone' };
+// ── Delete (Ctrl+X) ───────────────────────────────────────────────────────────
+//
+// `capy project delete`'s rules, through `commands/projectDeleteActions.ts`:
+// the same summary first, then the same question with No as the default
+// (Enter, `n` and Esc all answer No), then the DELETE — never forced from here.
+// The service refuses anyone but an org owner, and a project with live deploy
+// tokens; the refusal is shown as `capy project delete` words it.
+
+/** The project a delete is about. */
+export interface ProjectRefLite {
+  readonly id: string;
+  readonly name: string;
+}
+
+/** A coded refusal, with `capy project delete`'s words. */
+export interface ScreenRefusal {
+  readonly code: string;
+  readonly message: string;
+  readonly lines: readonly string[];
+}
+
+/** The summary shown before the question, or why it could not be read. */
+export type DeletePreviewLoaded = { readonly ok: true; readonly lines: readonly string[] } | { readonly ok: false; readonly refusal: ScreenRefusal };
+
+/** The delete's answer: what to tell the person, or the refusal. */
+export type DeleteFinished = { readonly ok: true; readonly lines: readonly string[] } | { readonly ok: false; readonly refusal: ScreenRefusal };
+
+export type DeleteDialog =
+  | { readonly step: 'loading'; readonly project: ProjectRefLite }
+  | { readonly step: 'confirm'; readonly project: ProjectRefLite; readonly lines: readonly string[] }
+  | { readonly step: 'deleting'; readonly project: ProjectRefLite }
+  | { readonly step: 'refused'; readonly project: ProjectRefLite; readonly refusal: ScreenRefusal };
+
+/** The screen's own effects: the ones `capy secrets` does not have. */
+export type ProjectsOwnEffect =
+  | { readonly type: 'projectDeletePreview'; readonly project: ProjectRefLite }
+  | { readonly type: 'projectDelete'; readonly project: ProjectRefLite };
+
+/** Opens the delete question for `project`: its summary is read first. */
+function startDelete(state: ProjectsScreenState, project: ProjectItem): ProjectsReduceResult {
+  const ref = { id: project.id, name: project.name };
+  return { state: { ...state, dialog: { step: 'loading', project: ref } }, effect: { type: 'projectDeletePreview', project: ref } };
+}
+
+function handleDialogKey(state: ProjectsScreenState, dialog: DeleteDialog, key: string): ProjectsReduceResult {
+  const isEsc = key === KEY_ESC || key === KEY_ESC_ESC || key === KEY_CTRL_C;
+  if (dialog.step === 'deleting') return noEffect(state);
+  if (dialog.step === 'refused') return noEffect({ ...state, dialog: null });
+  if (dialog.step === 'loading') return noEffect(isEsc ? { ...state, dialog: null, notes: [DELETE_CANCELLED_TEXT] } : state);
+  if (key === 'y' || key === 'Y') {
+    // A dry run asks the question and stops: the DELETE is never sent.
+    if (state.dryRun) return noEffect({ ...state, dialog: null, notes: [DELETE_DRY_RUN_TEXT] });
+    return { state: { ...state, dialog: { step: 'deleting', project: dialog.project } }, effect: { type: 'projectDelete', project: dialog.project } };
+  }
+  // No is the default: Enter answers it, like the terminal question.
+  if (key === 'n' || key === 'N' || key === KEY_ENTER || isEsc) return noEffect({ ...state, dialog: null, notes: [DELETE_CANCELLED_TEXT] });
+  return noEffect(state);
+}
+
+/** The summary arrived: the question is asked, or the refusal shown. Dropped when the dialog has moved on. */
+export function applyDeletePreview(state: ProjectsScreenState, projectId: string, loaded: DeletePreviewLoaded): ProjectsScreenState {
+  const dialog = state.dialog;
+  if (dialog === null || dialog.step !== 'loading' || dialog.project.id !== projectId) return state;
+  return {
+    ...state,
+    dialog: loaded.ok ? { step: 'confirm', project: dialog.project, lines: loaded.lines } : { step: 'refused', project: dialog.project, refusal: loaded.refusal },
+  };
+}
+
+/** `data` without the project: gone from the list and from the index (so no row still counts it as another project). */
+function withoutProject(data: ProjectsData, projectId: string): ProjectsData {
+  const index = data.index === null
+    ? null
+    : {
+        ...data.index,
+        rows: data.index.rows
+          .map((r) => ({ ...r, locations: r.locations.filter((l) => l.project_id !== projectId) }))
+          .filter((r) => r.locations.length > 0),
+        skipped: data.index.skipped.filter((sk) => sk.project_id !== projectId),
+      };
+  return { ...data, projects: data.projects.filter((p) => p.id !== projectId), index };
+}
+
+/** The delete answered: on success, back to the list without the project, saying so; else the refusal. */
+export function applyDeleteDone(state: ProjectsScreenState, projectId: string, finished: DeleteFinished): ProjectsScreenState {
+  const dialog = state.dialog;
+  if (dialog === null || dialog.step !== 'deleting' || dialog.project.id !== projectId) return state;
+  if (!finished.ok) return { ...state, dialog: { step: 'refused', project: dialog.project, refusal: finished.refusal } };
+  const data = withoutProject(state.data, projectId);
+  const shown = filteredProjects({ data, query: state.query });
+  return { ...state, data, dialog: null, open: null, cursor: clampIndex(state.cursor, shown.length), notes: finished.lines };
+}
 
 export type ProjectsScreenEffect = SecretsScreenEffect | ProjectsOwnEffect;
 
@@ -365,6 +462,9 @@ const noEffect = (state: ProjectsScreenState): ProjectsReduceResult => ({ state,
 
 /** Pure reducer: `(state, key) => { state, effect }`. */
 export function handleKey(state: ProjectsScreenState, key: string): ProjectsReduceResult {
+  // The notes last until the next key.
+  if (state.notes.length > 0) return handleKey({ ...state, notes: [] }, key);
+  if (state.dialog) return handleDialogKey(state, state.dialog, key);
   if (state.open) return handleProjectKey(state, state.open, key);
   return handleListKey(state, key);
 }
@@ -376,7 +476,10 @@ function openProject(state: ProjectsScreenState, project: ProjectItem): Projects
   const scope = {
     title: project.name,
     otherProjects: index === null ? {} : otherProjectCounts(index.rows, project.id),
-    hints: [{ key: 'tab', label: 'next tab' }], // COPY-FLAG
+    hints: [
+      { key: 'tab', label: 'next tab' }, // COPY-FLAG
+      { key: 'ctrl+x', label: 'delete project' }, // COPY-FLAG
+    ],
   };
   const tab = visibleTabs(state.data, project)[0] ?? 'branches';
   return { ...state, open: { projectId: project.id, tab, secrets: initialSecretsScreenState(rows, state.dryRun, scope), scroll: 0 } };
@@ -396,6 +499,10 @@ function handleListKey(state: ProjectsScreenState, key: string): ProjectsReduceR
   if (key === KEY_ENTER) {
     const project = projects[clampIndex(state.cursor, projects.length)];
     return noEffect(project ? openProject(state, project) : state);
+  }
+  if (key === KEY_CTRL_X) {
+    const project = projects[clampIndex(state.cursor, projects.length)];
+    return project ? startDelete(state, project) : noEffect(state);
   }
   if (key === KEY_BACKSPACE || key === KEY_BACKSPACE2) return noEffect(withQuery(state, state.query.slice(0, -1)));
   if (key.length === 1 && key.charCodeAt(0) >= 0x20 && key.charCodeAt(0) !== 0x7f) return noEffect(withQuery(state, state.query + key));
@@ -421,7 +528,7 @@ function secretsIdle(secrets: SecretsScreenState): boolean {
  */
 function secretsOwnsKey(secrets: SecretsScreenState, key: string): boolean {
   if (!secretsIdle(secrets)) return true;
-  if (key === KEY_TAB || key === KEY_SHIFT_TAB || key === KEY_CTRL_C) return false;
+  if (key === KEY_TAB || key === KEY_SHIFT_TAB || key === KEY_CTRL_C || key === KEY_CTRL_X) return false;
   if (key === KEY_ESC || key === KEY_ESC_ESC) return secrets.search.query !== '';
   return true;
 }
@@ -457,6 +564,7 @@ function handleProjectKey(state: ProjectsScreenState, view: ProjectView, key: st
   if (onSecretsScreen(state.data, view) && secretsOwnsKey(view.secrets, key)) return forwardToSecrets(state, view, key);
   if (key === KEY_CTRL_C) return noEffect({ ...state, quit: true });
   if (key === KEY_ESC || key === KEY_ESC_ESC) return noEffect({ ...state, open: null });
+  if (key === KEY_CTRL_X) return startDelete(state, project);
   const tabs = visibleTabs(state.data, project);
   if (key === KEY_TAB) return noEffect({ ...state, open: { ...view, tab: stepTab(tabs, view.tab, 1), scroll: 0 } });
   if (key === KEY_SHIFT_TAB) return noEffect({ ...state, open: { ...view, tab: stepTab(tabs, view.tab, -1), scroll: 0 } });
@@ -558,9 +666,11 @@ function renderList(state: ProjectsScreenState, termWidth: number, termHeight: n
   });
   const footer: readonly string[] = [
     '',
+    ...noteLines(state.notes),
     m + joinHints([
       renderHint(null, '↑↓ navigate'), // COPY-FLAG
       renderHint('enter', 'open'), // COPY-FLAG
+      renderHint('ctrl+x', 'delete'), // COPY-FLAG
       renderHint('esc', 'clear/quit'), // COPY-FLAG
     ]),
   ];
@@ -596,8 +706,32 @@ function projectFooter(): string {
   return joinHints([
     renderHint(null, '↑↓ scroll'), // COPY-FLAG
     renderHint('tab', 'next tab'), // COPY-FLAG
+    renderHint('ctrl+x', 'delete project'), // COPY-FLAG
     renderHint('esc', 'back'), // COPY-FLAG
   ]);
+}
+
+/** The notes (what a delete did), dim, above the footer. */
+function noteLines(notes: readonly string[]): readonly string[] {
+  return notes.map((n) => `${' '.repeat(MARGIN)}${DIM}${n}${RESET}`);
+}
+
+/** The delete question: `capy project delete`'s summary, then its question; or the refusal. */
+function renderDialog(state: ProjectsScreenState, dialog: DeleteDialog): readonly string[] {
+  const m = ' '.repeat(MARGIN);
+  const head = [`${m}${BOLD}capy projects${RESET}${dryRunTag(state.dryRun)}`, ''];
+  if (dialog.step === 'loading') return [...head, `${m}${DIM}Loading project...${RESET}`, '', m + renderHint('esc', 'cancel')]; // COPY-FLAG
+  if (dialog.step === 'deleting') return [...head, `${m}${DIM}Deleting project ${dialog.project.name}...${RESET}`]; // COPY-FLAG
+  if (dialog.step === 'refused') {
+    return [...head, `${m}${dialog.refusal.message}`, ...dialog.refusal.lines.map((l) => `${m}${l}`), '', m + renderHint('esc', 'back')];
+  }
+  return [
+    ...head,
+    ...dialog.lines.map((l) => `${m}${l}`),
+    `${m}${BOLD}${deleteQuestion(dialog.project.name)}${RESET}`,
+    '',
+    m + joinHints([renderHint('y', 'yes'), renderHint('n', 'no'), renderHint('enter', 'no')]), // COPY-FLAG
+  ];
 }
 
 /**
@@ -625,7 +759,7 @@ function renderProject(state: ProjectsScreenState, view: ProjectView, termWidth:
   const m = ' '.repeat(MARGIN);
   const available = Math.max(20, termWidth - MARGIN * 2);
   const head: readonly string[] = [`${m}${BOLD}${project.name}${RESET}${dryRunTag(state.dryRun)}`, tabBarLine(tabs, view.tab), ''];
-  const footer: readonly string[] = ['', m + projectFooter()];
+  const footer: readonly string[] = ['', ...noteLines(state.notes), m + projectFooter()];
   const bodyHeight = Math.max(3, termHeight - head.length - footer.length);
   const body = view.tab === 'secrets'
     ? NO_SECRETS_YET_LINES.map((l) => `${m}${l}`)
@@ -635,8 +769,14 @@ function renderProject(state: ProjectsScreenState, view: ProjectView, termWidth:
 
 /** Pure render: a total function of state and terminal size. No line is wider than the terminal. */
 export function render(state: ProjectsScreenState, termWidth: number, termHeight: number): string {
-  if (state.open) return renderProject(state, state.open, termWidth, termHeight);
   const width = Math.max(1, termWidth);
+  if (state.dialog) {
+    return renderDialog(state, state.dialog)
+      .slice(0, Math.max(1, termHeight))
+      .map((l) => clipLine(l, width) + CLEAR_EOL)
+      .join('\n');
+  }
+  if (state.open) return renderProject(state, state.open, termWidth, termHeight);
   return renderList(state, termWidth, termHeight)
     .map((l) => clipLine(l, width) + CLEAR_EOL)
     .join('\n');

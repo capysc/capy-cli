@@ -316,6 +316,16 @@ describe('inside a project: tabs', () => {
     expect(s.open?.secrets.search.query).toBe('DB');
   });
 
+  test('Ctrl+X inside a project (on any tab) opens the delete question for that project', () => {
+    const fromSecrets = handleKey(openFirst(full()), '\x18');
+    expect(fromSecrets.effect).toEqual({ type: 'projectDeletePreview', project: { id: 'p1', name: 'web' } });
+    const fromBranches = handleKey(press(openFirst(full()), ...tabs(3)), '\x18');
+    expect(fromBranches.state.dialog).toEqual({ step: 'loading', project: { id: 'p1', name: 'web' } });
+    // While the edit dialog is open, Ctrl+X is the edit dialog's key, not a delete.
+    const editing = press(openFirst(full()), '\x05');
+    expect(handleKey(editing, '\x18').state.dialog).toBeNull();
+  });
+
   test('no line of any tab is wider than the terminal', () => {
     const s0 = openFirst(full());
     const frames = [0, 1, 2, 3, 4, 5].map((n) => render(press(s0, ...tabs(n)), 50, 16));
