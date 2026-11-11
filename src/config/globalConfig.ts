@@ -19,8 +19,10 @@ export function getAuthSessionPath(userId?: string): string {
 }
 
 /**
- * The one pending `capy pair` grant (agent mode): written by the start run, read by `capy pair --wait`, removed on
- * success, mismatch, expiry, denial and cancel. Under the global dir, so `capy-dev` / `capy-staging` keep their own.
+ * The one pending `capy pair` grant (agent mode): written by the start run, read by `capy pair --wait`. Removal is
+ * decided in `auth/pairing/pendingGrant.ts` (approval seen, expiry, denial, cancel, an expired grant at the start of
+ * any other agent-mode run, an unreadable file, replacement by a new start run). Under the global dir, so `capy-dev`
+ * and `capy-staging` keep their own.
  */
 export function getPairPendingPath(): string {
   return join(getGlobalCapyDir(), 'pair', 'pending.json');

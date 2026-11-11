@@ -7,7 +7,7 @@
  * nothing really waits.
  */
 import { mock, jest, describe, test, expect, beforeEach, afterEach, afterAll, spyOn } from 'bun:test';
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from 'fs';
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync } from 'fs';
 import { join } from 'path';
 import { webcrypto } from 'crypto';
 import { CapyError, ERROR_CODES } from '../../src/types/index';
@@ -45,7 +45,7 @@ mock.module('../../src/service/serviceClient', () => ({
 }));
 
 const { pairAgentCommand, accountMatches, normalizeEmail, PAIR_WAIT_CEILING_MS } = await import('../../src/commands/pairAgentCommand');
-const { getPairPendingPath, getGlobalCapyDir, getAuthSessionPath, getLocalRootPath, getOrgKeyPath, readLocalRoot } = await import('../../src/config/globalConfig');
+const { getPairPendingPath, getGlobalCapyDir, getAuthSessionPath, getLocalRootPath, getOrgKeyPath, readLocalRoot, saveAuthSession, savePairPendingRaw } = await import('../../src/config/globalConfig');
 const { PAIR_DEFAULT_PURPOSE } = await import('../../src/commands/pairCommand');
 const { exportPairKeyPair, generatePairKeyPair, importPairKeyPair } = await import('../../src/crypto/pairCrypto');
 
@@ -149,6 +149,7 @@ const PAYLOAD: PairingPayload = {
   }],
 };
 
+const readPairFileOf = (path: string): string => readFileSync(path, 'utf8');
 const pendingExists = (): boolean => existsSync(getPairPendingPath());
 const pendingRaw = (): string => readFileSync(getPairPendingPath(), 'utf8');
 const keysWritten = (): boolean => existsSync(getLocalRootPath('org-123', USER.id)) || existsSync(getOrgKeyPath('org-123', USER.id));
@@ -163,7 +164,11 @@ describe('capy pair, agent mode', () => {
     // Never clear anything that is not the temp home (a real ~/.capy holds recovery-equivalent keys).
     if (!getGlobalCapyDir().startsWith(tempHome)) throw new Error('the home directory mock is not in effect');
     rmSync(getGlobalCapyDir(), { recursive: true, force: true });
-    mockInstallDeviceGrantSession.mockResolvedValue({ success: true, organization_id: 'org-123', user_id: USER.id });
+    // The real session-writing step: a session file appears on disk exactly when this runs.
+    mockInstallDeviceGrantSession.mockImplementation(async (_token: unknown, user: { id: string }) => {
+      saveAuthSession({ version: 2, user_id: user.id }, user.id);
+      return { success: true, organization_id: 'org-123', user_id: user.id };
+    });
     mockAuthenticateSilent.mockResolvedValue({ success: true, organization_id: 'org-123', user_id: USER.id });
   });
 
@@ -276,6 +281,7 @@ describe('capy pair, agent mode', () => {
       expect(mockPickupDevicePairing).toHaveBeenCalledWith('device-1');
       expect(readLocalRoot('org-123', USER.id)?.equals(Buffer.alloc(32, 5))).toBe(true);
       expect(existsSync(getOrgKeyPath('org-123', USER.id))).toBe(true);
+      expect(existsSync(getAuthSessionPath(USER.id))).toBe(true);
       expect(pendingExists()).toBe(false);
     });
 
@@ -363,13 +369,39 @@ describe('capy pair, agent mode', () => {
       expect(JSON.parse(pendingRaw()).interval_seconds).toBe(10);
     });
 
-    test('an interval longer than the ceiling polls once and says still waiting', async () => {
+    test('an interval at least as long as the ceiling polls once and returns at once; the next run waits it out without polling', async () => {
       stubFetch([PENDING], { ...AUTHORIZE_BODY, interval: 60 });
       await run({ email: 'mike@example.com' });
       const fetchMock = stubFetch([PENDING]);
-      const ran = await run({ wait: true });
+      const first = fakeClock();
+      const ran = await run({ wait: true }, first);
       expect(ran.exit).toBe(3);
+      expect(ran.json.code).toBe(ERROR_CODES.PAIR_STILL_WAITING);
       expect(callsTo(fetchMock, '/auth/device/token')).toHaveLength(1);
+      expect(first.sleep).not.toHaveBeenCalled();
+      expect(JSON.parse(pendingRaw()).interval_seconds).toBe(60);
+      const second = fakeClock();
+      const again = await run({ wait: true }, second);
+      expect(again.json.code).toBe(ERROR_CODES.PAIR_STILL_WAITING);
+      expect(callsTo(fetchMock, '/auth/device/token')).toHaveLength(1);
+      expect(second.sleep).not.toHaveBeenCalled();
+    });
+
+    test('the interval is respected across runs: the next run sleeps until the saved earliest-next-poll time before it polls', async () => {
+      await startThenStub('mike@example.com', [PENDING]);
+      const first = await run({ wait: true });
+      expect(first.json.code).toBe(ERROR_CODES.PAIR_STILL_WAITING);
+      const saved = JSON.parse(pendingRaw()).next_poll_at as number;
+      expect(saved).toBeGreaterThan(Date.now());
+      const fetchMock = stubFetch([APPROVED]);
+      // The real first run takes its 30 seconds; the fake one did not, so the second run starts a moment later.
+      const clock = fakeClock(Date.now() + 1000);
+      const ran = await run({ wait: true }, clock);
+      expect(ran.exit).toBe(0);
+      expect(callsTo(fetchMock, '/auth/device/token')).toHaveLength(1);
+      const [[slept]] = clock.sleep.mock.calls as number[][];
+      expect(slept).toBeGreaterThan(20_000);
+      expect(slept).toBeLessThanOrEqual(30_000);
     });
 
     test('an expired grant (service says so): PAIR_EXPIRED, pending file gone, nothing installed', async () => {
@@ -427,6 +459,204 @@ describe('capy pair, agent mode', () => {
     });
   });
 
+  describe('bounds and hygiene', () => {
+    const EMPTY_EMAIL_USER = { ...USER, email: '' };
+
+    async function startThenStubAny(email: string | undefined, tokens: readonly Wire[]) {
+      const startFetch = stubFetch([PENDING]);
+      await run({ ...(email === undefined ? {} : { email }) });
+      mockPickupDevicePairing.mockImplementation(async () => ({ sealed: await sealAsBrowser(PAYLOAD, sentPublicKey(startFetch)) }));
+      return stubFetch(tokens);
+    }
+
+    test('a start run that replaces a pending file whose mode was loosened to 0644 leaves it at 0600', async () => {
+      stubFetch([PENDING]);
+      await run({ email: 'mike@example.com' });
+      chmodSync(getPairPendingPath(), 0o644);
+      expect(statSync(getPairPendingPath()).mode & 0o777).toBe(0o644);
+      await run({ email: 'mike@example.com' });
+      expect(statSync(getPairPendingPath()).mode & 0o777).toBe(0o600);
+    });
+
+    test('a still-waiting rewrite of the pending file holds no token', async () => {
+      await startThenStubAny('mike@example.com', [PENDING]);
+      const before = pendingRaw();
+      await run({ wait: true });
+      const after = pendingRaw();
+      expect(after).not.toBe(before);
+      expect(after).not.toMatch(/token/i);
+      expect(after).not.toContain('jwt-secret');
+    });
+
+    test('the pending file is private to its global dir name: two names, two paths, and a file under one is invisible to the other', () => {
+      const script = (action: string) => `
+        import { getPairPendingPath, savePairPendingRaw, readPairPendingRaw } from ${JSON.stringify(join(import.meta.dir, '../../src/config/globalConfig.ts'))};
+        ${action}
+        console.log(JSON.stringify({ path: getPairPendingPath(), content: readPairPendingRaw() }));`;
+      const inDir = (name: string, action: string) => {
+        const result = Bun.spawnSync(['bun', '-e', script(action)], { env: { ...process.env, HOME: tempHome, CAPY_GLOBAL_DIR_NAME: name } });
+        return JSON.parse(result.stdout.toString().trim().split('\n').at(-1) as string) as { path: string; content: string | null };
+      };
+      const a = inDir('.capy-iso-a', "savePairPendingRaw('only-in-a');");
+      const b = inDir('.capy-iso-b', '');
+      const aAgain = inDir('.capy-iso-a', '');
+      expect(a.path).not.toBe(b.path);
+      expect(a.path).toBe(join(tempHome, '.capy-iso-a', 'pair', 'pending.json'));
+      expect(b.path).toBe(join(tempHome, '.capy-iso-b', 'pair', 'pending.json'));
+      expect(a.content).toBe('only-in-a');
+      expect(b.content).toBeNull();
+      expect(aAgain.content).toBe('only-in-a');
+      expect(readPairFileOf(a.path)).toBe('only-in-a');
+    });
+
+    test('no agent path prints the private key, the device code or a token', async () => {
+      const secretsOf = (): readonly string[] => {
+        const file = JSON.parse(pendingRaw());
+        return [file.pair_private_key, file.device_code];
+      };
+      const quiet = (ran: Ran, secrets: readonly string[]) => {
+        secrets.forEach((secret) => expect(ran.stdout).not.toContain(secret));
+        ['jwt-secret', 'rt-secret', 'device-1'].forEach((secret) => expect(ran.stdout).not.toContain(secret));
+      };
+      stubFetch([PENDING]);
+      const form = await run({});
+      quiet(form, []);
+      const started = await run({ email: 'mike@example.com' });
+      const secrets = secretsOf();
+      quiet(started, secrets);
+      stubFetch([PENDING]);
+      quiet(await run({ wait: true }), secrets);
+      quiet(await run({ cancel: true }), secrets);
+      quiet(await run({ wait: true }), secrets);
+      // Mismatch, success, expired and denied.
+      await startThenStubAny('other@example.com', [APPROVED]);
+      const mismatchSecrets = secretsOf();
+      quiet(await run({ wait: true }), mismatchSecrets);
+      await startThenStubAny('mike@example.com', [APPROVED]);
+      const successSecrets = secretsOf();
+      quiet(await run({ wait: true }), successSecrets);
+      await startThenStubAny('mike@example.com', [EXPIRED]);
+      const expiredSecrets = secretsOf();
+      quiet(await run({ wait: true }), expiredSecrets);
+      await startThenStubAny('mike@example.com', [DENIED]);
+      const deniedSecrets = secretsOf();
+      quiet(await run({ wait: true }), deniedSecrets);
+    });
+
+    test('a poll that times out is a coded NETWORK_ERROR, the pending file is kept, and the request carried an abort signal', async () => {
+      await startThenStubAny('mike@example.com', [PENDING]);
+      const fetchMock = jest.fn((_url: string, init: { signal?: AbortSignal }) => new Promise<Response>((_resolve, reject) => {
+        init.signal?.addEventListener('abort', () => reject(init.signal?.reason));
+      }));
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+      const before = pendingRaw();
+      const ran = await run({ wait: true }, { ...fakeClock(), pollTimeoutMs: 20 });
+      expect(ran.exit).toBe(1);
+      expect(ran.json.code).toBe(ERROR_CODES.NETWORK_ERROR);
+      expect(pendingExists()).toBe(true);
+      expect(pendingRaw()).toBe(before);
+      expect(fetchMock.mock.calls[0][1].signal).toBeInstanceOf(AbortSignal);
+    });
+
+    test('the authorize request carries no abort signal (the shared request path is unchanged for everyone else)', async () => {
+      const fetchMock = stubFetch([PENDING]);
+      await run({ email: 'mike@example.com' });
+      const [, init] = callsTo(fetchMock, '/auth/device/authorize')[0] as [string, { signal?: AbortSignal }];
+      expect(init.signal).toBeUndefined();
+    });
+
+    test('an expired pending file is swept by a start run that fails, and by the form path, and by cancel', async () => {
+      const expire = () => {
+        const file = JSON.parse(pendingRaw());
+        savePairPendingRaw(JSON.stringify({ ...file, expires_at: new Date(Date.now() - 1000).toISOString() }));
+      };
+      stubFetch([PENDING]);
+      await run({ email: 'mike@example.com' });
+      expire();
+      expect(pendingExists()).toBe(true);
+      const form = await run({});
+      expect(form.json.code).toBe(ERROR_CODES.PAIR_EMAIL_REQUIRED);
+      expect(pendingExists()).toBe(false);
+
+      await run({ email: 'mike@example.com' });
+      expire();
+      globalThis.fetch = (async () => ({ ok: false, status: 500, json: async () => ({ error: 'down', code: 'AUTH_FAILED' }) }) as Response) as typeof fetch;
+      const failed = await run({ email: 'mike@example.com' });
+      expect(failed.exit).toBe(1);
+      expect(pendingExists()).toBe(false);
+
+      stubFetch([PENDING]);
+      await run({ email: 'mike@example.com' });
+      expire();
+      await run({ cancel: true });
+      expect(pendingExists()).toBe(false);
+    });
+
+    test('a pending file that has not expired is not swept by the form path', async () => {
+      stubFetch([PENDING]);
+      await run({ email: 'mike@example.com' });
+      await run({});
+      expect(pendingExists()).toBe(true);
+    });
+
+    test('an approving user with no email, or an empty one, cannot satisfy an email expectation: PAIR_ACCOUNT_MISMATCH, nothing installed', async () => {
+      const { email: _omitted, ...noEmail } = USER;
+      const bodies = [{ ...APPROVED.body, user: noEmail }, { ...APPROVED.body, user: EMPTY_EMAIL_USER }, { ...APPROVED.body, user: { ...USER, email: null } }];
+      for (const body of bodies) {
+        await startThenStubAny('mike@example.com', [{ status: 200, body }]);
+        const ran = await run({ wait: true });
+        expect(ran.exit).toBe(1);
+        expect(ran.json.code).toBe(ERROR_CODES.PAIR_ACCOUNT_MISMATCH);
+        expect(mockInstallDeviceGrantSession).not.toHaveBeenCalled();
+        expect(existsSync(getAuthSessionPath(USER.id))).toBe(false);
+        expect(keysWritten()).toBe(false);
+        expect(pendingExists()).toBe(false);
+      }
+    });
+
+    test.each(['not-an-email', 'a b@c.co', 'a@@b.co', '@b.co', 'a@'])('--email %p fails the form field\'s own pattern: the form again, no network call', async (email) => {
+      const fetchMock = stubFetch([PENDING]);
+      const ran = await run({ email });
+      expect(ran.exit).toBe(3);
+      expect(ran.json.code).toBe(ERROR_CODES.PAIR_EMAIL_REQUIRED);
+      expect(ran.json.elicitation.kind).toBe('form');
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(pendingExists()).toBe(false);
+    });
+
+    test('every email the form accepts is one the form\'s pattern matches', async () => {
+      stubFetch([PENDING]);
+      const form = await run({});
+      const pattern = new RegExp(form.json.elicitation.fields[0].pattern);
+      expect(pattern.test('mike@example.com')).toBe(true);
+      expect(pattern.test('not-an-email')).toBe(false);
+    });
+
+    test.each([
+      ['a zero interval', { interval: 0 }],
+      ['a negative interval', { interval: -5 }],
+      ['a non-numeric interval', { interval: 'soon' }],
+      ['no interval', { interval: undefined }],
+      ['no expiry at all', { expires_in: undefined }],
+      ['a zero expires_in', { expires_in: 0 }],
+      ['an unparseable expires_at', { expires_at: 'tomorrow-ish' }],
+      ['no user code', { user_code: '' }],
+    ])('%s from the service: INVALID_FORMAT and nothing is saved', async (_name, patch) => {
+      stubFetch([PENDING], { ...AUTHORIZE_BODY, ...patch });
+      const ran = await run({ email: 'mike@example.com' });
+      expect(ran.exit).toBe(1);
+      expect(ran.json.code).toBe(ERROR_CODES.INVALID_FORMAT);
+      expect(pendingExists()).toBe(false);
+    });
+
+    test('a valid expires_at from the service is kept as the grant\'s expiry', async () => {
+      const at = new Date(Date.now() + 120_000).toISOString();
+      stubFetch([PENDING], { ...AUTHORIZE_BODY, expires_at: at });
+      const ran = await run({ email: 'mike@example.com' });
+      expect(ran.json.elicitation.expires_at).toBe(at);
+    });
+  });
+
   describe('cancel', () => {
     test('removes the pending file', async () => {
       stubFetch([PENDING]);
@@ -434,7 +664,7 @@ describe('capy pair, agent mode', () => {
       expect(pendingExists()).toBe(true);
       const ran = await run({ cancel: true });
       expect(ran.exit).toBe(0);
-      expect(ran.json).toEqual({ ok: true, code: ERROR_CODES.PAIR_CANCELLED });
+      expect(ran.json).toEqual({ ok: true, status: 'cancelled' });
       expect(pendingExists()).toBe(false);
     });
 
@@ -442,7 +672,7 @@ describe('capy pair, agent mode', () => {
       const fetchMock = stubFetch([PENDING]);
       const ran = await run({ cancel: true });
       expect(ran.exit).toBe(0);
-      expect(ran.json).toEqual({ ok: true, code: ERROR_CODES.PAIR_CANCELLED });
+      expect(ran.json).toEqual({ ok: true, status: 'cancelled' });
       expect(fetchMock).not.toHaveBeenCalled();
     });
   });
@@ -460,7 +690,6 @@ describe('who must approve', () => {
     expect(accountMatches(grant, { email: 'xmike@example.com' })).toBe(false);
     expect(accountMatches(grant, { email: '' })).toBe(false);
   });
-
 });
 
 describe('the pair key pair in the pending file', () => {

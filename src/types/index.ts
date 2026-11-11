@@ -684,8 +684,6 @@ export const ERROR_CODES = {
   PAIR_EXPIRED: 'PAIR_EXPIRED',
   /** `capy pair --wait`: the human denied the grant. */
   PAIR_DENIED: 'PAIR_DENIED',
-  /** `capy pair --cancel`: the pending pairing (if any) is gone. Success. */
-  PAIR_CANCELLED: 'PAIR_CANCELLED',
   // --- capy remove (CAP-686) ---
   /** `capy remove NAME...`: one or more names given are not on the active branch. */
   VAR_NOT_FOUND: 'VAR_NOT_FOUND',

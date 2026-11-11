@@ -5,7 +5,12 @@
  * nothing it could misuse: the device code, the one-time pair key pair (needed to open the sealed payload), the short
  * code and link, who is expected to approve, the options that shaped the run, and the grant's expiry and interval.
  * NEVER a session token. The file is mode 0600 under the global config dir (`getPairPendingPath`), so `capy-dev` and
- * `capy-staging` keep their own, and it is removed on success, mismatch, expiry, denial and cancel.
+ * `capy-staging` keep their own.
+ *
+ * It is removed: by `capy pair --wait` the moment an approval is seen (before the account check, so on success and on
+ * mismatch alike), on expiry and on denial; by `capy pair --cancel`; by any agent-mode `capy pair` run other than
+ * `--wait` once the grant has expired (`sweepExpiredPendingPairGrant`); when it is read and cannot be parsed; and when
+ * a new start run replaces it. A poll error keeps it.
  *
  * Nothing here logs or prints the file's contents.
  */
@@ -17,7 +22,7 @@ export interface PendingPairGrant {
   readonly keyPair: PairKeyPair;
   readonly userCode: string;
   readonly deviceLink: string;
-  /** The account expected to approve. Already trimmed and lower-cased. */
+  /** Already trimmed and lower-cased. */
   readonly expectedEmail: string;
   readonly force: boolean;
   readonly apiUrl: string;
@@ -26,6 +31,8 @@ export interface PendingPairGrant {
   /** ISO time the grant expires. */
   readonly expiresAt: string;
   readonly intervalSeconds: number;
+  /** Earliest time (ms since the epoch) the next poll may be sent, so a later wait run never polls before the interval is up. Absent before the first poll. */
+  readonly nextPollAt?: number;
 }
 
 const FILE_VERSION = 1;
@@ -55,6 +62,7 @@ function parsePending(raw: string): PendingPairGrant | null {
   const expiresAt = str(data.expires_at);
   const interval = data.interval_seconds;
   const expectedEmail = str(data.expected_email);
+  const nextPollAt = typeof data.next_poll_at === 'number' && Number.isFinite(data.next_poll_at) ? data.next_poll_at : undefined;
   if (!deviceCode || !privateKey || !publicKey || !userCode || !deviceLink || !apiUrl || !purpose || !expiresAt) return null;
   if (typeof interval !== 'number' || !Number.isFinite(interval) || interval <= 0) return null;
   if (Number.isNaN(Date.parse(expiresAt))) return null;
@@ -78,6 +86,7 @@ function parsePending(raw: string): PendingPairGrant | null {
     purpose,
     expiresAt,
     intervalSeconds: interval,
+    ...(nextPollAt !== undefined ? { nextPollAt } : {}),
   };
 }
 
@@ -97,6 +106,7 @@ export function savePendingPairGrant(grant: PendingPairGrant): void {
     purpose: grant.purpose,
     expires_at: grant.expiresAt,
     interval_seconds: grant.intervalSeconds,
+    ...(grant.nextPollAt !== undefined ? { next_poll_at: grant.nextPollAt } : {}),
   }));
 }
 
@@ -114,4 +124,12 @@ export function removePendingPairGrant(): boolean {
   const existed = readPairPendingRaw() !== null;
   deletePairPending();
   return existed;
+}
+
+/** Removes the pending grant when its expiry has passed (or it cannot be read). Returns whether one was removed. */
+export function sweepExpiredPendingPairGrant(nowMs: number): boolean {
+  const grant = readPendingPairGrant();
+  if (!grant || nowMs < Date.parse(grant.expiresAt)) return false;
+  deletePairPending();
+  return true;
 }
