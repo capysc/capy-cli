@@ -714,7 +714,7 @@ program
   .option('--email <email>', 'agent mode: the account that will approve; prints a link and exits 3 at once, then run --wait') // COPY-FLAG
   .option('--wait', 'agent mode: wait for the pending pairing to be approved (exits 3 with PAIR_STILL_WAITING after 30 seconds; run it again)') // COPY-FLAG
   .option('--cancel', 'agent mode: drop the pending pairing') // COPY-FLAG
-  .addHelpText('after', '\nAfter browser approval: Enable this location as [email]? (y/N)\nAgents: use an interactive terminal/PTY, show the email to the human, and obtain explicit approval before answering Yes. Never auto-confirm. No upfront email is required.\n')
+  .addHelpText('after', '\nIn a terminal, after browser approval: Enable this location as [email]? (y/N)\nAgents: ask the human which email will approve, run `capy pair --email <email>`, show the human the link and code, then run `capy pair --wait`. Never fill in the email yourself.\n') // COPY-FLAG
   .action(async (options) => {
     assertNotLocalOnly('pair');
     const { pairEntry } = await import('./commands/pairEntry');
