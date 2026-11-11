@@ -109,3 +109,8 @@ export function createProjectDisplay(input: CreateDisplayInput): string {
   ]);
   return `${summary}\n\n${input.branchDescription}`;
 }
+
+/** The table for `capy pair` asking for the email of the account that will approve: one row, still to choose. */
+export function pairEmailDisplay(): string {
+  return table(['', ''], [['Email', TO_CHOOSE]]); // COPY-FLAG
+}

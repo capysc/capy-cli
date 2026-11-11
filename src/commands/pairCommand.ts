@@ -15,8 +15,8 @@
 import { confirmPairAccount } from './pairAccountConfirmation';
 import { resolveActiveUrl } from '../config/profileConfig';
 import { resolveKeepOrigin } from '../config/keepOrigin';
-import { generatePairKeyPair, openPairEnvelope, parsePairEnvelope } from '../crypto/pairCrypto';
-import { authorizeDevice, pollDeviceToken } from '../auth/deviceGrant';
+import { generatePairKeyPair, openPairEnvelope, parsePairEnvelope, type PairKeyPair } from '../crypto/pairCrypto';
+import { authorizeDevice, pollDeviceToken, type DeviceTokenExchange } from '../auth/deviceGrant';
 import { AuthService } from '../auth/authService';
 import { ServiceClient } from '../service/serviceClient';
 import { readLocalRoot, saveLocalRoot, writeOrgKeyFileRaw } from '../config/globalConfig';
@@ -44,8 +44,8 @@ function announce(json: boolean, line: string): void {
 }
 
 interface PairedOrg {
-  org_id: string;
-  user_id: string;
+  readonly org_id: string;
+  readonly user_id: string;
 }
 
 /** Writes one entry's `local.key` + `key.enc`, honoring the local.key conflict guard. Returns whether it was written or skipped (--force not needed, values matched). */
@@ -63,6 +63,9 @@ function writeEntry(entry: PairingEntry, force: boolean): 'written' {
   writeOrgKeyFileRaw(entry.org_id, entry.key_enc, entry.user_id);
   return 'written';
 }
+
+/** What a link elicitation says the pairing is for. Display text for the agent. */
+export const PAIR_DEFAULT_PURPOSE = 'Sign in or sign up in Keep, prepare Transport, and pair this CLI.'; // COPY-FLAG
 
 const PAIR_LINK_LABEL = 'Approve on your other device:'; // COPY-FLAG
 
@@ -119,9 +122,51 @@ function printHumanPairBlock(deviceLink: string, qr: RenderedTerminalQr | null, 
   return prompt;
 }
 
+/**
+ * Everything after the approving account is accepted: install the device-grant session, pick up and open the sealed
+ * payload, and write the key files. Shared by the terminal flow below and by `capy pair --wait`
+ * (`pairAgentCommand.ts`); behaviour is the same in both.
+ */
+export async function finishPairing(
+  exchange: DeviceTokenExchange,
+  keyPair: PairKeyPair,
+  deviceCode: string,
+  options: PairOptions,
+): Promise<{ readonly paired: readonly PairedOrg[] }> {
+  const force = options.force === true;
+  const devMode = options.devMode === true;
+  const authService = new AuthService(options.apiUrl, devMode);
+  const installed = await authService.installDeviceGrantSession(exchange.token, exchange.user, exchange.organizations);
+  if (!installed.organization_id) {
+    // Multi-org account with no org scoped by the device-grant token yet —
+    // resolve into one the same way every other org-context command does.
+    await authService.authenticateSilent();
+  }
+
+  const serviceClient = new ServiceClient(options.apiUrl, devMode);
+  serviceClient.setTokenProvider(() => authService.getValidToken());
+
+  const { sealed } = await serviceClient.pickupDevicePairing(deviceCode);
+  const envelope = parsePairEnvelope(sealed);
+  const payload = openPairEnvelope(envelope, keyPair);
+
+  const matching = payload.entries.filter((e) => e.user_id === exchange.user.id);
+  if (matching.length === 0) {
+    throw new CapyError(
+      'No keys were waiting for this account — run `capy transport` on a machine that already has them, then try again.', // COPY-FLAG
+      ERROR_CODES.PAIR_NO_KEYS,
+    );
+  }
+
+  const paired: readonly PairedOrg[] = matching.map((entry) => {
+    writeEntry(entry, force);
+    return { org_id: entry.org_id, user_id: entry.user_id };
+  });
+  return { paired };
+}
+
 export async function pairCommand(options: PairOptions = {}): Promise<void> {
   const json = options.json === true;
-  const force = options.force === true;
   const devMode = options.devMode === true;
   try {
     // Same precedence ServiceClient's constructor uses: explicit override
@@ -173,33 +218,7 @@ export async function pairCommand(options: PairOptions = {}): Promise<void> {
       );
     }
 
-    const authService = new AuthService(options.apiUrl, devMode);
-    const installed = await authService.installDeviceGrantSession(exchange.token, exchange.user, exchange.organizations);
-    if (!installed.organization_id) {
-      // Multi-org account with no org scoped by the device-grant token yet —
-      // resolve into one the same way every other org-context command does.
-      await authService.authenticateSilent();
-    }
-
-    const serviceClient = new ServiceClient(options.apiUrl, devMode);
-    serviceClient.setTokenProvider(() => authService.getValidToken());
-
-    const { sealed } = await serviceClient.pickupDevicePairing(authorize.device_code);
-    const envelope = parsePairEnvelope(sealed);
-    const payload = openPairEnvelope(envelope, keyPair);
-
-    const matching = payload.entries.filter((e) => e.user_id === exchange.user.id);
-    if (matching.length === 0) {
-      throw new CapyError(
-        'No keys were waiting for this account — run `capy transport` on a machine that already has them, then try again.', // COPY-FLAG
-        ERROR_CODES.PAIR_NO_KEYS,
-      );
-    }
-
-    const paired: PairedOrg[] = matching.map((entry) => {
-      writeEntry(entry, force);
-      return { org_id: entry.org_id, user_id: entry.user_id };
-    });
+    const { paired } = await finishPairing(exchange, keyPair, authorize.device_code, options);
 
     if (json) {
       console.log(JSON.stringify({ ok: true, user_id: exchange.user.id, paired }, null, 2));

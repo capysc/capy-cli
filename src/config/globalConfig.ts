@@ -18,6 +18,14 @@ export function getAuthSessionPath(userId?: string): string {
   return join(getGlobalCapyDir(), 'auth', 'session.json');
 }
 
+/**
+ * The one pending `capy pair` grant (agent mode): written by the start run, read by `capy pair --wait`, removed on
+ * success, mismatch, expiry, denial and cancel. Under the global dir, so `capy-dev` / `capy-staging` keep their own.
+ */
+export function getPairPendingPath(): string {
+  return join(getGlobalCapyDir(), 'pair', 'pending.json');
+}
+
 export function getOrgKeyPath(orgId: string, userId?: string): string {
   if (userId) {
     return join(getGlobalCapyDir(), 'orgs', orgId, 'users', userId, 'key.enc');
@@ -190,6 +198,20 @@ export function readProjectKeyCache(
 
 export function saveAuthSession(token: object, userId?: string): void {
   writeSecureFile(getAuthSessionPath(userId), JSON.stringify(token, null, 2));
+}
+
+/** Writes the pending pair grant, mode 0600, replacing any earlier one (the old file goes first, so its mode never carries over). */
+export function savePairPendingRaw(content: string): void {
+  rmSync(getPairPendingPath(), { force: true });
+  writeSecureFile(getPairPendingPath(), content);
+}
+
+export function readPairPendingRaw(): string | null {
+  return readFileOrNull(getPairPendingPath());
+}
+
+export function deletePairPending(): void {
+  rmSync(getPairPendingPath(), { force: true });
 }
 
 export function readAuthSession(userId?: string): object | null {
