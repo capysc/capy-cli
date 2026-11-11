@@ -29,7 +29,7 @@ export function redeemRepoOrgRefusal(projectRoot: string, invitedOrgId: string):
   const repoOrgId = readTrackedRepoOrgId(projectRoot);
   if (repoOrgId === undefined || repoOrgId === invitedOrgId) return undefined;
   return new CapyError(
-    `This git repo belongs to ${repoOrgId}. You cannot redeem an invite for ${invitedOrgId} into it.`, // COPY-FLAG
+    `This git repo belongs to ${repoOrgId}. You cannot redeem an invite for ${invitedOrgId} into it.`,
     ERROR_CODES.REPO_ORG_MISMATCH,
     { repo_org_id: repoOrgId, requested_org_id: invitedOrgId },
   );
@@ -43,7 +43,7 @@ export function switchRepoOrgRefusal(
 ): CapyError | undefined {
   if (repoOrgId === undefined || repoOrgId === requestedOrgId) return undefined;
   return new CapyError(
-    `This git repo belongs to ${repoOrgName ?? repoOrgId}. You cannot switch it to another organization.`, // COPY-FLAG
+    `This git repo belongs to ${repoOrgName ?? repoOrgId}. You cannot switch it to another organization.`,
     ERROR_CODES.REPO_ORG_MISMATCH,
     { repo_org_id: repoOrgId, ...(requestedOrgId === undefined ? {} : { requested_org_id: requestedOrgId }) },
   );
