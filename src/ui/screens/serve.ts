@@ -1,6 +1,7 @@
 import { createServer, IncomingMessage, Server, ServerResponse } from 'http';
 import { createHash, randomBytes, timingSafeEqual } from 'crypto';
 import { SCREEN_HTML, SCREEN_WIDE } from './generated';
+import { CALLBACK_HTML } from './callback.generated';
 import type { ScreenDataMap, ScreenName } from './contract';
 
 /** Serve-time marker baked into every embedded screen by the ui build. */
@@ -80,7 +81,7 @@ export function screenHeaders(opts: { interactive?: boolean } = {}): Record<stri
  */
 export function renderScreen<K extends ScreenName>(screen: K, data: ScreenDataMap[K]): string {
   const json = JSON.stringify(data).replace(/</g, '\\u003c');
-  const html = SCREEN_HTML[screen].replace(DATA_PLACEHOLDER, () => json);
+  const html = (CALLBACK_HTML[screen] ?? SCREEN_HTML[screen]).replace(DATA_PLACEHOLDER, () => json);
   return SCREEN_WIDE[screen] ? html.replace('<head>', `<head>${WIDE_WINDOW_MARKER}`) : html;
 }
 
