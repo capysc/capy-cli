@@ -10,6 +10,7 @@ import { SyncEngine } from '../sync/syncEngine';
 import { hashValue } from './statusCommand';
 import { gateFirst, type GateOptions } from '../sync/gate';
 import { conflictFlagsOrExit, type RawConflictFlags } from '../sync/conflicts';
+import { pinnedHashes } from '../sync/commit';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -23,26 +24,25 @@ const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
  * Presence is `=== undefined` deliberately: '' is a legitimate committed value
  * (its hash pins as e3b0c44298fc1c14), and a falsy check misreads every
  * empty-valued variable as a deletion — permanently blocking branch switches
- * on any branch that pins empty placeholders.
+ * on any branch that pins empty values.
+ *
+ * What counts as pinned is `pinnedHashes`, the same reading `capy`, `capy
+ * status` and `capy edit` use. A placeholder (a name an import could not read
+ * a value for) pins no value: its clean state is no line in .env, and a value
+ * typed into .env for it is an uncommitted addition, exactly as `capy` sees it.
  */
 export function findUncommittedEnvChange(
-  localPlaintext: Record<string, string>,
+  localPlaintext: Readonly<Record<string, string>>,
   variables: KeepFile['variables'],
   branch: string,
 ): string | null {
-  const pinnedKeys = new Set<string>();
-  for (const [varName, entries] of Object.entries(variables)) {
-    const entry = entries.find(e => e.branch === branch);
-    if (!entry) continue;
-    pinnedKeys.add(varName);
+  const pinned = pinnedHashes({ variables }, branch);
+  const changed = Object.entries(pinned).find(([varName, hash]) => {
     const localValue = localPlaintext[varName];
-    if (localValue === undefined) return varName; // uncommitted deletion
-    if (hashValue(localValue) !== entry.value_hash) return varName; // uncommitted edit
-  }
-  for (const varName of Object.keys(localPlaintext)) {
-    if (!pinnedKeys.has(varName)) return varName; // uncommitted addition
-  }
-  return null;
+    return localValue === undefined || hashValue(localValue) !== hash; // uncommitted deletion or edit
+  });
+  if (changed) return changed[0];
+  return Object.keys(localPlaintext).find((varName) => !Object.hasOwn(pinned, varName)) ?? null; // uncommitted addition
 }
 
 export interface DirtyBranchIssue {
