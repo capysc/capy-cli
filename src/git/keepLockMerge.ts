@@ -38,7 +38,9 @@ export type KeepLockConflictCode =
   /** One side removed a delivery target that the other side changed. */
   | 'TARGET_REMOVED_AND_CHANGED'
   /** The same delivery target was changed on both sides and the two `deployed_at` cannot be ordered. */
-  | 'TARGET_DIVERGED';
+  | 'TARGET_DIVERGED'
+  /** The later delivery of a target would win, but the losing one holds a deploy id (live or superseded) the winner does not account for: that token would be untracked. */
+  | 'TARGET_DEPLOY_IDS_UNACCOUNTED';
 
 export type KeepLockSide = 'base' | 'ours' | 'theirs';
 
@@ -93,11 +95,36 @@ function deepEqual(a: unknown, b: unknown): boolean {
   return false;
 }
 
+const sameBytes = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b);
+
+/**
+ * The same value with every object's keys in code-unit order. Two sides that
+ * agree on a value but wrote its keys in a different order get this, so the
+ * merged bytes do not depend on which side is "ours".
+ */
+function sortKeys(v: unknown): unknown {
+  if (Array.isArray(v)) return v.map(sortKeys);
+  if (!isObj(v)) return v;
+  return Object.fromEntries(sortedCopy(Object.keys(v), compareStrings).map((k) => [k, sortKeys(v[k])]));
+}
+
+/** A sorted copy of `items`: the sorted array is built here and the input is never changed (`toSorted` is ES2023; this package supports Node 18). */
+function sortedCopy<T>(items: readonly T[], compare: (a: T, b: T) => number): readonly T[] {
+  return Array.from(items).sort(compare);
+}
+
+/** Code-unit order, as `Array.prototype.sort` orders strings by default. */
+function compareStrings(a: string, b: string): number {
+  if (a < b) return -1;
+  if (a > b) return 1;
+  return 0;
+}
+
 type ThreeWay = { readonly agreed: true; readonly value: unknown } | { readonly agreed: false };
 
 /** One value, three versions: the side that changed it wins; both changed it differently is not agreed. */
 function threeWay(base: unknown, ours: unknown, theirs: unknown): ThreeWay {
-  if (deepEqual(ours, theirs)) return { agreed: true, value: ours };
+  if (deepEqual(ours, theirs)) return { agreed: true, value: sameBytes(ours, theirs) ? ours : sortKeys(ours) };
   if (deepEqual(base, ours)) return { agreed: true, value: theirs };
   if (deepEqual(base, theirs)) return { agreed: true, value: ours };
   return { agreed: false };
@@ -191,10 +218,15 @@ const isCount = (v: unknown): v is number => typeof v === 'number' && Number.isI
 function mergeDeployRevision(base: Obj, ours: Obj, theirs: Obj): Result<number | undefined> {
   const values = [base.deploy_revision, ours.deploy_revision, theirs.deploy_revision];
   if (!values.every((v) => v === undefined || isCount(v))) return fail({ code: 'DEPLOY_REVISION_UNORDERABLE', field: 'deploy_revision' });
-  const [b, o, t] = values.map((v) => (isCount(v) ? v : 0));
+  const [rb, ro, rt] = values as readonly (number | undefined)[];
+  // A side that left it as the ancestor had it (present or absent) did nothing: the other side's value stands.
+  if (ro === rb) return ok(rt);
+  if (rt === rb) return ok(ro);
+  // Both sides removed it.
+  if (ro === undefined && rt === undefined) return ok(undefined);
+  const [b, o, t] = [rb ?? 0, ro ?? 0, rt ?? 0];
   if (o < b || t < b) return fail({ code: 'DEPLOY_REVISION_UNORDERABLE', field: 'deploy_revision' });
-  const anySide = ours.deploy_revision !== undefined || theirs.deploy_revision !== undefined;
-  return ok(anySide ? o + t - b : undefined);
+  return ok(o + t - b);
 }
 
 function mergeTopLevel(
@@ -221,21 +253,51 @@ function mergeTopLevel(
 
 type Where = { readonly name: string; readonly branch: string };
 
+/** The deploy ids a delivery element holds: its live `deploy_id` and every id it superseded. A malformed `superseded_deploy_ids` counts as one unaccountable id. */
+function deployIdsOf(element: Obj): readonly unknown[] {
+  return [element.deploy_id, ...supersededIdsOf(element)].filter((id) => id !== undefined);
+}
+
+function supersededIdsOf(element: Obj): readonly unknown[] {
+  const superseded = element.superseded_deploy_ids;
+  if (superseded === undefined) return [];
+  return Array.isArray(superseded) ? (superseded as readonly unknown[]) : [superseded];
+}
+
+/**
+ * Whether the winning element accounts for every deploy id the losing one
+ * holds. A deploy id is a live token on the platform; `upsertTargetElement`
+ * keeps every one findable (the current `deploy_id`, or `superseded_deploy_ids`
+ * until a real deploy confirms its replacement), so that `targets-remove` can
+ * revoke it. Dropping the loser would leave a live token recorded nowhere.
+ */
+function accountsForDeployIds(winner: Obj, loser: Obj): boolean {
+  const kept = deployIdsOf(winner);
+  return deployIdsOf(loser).every((id) => kept.includes(id));
+}
+
 function mergeTarget(
   where: Where,
-  key: string,
   base: Obj | undefined,
   ours: Obj | undefined,
   theirs: Obj | undefined,
 ): Result<Obj | undefined> {
   const three = threeWay(base, ours, theirs);
   if (three.agreed) return ok(three.value as Obj | undefined);
-  const id = { ...where, provider: (ours ?? theirs ?? base)?.provider as string, target: (ours ?? theirs ?? base)?.target as string };
+  const named = (ours ?? theirs ?? base) as Obj;
+  const id = { ...where, provider: named.provider as string, target: named.target as string };
   if (ours === undefined || theirs === undefined) {
     return fail({ code: 'TARGET_REMOVED_AND_CHANGED', ...id });
   }
   const winner = later(ours, timeOf(ours.deployed_at), theirs, timeOf(theirs.deployed_at));
-  return winner === undefined ? fail({ code: 'TARGET_DIVERGED', ...id }) : ok(winner);
+  if (winner === undefined) return fail({ code: 'TARGET_DIVERGED', ...id });
+  const loser = winner === ours ? theirs : ours;
+  return accountsForDeployIds(winner, loser) ? ok(winner) : fail({ code: 'TARGET_DEPLOY_IDS_UNACCOUNTED', ...id });
+}
+
+/** Targets in a fixed (provider, target) order, so the merged bytes do not depend on which side is ours. */
+function sortedTargets(elements: readonly Obj[]): readonly Obj[] {
+  return sortedCopy(elements, (a, b) => compareStrings(targetKey(a), targetKey(b)));
 }
 
 function mergeTargets(where: Where, base: unknown, ours: unknown, theirs: unknown): Result<unknown> {
@@ -245,11 +307,9 @@ function mergeTargets(where: Where, base: unknown, ours: unknown, theirs: unknow
   const [b, o, t] = [elementsOf(base), elementsOf(ours), elementsOf(theirs)];
   const keys = unique([...o, ...t, ...b].map(targetKey));
   const find = (list: readonly Obj[], key: string): Obj | undefined => list.find((e) => targetKey(e) === key);
-  const merged = all(keys.map((key) => mergeTarget(where, key, find(b, key), find(o, key), find(t, key))));
+  const merged = all(keys.map((key) => mergeTarget(where, find(b, key), find(o, key), find(t, key))));
   if (!merged.ok) return merged;
-  const elements = merged.value.flatMap((e) => (e === undefined ? [] : [e]));
-  if (deepEqual(elements, ours)) return ok(ours);
-  if (deepEqual(elements, theirs)) return ok(theirs);
+  const elements = sortedTargets(merged.value.flatMap((e) => (e === undefined ? [] : [e])));
   const present = Array.isArray(ours) || Array.isArray(theirs);
   return ok(elements.length === 0 && !present ? undefined : elements);
 }
@@ -258,14 +318,30 @@ function mergeTargets(where: Where, base: unknown, ours: unknown, theirs: unknow
 // Entries
 // ---------------------------------------------------------------------------
 
-/** Known entry fields in the order `KeepVariableEntry` declares them; a merged entry that matches neither side is written in this order. */
+/** Known entry fields in the order `KeepVariableEntry` declares them. */
 const ENTRY_FIELD_ORDER: readonly string[] = ['resource_id', 'branch', 'value_hash', 'changed_at', 'connector', 'placeholder', 'targets'];
 
+/** A merged entry's fields: the known ones in declaration order, then any others by name, the same whichever side is ours. */
 function orderedEntry(fields: Obj): Obj {
   const present = Object.keys(fields);
-  const keys = [...ENTRY_FIELD_ORDER.filter((k) => present.includes(k)), ...present.filter((k) => !ENTRY_FIELD_ORDER.includes(k))];
+  const extras = sortedCopy(present.filter((k) => !ENTRY_FIELD_ORDER.includes(k)), compareStrings);
+  const keys = [...ENTRY_FIELD_ORDER.filter((k) => present.includes(k)), ...extras];
   return Object.fromEntries(keys.map((k) => [k, fields[k]]));
 }
+
+/**
+ * The side that changed `value_hash`, when exactly one did. The fields that
+ * describe the value (`changed_at`, `placeholder`) come from that side whole:
+ * the other side can only have moved them for the value it still had.
+ */
+function valueChangedBy(base: Obj, ours: Obj, theirs: Obj): Obj | undefined {
+  if (ours.value_hash === theirs.value_hash) return undefined;
+  if (base.value_hash === theirs.value_hash) return ours;
+  if (base.value_hash === ours.value_hash) return theirs;
+  return undefined;
+}
+
+const VALUE_BOUND_FIELDS: readonly string[] = ['changed_at', 'placeholder'];
 
 function mergeEntryField(
   where: Where,
@@ -275,6 +351,8 @@ function mergeEntryField(
   theirs: Obj,
 ): Result<unknown> {
   if (field === 'targets') return mergeTargets(where, base.targets, ours.targets, theirs.targets);
+  const valueSide = valueChangedBy(base, ours, theirs);
+  if (valueSide !== undefined && VALUE_BOUND_FIELDS.includes(field)) return ok(valueSide[field]);
   const three = threeWay(base[field], ours[field], theirs[field]);
   if (three.agreed) return ok(three.value);
   if (field === 'value_hash') return fail({ code: 'VALUE_HASH_DIVERGED', ...where, field });
@@ -295,10 +373,7 @@ function mergeEntryFields(where: Where, base: Obj, ours: Obj, theirs: Obj): Resu
     return r.ok ? ok([field, r.value] as const) : r;
   }));
   if (!merged.ok) return merged;
-  const present = Object.fromEntries(merged.value.filter(([, v]) => v !== undefined));
-  if (deepEqual(present, ours)) return ok(ours);
-  if (deepEqual(present, theirs)) return ok(theirs);
-  return ok(orderedEntry(present));
+  return ok(orderedEntry(Object.fromEntries(merged.value.filter(([, v]) => v !== undefined))));
 }
 
 function mergeEntry(
@@ -307,10 +382,11 @@ function mergeEntry(
   ours: Obj | undefined,
   theirs: Obj | undefined,
 ): Result<Obj | undefined> {
-  if (ours !== undefined && theirs !== undefined) return mergeEntryFields(where, base ?? {}, ours, theirs);
-  // One side no longer has the entry: removed there, or never added there.
   const three = threeWay(base, ours, theirs);
-  return three.agreed ? ok(three.value as Obj | undefined) : fail({ code: 'ENTRY_REMOVED_AND_CHANGED', ...where });
+  // One side changed the whole entry (or both the same way), or one side no longer has it and the other left it alone.
+  if (three.agreed) return ok(three.value as Obj | undefined);
+  if (ours !== undefined && theirs !== undefined) return mergeEntryFields(where, base ?? {}, ours, theirs);
+  return fail({ code: 'ENTRY_REMOVED_AND_CHANGED', ...where });
 }
 
 function mergeName(

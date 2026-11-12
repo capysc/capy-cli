@@ -30,8 +30,10 @@ export function serializeKeep(keep: KeepFile): string {
   // Build a stable key order, then attach any other fields the entry carries
   // (e.g. `connector` metadata set by `capy connect`). Without this, every
   // sync would strip extras off the entry.
+  // A variable (or an entry field) named `__proto__` has never been written: assigning to that key
+  // sets the prototype instead of adding a field, so it was always dropped. Kept that way.
   const variables = Object.fromEntries(
-    sortedCopy(Object.keys(keep.variables), compareKeys).map((key) => [key, serializeEntries(keep.variables[key])]),
+    sortedCopy(Object.keys(keep.variables).filter(isWritableKey), compareKeys).map((key) => [key, serializeEntries(keep.variables[key])]),
   );
   const sorted = {
     _comment: KEEP_COMMENT,
@@ -57,7 +59,13 @@ function sortedCopy<T>(items: readonly T[], compare: (a: T, b: T) => number): re
 }
 
 /** The default order of `Array.prototype.sort` for strings: by UTF-16 code unit, not by locale. */
-const compareKeys = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
+function compareKeys(a: string, b: string): number {
+  if (a < b) return -1;
+  if (a > b) return 1;
+  return 0;
+}
+
+const isWritableKey = (key: string): boolean => key !== '__proto__';
 
 /**
  * One variable's entries in a stable order (branch, then resource_id) so
@@ -75,7 +83,7 @@ function serializeEntries(entries: KeepFile['variables'][string]): readonly Reco
     ...(e.branch ? { branch: e.branch } : {}),
     value_hash: e.value_hash,
     ...Object.fromEntries(
-      Object.entries(e).filter(([k, v]) => k !== 'resource_id' && k !== 'branch' && k !== 'value_hash' && v !== undefined),
+      Object.entries(e).filter(([k, v]) => k !== 'resource_id' && k !== 'branch' && k !== 'value_hash' && isWritableKey(k) && v !== undefined),
     ),
   }));
 }

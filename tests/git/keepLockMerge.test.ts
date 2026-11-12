@@ -156,6 +156,34 @@ describe('keep.lock merge: names and entries', () => {
     ]);
   });
 
+  test('the bytes do not depend on which side is ours: extra fields come out in one fixed order', () => {
+    const a = keep({ ALPHA: [entry('ALPHA', 'prod', 'h1', { zeta: 1, changed_at: '2026-11-10T10:00:00.000Z' })] });
+    const b = keep({ ALPHA: [entry('ALPHA', 'prod', 'h1', { alpha: 2, connector: { provider: 'x' } })] });
+    const expected = text(keep({
+      ALPHA: [entry('ALPHA', 'prod', 'h1', { changed_at: '2026-11-10T10:00:00.000Z', connector: { provider: 'x' }, alpha: 2, zeta: 1 })],
+    }));
+    expect(mergedText(merge(base, a, b))).toBe(expected);
+    expect(mergedText(merge(base, b, a))).toBe(expected);
+  });
+
+  test('two sides that agree on a value written with its keys in a different order get one order', () => {
+    const a = keep({ ALPHA: [entry('ALPHA', 'prod', 'h1', { connector: { provider: 'x', account: 'y' } })] });
+    const b = keep({ ALPHA: [entry('ALPHA', 'prod', 'h1', { connector: { account: 'y', provider: 'x' } })] });
+    expect(mergedText(merge(base, a, b))).toBe(mergedText(merge(base, b, a)));
+  });
+
+  test('an entry both sides left byte-identical keeps its own field order', () => {
+    const odd = keep({ ALPHA: [entry('ALPHA', 'prod', 'h1', { zeta: 1, alpha: 2 })] });
+    expect(mergedText(merge(odd, odd, odd))).toBe(text(odd));
+  });
+
+  test('a variable named __proto__ is dropped, as the CLI writer has always dropped it', () => {
+    const withProto = '{"version":"3.0","org_id":"org","project_id":"proj","project_name":"proj-name","variables":{"__proto__":[{"resource_id":"r","value_hash":"h"}],"ALPHA":[{"resource_id":"id-ALPHA","branch":"prod","value_hash":"h1"}]}}';
+    const out = mergedText(mergeKeepLockText(withProto, withProto, withProto));
+    expect(out).not.toContain('__proto__');
+    expect(out).toContain('"ALPHA"');
+  });
+
   test('an unchanged file merges to the same bytes', () => {
     expect(mergedText(merge(base, base, base))).toBe(text(base));
   });
@@ -181,6 +209,23 @@ describe('keep.lock merge: value_hash and changed_at', () => {
     const late = keep({ ALPHA: [entry('ALPHA', 'prod', 'h1', { changed_at: '2026-11-09T00:00:00.000Z' })] });
     expect(mergedText(merge(base, early, late))).toBe(text(late));
     expect(mergedText(merge(base, late, early))).toBe(text(late));
+  });
+
+  test('one side changed the value and the other only moved changed_at: changed_at comes from the side that changed the value, never a pairing neither side had', () => {
+    const anc = keep({ ALPHA: [entry('ALPHA', 'prod', 'h1', { changed_at: '2026-10-01T00:00:00.000Z' })] });
+    const valueChanged = keep({ ALPHA: [entry('ALPHA', 'prod', 'h2', { changed_at: '2026-10-05T00:00:00.000Z' })] });
+    const onlyMoved = keep({ ALPHA: [entry('ALPHA', 'prod', 'h1', { changed_at: '2026-10-09T00:00:00.000Z' })] });
+    const expected = text(valueChanged);
+    expect(mergedText(merge(anc, valueChanged, onlyMoved))).toBe(expected);
+    expect(mergedText(merge(anc, onlyMoved, valueChanged))).toBe(expected);
+  });
+
+  test('the side that changed the value has no changed_at: the other side\'s date is not attached to the new value', () => {
+    const anc = keep({ ALPHA: [entry('ALPHA', 'prod', 'h1')] });
+    const valueChanged = keep({ ALPHA: [entry('ALPHA', 'prod', 'h2')] });
+    const onlyMoved = keep({ ALPHA: [entry('ALPHA', 'prod', 'h1', { changed_at: '2026-10-09T00:00:00.000Z' })] });
+    expect(mergedText(merge(anc, valueChanged, onlyMoved))).toBe(text(valueChanged));
+    expect(mergedText(merge(anc, onlyMoved, valueChanged))).toBe(text(valueChanged));
   });
 
   test('changed_at that already existed in the ancestor and moved on both sides: the later wins', () => {
@@ -279,10 +324,64 @@ describe('keep.lock merge: targets', () => {
     expect(mergedText(merge(anc, placeholder, delivered))).toBe(text(delivered));
   });
 
-  test('targets on both sides with the same elements in a different order keep our order', () => {
+  test('targets on both sides with the same elements in a different order are written in (provider, target) order, whichever side is ours', () => {
     const a = withTargets([web('2026-11-01T00:00:00.000Z'), api('2026-11-01T00:00:00.000Z')]);
     const b = withTargets([api('2026-11-01T00:00:00.000Z'), web('2026-11-01T00:00:00.000Z')]);
-    expect(mergedText(merge(withTargets(undefined), a, b))).toBe(text(a));
+    const expected = text(b);
+    expect(mergedText(merge(withTargets(undefined), a, b))).toBe(expected);
+    expect(mergedText(merge(withTargets(undefined), b, a))).toBe(expected);
+  });
+
+  test('merged targets come out in (provider, target) order whichever side added which', () => {
+    const anc = withTargets(undefined);
+    const a = withTargets([web('2026-11-01T00:00:00.000Z')]);
+    const b = withTargets([api('2026-11-02T00:00:00.000Z')]);
+    const expected = text(withTargets([api('2026-11-02T00:00:00.000Z'), web('2026-11-01T00:00:00.000Z')]));
+    expect(mergedText(merge(anc, a, b))).toBe(expected);
+    expect(mergedText(merge(anc, b, a))).toBe(expected);
+  });
+
+  describe('deploy ids (live tokens) are never dropped', () => {
+    const anc = withTargets([web('2026-11-01T00:00:00.000Z', 'h0', { deploy_id: 'D0' })]);
+    const ancestorTarget = (extra: Entry, at: string) => withTargets([web(at, 'h-new', extra)]);
+    const reason = { code: 'TARGET_DEPLOY_IDS_UNACCOUNTED', name: 'ALPHA', branch: 'prod', provider: 'dokploy', target: 'web' };
+
+    test('the later delivery wins only when it accounts for the loser\'s live deploy_id', () => {
+      const early = ancestorTarget({ deploy_id: 'D1', superseded_deploy_ids: ['D0'] }, '2026-11-02T00:00:00.000Z');
+      const late = ancestorTarget({ deploy_id: 'D2', superseded_deploy_ids: ['D0'] }, '2026-11-05T00:00:00.000Z');
+      expect(reasons(merge(anc, early, late))).toEqual([reason]);
+      expect(reasons(merge(anc, late, early))).toEqual([reason]);
+    });
+
+    test('accounted for: the winner lists the loser\'s deploy_id as superseded', () => {
+      const early = ancestorTarget({ deploy_id: 'D1', superseded_deploy_ids: ['D0'] }, '2026-11-02T00:00:00.000Z');
+      const late = ancestorTarget({ deploy_id: 'D2', superseded_deploy_ids: ['D0', 'D1'] }, '2026-11-05T00:00:00.000Z');
+      expect(mergedText(merge(anc, early, late))).toBe(text(late));
+      expect(mergedText(merge(anc, late, early))).toBe(text(late));
+    });
+
+    test('the winner has the same deploy_id as the loser: accounted for', () => {
+      const early = ancestorTarget({ deploy_id: 'D1' }, '2026-11-02T00:00:00.000Z');
+      const late = ancestorTarget({ deploy_id: 'D1' }, '2026-11-05T00:00:00.000Z');
+      expect(mergedText(merge(anc, early, late))).toBe(text(late));
+    });
+
+    test('a superseded id only the loser holds is also unaccounted for', () => {
+      const early = ancestorTarget({ superseded_deploy_ids: ['D0', 'DX'] }, '2026-11-02T00:00:00.000Z');
+      const late = ancestorTarget({ deploy_id: 'D2', superseded_deploy_ids: ['D0'] }, '2026-11-05T00:00:00.000Z');
+      expect(reasons(merge(anc, early, late))).toEqual([reason]);
+    });
+
+    test('a loser with no deploy ids loses freely', () => {
+      const early = ancestorTarget({}, '2026-11-02T00:00:00.000Z');
+      const late = ancestorTarget({ deploy_id: 'D2' }, '2026-11-05T00:00:00.000Z');
+      expect(mergedText(merge(anc, early, late))).toBe(text(late));
+    });
+
+    test('a target changed on one side only is taken whole, deploy ids and all', () => {
+      const changed = ancestorTarget({ deploy_id: 'D2', superseded_deploy_ids: ['D0'] }, '2026-11-05T00:00:00.000Z');
+      expect(mergedText(merge(anc, changed, anc))).toBe(text(changed));
+    });
   });
 });
 
@@ -304,6 +403,13 @@ describe('keep.lock merge: top-level fields', () => {
     expect(mergedText(merge(base, withTop({ deploy_revision: 1 }), withTop({ deploy_revision: 1 })))).toBe(
       text(withTop({ deploy_revision: 2 })),
     );
+  });
+
+  test('both sides removing deploy_revision is not a conflict; one side removing it while the other left it alone removes it', () => {
+    const had = withTop({ deploy_revision: 3 });
+    expect(mergedText(merge(had, base, base))).toBe(text(base));
+    expect(mergedText(merge(had, base, had))).toBe(text(base));
+    expect(mergedText(merge(had, had, base))).toBe(text(base));
   });
 
   test('deploy_revision absent everywhere stays absent', () => {
