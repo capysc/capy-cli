@@ -145,3 +145,52 @@ describe('findDirtyBranchIssue', () => {
     expect(findDirtyBranchIssue(pm, fm, 'k')).toEqual({ code: 'UNCOMMITTED_CHANGES', branch: 'staging', varName: 'A' });
   });
 });
+
+// ── placeholders: a name an import could not read a value for ──────────────
+//
+// An import pins such a name with an empty `value_hash` and a `placeholder`
+// marker, and .env carries only a comment for it. `capy` reads that as clean
+// (pinnedHashes skips placeholders); checkout must read it the same way, or
+// every branch an import left a placeholder on can never be switched away from.
+
+const placeholderPin = (branch: string): KeepFile['variables'][string][number] => ({
+  resource_id: `rid-ph-${branch}`,
+  branch,
+  value_hash: '',
+  placeholder: { provider: 'vercel', reason: 'value_not_decrypted' },
+});
+
+describe('findUncommittedEnvChange: placeholders', () => {
+  test('REGRESSION: a placeholder with no line in .env is clean, not an uncommitted deletion', () => {
+    const variables: KeepFile['variables'] = {
+      API_TOKEN: [placeholderPin(BRANCH)],
+      ...keepVars({ DATABASE_URL: 'postgres://fake' }),
+    };
+    expect(findUncommittedEnvChange({ DATABASE_URL: 'postgres://fake' }, variables, BRANCH)).toBeNull();
+  });
+
+  test('a value typed into .env for a placeholder is uncommitted', () => {
+    const variables: KeepFile['variables'] = { API_TOKEN: [placeholderPin(BRANCH)] };
+    expect(findUncommittedEnvChange({ API_TOKEN: 'filled-in-by-hand' }, variables, BRANCH)).toBe('API_TOKEN');
+  });
+
+  test('placeholders do not hide a real edit next to them', () => {
+    const variables: KeepFile['variables'] = {
+      API_TOKEN: [placeholderPin(BRANCH)],
+      ...keepVars({ DATABASE_URL: 'postgres://fake' }),
+    };
+    expect(findUncommittedEnvChange({ DATABASE_URL: 'postgres://edited' }, variables, BRANCH)).toBe('DATABASE_URL');
+  });
+});
+
+describe('findDirtyBranchIssue: placeholders', () => {
+  test('a branch whose only differences from .env are placeholders: clean (null), so checkout may switch', () => {
+    const keep: KeepFile = {
+      ...keepWithPin('A', 'production', '1'),
+      variables: { ...keepWithPin('A', 'production', '1').variables, API_TOKEN: [placeholderPin('production')] },
+    };
+    const pm = fakePm({ keep, activeBranch: 'production', syncState: { keep_hash: { production: SyncEngine.computeKeepHash(keep, 'production') } } });
+    const fm = fakeFm({ envHeaderBranch: 'production', localPlaintext: { A: '1' } });
+    expect(findDirtyBranchIssue(pm, fm, 'k')).toBeNull();
+  });
+});
