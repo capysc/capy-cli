@@ -68,7 +68,9 @@ export class RedeemCommand {
 
     // 4. Regardless of whether crypto setup is needed, always update local
     //    state so the next `capy` run targets the redeemed org.
-    const orgName = authResult.organizations?.find(o => o.id === orgId)?.name || orgId;
+    //    The guard above proved orgId === targetOrgId, so the display name is
+    //    looked up by the invite's own org id, not by a value from the sign-in result.
+    const orgName = authResult.organizations?.find(o => o.id === targetOrgId)?.name || targetOrgId;
     this.switchLocalContext(orgId, userId, orgName);
 
     const serviceClient = new ServiceClient(this.apiUrl, this.devMode);
