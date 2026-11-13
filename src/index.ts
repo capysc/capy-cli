@@ -826,19 +826,6 @@ projectCmd
     await restoreProjectCommand(ref, { yes, nonTty, json, dryRun });
   });
 
-orgCmd
-  .command('projects')
-  .description('List projects in the active organization; --deleted also lists deleted ones (owners only)') // COPY-FLAG
-  .option('--deleted', 'also list deleted projects, marked as deleted, with the date') // COPY-FLAG
-  .option('--json', 'emit machine-readable JSON instead of the human UI')
-  .action(async (_options: any, command: any) => {
-    assertNotLocalOnly('org projects');
-    const { ProjectsCommand } = await import('./commands/projectsCommand');
-    const cmd = new ProjectsCommand();
-    const merged = command.optsWithGlobals();
-    await cmd.execute({ json: merged.json, deleted: merged.deleted === true });
-  });
-
 program
   .command('info')
   .description('Show current session info')
@@ -875,12 +862,13 @@ program
 program
   .command('projects')
   .description('List projects in the active organization and their branches')
+  .option('--deleted', 'also list deleted projects, marked as deleted, with the date (owners only)') // COPY-FLAG
   .option('--json', 'emit machine-readable JSON instead of the human UI')
   .action(async (options) => {
     assertNotLocalOnly('projects');
     const { ProjectsCommand } = await import('./commands/projectsCommand');
     const cmd = new ProjectsCommand();
-    await cmd.execute({ json: options.json });
+    await cmd.execute({ json: options.json, deleted: options.deleted === true });
   });
 
 const secretsCmd = program
@@ -1209,6 +1197,16 @@ program
   .action(async () => {
     const { LockCommand } = await import('./commands/lockCommand');
     await new LockCommand().execute();
+  });
+
+// Hidden: git calls this as the keep.lock merge driver (`<cmd> %O %A %B`); it is not for people.
+program
+  .command('merge-keep-lock <ancestor> <ours> <theirs> [ourLabel] [baseLabel] [theirLabel] [markerSize]', { hidden: true })
+  // COPY-FLAG
+  .description('Merge keep.lock (git merge driver)')
+  .action(async (ancestor: string, ours: string, theirs: string, ourLabel?: string, baseLabel?: string, theirLabel?: string, markerSize?: string) => {
+    const { mergeKeepLockCommand } = await import('./commands/mergeKeepLockCommand');
+    process.exit(mergeKeepLockCommand(ancestor, ours, theirs, ourLabel, baseLabel, theirLabel, markerSize));
   });
 
 program.parse(process.argv);

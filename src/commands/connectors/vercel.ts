@@ -61,6 +61,7 @@ import {
   mapVercelApiError,
   parseVarList,
   resolveEnvValues,
+  resolveNamedTeam,
   resolveTeam,
   resolveVercelToken,
   vercelSecretsMayPrompt,
@@ -436,13 +437,22 @@ export function createVercelConnector(deps: VercelConnectorDeps = {}): Connector
     }
   };
 
-  /** Team scope: `--team`, the token's only team, a pick (only when this run can ask), or a coded refusal. */
+  /**
+   * Team scope: `--team` looked up on its own (never the whole team list,
+   * which a token scoped to one team may not read — see `resolveNamedTeam`);
+   * otherwise the token's only team, a pick (only when this run can ask), or
+   * a coded refusal. A single import passes its `--project` along for when
+   * Vercel refuses even the one team; under discovery `--project` only picks
+   * a collision winner, so it is not passed.
+   */
   const chooseTeam = async (
     client: VercelClient,
     opts: ConnectOpts,
     promptable: boolean,
     discovery: boolean = false,
   ): Promise<{ ok: true; teamId: string | undefined; teamSlug?: string } | Failure> => {
+    const named = opts.team?.trim();
+    if (named) return resolveNamedTeam(client, named, discovery ? undefined : opts.project?.trim() || undefined);
     const teams = await guard(() => client.listTeams(), discovery);
     if (!teams.ok) return teams;
     const team = await resolveTeam(teams.value, opts.team, promptable ? pickTeam : null);

@@ -787,18 +787,6 @@ projectCmd
     await restoreProjectCommand(ref, { yes, nonTty, json, dryRun, apiUrl: process.env.CAPY_API_URL, devMode: true });
   });
 
-orgCmd
-  .command('projects')
-  .description('List projects in the active organization; --deleted also lists deleted ones (owners only)') // COPY-FLAG
-  .option('--deleted', 'also list deleted projects, marked as deleted, with the date') // COPY-FLAG
-  .option('--json', 'emit machine-readable JSON instead of the human UI')
-  .action(async (_options: any, command: any) => {
-    const { ProjectsCommand } = await import('./commands/projectsCommand');
-    const cmd = new ProjectsCommand(process.env.CAPY_API_URL, true);
-    const merged = command.optsWithGlobals();
-    await cmd.execute({ json: merged.json, deleted: merged.deleted === true });
-  });
-
 program
   .command('info')
   .description('Show current session info')
@@ -832,11 +820,12 @@ program
 program
   .command('projects')
   .description('List projects in the active organization and their branches')
+  .option('--deleted', 'also list deleted projects, marked as deleted, with the date (owners only)') // COPY-FLAG
   .option('--json', 'emit machine-readable JSON instead of the human UI')
   .action(async (options) => {
     const { ProjectsCommand } = await import('./commands/projectsCommand');
     const cmd = new ProjectsCommand(process.env.CAPY_API_URL, true);
-    await cmd.execute({ json: options.json });
+    await cmd.execute({ json: options.json, deleted: options.deleted === true });
   });
 
 const secretsCmd = program
@@ -1267,6 +1256,16 @@ program
       const { SCREEN_WIDE } = await import('./ui/screens/generated');
       await openScreen(url, { kind: 'dialog', wide: SCREEN_WIDE[name] });
     }
+  });
+
+// Hidden: git calls this as the keep.lock merge driver (`<cmd> %O %A %B`); it is not for people.
+program
+  .command('merge-keep-lock <ancestor> <ours> <theirs> [ourLabel] [baseLabel] [theirLabel] [markerSize]', { hidden: true })
+  // COPY-FLAG
+  .description('Merge keep.lock (git merge driver)')
+  .action(async (ancestor: string, ours: string, theirs: string, ourLabel?: string, baseLabel?: string, theirLabel?: string, markerSize?: string) => {
+    const { mergeKeepLockCommand } = await import('./commands/mergeKeepLockCommand');
+    process.exit(mergeKeepLockCommand(ancestor, ours, theirs, ourLabel, baseLabel, theirLabel, markerSize));
   });
 
 program.parse(process.argv);

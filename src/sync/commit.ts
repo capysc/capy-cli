@@ -58,7 +58,7 @@ export interface Snapshot {
 }
 
 /** value_hash by name for `branch`: what a keep.lock pins. */
-export function pinnedHashes(keep: KeepFile | null | undefined, branch: string): Record<string, string> {
+export function pinnedHashes(keep: Pick<KeepFile, 'variables'> | null | undefined, branch: string): Record<string, string> {
   return Object.fromEntries(
     Object.entries(keep?.variables ?? {}).flatMap(([name, entries]) => {
       const entry = entries.find((e) => e.branch === branch);

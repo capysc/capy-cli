@@ -972,6 +972,9 @@ export const ERROR_CODES = {
    * Nothing was saved by that call. `capy secrets set` pushes the location once more, then reports it failed with this code.
    */
   KEEP_WRITE_CONFLICT: 'KEEP_WRITE_CONFLICT',
+  // --- A git repo belongs to one organization ---
+  /** The folder's tracked keep.lock names organization A, and `capy redeem` or `capy org` was asked to bring organization B into it. Nothing in the folder was changed. Exit 1. */
+  REPO_ORG_MISMATCH: 'REPO_ORG_MISMATCH',
 } as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES];

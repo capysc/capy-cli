@@ -2,7 +2,7 @@
 
 # capy CLI reference
 
-Version `0.9.15`. Generated from `capy help --json`.
+Version `0.9.16`. Generated from `capy help --json`.
 
 ## Commands
 
@@ -482,21 +482,6 @@ capy org [options]
 
 JSON support: no
 
-### `capy org projects`
-
-List projects in the active organization; --deleted also lists deleted ones (owners only)
-
-```
-capy org projects [options]
-```
-
-| Option | Description | Default |
-|---|---|---|
-| `--deleted` | also list deleted projects, marked as deleted, with the date |  |
-| `--json` | emit machine-readable JSON instead of the human UI |  |
-
-JSON support: yes (`--json`)
-
 ## `capy project`
 
 Create, delete or restore a project in the active organization
@@ -617,6 +602,7 @@ capy projects [options]
 
 | Option | Description | Default |
 |---|---|---|
+| `--deleted` | also list deleted projects, marked as deleted, with the date (owners only) |  |
 | `--json` | emit machine-readable JSON instead of the human UI |  |
 
 JSON support: yes (`--json`)
@@ -1180,6 +1166,7 @@ Every refusal carries a stable `code` — branch on it, never on message text.
 - `DEPLOY_PUSH_FAILED`
 - `SECRET_NOT_PERSISTED`
 - `KEEP_WRITE_CONFLICT`
+- `REPO_ORG_MISMATCH`
 
 ## Conventions
 
