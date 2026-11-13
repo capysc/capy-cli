@@ -299,6 +299,9 @@ export class CapyCommand {
       listBranches: () => this.serviceClient.listBranches(projectState.projectId!),
       syncedBranches: syncedBranchNames(this.projectManager.readSyncState()),
       promptPick: async (branches, defaultName) => {
+        // `capy checkout <branch>` names the answer for a folder that records no branch at all: nobody is asked.
+        const named = this.namedBranchForUnrecordedFolder(branches);
+        if (named !== undefined) return named;
         // Off a terminal nobody can pick: the run ends with a code and the command that records the choice.
         if (this.protocol) {
           throw new CapyError(
@@ -324,6 +327,19 @@ export class CapyCommand {
     });
     this.projectManager.writeActiveBranch(selected);
     return selected;
+  }
+
+  /**
+   * The branch `capy checkout <branch>` named (`options.branchHint`), when this folder records no branch at all (no
+   * `.env` file of any kind, no `.capy/branch`, nothing `deriveActiveBranch` reads) and the server has that branch.
+   * Otherwise `undefined`: the branch is picked, or refused off a terminal, as it is for any other folder.
+   */
+  private namedBranchForUnrecordedFolder(branches: ReadonlyArray<{ readonly name: string }>): string | undefined {
+    const hint = this.options.branchHint;
+    if (hint === undefined || !branches.some((b) => b.name === hint)) return undefined;
+    const recorded =
+      this.projectManager.deriveActiveBranch() !== null || existsSync(this.projectManager.getEnvPath(this.options.envPath));
+    return recorded ? undefined : hint;
   }
 
   /**

@@ -432,6 +432,13 @@ export interface CliOptions {
    * state ends only that folder's sync.
    */
   onBranchMismatch?: 'follow-env-header' | 'throw';
+  /**
+   * The branch the command that runs this first is about to switch to (`capy checkout <branch>`). Only a folder with no
+   * recorded branch at all (no `.env`, no `.capy/branch`, nothing `ProjectManager.deriveActiveBranch` reads) uses it,
+   * and only when that branch exists on the server: it answers "which branch" instead of the picker. Any other folder
+   * resolves its branch as before.
+   */
+  branchHint?: string;
 }
 
 export interface ProjectInitResult {

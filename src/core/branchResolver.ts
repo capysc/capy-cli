@@ -114,18 +114,20 @@ export async function selectBranchWithServer(deps: {
   promptPick: (branches: Branch[], defaultName?: string) => Promise<string>;
   syncedBranches: string[];
 }): Promise<string> {
-  let branches: Branch[];
-  try {
-    branches = await deps.listBranches();
-  } catch (err) {
-    throw new CapyError(
-      'Cannot determine the active branch: this directory has no .env and no .capy/branch, ' +
-      'and the Capy service is unreachable to list branches.\n\n' +
-      '  Reconnect and run capy again, or restore the .env for the branch you were on.',
-      ERROR_CODES.NETWORK_ERROR,
-      { cause: err },
-    );
-  }
+  const listBranches = async (): Promise<Branch[]> => {
+    try {
+      return await deps.listBranches();
+    } catch (err) {
+      throw new CapyError(
+        'Cannot determine the active branch: this directory has no .env and no .capy/branch, ' +
+        'and the Capy service is unreachable to list branches.\n\n' +
+        '  Reconnect and run capy again, or restore the .env for the branch you were on.',
+        ERROR_CODES.NETWORK_ERROR,
+        { cause: err },
+      );
+    }
+  };
+  const branches = await listBranches();
 
   if (branches.length === 0) {
     throw new CapyError(
