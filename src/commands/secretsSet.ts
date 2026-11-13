@@ -16,6 +16,14 @@
  * for byte (it is never decrypted and re-encrypted), so a push touches this one
  * variable and nothing else. Each branch is its own push.
  *
+ * ONE PROJECT AT A TIME, AND READ BACK: all branches of a project are kept together on the service, so two pushes to
+ * branches of the same project that overlap can overwrite each other while both answer success. The locations of one
+ * project are therefore pushed one after another (different projects still run in parallel), and after each push
+ * the location is read back from the service: it is `updated` only if what the service holds for that branch (the blob's
+ * value and the keep's pin) is what was sent. A miss is pushed once more and read back again; a second miss is the
+ * failed code `SECRET_NOT_PERSISTED`. A save the service refused as conflicting (`KEEP_WRITE_CONFLICT`) is pushed once
+ * more too, then failed with that code.
+ *
  * WHEN A LOCATION MOVED (docs/conflict-resolution.md, "Commands with no folder"):
  * `compareSecrets` over the fingerprint the row listed (pinned), the new value
  * (local) and what the location holds now (remote). Unchanged since the row was
@@ -34,7 +42,7 @@
  * and nothing here ever prints, returns or throws the value or any hash of it.
  */
 import { SyncEngine } from '../sync/syncEngine';
-import { UploadIo, envBlobOf, isStaleBase, snapshotFrom, uploadChanges, type Changes } from '../sync/commit';
+import { UploadIo, envBlobOf, isStaleBase, keepWithChanges, snapshotFrom, uploadChanges, type Changes, type Snapshot } from '../sync/commit';
 import type { SourceConflict } from '../sync/conflicts';
 import { BoundAnswer, actionFor, holdsFor, movedRow, shownValueUnavailable } from '../sync/noFolder';
 import { hashValue } from '../deploy/keepGate';
@@ -352,7 +360,8 @@ function bulkIo(env: SetEnv, loc: SetLocation, projectKey: string): UploadIo {
 /**
  * One location: read the current branch, replace `name`, push (the shared upload, with `base_keep_hash`), write the
  * cache. Never throws; reports the rate-limit reading it saw. If the server says someone saved since the read
- * (`SECRETS_STALE_BASE`), the location is read and compared once more from the new latest.
+ * (`SECRETS_STALE_BASE`), the location is read and compared once more from the new latest. After the push the location is
+ * read back; a read that does not show what was sent (or a `KEEP_WRITE_CONFLICT`) is pushed once more, then failed.
  */
 async function pushLocation(
   env: SetEnv,
@@ -361,7 +370,7 @@ async function pushLocation(
   name: string,
   value: string,
   check: { readonly shown?: string; readonly answer?: BoundAnswer; readonly restore?: string },
-  retried: boolean = false,
+  retried: Retried = FIRST_TRY,
 ): Promise<PoolItem<LocationOutcome>> {
   const key = await settled(keys(loc.project_id));
   if (!key.ok) return failedItem(loc, key.error);
@@ -373,7 +382,9 @@ async function pushLocation(
   }
   const { snapshot, rate: readRate } = read.value;
   const entry = snapshot.entries[name];
-  if (entry?.plaintext === value) return withRate<LocationOutcome>({ kind: 'unchanged', location: loc }, readRate);
+  // Already holding the new value is `unchanged` for a write on its first try or after a refused push; never after a read-back miss (the pin may be what is missing), and never for a restore or a removal.
+  const mayBeUnchanged = retried.plan === undefined || (retried.plan.action === 'write' && !retried.rewrite);
+  if (mayBeUnchanged && entry?.plaintext === value) return withRate<LocationOutcome>({ kind: 'unchanged', location: loc }, readRate);
   if (snapshot.keep === undefined) return failedItem(loc, new CapyError('keep.lock unavailable', ERROR_CODES.NO_KEEP_FILE), readRate);
   if (entry !== undefined && entry.plaintext === undefined) return failedItem(loc, new CapyError('variable not readable', ERROR_CODES.PERMISSION_DENIED), readRate);
 
@@ -390,14 +401,29 @@ async function pushLocation(
           remote: entry?.hash,
           serverKeepHash: SyncEngine.computeKeepHash(snapshot.keep, loc.branch),
         });
-  const answered = moved === undefined ? { ok: true as const, value: 'write' as const } : answerAt(check, moved);
+  const answered = decideAction(retried.plan, entry, check, value, moved);
   if (!answered.ok) return failedItem(loc, answered.error, readRate);
   const action = answered.value;
-  // Nothing to remove where the variable is already gone.
-  if (action === 'leave' || (action === 'remove' && entry === undefined)) return withRate<LocationOutcome>({ kind: 'unchanged', location: loc }, readRate);
+  if (action === 'leave') return withRate<LocationOutcome>({ kind: 'unchanged', location: loc }, readRate);
+  // Nothing to remove where the variable is already gone. On a retry (an attempt already validated this removal) that is the removal
+  // done, and a pin that is still there is not "gone": it is pushed away.
+  const retrying = retried.plan !== undefined;
+  const pinNow = pinOn(snapshot, name, loc.branch) !== undefined;
+  if (action === 'remove' && entry === undefined && !(retrying && pinNow)) {
+    return withRate<LocationOutcome>({ kind: retrying ? 'removed' : 'unchanged', location: loc }, readRate);
+  }
+  const pinStays = retrying && pinNow;
   // `pinned` writes back the value that was shown; no plaintext for it is a refusal, never a guess.
   if (action === 'restore' && check.restore === undefined) return failedItem(loc, shownValueUnavailable(name), readRate);
 
+  // What the server must hold for this branch after the push: the value sent, or nothing (a removal).
+  const sent = action === 'remove' ? undefined : action === 'restore' ? check.restore : value;
+  // A retry plans against a read that cannot say what `name` holds (the line keeps its place), so the line and the pin are
+  // written even if the read already holds the value.
+  const planned: Snapshot =
+    retrying && action !== 'remove' && entry !== undefined
+      ? { ...snapshot, entries: { ...snapshot.entries, [name]: { ...entry, plaintext: undefined } } }
+      : snapshot;
   const uploaded = await settled(
     uploadChanges({
       client: env.client,
@@ -406,18 +432,37 @@ async function pushLocation(
       projectKey: key.value,
       startKeep: snapshot.keep,
       changes: changesFor(action, name, value, check.restore),
-      seen: snapshot,
+      seen: planned,
       io,
+      // A removal whose blob line is already gone but whose pin is not: the keep to push drops the pin (the shared upload would not).
+      ...(action === 'remove' && pinStays ? { transformKeep: (keep: KeepFile) => keepWithChanges(keep, loc.branch, {}, [name], (n) => n) } : {}),
     }),
   );
   if (!uploaded.ok) {
-    if (!retried && isStaleBase(unwrapped(uploaded.error).error)) return pushLocation(env, keys, loc, name, value, check, true);
     const failure = unwrapped(uploaded.error);
+    // Nothing was saved. Either way the retry does the action this attempt validated.
+    const plan = retried.plan ?? { action, before: entry?.hash };
+    if (!retried.stale && isStaleBase(failure.error)) return pushLocation(env, keys, loc, name, value, check, { ...retried, stale: true, plan });
+    if (!retried.miss && isWriteConflict(failure.error)) return pushLocation(env, keys, loc, name, value, check, { ...retried, miss: true, plan });
     return failedItem(loc, failure.error, mergeRates(readRate, failure.rate, (env.now ?? Date.now)()));
   }
-  const rate = mergeRates(readRate, uploaded.value.rates.push, (env.now ?? Date.now)());
+  const pushRate = mergeRates(readRate, uploaded.value.rates.push, (env.now ?? Date.now)());
   const pushedResult = uploaded.value.result;
-  if (pushedResult === undefined) return failedItem(loc, new CapyError('nothing was pushed', ERROR_CODES.SERVICE_ERROR), rate);
+  if (pushedResult === undefined) return failedItem(loc, new CapyError('nothing was pushed', ERROR_CODES.SERVICE_ERROR), pushRate);
+
+  // Read it back: the push is only done when the server holds what was sent. Before the cache is written, so a miss never leaves
+  // a cache that says otherwise.
+  const back = await settled(io.read());
+  if (!back.ok) {
+    const failure = unwrapped(back.error);
+    return failedItem(loc, failure.error, mergeRates(pushRate, failure.rate, (env.now ?? Date.now)()));
+  }
+  const rate = mergeRates(pushRate, back.value.rate, (env.now ?? Date.now)());
+  if (!holds(back.value.snapshot, name, loc.branch, sent)) {
+    return retried.miss
+      ? failedItem(loc, new CapyError('the server does not hold the new value', ERROR_CODES.SECRET_NOT_PERSISTED), rate) // COPY-FLAG
+      : pushLocation(env, keys, loc, name, value, check, { ...retried, miss: true, rewrite: true, plan: retried.plan ?? { action, before: entry?.hash } });
+  }
 
   const done = attemptSync(() => {
     env.writeCache(env.orgId, loc.project_id, pushedResult.keep_hash, envBlobOf(uploaded.value.lines));
@@ -432,6 +477,67 @@ async function pushLocation(
       : { kind: 'updated', location: loc, entry: done.value.entry, serverKeep: done.value.adopted },
     rate,
   );
+}
+
+/** The one retry a location gets for a write that did not stick (a read-back miss or `KEEP_WRITE_CONFLICT`), and the one for a stale base. */
+interface Retried {
+  readonly stale: boolean;
+  readonly miss: boolean;
+  /** The retry after a read-back miss writes the value again even if the read now shows it (its pin may be what is missing). */
+  readonly rewrite: boolean;
+  /** Set on exactly that retry: what the first try decided and validated. The retry does the same and never decides again. */
+  readonly plan?: Planned;
+}
+
+/** The action for this attempt: the first try decides it (validating the person's answer); every later one does the same. */
+function decideAction(
+  plan: Planned | undefined,
+  entry: { readonly hash: string } | undefined,
+  check: { readonly shown?: string; readonly answer?: BoundAnswer; readonly restore?: string },
+  value: string,
+  moved: SourceConflict | undefined,
+): Tried<ReturnType<typeof actionFor>> {
+  if (plan !== undefined) return sameAction(plan, entry, check, value);
+  if (moved === undefined) return { ok: true, value: 'write' };
+  return answerAt(check, moved);
+}
+
+/** What the first try validated: the action it took, and what the location held when it was read (a fingerprint; `undefined`: no such variable). */
+interface Planned {
+  readonly action: 'write' | 'restore' | 'remove';
+  readonly before: string | undefined;
+}
+
+const FIRST_TRY: Retried = { stale: false, miss: false, rewrite: false };
+
+/**
+ * The retry's action: exactly the one the first try validated. The location may now hold the old state (the push was lost), what
+ * the push sent (it landed, only the pin or the read did not), or, if the person's check was on, nothing else: any other state
+ * is someone else's change since, which is a conflict as it would have been on the first try. Never a different action.
+ */
+function sameAction(plan: Planned, entry: { readonly hash: string } | undefined, check: { readonly shown?: string; readonly restore?: string }, value: string): Tried<Planned['action']> {
+  const sent = plan.action === 'remove' ? undefined : plan.action === 'restore' ? check.restore : value;
+  const ours = sent === undefined ? entry === undefined : entry?.hash === hashValue(sent);
+  const untouched = entry?.hash === plan.before;
+  return check.shown === undefined || ours || untouched
+    ? { ok: true, value: plan.action }
+    : { ok: false, error: new CapyError('changed since it was read', ERROR_CODES.SECRETS_CONFLICT) };
+}
+
+const isWriteConflict = (err: unknown): boolean => err instanceof CapyError && err.code === ERROR_CODES.KEEP_WRITE_CONFLICT;
+
+/** The keep's pin (fingerprint) for `name` on `branch` in a read; `undefined` when there is none. */
+const pinOn = (snapshot: Snapshot, name: string, branch: string): string | undefined =>
+  snapshot.keep?.variables[name]?.find((e) => e.branch === branch)?.value_hash;
+
+/**
+ * Whether a read of a branch shows what was sent: `sent` is the blob's value AND the keep's pin for that branch is the
+ * fingerprint of it; `undefined` (the variable was removed) is no blob line AND no pin.
+ */
+function holds(snapshot: Snapshot, name: string, branch: string, sent: string | undefined): boolean {
+  const pin = pinOn(snapshot, name, branch);
+  const entry = snapshot.entries[name];
+  return sent === undefined ? entry === undefined && pin === undefined : entry?.plaintext === sent && pin === hashValue(sent);
 }
 
 /** `f()` as a result instead of a throw. */
@@ -707,7 +813,7 @@ const NO_KEYS: KeyResolver = async () => {
 
 /**
  * Pushes `req.value` to every location, `LOCATION_CONCURRENCY` at a time after ONE
- * unlock, then opens one PR per repo (`PR_CONCURRENCY` at a time) for the locations
+ * unlock (never two at once for the same project, and each read back after its push), then opens one PR per repo (`PR_CONCURRENCY` at a time) for the locations
  * that were actually pushed. One failure never blocks another, and nothing here waits
  * forever (every GitHub call has a timeout, every service call too; a rate limit is
  * waited out a bounded number of times). `hooks` reports progress and lets the caller
@@ -719,6 +825,8 @@ export async function runSecretSet(req: SetRequest, env: SetEnv, hooks: RunHooks
   const pushed = await runPool({
     items: req.locations,
     limit: LOCATION_CONCURRENCY,
+    // The branches of one project share one stored file: they are pushed one after another, projects in parallel.
+    lane: (loc) => loc.project_id,
     run: (loc) =>
       pushLocation(env, keys, loc, req.name, req.value, {
         shown: req.shown?.[locationKeyOf(loc)],

@@ -19,7 +19,7 @@ import { createEditActionsWith } from '../../src/commands/secretsEditActions';
 import { CANCELLED_NOTHING } from '../../src/commands/secretsSetText';
 import type { OrgRepoLink, SecretIndexRow } from '../../src/service/serviceClient';
 import type { RunProgress } from '../../src/commands/secretsSet';
-import { LINKS, NAME, SENTINEL, fakeGithub, fakeService, indexRows, makeEnv, manyLocs, standardRepos } from '../helpers/secretsWorld';
+import { LINKS, NAME, SENTINEL, fakeGithub, fakeService, indexRows, makeEnv, manyProjectLocs, standardRepos } from '../helpers/secretsWorld';
 
 const ESC = '\x1b';
 const CTRL_C = '\x03';
@@ -169,7 +169,8 @@ describe('Ctrl+C while pushing and while opening PRs', () => {
 });
 
 describe('through the real driver: a run stopped part way', () => {
-  const TEN = manyLocs(10);
+  // Ten locations in ten projects: the locations of one project are pushed one at a time, so six at once needs six projects.
+  const TEN = manyProjectLocs(10);
   const rows = indexRows(TEN);
 
   test('the actions\' own cancel stops after the pushes in flight and the screen prints what happened, with the cancelled list', async () => {

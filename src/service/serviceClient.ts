@@ -57,6 +57,8 @@ const SERVER_CODES = new Set<string>([
   ERROR_CODES.PROJECT_DELETED,
   ERROR_CODES.PROJECT_HAS_LIVE_DEPLOY_TOKENS,
   ERROR_CODES.PROJECT_NOT_DELETED,
+  // A save that kept conflicting with other writes to the same project's keep: HTTP 409. Nothing was saved.
+  ERROR_CODES.KEEP_WRITE_CONFLICT,
 ]);
 
 /**
