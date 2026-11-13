@@ -111,7 +111,7 @@ const runBareCapy: SyncRunner = (opts, protocol) =>
       // working directory the header's branch is compared (so `capy checkout <branch>`, the recovery, can run); in another
       // checkout it is that folder's coded failure, so a multi-folder run goes on to the next folder.
       const onBranchMismatch = opts.cwd === undefined ? 'follow-env-header' : 'throw';
-      return new CapyCommand({ protocol, silentAuthOnly: protocol, quiet: true, conflictFlags: opts.conflictFlags, dryRun: opts.dryRun, onBranchMismatch, branchHint: opts.branchHint },opts.devMode === true).runSync();
+      return new CapyCommand({ protocol, silentAuthOnly: protocol, quiet: true, conflictFlags: opts.conflictFlags, dryRun: opts.dryRun, onBranchMismatch, branchHint: opts.branchHint }, opts.devMode === true).runSync();
     },
     'up-to-date',
   );
