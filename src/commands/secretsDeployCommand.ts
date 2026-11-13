@@ -34,6 +34,7 @@ import { ERROR_CODES } from '../types/index';
 import { isValidVarName } from './pipedWrite';
 import { refuseInvalidName } from './pipedValue';
 import { rowIdOf } from './secretsRowId';
+import { deleteStaleLinks } from './repoLinksFollowGit';
 import {
   BatchEnv,
   BatchPlan,
@@ -82,7 +83,8 @@ export interface SecretsDeployOpts {
 /** Injectable seam: tests pass fakes for the service, GitHub and Dokploy. */
 export interface SecretsDeployIo {
   readonly orgId: string;
-  readonly client: Pick<ServiceClient, 'getSecretIndex' | 'getOrgRepos'>;
+  /** `deleteProjectRepo` is optional: a client without it never forgets a stale link. */
+  readonly client: Pick<ServiceClient, 'getSecretIndex' | 'getOrgRepos'> & Partial<Pick<ServiceClient, 'deleteProjectRepo'>>;
   readonly env: BatchEnv;
   /** Cancel signals (SIGINT in the real command), the same three the edit has. */
   readonly control?: SecretsSetIo['control'];
@@ -248,6 +250,8 @@ export async function runSecretsDeploy(names: readonly string[], opts: SecretsDe
     // Said once per phase when a stop is noticed with items still running; silent when nothing is in progress.
     onStopping: ({ inFlight }) => (json || inFlight === 0 ? undefined : console.error(stoppingAfter(inFlight))),
   }).catch((err: unknown) => (err instanceof ConflictRefusal ? exitWithConflicts(err, { plan_id: planId }) : Promise.reject(err)));
+  // Best effort and silent: the folders the default branch no longer carries are forgotten. Never changes the result.
+  await deleteStaleLinks(io.client, io.orgId, plan.stale_links ?? []);
   const ok = batchSucceeded(result);
 
   if (json) {

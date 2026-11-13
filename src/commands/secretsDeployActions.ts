@@ -17,6 +17,7 @@
 import type { OrgRepoLink, SecretIndexRow, ServiceClient } from '../service/serviceClient';
 import type { SecretsDeployActions } from '../ui/secretsScreenDriver';
 import { BatchEnv, createBatchEnv, deployLocationsOf, planBatchDeploy, runBatchDeploy } from '../deploy/batchDeploy';
+import { deleteStaleLinks } from './repoLinksFollowGit';
 import {
   conflictRefusalFor,
   isConflictRefusal,
@@ -60,7 +61,7 @@ const targetConflictsOf = (conflicts: readonly (TargetConflict | { readonly name
  * reaches exactly the operations running now.
  */
 export function createDeployActionsWith(
-  client: Pick<ServiceClient, 'getOrgRepos'>,
+  client: Pick<ServiceClient, 'getOrgRepos'> & Partial<Pick<ServiceClient, 'deleteProjectRepo'>>,
   orgId: string,
   env: BatchEnv,
   dryRun: boolean = false,
@@ -100,7 +101,10 @@ export function createDeployActionsWith(
         const stopPushes = begin('pushing');
         // Only a platform whose live values can be read has anything to compare. A stop asked for during the comparison decides nothing.
         const decide = env.adapter.readsLiveValues === true ? (scopes: readonly ConflictScope[]) => (stopPushes.aborted ? {} : decideFrom(decisions)(scopes)) : undefined;
-        return { ok: true, result: await runBatchDeploy(plan, env, { onProgress, stopPushes, stopPrs: begin('prs'), decide }) };
+        const result = await runBatchDeploy(plan, env, { onProgress, stopPushes, stopPrs: begin('prs'), decide });
+        // Best effort and silent; never changes the result.
+        await deleteStaleLinks(client, orgId, plan.stale_links ?? []);
+        return { ok: true, result };
       } catch (err) {
         // Nothing has been written: the comparison found rows that are unanswered, or answered against a value that has moved.
         if (isConflictRefusal(err)) return { ok: false, code: err.code, conflicts: targetConflictsOf(err.payload.conflicts) };

@@ -1053,6 +1053,14 @@ export class ServiceClient {
     return this.request('PUT', `/orgs/${orgId}/projects/${projectId}/repos`, link, { timeout: timeoutMs });
   }
 
+  /**
+   * Forgets one stored link of a project (its folder moved). Idempotent on the service. Best effort for the
+   * caller: it passes a short `timeoutMs` and drops any failure.
+   */
+  async deleteProjectRepo(orgId: string, projectId: string, link: KnownRepo, timeoutMs?: number): Promise<{ ok: true; deleted: boolean }> {
+    return this.request('DELETE', `/orgs/${orgId}/projects/${projectId}/repos`, link, { timeout: timeoutMs });
+  }
+
   /** CAP-697: every project → repo link the caller can see (owners, admins and project admins only; a plain member gets a 403). */
   async getOrgRepos(orgId: string): Promise<OrgReposResponse> {
     try {

@@ -1066,6 +1066,7 @@ Every refusal carries a stable `code` — branch on it, never on message text.
 - `KEEP_PR_COMMIT_FAILED`
 - `KEEP_PR_BRANCH_FAILED`
 - `KEEP_PR_CREATE_FAILED`
+- `KEEP_LOCK_PROJECT_MISMATCH`
 - `CI_DEPLOY_TARGETS_RECORD_FAILED`
 - `DEPLOY_STALE_KEEP`
 - `DEPLOY_TOKEN_UNTRACKED`

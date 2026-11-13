@@ -33,6 +33,7 @@ import {
 } from './secretsSet';
 import { holdsFor, type BoundAnswer } from '../sync/noFolder';
 import { describePlanBody, type SetPlanBody } from './secretsSetCommand';
+import { deleteStaleLinks, followGitTargets } from './repoLinksFollowGit';
 import type { DryRunView } from './secretsSetText';
 import { CapyError, ERROR_CODES } from '../types/index';
 
@@ -57,12 +58,14 @@ export function dryRunView(body: SetPlanBody, request: RunRequest): DryRunView {
 
 async function planOnly(env: SetEnv, request: RunRequest): Promise<DryRunView> {
   const bases = request.bases ?? (await resolveBases(request.repos.length > 0 ? env.github() : undefined, request.repos));
+  // Only the folders the default branch carries are planned (reading only; nothing is forgotten in a dry run).
+  const followed = await followGitTargets(request.repos.length > 0 ? env.github() : undefined, request.repos, bases, 'default');
   const body = await describePlanBody(
-    { name: request.name, located: request.locations, targets: request.repos, notLinked: [], bases },
+    { name: request.name, located: request.locations, targets: followed.targets, notLinked: [], bases },
     env,
     request.value,
   );
-  return dryRunView(body, request);
+  return dryRunView(body, { ...request, repos: followed.targets });
 }
 
 /** What the locations that were read allow: the run goes on with these, or it stops for answers. */
@@ -106,7 +109,7 @@ type CancelPhase = Parameters<SecretsEditActions['cancel']>[0];
  * `EventTarget`, so a cancel reaches exactly the operations running now.
  */
 export function createEditActionsWith(
-  client: Pick<ServiceClient, 'getOrgRepos'>,
+  client: Pick<ServiceClient, 'getOrgRepos'> & Partial<Pick<ServiceClient, 'deleteProjectRepo'>>,
   orgId: string,
   env: SetEnv,
   dryRun: boolean = false,
@@ -144,7 +147,11 @@ export function createEditActionsWith(
         const reads = keys === undefined ? [] : await previewLocations(env, request.locations, request.name, request.value, keys);
         const settled: SettledLocations = stopPushes.aborted ? { kind: 'ready', locations: request.locations } : settleLocations(request, reads);
         if (settled.kind === 'conflicts') return { ok: false, code: ERROR_CODES.SECRETS_CONFLICT, conflicts: settled.conflicts };
-        const result = await runSecretSet({ ...request, locations: settled.locations, shown: settled.shown, answers: settled.answers, keys }, env, { onProgress, stopPushes, stopPrs });
+        // A project lives where the default branch has its keep.lock. Judged only when the screen has read the default branches.
+        const followed = await followGitTargets(request.bases === undefined || request.repos.length === 0 ? undefined : env.github(), request.repos, request.bases ?? {}, 'default');
+        const result = await runSecretSet({ ...request, repos: followed.targets, locations: settled.locations, shown: settled.shown, answers: settled.answers, keys }, env, { onProgress, stopPushes, stopPrs });
+        // Best effort and silent; never changes the result.
+        await deleteStaleLinks(client, orgId, followed.stale);
         return { ok: true, result };
       } catch (err) {
         return { ok: false, code: codeOf(err) };

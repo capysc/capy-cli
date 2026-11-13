@@ -723,6 +723,8 @@ export const ERROR_CODES = {
   KEEP_PR_BRANCH_FAILED: 'KEEP_PR_BRANCH_FAILED',
   /** keep.lock PR step: opening the pull request on GitHub failed. */
   KEEP_PR_CREATE_FAILED: 'KEEP_PR_CREATE_FAILED',
+  /** A batch deploy's keep.lock PR: the folder on the PR base holds another project's keep.lock, and this project has no other folder there. */
+  KEEP_LOCK_PROJECT_MISMATCH: 'KEEP_LOCK_PROJECT_MISMATCH',
   // --- CI-mode target recording (CAP-687) ---
   /**
    * A CI-mode deploy delivered successfully (its PR's keep.lock already
