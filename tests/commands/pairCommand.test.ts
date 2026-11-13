@@ -14,6 +14,7 @@
  */
 import { mock, jest, describe, test, expect, beforeEach, spyOn } from 'bun:test';
 import { webcrypto } from 'crypto';
+import { existsSync } from 'fs';
 import { CapyError, ERROR_CODES } from '../../src/types/index';
 import { PAIR_AAD, type PairEnvelope } from '../../src/crypto/pairCrypto';
 import type { PairingPayload } from '../../src/crypto/pairingPayload';
@@ -195,10 +196,50 @@ describe('pairCommand', () => {
     expect(mockWriteOrgKeyFileRaw.mock.calls[0][2]).toBe('user-456');
   });
 
-  test('under --json, the QR/link/progress lines go to stderr and stdout stays pure JSON', async () => {
+  test('under --json, presentation metadata goes to stderr and stdout stays a single result object', async () => {
     const { stdout, stderr } = await withCapturedIo(() => pairCommand({ json: true }));
     expect(() => JSON.parse(stdout)).not.toThrow();
-    expect(stderr).toContain('ABCD-EFGH');
+    const handoff = JSON.parse(stderr);
+    expect(handoff.event).toBe('pairing_required');
+    expect(handoff.user_code).toBe('ABCD-EFGH');
+    expect(handoff.qr.mime_type).toBe('image/png');
+    expect(handoff.agent_instructions).toContain('If your client cannot display images, explicitly say so and still show the complete metadata and clickable link. Do not silently omit the QR.');
+    expect(existsSync(handoff.qr.file)).toBe(false);
+    expect(stderr).not.toContain('device-1');
+  });
+
+  test('emits the complete handoff before waiting for approval, even without terminal QR rendering', async () => {
+    const io = captureStdio();
+    try {
+      mockPollDeviceToken.mockImplementation(async () => {
+        const handoff = JSON.parse(io.stderr());
+        expect(io.stdout()).toBe('');
+        expect(handoff.status).toBe('pending');
+        expect(handoff.account.status).toBe('not_yet_confirmed');
+        expect(existsSync(handoff.qr.file)).toBe(true);
+        expect(handoff.display.markdown).toContain('ABCD-EFGH');
+        return {
+          token: { access_token: 'jwt', refresh_token: 'rt', expires_in: 600 },
+          user: EXCHANGE_USER,
+          organizations: [{ id: 'org-123', workos_org_id: 'wo_1', name: 'Acme' }],
+        };
+      });
+      await pairCommand({ json: true });
+      expect(mockRenderTerminalQr).not.toHaveBeenCalled();
+      expect(JSON.parse(io.stdout()).ok).toBe(true);
+    } finally {
+      io.restore();
+    }
+  });
+
+  test('expires cleanly, deleting the pending QR and returning the existing JSON refusal', async () => {
+    mockPollDeviceToken.mockRejectedValue(new CapyError('Pairing expired', ERROR_CODES.AUTH_FAILED));
+    const { stdout, stderr } = await withCapturedIo(async () => {
+      await expect(pairCommand({ json: true })).rejects.toThrow();
+    });
+    expect(JSON.parse(stdout).code).toBe('AUTH_FAILED');
+    expect(existsSync(JSON.parse(stderr).qr.file)).toBe(false);
+    expect(mockInstallDeviceGrantSession).not.toHaveBeenCalled();
   });
 
   // CAP-684 follow-up: `bun test`'s stdin is never a real TTY, so this
@@ -227,7 +268,7 @@ describe('pairCommand', () => {
     expect(qrArg).not.toBe('https://keep.capy.sc/device?…');
   });
 
-  test('--json is untouched: the progress line on stderr still carries the FULL link, exactly as before', async () => {
+  test('--json presentation metadata carries the full approval link', async () => {
     const { stderr } = await withCapturedIo(() => pairCommand({ json: true }));
     expect(stderr).toContain('/device?code=ABCD-EFGH');
   });
