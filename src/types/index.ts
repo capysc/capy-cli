@@ -961,6 +961,9 @@ export const ERROR_CODES = {
   DEPLOY_PREFLIGHT_FAILED: 'DEPLOY_PREFLIGHT_FAILED',
   /** A batch deploy target's delivery to the platform failed and gave no code of its own. */
   DEPLOY_PUSH_FAILED: 'DEPLOY_PUSH_FAILED',
+  // --- A git repo belongs to one organization ---
+  /** The folder's tracked keep.lock names organization A, and `capy redeem` or `capy org` was asked to bring organization B into it. Nothing in the folder was changed. Exit 1. */
+  REPO_ORG_MISMATCH: 'REPO_ORG_MISMATCH',
 } as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES];
