@@ -33,11 +33,13 @@ function parseOne(spec: string): { readonly environment: string; readonly branch
   return { environment: spec.slice(0, at).trim(), branch: spec.slice(at + 1).trim(), branchGiven: true };
 }
 
-function firstDuplicate(names: readonly string[]): string | undefined {
-  return names.find((name, i) => names.indexOf(name) !== i);
+/** The first name that repeats an earlier one, compared through `normalize` (identity unless given). */
+function firstDuplicate(names: readonly string[], normalize: (name: string) => string = (name) => name): string | undefined {
+  const keys = names.map(normalize);
+  return names.find((_name, i) => keys.indexOf(keys[i]) !== i);
 }
 
-/** The first problem in the parsed list, as a refusal, or `null` when the list is fine. Order: an empty environment, a bad branch name, an environment named twice, a branch used twice. */
+/** The first problem in the parsed list, as a refusal, or `null` when the list is fine. Order: an empty environment, a bad branch name, an environment named twice, a branch used twice (case-insensitively). */
 function problemWith(parsed: ReadonlyArray<ReturnType<typeof parseOne>>): ConnectFailure | null {
   const unnamed = parsed.find((p) => p.environment === '');
   if (unnamed) {
@@ -46,6 +48,7 @@ function problemWith(parsed: ReadonlyArray<ReturnType<typeof parseOne>>): Connec
   }
   const badBranch = parsed.map((p) => ({ p, problem: branchNameProblem(p.branch) })).find((x) => x.problem !== null);
   if (badBranch?.problem) {
+    // COPY-FLAG: new user-facing string, minimal/neutral wording (the service's own sentence, prefixed with the environment).
     return { ok: false, code: badBranch.problem.code, message: `${badBranch.p.environment}: ${badBranch.problem.message}` };
   }
   const twiceEnvironment = firstDuplicate(parsed.map((p) => p.environment));
@@ -53,7 +56,8 @@ function problemWith(parsed: ReadonlyArray<ReturnType<typeof parseOne>>): Connec
     // COPY-FLAG: new user-facing string, minimal/neutral wording.
     return { ok: false, code: ERROR_CODES.VERCEL_ENVIRONMENT_DUPLICATE, message: `Environment named twice: ${twiceEnvironment}.` };
   }
-  const twiceBranch = firstDuplicate(parsed.map((p) => p.branch));
+  // Two branches that differ only by case are never what someone wants here, so they count as the same branch.
+  const twiceBranch = firstDuplicate(parsed.map((p) => p.branch), (branch) => branch.toLowerCase());
   if (twiceBranch !== undefined) {
     // COPY-FLAG: new user-facing string, minimal/neutral wording.
     return { ok: false, code: ERROR_CODES.VERCEL_BRANCH_DUPLICATE, message: `Branch used twice: ${twiceBranch}.` };

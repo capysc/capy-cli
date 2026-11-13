@@ -12,14 +12,16 @@
  *
  * No `mock.module()`: this file runs in the normal batch.
  */
-import { describe, test, expect, mock } from 'bun:test';
+import { describe, test, expect, mock, spyOn } from 'bun:test';
 import { randomBytes } from 'node:crypto';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { createVercelConnector } from '../../src/commands/connectors/vercel';
 import { buildVercelDiscoveryPlan } from '../../src/commands/connectors/vercelDiscovery';
 import { optionConflict, parseEnvironmentChoices } from '../../src/commands/connectors/vercelEnvironmentMap';
+import { loadProvider, listProviders } from '../../src/commands/connectors/registry';
 import { findCandidateReposResult, type DiscoveryContext } from '../../src/commands/connectors/dokployDiscovery';
 import { ConnectCommand } from '../../src/commands/connectCommand';
 import { FileManager } from '../../src/files/fileManager';
@@ -113,10 +115,29 @@ describe('parseEnvironmentChoices — each refusal has its code', () => {
     expect(parseEnvironmentChoices([])).toEqual({ ok: true, choices: [] });
   });
 
+  test('whitespace around the environment, the = and the branch is trimmed; environment names stay case-sensitive', () => {
+    expect(parseEnvironmentChoices([' preview = staging ', '  production  '])).toEqual({
+      ok: true,
+      choices: [
+        { environment: 'preview', branch: 'staging' },
+        { environment: 'production', branch: 'production' },
+      ],
+    });
+    // `Preview` and `preview` are two different environment names, so this is not an environment named twice
+    expect(parseEnvironmentChoices(['Preview=a', 'preview=b'])).toEqual({
+      ok: true,
+      choices: [
+        { environment: 'Preview', branch: 'a' },
+        { environment: 'preview', branch: 'b' },
+      ],
+    });
+  });
+
   test.each([
     ['the same environment twice', ['preview=staging', 'preview'], ERROR_CODES.VERCEL_ENVIRONMENT_DUPLICATE],
     ['the same environment twice, renamed both times', ['preview=a', 'preview=b'], ERROR_CODES.VERCEL_ENVIRONMENT_DUPLICATE],
     ['two environments on the same branch', ['preview=staging', 'development=staging'], ERROR_CODES.VERCEL_BRANCH_DUPLICATE],
+    ['two branches that differ only by case', ['preview=Staging', 'production=staging'], ERROR_CODES.VERCEL_BRANCH_DUPLICATE],
     ['a rename onto another named environment\'s own branch', ['preview=production', 'production'], ERROR_CODES.VERCEL_BRANCH_DUPLICATE],
     ['a branch that starts with a symbol', ['preview=-staging'], ERROR_CODES.BRANCH_NAME_INVALID],
     ['a branch with ..', ['preview=a..b'], ERROR_CODES.BRANCH_NAME_INVALID],
@@ -178,6 +199,58 @@ describe('connector — refusals change nothing and ask Vercel nothing the optio
       expect((out as { code: string }).code).toBe(ERROR_CODES.VERCEL_IMPORT_ENVIRONMENT_NOT_APPLICABLE);
       expect(fetchMock.mock.calls.length).toBe(0);
     });
+  });
+});
+
+describe('connector — names are trimmed, environment names are case-sensitive', () => {
+  test('" preview = staging " plans preview on staging', async () => {
+    await withExitCodeRestored(() =>
+      inRepo(async (root) => {
+        const { out } = await dryRunJson(root, { importEnvironments: [' preview = staging '] });
+        expect(envsOf(out).map((x) => [x.branch, x.environment])).toEqual([['staging', 'preview']]);
+      }),
+    );
+  });
+
+  test('"Preview" is not "preview": VERCEL_ENVIRONMENT_NOT_FOUND, listing the names that exist', async () => {
+    await inRepo(async (root) => {
+      const { connector } = connectorFor(root, data());
+      const out = await connector.discover!(fakeDiscoveryCtx(), discoverOpts({ yes: true, importEnvironments: ['Preview=staging'] }));
+      expect((out as { code: string }).code).toBe(ERROR_CODES.VERCEL_ENVIRONMENT_NOT_FOUND);
+      expect((out as { message: string }).message).toContain('preview');
+      expect(existsSync(join(root, 'keep.lock'))).toBe(false);
+    });
+  });
+});
+
+describe('connectors that do not take --import-environment refuse it, before any request', () => {
+  test('only the Vercel connector accepts it', async () => {
+    const accepting = await Promise.all(listProviders().map(async (p) => [p.name, (await loadProvider(p.name)).acceptsImportEnvironments === true] as const));
+    expect(accepting.filter(([, yes]) => yes).map(([name]) => name)).toEqual(['vercel']);
+  });
+
+  test.each([['dokploy'], ['stripe']])('%s: CONNECTOR_OPTION_NOT_APPLICABLE as JSON, exit code 1, zero requests, nothing written', async (provider) => {
+    await withExitCodeRestored(() =>
+      inRepo(async (root) => {
+        const fetchSpy = spyOn(globalThis, 'fetch').mockImplementation(async () => {
+          throw new Error('no request may be made');
+        });
+        try {
+          const run = await captureConsole(() =>
+            new ConnectCommand(false).execute(provider, { discover: true, yes: true, json: true, nonTty: true, importEnvironments: ['staging'] }),
+          );
+          expect(run.result).toEqual({ linked: false });
+          expect(run.stdout.length).toBe(1);
+          expect(JSON.parse(run.stdout[0])).toMatchObject({ ok: false, code: ERROR_CODES.CONNECTOR_OPTION_NOT_APPLICABLE });
+          expect(process.exitCode).toBe(1);
+          expect(fetchSpy.mock.calls.length).toBe(0);
+          expect(git(root, ['status', '--porcelain']).trim()).toBe('');
+          expect(existsSync(join(root, 'keep.lock'))).toBe(false);
+        } finally {
+          fetchSpy.mockRestore();
+        }
+      }),
+    );
   });
 });
 
@@ -478,6 +551,95 @@ describe('a real run with the option', () => {
   }, 30_000);
 });
 
+describe('a real run: what is read, what is kept, where placeholders land', () => {
+  const idsFetched = (fetchMock: { mock: { calls: ReadonlyArray<readonly unknown[]> } }): readonly string[] =>
+    callsOf(fetchMock)
+      .map((c) => /\/env\/([^/?]+)/.exec(c.url)?.[1])
+      .filter((id): id is string => id !== undefined);
+
+  test('an environment that is not named never has its encrypted value fetched; a named one does', async () => {
+    await withIsolatedGlobalDir(() =>
+      withExitCodeRestored(() =>
+        inRepo(async (root) => {
+          const { ctx } = await prepareRealRun(root, 'org_v_envchoice_fetch', []);
+          const first = connectorFor(root, data());
+          await first.connector.discover!(ctx, discoverOpts({ yes: true, importEnvironments: ['production=live'] }));
+          // production's encrypted SHARED (p2) is read; preview's and development's records are not
+          expect(idsFetched(first.fetchMock)).toContain('p2');
+          expect(idsFetched(first.fetchMock).filter((id) => ['v1', 'v2', 'd1'].includes(id))).toEqual([]);
+        }),
+      ),
+    );
+    await withIsolatedGlobalDir(() =>
+      withExitCodeRestored(() =>
+        inRepo(async (root) => {
+          const { ctx } = await prepareRealRun(root, 'org_v_envchoice_fetch2', []);
+          const second = connectorFor(root, data());
+          await second.connector.discover!(ctx, discoverOpts({ yes: true, importEnvironments: ['preview=staging'] }));
+          // production's records (A, encrypted SHARED, sensitive HIDDEN) and development's are never asked for
+          expect(idsFetched(second.fetchMock).filter((id) => ['p1', 'p2', 'p3', 'd1'].includes(id))).toEqual([]);
+        }),
+      ),
+    );
+  }, 30_000);
+
+  test('a differing value on an existing mapped branch is skipped and the existing value is kept', async () => {
+    await withIsolatedGlobalDir(() =>
+      withExitCodeRestored(() =>
+        inRepo(async (root) => {
+          const orgId = 'org_v_envchoice_keepold';
+          const { ctx, projectKey } = await prepareRealRun(root, orgId, ['staging']);
+          // the existing `staging` branch already holds P with another value, as the service would hand it over
+          const scratch = mkdtempSync(join(tmpdir(), 'capy-envchoice-seed-'));
+          const keep: KeepFile = { version: '3.0', org_id: orgId, project_id: `${orgId}_proj`, project_name: 'widgets', variables: {} };
+          new FileManager(scratch).writeEncryptedEnvFile({ P: 'old-P-SENT-99zz' }, projectKey, undefined, keep, 'staging');
+          const envContent = readFileSync(join(scratch, '.env'), 'utf-8');
+          const withExisting = {
+            ...ctx,
+            serviceClient: {
+              ...ctx.serviceClient,
+              getDecryptData: async () => ({ env_content: envContent, keep_file: '', decrypt_key: '', expires_at: new Date().toISOString() }),
+            },
+          } as DiscoveryContext;
+
+          const { connector } = connectorFor(root, data());
+          const outcome = await connector.discover!(withExisting, discoverOpts({ yes: true, importEnvironments: ['preview=staging'] }));
+          expect(outcome.ok).toBe(true);
+          if (!outcome.ok) return;
+          const folder = outcome.applied?.[0];
+          if (!folder?.ok) throw new Error('folder not applied');
+          const step = folder.environments[0];
+          expect([step.branchName, step.branchCreated, step.overwrote]).toEqual(['staging', false, false]);
+          expect(step.outcome.imported).toEqual([]);
+          expect(step.outcome.skipped).toEqual(expect.arrayContaining([{ name: 'P', code: 'IMPORT_CONFLICT_SKIPPED' }]));
+          expect(new FileManager(root).readEncryptedEnvFile(projectKey)).toEqual({ P: 'old-P-SENT-99zz' });
+        }),
+      ),
+    );
+  }, 30_000);
+
+  test('a placeholder for an unreadable value in a renamed environment lands on the renamed branch only', async () => {
+    await withIsolatedGlobalDir(() =>
+      withExitCodeRestored(() =>
+        inRepo(async (root) => {
+          const { ctx } = await prepareRealRun(root, 'org_v_envchoice_placeholder', []);
+          const withHidden: FakeVercelData = { ...data(), envs: { prj_web: [...ENVS, e({ id: 'v3', key: 'PH', type: 'sensitive', target: ['preview'] })] } };
+          const { connector } = connectorFor(root, withHidden);
+          const outcome = await connector.discover!(ctx, discoverOpts({ yes: true, importEnvironments: ['preview=staging'] }));
+          expect(outcome.ok).toBe(true);
+          if (!outcome.ok) return;
+          const folder = outcome.applied?.[0];
+          if (!folder?.ok) throw new Error('folder not applied');
+          expect(folder.environments[0].branchName).toBe('staging');
+          expect(folder.environments[0].outcome.placeholders).toEqual([{ name: 'PH', code: 'sensitive_unreadable', provider: 'vercel' }]);
+          const keep = JSON.parse(readFileSync(join(root, 'keep.lock'), 'utf-8')) as KeepFile;
+          expect((keep.variables.PH ?? []).map((row) => [row.branch, row.placeholder?.provider])).toEqual([['staging', 'vercel']]);
+        }),
+      ),
+    );
+  }, 30_000);
+});
+
 // ── help ────────────────────────────────────────────────────────────────────
 
 describe('capy help --json', () => {
@@ -492,7 +654,7 @@ describe('capy help --json', () => {
     const option = connect.options.find((o) => o.long === '--import-environment');
     expect(option).toBeDefined();
     expect(option!.description).toContain('vercel');
-    ['VERCEL_ENVIRONMENT_DUPLICATE', 'VERCEL_BRANCH_DUPLICATE', 'VERCEL_IMPORT_ENVIRONMENT_NOT_APPLICABLE'].forEach((code) => expect(doc.errorCodes).toContain(code));
+    ['VERCEL_ENVIRONMENT_DUPLICATE', 'VERCEL_BRANCH_DUPLICATE', 'VERCEL_IMPORT_ENVIRONMENT_NOT_APPLICABLE', 'CONNECTOR_OPTION_NOT_APPLICABLE'].forEach((code) => expect(doc.errorCodes).toContain(code));
   });
 
   test('--environment is still there, unchanged in meaning', () => {

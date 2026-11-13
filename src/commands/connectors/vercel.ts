@@ -784,6 +784,7 @@ export function createVercelConnector(deps: VercelConnectorDeps = {}): Connector
     description: 'One-time import of env vars from a Vercel project',
     kind: 'import',
     displayName: 'Vercel',
+    acceptsImportEnvironments: true,
 
     // Never reached: `connectCommand.ts` routes `kind === 'import'` to import().
     async connect(): Promise<ConnectResult> {

@@ -196,6 +196,13 @@ async function toPlanFolder(
   };
 }
 
+/** The environments the plan keeps: the chosen ones, else the `--environment` filter, else all (`undefined`). */
+function selectedEnvironments(chosen: readonly EnvironmentBranchChoice[] | undefined, environmentFilter: readonly string[] | undefined): ReadonlySet<string> | undefined {
+  if (chosen) return new Set(chosen.map((c) => c.environment));
+  if (environmentFilter && environmentFilter.length > 0) return new Set(environmentFilter);
+  return undefined;
+}
+
 /**
  * Reads every project, matches against `repos`, plans a folder per matched
  * project, flags collisions. Apart from the injected client/peek this never
@@ -221,11 +228,7 @@ export async function buildVercelDiscoveryPlan(
   const noVariables = projectPlans.filter((pp) => pp.envs.length === 0).map((pp) => unmatchedFrom(pp.matched.project, 'no_variables'));
   const allEnvironmentNames = sortedCopy([...new Set(withVariables.flatMap((pp) => pp.envs.map((e) => e.environmentName)))]);
   const chosen = choices && choices.length > 0 ? choices : undefined;
-  const filterSet = chosen
-    ? new Set(chosen.map((c) => c.environment))
-    : environmentFilter && environmentFilter.length > 0
-      ? new Set(environmentFilter)
-      : undefined;
+  const filterSet = selectedEnvironments(chosen, environmentFilter);
   const branchFor = chosen ? new Map(chosen.map((c) => [c.environment, c.branch] as const)) : undefined;
 
   const maybeFolders = await Promise.all(withVariables.map((pp) => toPlanFolder(pp, filterSet, peek, branchFor)));

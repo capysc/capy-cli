@@ -390,6 +390,13 @@ export interface ConnectorModule {
    */
   displayName?: string;
   /**
+   * Whether this connector's discovery takes `--import-environment` (a chosen
+   * set of environments, each on a chosen Capy branch). Omitted: it does not,
+   * and `connectCommand` refuses the option before any request rather than
+   * letting it be ignored.
+   */
+  acceptsImportEnvironments?: boolean;
+  /**
    * Set when rotating runs an interactive auth step the user must complete by
    * hand (e.g. Stripe shells out to `stripe login`, which opens a browser).
    * Surfaced as a leading "Auth" stop in the rotate plan so the user knows a

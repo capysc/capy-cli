@@ -819,6 +819,8 @@ export const ERROR_CODES = {
   // --- Connector discovery, any provider (`capy connect <provider> --discover`) ---
   // One per step a folder's run can stop on. Every provider but Dokploy reports these;
   // Dokploy keeps its own `DOKPLOY_*` spellings of the same steps.
+  /** An option was given to a connector that does not take it (for example `--import-environment` with a provider that cannot choose environments). Nothing was changed. */
+  CONNECTOR_OPTION_NOT_APPLICABLE: 'CONNECTOR_OPTION_NOT_APPLICABLE',
   /** The folder's upload failed for a reason other than a stale base. That folder's run stopped; the other folders still ran. */
   CONNECTOR_PUSH_FAILED: 'CONNECTOR_PUSH_FAILED',
   /** Non-interactive run without `--yes`: the folder has no keep.lock, and a person has to initialize it. */
