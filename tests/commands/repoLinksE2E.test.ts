@@ -188,6 +188,7 @@ describe('capy run records the link even when the child exits at once', () => {
       // An encrypted variable in .env, written with reporting off, so `run` has something to decrypt (and so reaches the key step).
       await h.run(['edit', NAME, '--json'], 'v\n', undefined, { ...env, CAPY_NO_REPO_LINK: '1' });
       expect(putsOf(h)).toHaveLength(0);
+      h.setBranches('proj_test_piped', [{ id: 'b_production', name: 'production', is_protected: false }]);
 
       const out = await h.run(['run', '--', 'node', '-e', 'process.stdout.write("hi"); process.exit(4)'], undefined, undefined, env);
       expect(out.code).toBe(4);
@@ -204,6 +205,7 @@ describe('capy run records the link even when the child exits at once', () => {
   test('a service that never answers adds at most the budget to an instant child, and changes nothing else', async () => {
     await withRepo('git@github.com:Acme/solo.git', 'project', async (h, env) => {
       await h.run(['edit', NAME, '--json'], 'v\n', undefined, { ...env, CAPY_NO_REPO_LINK: '1' });
+      h.setBranches('proj_test_piped', [{ id: 'b_production', name: 'production', is_protected: false }]);
       h.setRepoPutMode('hang');
       const out = await h.run(['run', '--', 'node', '-e', 'process.exit(6)'], undefined, undefined, env);
       expect(out.code).toBe(6);
