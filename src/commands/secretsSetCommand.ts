@@ -51,6 +51,8 @@ import { MAX_PIPED_BYTES, PipedValueResult, readPipedValue, refuseInvalidName, e
 import { isValidVarName } from './pipedWrite';
 import { rowIdOf } from './secretsRowId';
 import {
+  FailedItem,
+  SecretSetResult,
   KeyResolver,
   LocationConflict,
   LocationPreview,
@@ -135,6 +137,8 @@ export interface SetPlanBody {
   readonly not_linked: readonly string[];
   /** Present only when the repo links could not be read (e.g. `REPO_LINKS_UNSUPPORTED`): no PR can be planned. */
   readonly repos_unavailable?: string;
+  /** Present only when a repo cannot get a PR for a project: the same shape as a run's `failed`, with `KEEP_LOCK_PROJECT_MISMATCH`. */
+  readonly failed?: readonly FailedItem[];
 }
 
 export interface SetPlan extends SetPlanBody {
@@ -326,6 +330,8 @@ export interface PlanInput {
   readonly notLinked: readonly string[];
   readonly bases: Readonly<Record<string, string>>;
   readonly reposUnavailable?: string;
+  /** Repos that cannot get a PR for a project (`KEEP_LOCK_PROJECT_MISMATCH`); absent when none. */
+  readonly failed?: readonly FailedItem[];
 }
 
 interface Selection extends PlanInput {
@@ -383,6 +389,7 @@ export async function describePlanBody(
     prs,
     not_linked: sel.notLinked,
     ...(sel.reposUnavailable === undefined ? {} : { repos_unavailable: sel.reposUnavailable }),
+    ...(sel.failed === undefined || sel.failed.length === 0 ? {} : { failed: sel.failed }),
   };
 }
 
@@ -408,6 +415,10 @@ export function renderPlanText(plan: SetPlan): string {
     ...(plan.repos_unavailable === undefined ? [] : [`Repo links unavailable (${plan.repos_unavailable}).`]), // COPY-FLAG
   ].join('\n');
 }
+
+/** Each repo in `repos` as a failed repo with `KEEP_LOCK_PROJECT_MISMATCH` (the shape the write point's refusal has). */
+export const mismatchFailures = (repos: readonly string[]): readonly FailedItem[] =>
+  repos.map((repo): FailedItem => ({ kind: 'repo', repo, code: ERROR_CODES.KEEP_LOCK_PROJECT_MISMATCH }));
 
 // ── The command ─────────────────────────────────────────────────────────────
 
@@ -498,8 +509,11 @@ export async function runSecretsSet(name: string, opts: SecretsSetOpts, io: Secr
   const narrowed = narrowRepos(planning.targets, opts.noPrFor ?? [], noPr, json);
   const bases = await resolveBases(narrowed.length > 0 ? io.env.github() : undefined, narrowed, io.control?.planning);
   // A project lives where the repo's default branch has its keep.lock: a folder that branch does not carry, while another does, is left out of the plan (the rows stay).
-  const targets = await followGitTargets(narrowed.length > 0 ? io.env.github() : undefined, narrowed, bases, io.control?.planning);
-  const sel: Selection = { name, located, targets, notLinked: planning.notLinked, bases, reposUnavailable: loaded.unavailable };
+  const followed = await followGitTargets(narrowed.length > 0 ? io.env.github() : undefined, narrowed, bases, io.control?.planning);
+  const targets = followed.targets;
+  // A repo whose project has nothing it may write to is a failed repo, in the plan and in the run: never silently left out.
+  const mismatches = mismatchFailures(followed.mismatched);
+  const sel: Selection = { name, located, targets, notLinked: planning.notLinked, bases, reposUnavailable: loaded.unavailable, failed: mismatches };
 
   if (opts.dryRun === true) {
     const previewValue = await optionalValue(io);
@@ -558,12 +572,13 @@ export async function runSecretsSet(name: string, opts: SecretsSetOpts, io: Secr
   );
   const leftAlone = new Set(moved.filter(() => choice === 'remote').map((c) => locationKeyOf(c.location)));
   const pushTo = located.filter((l) => !leftAlone.has(locationKeyOf(l)));
-  const result = await runSecretSet({ name, value, locations: pushTo, repos: targets, bases, shown: shownOf(located), answers, restore, keys }, io.env, {
+  const ran = await runSecretSet({ name, value, locations: pushTo, repos: targets, bases, shown: shownOf(located), answers, restore, keys }, io.env, {
     stopPushes: io.control?.pushes,
     stopPrs: io.control?.prs,
     // Said once per phase when a stop is noticed with items still running; silent when nothing is in progress.
     onStopping: ({ inFlight }) => (json || inFlight === 0 ? undefined : console.error(stoppingAfter(inFlight))),
   });
+  const result: SecretSetResult = { ...ran, failed: [...ran.failed, ...mismatches] };
   const cancelled = result.cancelled ?? [];
   // A stopped run is partial too: what was done is real, the rest is listed as cancelled.
   const failed = result.failed.length > 0 || cancelled.length > 0;

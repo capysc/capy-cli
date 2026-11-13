@@ -29,7 +29,8 @@ export function projectIdOfKeepText(raw: string): string | undefined {
 /** What a keep.lock's text says about `projectId`: present (its own), other (someone else's) or unknown. */
 export function kindOfKeepText(raw: string, projectId: string): StoredPathKind {
   const found = projectIdOfKeepText(raw);
-  if (found === undefined) return 'unknown';
+  // Both ids must be known to call the file anyone's: a side with no id says nothing.
+  if (found === undefined || typeof projectId !== 'string' || projectId.length === 0) return 'unknown';
   return found === projectId ? 'present' : 'other';
 }
 

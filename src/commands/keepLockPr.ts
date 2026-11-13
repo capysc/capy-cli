@@ -33,7 +33,7 @@ import {
 } from '../deploy/githubApi';
 import { resolveGh } from '../utils/gh';
 import { refusePiped } from './pipedValue';
-import { kindOfKeepText, probeKeepLockAt } from './keepLockProbe';
+import { StoredPathKind, kindOfKeepText, probeKeepLockAt } from './keepLockProbe';
 
 const GREEN = (s: string) => `\x1b[32m${s}\x1b[0m`;
 const YELLOW = (s: string) => `\x1b[33m${s}\x1b[0m`;
@@ -432,6 +432,14 @@ async function readBase(target: Target, base: string, spec: KeepLockFileSpec): P
  * The files the base has no keep.lock for while it has this project's at another stored folder: the project lives there on this
  * branch, so no empty keep.lock is created here. Read only; a read that fails does not count as "present".
  */
+/** A base file already read, judged the way the probe judges one: this project's id is present, another's is other, no id on either side is unknown. */
+function kindOfBase(base: BaseKeep, projectId: string): StoredPathKind {
+  if (!base.existed) return 'absent';
+  const found: unknown = base.keep.project_id;
+  if (typeof found !== 'string' || found.length === 0 || projectId.length === 0) return 'unknown';
+  return found === projectId ? 'present' : 'other';
+}
+
 async function skippedFor(target: Target, base: string, specs: readonly KeepLockFileSpec[], bases: readonly BaseKeep[]): Promise<readonly SkippedFile[]> {
   const judged = await Promise.all(
     specs.map(async (spec, i): Promise<readonly SkippedFile[]> => {
@@ -442,7 +450,7 @@ async function skippedFor(target: Target, base: string, specs: readonly KeepLock
           const read = specs.findIndex((s) => s.path === alt);
           return read === -1
             ? probeKeepLockAt(target.github, target.repo, alt, base, spec.localKeep.project_id)
-            : Promise.resolve(bases[read].existed ? 'present' : 'absent');
+            : Promise.resolve(kindOfBase(bases[read], spec.localKeep.project_id));
         }),
       );
       return kinds.includes('present') ? [{ path: spec.path, code: ERROR_CODES.KEEP_LOCK_NOT_ON_BASE }] : [];

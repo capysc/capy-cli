@@ -115,7 +115,7 @@ describe('the repos of a secrets set run, judged by the default branch', () => {
   const pathsOf = (t: readonly RepoTarget[]) => t.flatMap((r) => r.files.map((f) => f.path));
 
   test('old and new rows, only the new one has the file: one path is planned for the project', async () => {
-    const followed = await followGitTargets(fakeGithub(AFTER_MOVE), targetsFor([OLD_LINK, NEW_LINK, FRONTEND_LINK]), BASES);
+    const followed = (await followGitTargets(fakeGithub(AFTER_MOVE), targetsFor([OLD_LINK, NEW_LINK, FRONTEND_LINK]), BASES)).targets;
 
     expect(pathsOf(followed)).toEqual([NEW, 'frontend']);
   });
@@ -123,37 +123,47 @@ describe('the repos of a secrets set run, judged by the default branch', () => {
   test('neither row has the file: today\'s targets come back untouched', async () => {
     const targets = targetsFor([OLD_LINK, NEW_LINK, FRONTEND_LINK]);
 
-    expect(await followGitTargets(fakeGithub(NO_FILE_YET), targets, BASES)).toBe(targets);
+    expect((await followGitTargets(fakeGithub(NO_FILE_YET), targets, BASES)).targets).toBe(targets);
   });
 
   test('both rows have the file: both are planned', async () => {
     const targets = targetsFor([OLD_LINK, NEW_LINK, FRONTEND_LINK]);
 
-    expect(await followGitTargets(fakeGithub(BOTH), targets, BASES)).toBe(targets);
+    expect((await followGitTargets(fakeGithub(BOTH), targets, BASES)).targets).toBe(targets);
   });
 
   test('the move has not landed on this branch: the old path is planned', async () => {
-    const followed = await followGitTargets(fakeGithub(BEFORE_MOVE), targetsFor([OLD_LINK, NEW_LINK, FRONTEND_LINK]), BASES);
+    const followed = (await followGitTargets(fakeGithub(BEFORE_MOVE), targetsFor([OLD_LINK, NEW_LINK, FRONTEND_LINK]), BASES)).targets;
 
     expect(pathsOf(followed)).toEqual([OLD, 'frontend']);
   });
 
   test('a path that holds another project\'s keep.lock is never planned; the project\'s own path still is', async () => {
-    const followed = await followGitTargets(fakeGithub(NEW_IS_ANOTHERS), targetsFor([OLD_LINK, NEW_LINK, FRONTEND_LINK]), BASES);
+    const followed = (await followGitTargets(fakeGithub(NEW_IS_ANOTHERS), targetsFor([OLD_LINK, NEW_LINK, FRONTEND_LINK]), BASES)).targets;
 
     expect(pathsOf(followed)).toEqual([NEW, 'frontend']);
   });
 
   test('a project whose only stored path holds another project\'s keep.lock has nothing to write: the repo is left out', async () => {
-    const followed = await followGitTargets(fakeGithub(OLD_IS_ANOTHERS), targetsFor([OLD_LINK, FRONTEND_LINK]), BASES);
+    const followed = (await followGitTargets(fakeGithub(OLD_IS_ANOTHERS), targetsFor([OLD_LINK, FRONTEND_LINK]), BASES)).targets;
 
     expect(pathsOf(followed)).toEqual(['frontend']);
-    expect(await followGitTargets(fakeGithub(OLD_IS_ANOTHERS), targetsFor([OLD_LINK]), BASES)).toEqual([]);
+    const alone = await followGitTargets(fakeGithub(OLD_IS_ANOTHERS), targetsFor([OLD_LINK]), BASES);
+    expect(alone.targets).toEqual([]);
+    expect(alone.mismatched).toEqual(['Acme/mono']);
+  });
+
+  test('a foreign path next to a present one is resolved, not reported; only a project left with nothing is', async () => {
+    const resolved = await followGitTargets(fakeGithub(NEW_IS_ANOTHERS), targetsFor([OLD_LINK, NEW_LINK, FRONTEND_LINK]), BASES);
+    const blocked = await followGitTargets(fakeGithub(OLD_IS_ANOTHERS), targetsFor([OLD_LINK, FRONTEND_LINK]), BASES);
+
+    expect(resolved.mismatched).toEqual([]);
+    expect(blocked.mismatched).toEqual(['Acme/mono']);
   });
 
   test('each project of a repo is judged on its own', async () => {
     const files = monoWith({ [`${NEW}/keep.lock`]: githubKeep('pA'), 'frontend/keep.lock': githubKeep('pB') });
-    const followed = await followGitTargets(fakeGithub(files), targetsFor([OLD_LINK, NEW_LINK, FRONTEND_LINK, linkAt('web-old', 'pB')]), BASES);
+    const followed = (await followGitTargets(fakeGithub(files), targetsFor([OLD_LINK, NEW_LINK, FRONTEND_LINK, linkAt('web-old', 'pB')]), BASES)).targets;
 
     expect(pathsOf(followed)).toEqual([NEW, 'frontend']);
   });
@@ -161,9 +171,9 @@ describe('the repos of a secrets set run, judged by the default branch', () => {
   test('an unreadable keep.lock, an unknown base or no gh judges nothing: the targets come back as they were', async () => {
     const targets = targetsFor([OLD_LINK, NEW_LINK]);
     const failing = fakeGithub(AFTER_MOVE.map((r) => ({ ...r, fail: ['getFile'] })));
-    expect(await followGitTargets(failing, targets, BASES)).toBe(targets);
-    expect(await followGitTargets(fakeGithub(AFTER_MOVE), targets, {})).toBe(targets);
-    expect(await followGitTargets(undefined, targets, BASES)).toBe(targets);
+    expect((await followGitTargets(failing, targets, BASES)).targets).toBe(targets);
+    expect((await followGitTargets(fakeGithub(AFTER_MOVE), targets, {})).targets).toBe(targets);
+    expect((await followGitTargets(undefined, targets, BASES)).targets).toBe(targets);
   });
 
   test('a read that throws is an unknown, never a failure', async () => {
@@ -173,7 +183,7 @@ describe('the repos of a secrets set run, judged by the default branch', () => {
     });
     const targets = targetsFor([OLD_LINK, NEW_LINK]);
 
-    expect(await followGitTargets(github, targets, BASES)).toBe(targets);
+    expect((await followGitTargets(github, targets, BASES)).targets).toBe(targets);
   });
 
   test('every stored path is read once, from the base branch, for its own keep.lock', async () => {
@@ -239,15 +249,17 @@ function rig(over: { repos: readonly RepoFixture[]; links: readonly OrgRepoLink[
   return { io, service, github };
 }
 
+/** The paths one createTree call carried: several `entries`, or the one `path`. */
+const pathsOfTreeCall = (params: { path?: string; entries?: ReadonlyArray<{ path: string }> }): readonly string[] => {
+  if (params.entries !== undefined) return params.entries.map((e) => e.path);
+  return params.path === undefined ? [] : [params.path];
+};
+
 const json = (c: Captured) => JSON.parse(c.stdout);
 const run = (r: ReturnType<typeof rig>, opts: SecretsSetOpts) => capture(() => runSecretsSet(NAME, { json: true, ...opts }, r.io));
 const planOf = async (r: ReturnType<typeof rig>) => json(await run(r, { dryRun: true }));
 const monoPaths = (plan: { prs: ReadonlyArray<{ repo: string; keep_lock_paths: readonly string[] }> }) => plan.prs.find((p) => p.repo === 'Acme/mono')?.keep_lock_paths;
-const treePaths = (r: ReturnType<typeof rig>): readonly string[] =>
-  r.github.createTree.mock.calls.flatMap((c) => {
-    const params = c[1] as { path?: string; entries?: ReadonlyArray<{ path: string }> };
-    return params.entries === undefined ? (params.path === undefined ? [] : [params.path]) : params.entries.map((e) => e.path);
-  });
+const treePaths = (r: ReturnType<typeof rig>): readonly string[] => r.github.createTree.mock.calls.flatMap((c) => pathsOfTreeCall(c[1] as Parameters<typeof pathsOfTreeCall>[0]));
 
 describe('capy secrets set after a move', () => {
   test('the plan lists only the folder git has: the other stored folder is not a target', async () => {
@@ -315,6 +327,45 @@ describe('capy secrets set after a move', () => {
   });
 });
 
+describe('another project\'s keep.lock at a project\'s only stored path', () => {
+  const links = [OLD_LINK, FRONTEND_LINK, SOLO_LINK];
+  const mismatch = { kind: 'repo', repo: 'Acme/mono', code: ERROR_CODES.KEEP_LOCK_PROJECT_MISMATCH };
+
+  test('the plan reports the repo as failed with KEEP_LOCK_PROJECT_MISMATCH, in the same shape a run uses', async () => {
+    const plan = await planOf(rig({ repos: OLD_IS_ANOTHERS, links }));
+
+    expect(plan.failed).toEqual([mismatch]);
+    expect(monoPaths(plan)).toEqual(['frontend/keep.lock']);
+  });
+
+  test('a real run reports it in `failed`, exits 1 like any failed repo, and writes nothing into the other project\'s file', async () => {
+    const r = rig({ repos: OLD_IS_ANOTHERS, links });
+    const planId = (await planOf(r)).plan_id as string;
+    const out = await run(r, { confirm: planId });
+
+    expect(out.returned).toBe(1);
+    expect(json(out).ok).toBe(false);
+    expect(json(out).failed).toContainEqual(mismatch);
+    expect(treePaths(r).some((p) => p.startsWith(`${OLD}/`))).toBe(false);
+  });
+
+  test('when the only repo is the blocked one, it is in `failed` and not in prs, no_pr or not_linked', async () => {
+    const r = rig({ repos: OLD_IS_ANOTHERS, links: [OLD_LINK] });
+    const out = await run(r, { dryRun: true });
+    const plan = json(out);
+
+    expect(plan.failed).toEqual([mismatch]);
+    expect(plan.prs.map((p: { repo: string }) => p.repo)).not.toContain('Acme/mono');
+    expect(plan.not_linked).not.toContain(PROJECT_NAMES.pA);
+  });
+
+  test('a project that has its own folder next to the foreign one reports nothing', async () => {
+    const plan = await planOf(rig({ repos: NEW_IS_ANOTHERS, links: STORED }));
+
+    expect(plan.failed).toBeUndefined();
+  });
+});
+
 // ── The write point ────────────────────────────────────────────────────────
 
 describe('the write point holds the line against the files the branch has right then', () => {
@@ -327,11 +378,7 @@ describe('the write point holds the line against the files the branch has right 
     const result = await runSecretSet({ name: NAME, value: SENTINEL, locations, repos: [mono(files)], bases: BASES }, makeEnv(service, github));
     return { github, result };
   }
-  const treeFiles = (github: ReturnType<typeof fakeGithub>) =>
-    github.createTree.mock.calls.flatMap((c) => {
-      const params = c[1] as { path?: string; entries?: ReadonlyArray<{ path: string }> };
-      return params.entries === undefined ? (params.path === undefined ? [] : [params.path]) : params.entries.map((e) => e.path);
-    });
+  const treeFiles = (github: ReturnType<typeof fakeGithub>) => github.createTree.mock.calls.flatMap((c) => pathsOfTreeCall(c[1] as Parameters<typeof pathsOfTreeCall>[0]));
 
   test('a path that is absent at the write, while the other stored path has the project, is skipped with a code, never scaffolded', async () => {
     const { github, result } = await engine(AFTER_MOVE, both);
@@ -354,6 +401,14 @@ describe('the write point holds the line against the files the branch has right 
 
     expect(treeFiles(github).toSorted()).toEqual([`${NEW}/keep.lock`, `${OLD}/keep.lock`].toSorted());
     expect(result.prs[0].keep_lock_skipped).toBeUndefined();
+  });
+
+  test('an alternate that exists but has no readable project id is not "present": nothing is skipped for it', async () => {
+    const noId = JSON.stringify({ version: '3.0', variables: {} });
+    const { github, result } = await engine(monoWith({ [`${OLD}/keep.lock`]: noId, 'frontend/keep.lock': githubKeep('pB') }), both);
+
+    expect(treeFiles(github)).toEqual(expect.arrayContaining([`${NEW}/keep.lock`]));
+    expect(result.prs[0]?.keep_lock_skipped).toBeUndefined();
   });
 
   test('another project\'s keep.lock at a path is refused with a code and nothing is written, even when the plan did not filter it', async () => {
@@ -402,6 +457,14 @@ describe('the capy secrets screen after a move', () => {
 
     expect(finished.ok).toBe(true);
     expect(pathsOfTree(github)).toEqual([`${NEW}/keep.lock`]);
+  });
+
+  test('a project whose only stored path holds another project\'s keep.lock is a failed repo in the run result', async () => {
+    const github = fakeGithub(OLD_IS_ANOTHERS);
+    const finished = await actionsFor(github).run(request([mono([OLD_LINK].map(fileOf))], BASES));
+
+    expect(finished.ok && 'result' in finished ? finished.result.failed : undefined).toContainEqual({ kind: 'repo', repo: 'Acme/mono', code: ERROR_CODES.KEEP_LOCK_PROJECT_MISMATCH });
+    expect(github.createTree.mock.calls).toHaveLength(0);
   });
 
   test('a dry run reads only', async () => {

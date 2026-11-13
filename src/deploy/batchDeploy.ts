@@ -79,6 +79,8 @@ export const SKIP_CODES = {
   KEPT_ON_PLATFORM: 'KEPT_ON_PLATFORM',
   /** The PR base carries the project's keep.lock in other stored folders but not at the planned one, and nothing says which to write: nothing is written. */
   KEEP_LOCK_NOT_ON_BASE: ERROR_CODES.KEEP_LOCK_NOT_ON_BASE,
+  /** Every folder the project is stored at holds another project's keep.lock on the default branch: nothing is read or written. */
+  KEEP_LOCK_PROJECT_MISMATCH: ERROR_CODES.KEEP_LOCK_PROJECT_MISMATCH,
 } as const;
 export type SkipCode = (typeof SKIP_CODES)[keyof typeof SKIP_CODES];
 
@@ -189,6 +191,8 @@ function classifyLocation(
   reads: readonly LinkRead[],
   names: readonly string[],
   othersOf: (link: OrgRepoLink) => readonly string[],
+  /** The project has no folder to read: every stored one holds another project's keep.lock. */
+  mismatched: boolean,
 ): { readonly targets: readonly BatchTarget[]; readonly skipped: readonly PlanSkipped[] } {
   const skip = (target: string | null, provider: string | null, code: SkipCode): PlanSkipped => ({
     project: loc.project_name,
@@ -197,6 +201,7 @@ function classifyLocation(
     provider,
     code,
   });
+  if (mismatched) return { targets: [], skipped: [skip(null, null, SKIP_CODES.KEEP_LOCK_PROJECT_MISMATCH)] };
   const readable = reads.flatMap((r) => (r.read.ok ? [{ link: r.link, targets: r.read.targets, base: r.read.base }] : []));
   // A location whose deploy.json could not be read is not decided: it is in `read_failed`, not here.
   if (readable.length < reads.length) return { targets: [], skipped: [] };
@@ -257,7 +262,10 @@ export async function planBatchDeploy(
   const bases = await resolveBases(github, repos, signal);
   // A project lives where the default branch has its keep.lock: a stored folder that branch does not carry (while another does),
   // or that holds another project's keep.lock, is not looked at for a deploy.json, and so yields no target. The rows stay.
-  const live = new Set(await followGitLinks(github, stored, bases, signal));
+  const followed = await followGitLinks(github, stored, bases, signal);
+  const live = new Set(followed.links);
+  // Projects left with nothing to write to: their stored folders hold another project's keep.lock on the default branch.
+  const mismatched = new Set(followed.blocked.map((l) => l.project_id));
   const linksOf = (loc: DeployLocation): readonly OrgRepoLink[] => storedOf(loc).filter((l) => live.has(l));
   const othersOf = (link: OrgRepoLink): readonly string[] =>
     [...new Set(stored.filter((o) => o.project_id === link.project_id && repoKey(o) === repoKey(link) && o.path !== link.path).map((o) => o.path))];
@@ -285,6 +293,7 @@ export async function planBatchDeploy(
       linksOf(loc).map((link): LinkRead => ({ link, read: readByKey[`${repoKey(link)}\u0000${link.path}`] })),
       req.names,
       othersOf,
+      mismatched.has(loc.project_id) && linksOf(loc).length === 0,
     ),
   );
   const allTargets = perLocation.flatMap((p) => p.targets);
@@ -625,6 +634,8 @@ async function passOverTarget(
     { project_id: item.project_id, host: GITHUB_HOST, owner: repo.owner, name: repo.name, path: item.path },
     item.alt_paths ?? [],
   );
+  // An other stored folder could not be read: what this branch holds is unknown, so nothing is pushed or created (retriable).
+  if (placement.kind === 'unreadable') return failedPush(item, ERROR_CODES.KEEP_PR_READ_FAILED, 'github', read.rate);
   if (placement.kind === 'skipped') return withRate<PushOutcome>({ kind: 'skipped', item, code: SKIP_CODES.KEEP_LOCK_NOT_ON_BASE }, read.rate);
   if (placement.kind === 'moved') {
     // The new folder is judged as it stands: no other folder is looked at again.

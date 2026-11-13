@@ -186,6 +186,26 @@ describe('a PR base is judged by its own files', () => {
     expect(adapter.deploy.mock.calls.map(([c]) => c.name)).not.toContain('api');
   });
 
+  test('an other stored folder that cannot be read on the PR base: the target fails with the read-failure code before anything is pushed or created', async () => {
+    const repos = withMonoMain(mainWithApiOnDevelop, develop({ [`${OLD}/keep.lock`]: keepOfA }));
+    const service = fakeService();
+    const github = fakeGithub(repos);
+    const original = github.getFile.getMockImplementation() as (...args: unknown[]) => Promise<unknown>;
+    // The one read of the old folder on `develop` answers 502; every other read is the fixture's.
+    github.getFile.mockImplementation((async (repo: unknown, path: string, ref: string) =>
+      path === `${OLD}/keep.lock` && ref === 'develop' ? { ok: false, kind: 'REQUEST_FAILED', status: 502 } : original(repo, path, ref)) as never);
+    const adapter = fakeAdapter();
+    const { env } = makeEnv(service, github, adapter);
+    const plan = await planBatchDeploy(github, request, STORED);
+
+    const result = await runBatchDeploy(plan, env);
+
+    expect(result.targets.find((t) => t.target.target === 'api')).toMatchObject({ kind: 'failed', code: ERROR_CODES.KEEP_PR_READ_FAILED, stage: 'github', values_pushed: false });
+    expect(adapter.deploy.mock.calls.map(([c]) => c.name)).not.toContain('api');
+    expect(github.createTree.mock.calls).toHaveLength(0);
+    expect(github.createPull.mock.calls.filter((c) => (c[1] as { base: string }).base === 'develop')).toHaveLength(0);
+  });
+
   test('the planned folder holds another project\'s keep.lock on that branch and there is nowhere else: nothing is pushed, with a code', async () => {
     const service = fakeService();
     const github = fakeGithub(withMonoMain(mainWithApiOnDevelop, develop({ [`${NEW}/keep.lock`]: githubKeepFor('pB', 'staging') })));
@@ -199,6 +219,77 @@ describe('a PR base is judged by its own files', () => {
     expect(api).toMatchObject({ kind: 'failed', code: ERROR_CODES.KEEP_LOCK_PROJECT_MISMATCH });
     expect(github.createPull.mock.calls.filter((c) => (c[1] as { base: string }).base === 'develop')).toHaveLength(0);
     expect(adapter.deploy.mock.calls.map(([c]) => c.name)).not.toContain('api');
+  });
+});
+
+describe('another project\'s keep.lock at a project\'s only stored path', () => {
+  const only = [OLD_LINK, ...LINKS.filter((l) => l.project_id !== 'pA')];
+  const world = withMonoMain({ [`${OLD}/.capy/deploy.json`]: deployJson(TARGETS), [`${OLD}/keep.lock`]: githubKeepFor('pB', 'staging') });
+
+  test('the plan skips the locations with KEEP_LOCK_PROJECT_MISMATCH, not with a missing-target code, and reads no deploy.json there', async () => {
+    const github = fakeGithub(world);
+    const plan = await planBatchDeploy(github, request, only);
+
+    expect(plan.targets).toEqual([]);
+    expect(plan.skipped.map((k) => k.code)).toEqual([SKIP_CODES.KEEP_LOCK_PROJECT_MISMATCH, SKIP_CODES.KEEP_LOCK_PROJECT_MISMATCH]);
+    expect(SKIP_CODES.KEEP_LOCK_PROJECT_MISMATCH).toBe(ERROR_CODES.KEEP_LOCK_PROJECT_MISMATCH);
+    expect(deployJsonReads(github).filter((r) => r.startsWith('backend'))).toEqual([]);
+  });
+
+  test('a project with its own folder next to the foreign one is planned as usual', async () => {
+    const both = withMonoMain({ [`${NEW}/.capy/deploy.json`]: deployJson(TARGETS), [`${NEW}/keep.lock`]: keepOfA, [`${OLD}/keep.lock`]: githubKeepFor('pB', 'staging') });
+    const plan = await planBatchDeploy(fakeGithub(both), request, STORED);
+
+    expect(plan.targets.map((t) => t.path)).toEqual([NEW]);
+    expect(plan.skipped.map((k) => k.code)).not.toContain(SKIP_CODES.KEEP_LOCK_PROJECT_MISMATCH);
+  });
+
+  describe('through the command', () => {
+    const io = (): SecretsDeployIo => {
+      const { env } = makeEnv(fakeService(), fakeGithub(world), fakeAdapter());
+      return {
+        orgId: 'org1',
+        client: {
+          getSecretIndex: async () => ({ org_id: 'org1', rows: indexRows(), skipped: [] }),
+          getOrgRepos: async () => ({ org_id: 'org1', repos: [...only] }),
+        },
+        env,
+      };
+    };
+    const runIt = async (opts: SecretsDeployOpts) => {
+      const exitSpy = spyOn(process, 'exit').mockImplementation(((code?: number) => {
+        throw new Error(`exit ${code}`);
+      }) as never);
+      const logSpy = spyOn(console, 'log').mockImplementation(() => {});
+      const errSpy = spyOn(console, 'error').mockImplementation(() => {});
+      const outcome = await runSecretsDeploy([NAME], { json: true, ...opts }, io()).then(
+        (returned) => ({ returned, exited: false }),
+        () => ({ returned: undefined, exited: true }),
+      );
+      const stdout = logSpy.mock.calls.map((a) => a.map(String).join(' ')).join('\n');
+      logSpy.mockRestore();
+      errSpy.mockRestore();
+      exitSpy.mockRestore();
+      return { ...outcome, body: JSON.parse(stdout) };
+    };
+
+    test('a dry run lists the skip with the code', async () => {
+      const out = await runIt({ dryRun: true });
+
+      expect(out.body.skipped.filter((k: { project: string }) => k.project === 'mono-backend').map((k: { code: string }) => k.code)).toEqual([
+        ERROR_CODES.KEEP_LOCK_PROJECT_MISMATCH,
+        ERROR_CODES.KEEP_LOCK_PROJECT_MISMATCH,
+      ]);
+    });
+
+    test('a real run refuses with nothing to deploy, and the plan it shows carries the same skips', async () => {
+      const exclude = ['solo-server:staging'];
+      const out = await runIt({ confirm: 'deadbeefdeadbeef', exclude });
+
+      expect(out.exited).toBe(true);
+      expect(out.body.code).toBe(ERROR_CODES.DEPLOY_NOTHING_TO_DEPLOY);
+      expect(out.body.plan.skipped.map((k: { code: string }) => k.code)).toContain(ERROR_CODES.KEEP_LOCK_PROJECT_MISMATCH);
+    });
   });
 });
 

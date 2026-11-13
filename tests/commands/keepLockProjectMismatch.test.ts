@@ -78,6 +78,15 @@ describe('a base keep.lock that belongs to another project', () => {
     expect(out.keep_lock).toMatchObject({ changed: true, committed: true });
   });
 
+  test.each([['an empty', ''], ['a missing', undefined]])('%s local project_id against a base that has one is not a mismatch: the rule needs both ids', async (_label, id) => {
+    const f = fakes(serializeKeep(keepOf('proj-other')));
+    const local = { ...keepOf('x'), project_id: id } as unknown as KeepFile;
+
+    const out = await runKeepLockPrStep({ ...request('edit', 'x'), localKeep: local }, f.deps);
+
+    expect(out.keep_lock).toMatchObject({ changed: true, committed: true });
+  });
+
   test('a base file with no readable project id is not a mismatch: it is handled as before', async () => {
     const withoutId = JSON.stringify({ version: '3', variables: { KEEP_ME: [entry('development', 'k1')] } });
     const f = fakes(withoutId);

@@ -24,7 +24,7 @@
 import type { GithubApi, RepoRef } from '../deploy/githubApi';
 import type { OrgRepoLink } from '../service/serviceClient';
 import { PoolItem, runPool } from '../utils/pool';
-import { RepoTarget, keepLockPathOf, repoKey } from './secretsSet';
+import { RepoTarget, keepLockPathOf, repoKey, repoLabel } from './secretsSet';
 import { StoredPathKind, probeKeepLockAt } from './keepLockProbe';
 
 export { kindOfKeepText, projectIdOfKeepText, type StoredPathKind } from './keepLockProbe';
@@ -79,6 +79,8 @@ const pathKeyOf = (p: StoredPath): string => `${groupKeyOf(p)}\u0000${p.path}`;
 export interface Followed<T> {
   readonly keep: readonly T[];
   readonly foreign: readonly T[];
+  /** The foreign paths of every project left with nothing to write to: all of its stored paths hold another project's keep.lock (or none could be written). */
+  readonly blocked: readonly T[];
 }
 
 /**
@@ -92,7 +94,7 @@ export async function followGit<T extends StoredPath>(
   signal?: AbortSignal,
 ): Promise<Followed<T>> {
   const judgeable = github === undefined ? [] : paths.filter((p) => bases[repoKey(p)] !== undefined);
-  if (github === undefined || judgeable.length === 0) return { keep: paths, foreign: [] };
+  if (github === undefined || judgeable.length === 0) return { keep: paths, foreign: [], blocked: [] };
 
   const distinct = judgeable.filter((p, i) => judgeable.findIndex((o) => pathKeyOf(o) === pathKeyOf(p)) === i);
   const probed = await runPool({
@@ -107,22 +109,43 @@ export async function followGit<T extends StoredPath>(
 
   const judged = [...new Set(paths.map(groupKeyOf))].map((key) => judgePaths(paths.filter((p) => groupKeyOf(p) === key).map((item) => ({ item, kind: kindOf(item) }))));
   const kept = new Set(judged.flatMap((j) => j.keep).map(pathKeyOf));
-  const foreign = judged.flatMap((j) => j.foreign).filter((p, i, all) => all.findIndex((o) => pathKeyOf(o) === pathKeyOf(p)) === i);
-  return { keep: paths.filter((p) => kept.has(pathKeyOf(p))), foreign };
+  const once = (items: readonly T[]): readonly T[] => items.filter((p, i, all) => all.findIndex((o) => pathKeyOf(o) === pathKeyOf(p)) === i);
+  return {
+    keep: paths.filter((p) => kept.has(pathKeyOf(p))),
+    foreign: once(judged.flatMap((j) => j.foreign)),
+    blocked: once(judged.filter((j) => j.keep.length === 0).flatMap((j) => j.foreign)),
+  };
 }
 
 // ---------------------------------------------------------------------------
 // The links a run plans from
 // ---------------------------------------------------------------------------
 
-/** The same rule over org links (`capy secrets deploy`): the links a run may read and write through. */
+export interface FollowedLinks {
+  /** The links a run may read and write through. */
+  readonly links: readonly OrgRepoLink[];
+  /** The links of projects left with nothing to write to: each holds another project's keep.lock on the base. */
+  readonly blocked: readonly OrgRepoLink[];
+}
+
+/** The same rule over org links (`capy secrets deploy`). */
 export async function followGitLinks(
   github: GithubApi | undefined,
   links: readonly OrgRepoLink[],
   bases: Readonly<Record<string, string>>,
   signal?: AbortSignal,
-): Promise<readonly OrgRepoLink[]> {
-  return (await followGit(github, links, bases, signal)).keep;
+): Promise<FollowedLinks> {
+  const followed = await followGit(github, links, bases, signal);
+  return { links: followed.keep, blocked: followed.blocked };
+}
+
+export interface FollowedTargets {
+  readonly targets: readonly RepoTarget[];
+  /**
+   * `owner/name` of each repo that has a project left with nothing to write to (every stored path holds another project's
+   * keep.lock on the base): reported as a failed repo with `KEEP_LOCK_PROJECT_MISMATCH`, never silently dropped.
+   */
+  readonly mismatched: readonly string[];
 }
 
 /**
@@ -134,14 +157,18 @@ export async function followGitTargets(
   targets: readonly RepoTarget[],
   bases: Readonly<Record<string, string>>,
   signal?: AbortSignal,
-): Promise<readonly RepoTarget[]> {
+): Promise<FollowedTargets> {
   const stored = targets.flatMap((t) => t.files.map((file) => ({ project_id: file.project_id, host: t.host, owner: t.owner, name: t.name, path: file.path })));
   const followed = await followGit(github, stored, bases, signal);
-  if (followed.keep.length === stored.length) return targets;
+  const mismatched = [...new Set(followed.blocked.map((p) => repoLabel(p)))];
+  if (followed.keep.length === stored.length) return { targets, mismatched };
   const kept = new Set(followed.keep.map(pathKeyOf));
-  return targets
-    .map((t) => ({ ...t, files: t.files.filter((file) => kept.has(pathKeyOf({ project_id: file.project_id, host: t.host, owner: t.owner, name: t.name, path: file.path }))) }))
-    .filter((t) => t.files.length > 0);
+  return {
+    targets: targets
+      .map((t) => ({ ...t, files: t.files.filter((file) => kept.has(pathKeyOf({ project_id: file.project_id, host: t.host, owner: t.owner, name: t.name, path: file.path }))) }))
+      .filter((t) => t.files.length > 0),
+    mismatched,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -154,12 +181,15 @@ export type Placement =
   /** This branch keeps the project's files in another stored folder: write there. */
   | { readonly kind: 'moved'; readonly path: string }
   /** This branch has the project's keep.lock in several other stored folders and not at the planned one: nothing says which, nothing is written. */
-  | { readonly kind: 'skipped' };
+  | { readonly kind: 'skipped' }
+  /** The planned folder is not the project's here and an other stored folder could not be read: nothing can be said, nothing is written (retriable). */
+  | { readonly kind: 'unreadable' };
 
 /**
  * Where a write onto `base` goes. Judged by this branch's own files, whatever the default branch says:
  *  - the planned folder carries the project's keep.lock: there;
  *  - it does not, and exactly one other stored folder does: that one;
+ *  - it does not, and another stored folder could not be read: nowhere yet (`unreadable`), whatever the rest say;
  *  - it does not, and several others do: nowhere (`skipped`);
  *  - no stored folder carries it (first-time setup), or no other folder is stored: the planned one, as before.
  * Another project's file at the planned folder, with nowhere else to go, is left to the write point, which refuses it.
@@ -169,6 +199,7 @@ export async function placeOnBase(github: GithubApi, base: string, ownPath: Stor
   const own = await probeStoredPath(github, ownPath, base);
   if (own === 'present') return { kind: 'here' };
   const kinds = await Promise.all(others.map(async (path) => ({ path, kind: await probeStoredPath(github, { ...ownPath, path }, base) })));
+  if (kinds.some((k) => k.kind === 'unknown')) return { kind: 'unreadable' };
   const living = kinds.filter((k) => k.kind === 'present');
   if (living.length === 1) return { kind: 'moved', path: living[0].path };
   return living.length > 1 ? { kind: 'skipped' } : { kind: 'here' };
