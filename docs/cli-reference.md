@@ -11,10 +11,12 @@ Version `0.9.16`. Generated from `capy help --json`.
 Run a command with decrypted secrets
 
 ```
-capy run
+capy run [options]
 ```
 
-_No options._
+| Option | Description | Default |
+|---|---|---|
+| `--protected` | run even when the active branch is protected |  |
 
 JSON support: no
 
@@ -1167,6 +1169,8 @@ Every refusal carries a stable `code` — branch on it, never on message text.
 - `SECRET_NOT_PERSISTED`
 - `KEEP_WRITE_CONFLICT`
 - `REPO_ORG_MISMATCH`
+- `PROTECTED_BRANCH_NEEDS_FLAG`
+- `PROTECTED_STATUS_UNREADABLE`
 
 ## Conventions
 

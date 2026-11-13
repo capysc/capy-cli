@@ -194,13 +194,19 @@ function resolveKeepIds(keepPath: string): Result<{ orgId: string; projectId: st
  * passphrase session when the profile is local-only, otherwise via the
  * server's co-decrypt endpoint (silent auth + ServiceClient).
  */
-/** The project key, plus the repo-link report that was started alongside it (when one was). */
-type KeyResolution = Result<string> & { readonly reported?: Promise<unknown> };
+/**
+ * The project key, plus the repo-link report that was started alongside it (when one was).
+ * A refusal by the protected-branch gate carries its stable `code`.
+ */
+type KeyResolution =
+  | { readonly ok: true; readonly value: string; readonly reported?: Promise<unknown> }
+  | { readonly ok: false; readonly message: string; readonly code?: string };
 
 async function resolveLocalModeProjectKey(
   orgId: string,
   projectId: string,
   devMode: boolean,
+  allowProtected: boolean,
 ): Promise<KeyResolution> {
   try {
     const { isLocalOnly } = await import('../config/profileConfig');
@@ -226,6 +232,20 @@ async function resolveLocalModeProjectKey(
 
     const svc = new ServiceClient(undefined, devMode);
     svc.setTokenProvider(() => auth.getValidToken());
+
+    // Protected branches: the server says whether the folder's branch is protected, before
+    // anything is decrypted (the key resolution below is itself a server decrypt).
+    // Local-only profiles returned above and never get here.
+    const { ProjectManager } = await import('../core/projectManager');
+    const { checkProtectedBranchGate } = await import('../core/protectedBranchGate');
+    const gate = await checkProtectedBranchGate({
+      allowProtected,
+      branch: new ProjectManager().deriveActiveBranch(),
+      projectId,
+      listBranches: (id) => svc.listBranches(id),
+    });
+    if (!gate.ok) return { ok: false, message: gate.message, code: gate.code };
+
     const keyServiceOps = {
       coDecrypt: (o: string, c: string) => svc.coDecrypt(o, c).then((r) => r.plaintext),
       wrapOuterLayer: (o: string, p: string) => svc.wrapOuterLayer(o, p).then((r) => r.ciphertext),
@@ -325,7 +345,16 @@ function resolveNewRuntimePair(rawBlob: string, rawKey: string): NewRuntimePairR
   return { ok: true, secretsBlob: blob.value, projectKey: key.value };
 }
 
-export async function runCommand(args: string[], devMode: boolean = false): Promise<number> {
+export interface RunOptions {
+  /** `--protected`: run even when the folder's branch is protected. */
+  readonly allowProtected?: boolean;
+}
+
+export async function runCommand(
+  args: string[],
+  devMode: boolean = false,
+  options: RunOptions = {},
+): Promise<number> {
   if (args.length === 0) {
     console.error('Usage: capy run -- <command> [args...]');
     return 1;
@@ -472,9 +501,18 @@ export async function runCommand(args: string[], devMode: boolean = false): Prom
   }
   const { orgId, projectId } = keepIdsResult.value;
 
-  const projectKeyResult = await resolveLocalModeProjectKey(orgId, projectId, devMode);
+  const projectKeyResult = await resolveLocalModeProjectKey(
+    orgId,
+    projectId,
+    devMode,
+    options.allowProtected === true,
+  );
   if (!projectKeyResult.ok) {
-    console.error(projectKeyResult.message);
+    console.error(
+      projectKeyResult.code === undefined
+        ? projectKeyResult.message
+        : `capy run: [${projectKeyResult.code}] ${projectKeyResult.message}`,
+    );
     return 1;
   }
   const projectKeyHex = projectKeyResult.value;

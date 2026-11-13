@@ -85,6 +85,7 @@ ISOLATED_FILES=(
   tests/commands/projectCreateCommand.test.ts
   tests/commands/secretsCommand.test.ts
   tests/commands/runCommandSystemStore.test.ts
+  tests/commands/runProtectedGate.test.ts
   tests/commands/connectDiscoveryRouting.test.ts
   tests/commands/agentsCommand.test.ts
   tests/commands/transportCommand.test.ts

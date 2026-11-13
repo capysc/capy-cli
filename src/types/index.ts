@@ -975,6 +975,11 @@ export const ERROR_CODES = {
   // --- A git repo belongs to one organization ---
   /** The folder's tracked keep.lock names organization A, and `capy redeem` or `capy org` was asked to bring organization B into it. Nothing in the folder was changed. Exit 1. */
   REPO_ORG_MISMATCH: 'REPO_ORG_MISMATCH',
+  // --- Protected branches and plaintext ---
+  /** The folder's active branch is protected on the server and `--protected` was not passed. Nothing was decrypted. Exit 1. */
+  PROTECTED_BRANCH_NEEDS_FLAG: 'PROTECTED_BRANCH_NEEDS_FLAG',
+  /** The server's answer on whether the folder's active branch is protected could not be read. Nothing was decrypted. Exit 1. */
+  PROTECTED_STATUS_UNREADABLE: 'PROTECTED_STATUS_UNREADABLE',
 } as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES];

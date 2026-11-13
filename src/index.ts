@@ -111,13 +111,15 @@ program
 program
   .command('run')
   .description('Run a command with decrypted secrets')
+  // COPY-FLAG
+  .option('--protected', 'run even when the active branch is protected')
   .allowUnknownOption()
   .helpOption(false)
   .action(async (_opts: any, cmd: any) => {
     const { runCommand } = await import('./commands/runCommand');
     const dashIdx = process.argv.indexOf('--');
     const childArgs = dashIdx >= 0 ? process.argv.slice(dashIdx + 1) : cmd.args;
-    const code = await runCommand(childArgs);
+    const code = await runCommand(childArgs, false, { allowProtected: _opts.protected === true });
     process.exit(code);
   });
 
