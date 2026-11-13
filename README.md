@@ -174,6 +174,25 @@ Good when you want to see drift across the whole branch, edit one variable witho
 | [`capy logout`](https://docs.capy.sc/cli/logout) | Clear local session. |
 | [`capy cleanup`](https://docs.capy.sc/cli/cleanup) | Remove git hooks and local state. |
 
+### Pairing from an agent
+
+Run `capy pair --json` in an interactive terminal so the returned account can
+be confirmed after browser approval. Before polling, Capy emits a versioned
+`pairing_required` JSON event on **stderr**. It includes a PNG file and data URI,
+the complete approval URL, exact pairing code, expiry in UTC, purpose, requesting
+runtime, and `display.markdown` with the response the agent must show.
+
+Always render that QR image inline with the link and metadata. If the CLI runs
+inside another runtime, copy the PNG to the display environment or decode its
+data URI there. Never use an external QR service. A client that cannot display
+images must say so explicitly and still show the link and complete metadata.
+Keep the command running; show the returned email and obtain the human's explicit
+approval before confirming the account. The temporary PNG is removed when polling
+ends, including expiry or denial. Final success/refusal remains a single JSON
+object on **stdout**. `capy help --json` publishes the same presentation contract.
+Terminal account-confirmation prompts can follow the initial event on stderr;
+the event itself is one complete JSON line emitted before polling begins.
+
 ## Syncing
 
 `capy` is a three-way diff between your local `.env`, the last pinned snapshot in `keep.lock`, and the latest on the service. Conflicts open an interactive resolver. See [docs.capy.sc/using/syncing-secrets](https://docs.capy.sc/using/syncing-secrets).

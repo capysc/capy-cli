@@ -60,16 +60,21 @@
     "inquirer": "^12.9.6",
     "open": "8.4.2",
     "proper-lockfile": "^4.1.2",
+    "qrcode": "1.5.4",
     "qrcode-terminal": "^0.12.0",
     "undici": "^6.21.0"
   },
   "devDependencies": {
     "@types/inquirer": "^9.0.0",
     "@types/node": "^20.0.0",
+    "@types/pngjs": "6.0.5",
     "@types/proper-lockfile": "^4.1.4",
+    "@types/qrcode": "1.5.6",
     "@types/qrcode-terminal": "^0.12.2",
     "@yao-pkg/pkg": "^6.22.0",
     "esbuild": "^0.25.8",
+    "jsqr": "1.4.0",
+    "pngjs": "5.0.0",
     "typescript": "^5.0.0"
   },
   "overrides": {
