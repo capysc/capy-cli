@@ -1199,4 +1199,14 @@ program
     await new LockCommand().execute();
   });
 
+// Hidden: git calls this as the keep.lock merge driver (`<cmd> %O %A %B`); it is not for people.
+program
+  .command('merge-keep-lock <ancestor> <ours> <theirs> [ourLabel] [baseLabel] [theirLabel] [markerSize]', { hidden: true })
+  // COPY-FLAG
+  .description('Merge keep.lock (git merge driver)')
+  .action(async (ancestor: string, ours: string, theirs: string, ourLabel?: string, baseLabel?: string, theirLabel?: string, markerSize?: string) => {
+    const { mergeKeepLockCommand } = await import('./commands/mergeKeepLockCommand');
+    process.exit(mergeKeepLockCommand(ancestor, ours, theirs, ourLabel, baseLabel, theirLabel, markerSize));
+  });
+
 program.parse(process.argv);
