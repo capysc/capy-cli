@@ -47,11 +47,13 @@ import {
   PeekLocalKeep,
   ListServerBranches,
   VercelUnmatchedReason,
+  branchNameOf,
   detectCollisions,
   normalizeRelativeDir,
   orderEnvironments,
 } from './dokployDiscovery';
 import type { ConnectOpts } from './registry';
+import type { EnvironmentBranchChoice } from './vercelEnvironmentMap';
 
 /** `listProjects`/`listCustomEnvironments`/`listEnvs` only — the read-only surface planning needs. */
 export type VercelDiscoveryClient = Pick<VercelClient, 'listProjects' | 'listCustomEnvironments' | 'listEnvs'>;
@@ -143,7 +145,7 @@ type PlanEnvDraft = Omit<DiscoveryPlanEnv, 'branchExists' | 'willAutoOverwrite'>
 function withKeptSplit(localKeep: KeepFile | null): (e: PlanEnvDraft) => PlanEnvDraft {
   return (e) => {
     const isKept = (s: { name: string; code: string }): boolean =>
-      PLACEHOLDER_SKIP_REASONS.some((r) => r === s.code) && hasValueOnBranch(localKeep, s.name, e.environmentName);
+      PLACEHOLDER_SKIP_REASONS.some((r) => r === s.code) && hasValueOnBranch(localKeep, s.name, branchNameOf(e));
     const skipped = e.skipped ?? [];
     const keptRecords = skipped.filter(isKept);
     if (keptRecords.length === 0) return e;
@@ -155,22 +157,32 @@ function withKeptSplit(localKeep: KeepFile | null): (e: PlanEnvDraft) => PlanEnv
   };
 }
 
+/** A chosen mapping puts an environment on another branch: the plan environment carries that branch only when it differs from the environment's own name. */
+function withChosenBranch(branchFor: ReadonlyMap<string, string> | undefined): (e: PlanEnvDraft) => PlanEnvDraft {
+  return (e) => {
+    const branch = branchFor?.get(e.environmentName);
+    return branch === undefined || branch === e.environmentName ? e : { ...e, branchName: branch };
+  };
+}
+
 async function toPlanFolder(
   pp: ProjectPlan,
   environmentFilter: ReadonlySet<string> | undefined,
   peek: { peekLocalKeep: PeekLocalKeep; listServerBranches: ListServerBranches },
+  branchFor?: ReadonlyMap<string, string>,
 ): Promise<DiscoveryPlanFolder | null> {
-  const envs = environmentFilter ? pp.envs.filter((e) => environmentFilter.has(e.environmentName)) : pp.envs;
+  const envs = (environmentFilter ? pp.envs.filter((e) => environmentFilter.has(e.environmentName)) : pp.envs).map(withChosenBranch(branchFor));
   if (envs.length === 0) return null;
   const { matched } = pp;
   const localKeep = peek.peekLocalKeep(matched.repoDir, matched.folder);
   const initialized = !!localKeep;
   const serverBranchNames = localKeep ? new Set((await peek.listServerBranches(localKeep.project_id)).map((b) => b.name)) : null;
-  const firstName = orderEnvironments(envs)[0]?.environmentName;
+  const [first] = orderEnvironments(envs);
+  const firstName = first ? branchNameOf(first) : undefined;
   const environments: readonly DiscoveryPlanEnv[] = envs.map(withKeptSplit(localKeep)).map((e) => {
-    const branchExists = serverBranchNames ? serverBranchNames.has(e.environmentName) : undefined;
+    const branchExists = serverBranchNames ? serverBranchNames.has(branchNameOf(e)) : undefined;
     const willCreateBranch = branchExists === false || !initialized;
-    const willAutoOverwrite = willCreateBranch && !(!initialized && firstName === e.environmentName);
+    const willAutoOverwrite = willCreateBranch && !(!initialized && firstName === branchNameOf(e));
     return { ...e, ...(branchExists !== undefined ? { branchExists } : {}), willAutoOverwrite };
   });
   return {
@@ -196,6 +208,8 @@ export async function buildVercelDiscoveryPlan(
   peek: { peekLocalKeep: PeekLocalKeep; listServerBranches: ListServerBranches },
   environmentFilter?: readonly string[],
   folderExists: (repoDir: string, folder: string) => boolean = defaultFolderExists,
+  /** `--import-environment`: ONLY these environments are planned, each on its chosen branch. Takes the place of `environmentFilter`. */
+  choices?: readonly EnvironmentBranchChoice[],
 ): Promise<DiscoveryPlan> {
   const projects = await client.listProjects(teamId);
   const results = projects.map((p) => matchVercelProject(p, repos, folderExists));
@@ -206,9 +220,15 @@ export async function buildVercelDiscoveryPlan(
   const withVariables = projectPlans.filter((pp) => pp.envs.length > 0);
   const noVariables = projectPlans.filter((pp) => pp.envs.length === 0).map((pp) => unmatchedFrom(pp.matched.project, 'no_variables'));
   const allEnvironmentNames = sortedCopy([...new Set(withVariables.flatMap((pp) => pp.envs.map((e) => e.environmentName)))]);
-  const filterSet = environmentFilter && environmentFilter.length > 0 ? new Set(environmentFilter) : undefined;
+  const chosen = choices && choices.length > 0 ? choices : undefined;
+  const filterSet = chosen
+    ? new Set(chosen.map((c) => c.environment))
+    : environmentFilter && environmentFilter.length > 0
+      ? new Set(environmentFilter)
+      : undefined;
+  const branchFor = chosen ? new Map(chosen.map((c) => [c.environment, c.branch] as const)) : undefined;
 
-  const maybeFolders = await Promise.all(withVariables.map((pp) => toPlanFolder(pp, filterSet, peek)));
+  const maybeFolders = await Promise.all(withVariables.map((pp) => toPlanFolder(pp, filterSet, peek, branchFor)));
   const folders = maybeFolders.filter((f): f is DiscoveryPlanFolder => f !== null);
   return {
     folders,
@@ -216,7 +236,8 @@ export async function buildVercelDiscoveryPlan(
     unmatched: [...unmatchedByLink, ...noVariables],
     unreadableRepos: [],
     allEnvironmentNames,
-    ...(filterSet ? { environmentFilter: [...filterSet] } : {}),
+    ...(filterSet && !chosen ? { environmentFilter: [...filterSet] } : {}),
+    ...(chosen ? { environmentBranches: chosen.map((c) => ({ environment: c.environment, branch: c.branch })) } : {}),
   };
 }
 
@@ -228,7 +249,8 @@ const projectIdOf = (f: DiscoveryPlanFolder): string => f.environments[0]?.servi
 
 function envReport(e: Extract<DiscoveryFolderResult, { ok: true }>['environments'][number]) {
   return {
-    branch: e.environmentName,
+    branch: e.branchName ?? e.environmentName,
+    ...(e.branchName === undefined ? {} : { environment: e.environmentName }),
     branchCreated: e.branchCreated,
     overwrote: e.overwrote,
     imported: e.outcome.imported.map((i) => i.varName),
@@ -246,6 +268,7 @@ function planReport(plan: DiscoveryPlan) {
   return {
     ...(plan.team ? { team: plan.team } : {}),
     ...(plan.environmentFilter ? { environmentFilter: plan.environmentFilter } : {}),
+    ...(plan.environmentBranches ? { environmentBranches: plan.environmentBranches } : {}),
     folders: plan.folders.map((f) => ({
       repoDir: f.repoDir,
       folder: f.folder || '.',
@@ -253,7 +276,8 @@ function planReport(plan: DiscoveryPlan) {
       vercelProjectId: projectIdOf(f),
       initialized: f.initialized,
       environments: f.environments.map((e) => ({
-        branch: e.environmentName,
+        branch: branchNameOf(e),
+        ...(e.branchName === undefined ? {} : { environment: e.environmentName }),
         variableCount: e.variableCount,
         skippedCount: e.skippedCount,
         ...(e.kept && e.kept.length > 0 ? { keptCount: e.kept.length, kept: keptReport(e.kept) } : {}),
@@ -332,6 +356,9 @@ export function reportVercelDiscovery(
   return { linked };
 }
 
+// COPY-FLAG: new user-facing string, minimal/neutral wording: the Vercel environment a renamed branch comes from.
+const fromNote = (environment: string | undefined): string => (environment === undefined ? '' : ` (${environment})`);
+
 // COPY-FLAG: report lines mirror Dokploy's discovery report word for word, with Vercel substituted; nothing new invented.
 function humanLines(
   outcome: Extract<DiscoveryOutcome, { ok: true }>,
@@ -350,7 +377,7 @@ function humanLines(
     ...plan.folders.flatMap((f) => [
       `  ${B(f.folder)}  (${f.vercelProject})${f.initialized ? '' : ' — capy (init)'}`,
       ...f.environments.flatMap((e) => [
-        `    ${e.branchExists === true ? 'checkout' : 'checkout -b'} ${e.branch}: ${e.variableCount} var(s), ${e.skippedCount} skipped${e.keptCount ? `, ${e.keptCount} kept` : ''}${e.willAutoOverwrite ? ' [auto-overwrite]' : ''}`, // COPY-FLAG: new user-facing string, minimal/neutral wording.
+        `    ${e.branchExists === true ? 'checkout' : 'checkout -b'} ${e.branch}${fromNote(e.environment)}: ${e.variableCount} var(s), ${e.skippedCount} skipped${e.keptCount ? `, ${e.keptCount} kept` : ''}${e.willAutoOverwrite ? ' [auto-overwrite]' : ''}`, // COPY-FLAG: new user-facing string, minimal/neutral wording.
         ...(e.kept ? [`      kept (Capy value untouched): ${e.kept.map((k) => `${k.name} (${k.reason})`).join(', ')}`] : []), // COPY-FLAG: new user-facing string, minimal/neutral wording.
         ...Object.entries(e.skipped).map(
           ([reason, items]) => `      skipped ${reason}: ${items.map((i) => (i.gitBranch ? `${i.name} (${i.gitBranch})` : i.name)).join(', ')}`,
@@ -378,7 +405,7 @@ function appliedLines(outcome: Extract<DiscoveryOutcome, { ok: true }>, applied:
       const placeholderNames = (e.placeholders ?? []).map((p) => p.name);
       const keptNames = (e.kept ?? []).map((k) => k.name);
       return [
-        `    ${e.branch}${e.branchCreated ? ' (new branch)' : ''}${e.overwrote ? ' (--overwrite)' : ''}: ` +
+        `    ${e.branch}${fromNote(e.environment)}${e.branchCreated ? ' (new branch)' : ''}${e.overwrote ? ' (--overwrite)' : ''}: ` +
           `imported ${e.imported.length}, unchanged ${e.unchanged.length}, skipped ${e.skipped.length}` +
           (placeholderNames.length > 0 ? `, no value yet ${placeholderNames.length}` : '') + // COPY-FLAG
           (keptNames.length > 0 ? `, kept ${keptNames.length}` : '') + // COPY-FLAG

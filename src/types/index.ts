@@ -778,6 +778,12 @@ export const ERROR_CODES = {
   VERCEL_CONFIRMATION_REQUIRED: 'VERCEL_CONFIRMATION_REQUIRED',
   /** Several Vercel projects map to the same repo, folder and branch, and this run cannot ask which wins. */
   VERCEL_MAPPING_COLLISION: 'VERCEL_MAPPING_COLLISION',
+  /** `capy connect vercel --discover --import-environment`: the same environment is named more than once. Nothing was changed. */
+  VERCEL_ENVIRONMENT_DUPLICATE: 'VERCEL_ENVIRONMENT_DUPLICATE',
+  /** `capy connect vercel --discover --import-environment`: two environments are mapped to the same Capy branch. Nothing was changed. */
+  VERCEL_BRANCH_DUPLICATE: 'VERCEL_BRANCH_DUPLICATE',
+  /** `--import-environment` was used without `--discover`, or together with `--environment`. Nothing was changed. */
+  VERCEL_IMPORT_ENVIRONMENT_NOT_APPLICABLE: 'VERCEL_IMPORT_ENVIRONMENT_NOT_APPLICABLE',
   // CAP-696 Vercel target (codes not already above)
   /** `_TARGET_VERCEL_TOKEN` is absent but `_CONNECTOR_VERCEL_TOKEN` holds one, and there is no TTY to choose. */
   VERCEL_TARGET_KEY_MISSING: 'VERCEL_TARGET_KEY_MISSING',
