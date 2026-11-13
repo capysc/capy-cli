@@ -52,6 +52,7 @@ import {
   conflictRefusalFor,
   exitOnConflictRefusal,
   gateConflicts,
+  isConflictRefusal,
   hasConflictFlags,
   parseConflictFlags,
   sourceRowsOf,
@@ -233,7 +234,27 @@ export class CapyCommand {
    */
   async runSync(): Promise<SyncOutcome> {
     const projectState = await this.detectOrRecoverProjectState();
-    return projectState === undefined ? 'up-to-date' : this.syncProject(projectState);
+    if (projectState === undefined) return 'up-to-date';
+    const named = this.branchNamedForUnrecordedFolder();
+    return named === undefined ? this.syncProject(projectState) : this.syncNamedBranch(projectState, named);
+  }
+
+  /**
+   * `syncProject` for a folder that had no record of a branch before this run and was given one by name
+   * (`options.branchHint`). If the run ends in an error before that branch's `.env` exists, the folder goes back to
+   * how it was found: the `.capy/branch` written for the name is cleared (`writeActiveBranch('')`, the one writer), so
+   * a branch the person cannot read (403) or could not fetch does not stay recorded and gate every later command.
+   * A `ConflictRefusal` is the protocol's stop for a decision, not a failure: the record stays for the rerun.
+   * A stop the person chose ("Continue working") is a return value, not an error, so it keeps the record too.
+   */
+  private async syncNamedBranch(projectState: ProjectState, named: string): Promise<SyncOutcome> {
+    try {
+      return await this.syncProject(projectState);
+    } catch (err) {
+      const leftBehind = this.projectManager.readActiveBranch() === named && !existsSync(this.projectManager.getEnvPath(this.options.envPath));
+      if (leftBehind && !isConflictRefusal(err)) this.projectManager.writeActiveBranch('');
+      throw err;
+    }
   }
 
   /**
