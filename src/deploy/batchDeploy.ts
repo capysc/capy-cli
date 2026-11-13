@@ -77,6 +77,8 @@ export const SKIP_CODES = {
   NOTHING_TO_DEPLOY: 'NOTHING_TO_DEPLOY',
   /** Every picked value on the service was changed outside Capy and the caller chose to keep the service's (CAP-717). */
   KEPT_ON_PLATFORM: 'KEPT_ON_PLATFORM',
+  /** The PR base carries the project's keep.lock in other stored folders but not at the planned one, and nothing says which to write: nothing is written. */
+  KEEP_LOCK_NOT_ON_BASE: ERROR_CODES.KEEP_LOCK_NOT_ON_BASE,
 } as const;
 export type SkipCode = (typeof SKIP_CODES)[keyof typeof SKIP_CODES];
 
@@ -154,11 +156,6 @@ export interface BatchPlan {
   readonly skipped: readonly PlanSkipped[];
   /** Repos whose default branch or `.capy/deploy.json` could not be read: their locations are not decided either way. */
   readonly read_failed: readonly PlanReadFailure[];
-  /**
-   * Stored links the repo's default branch no longer carries a keep.lock for, while another link of the same project and
-   * repo does. Present only when there are some; never part of the plan's output. A real run forgets them, best effort.
-   */
-  readonly stale_links?: readonly OrgRepoLink[];
 }
 
 export const EMPTY_PLAN: BatchPlan = { targets: [], skipped: [], read_failed: [] };
@@ -259,9 +256,8 @@ export async function planBatchDeploy(
 
   const bases = await resolveBases(github, repos, signal);
   // A project lives where the default branch has its keep.lock: a stored folder that branch does not carry (while another does),
-  // or that holds another project's keep.lock, is not looked at for a deploy.json, and so yields no target.
-  const followed = await followGitLinks(github, stored, bases, 'default', signal);
-  const live = new Set(followed.links);
+  // or that holds another project's keep.lock, is not looked at for a deploy.json, and so yields no target. The rows stay.
+  const live = new Set(await followGitLinks(github, stored, bases, signal));
   const linksOf = (loc: DeployLocation): readonly OrgRepoLink[] => storedOf(loc).filter((l) => live.has(l));
   const othersOf = (link: OrgRepoLink): readonly string[] =>
     [...new Set(stored.filter((o) => o.project_id === link.project_id && repoKey(o) === repoKey(link) && o.path !== link.path).map((o) => o.path))];
@@ -299,12 +295,7 @@ export async function planBatchDeploy(
       return read !== undefined && !read.ok ? [{ repo: repoLabel(l), code: read.code }] : [];
     })
     .filter((f, i, all) => all.findIndex((o) => o.repo === f.repo && o.code === f.code) === i);
-  return {
-    targets,
-    skipped: perLocation.flatMap((p) => p.skipped),
-    read_failed: failures,
-    ...(followed.stale.length === 0 ? {} : { stale_links: followed.stale }),
-  };
+  return { targets, skipped: perLocation.flatMap((p) => p.skipped), read_failed: failures };
 }
 
 // ---------------------------------------------------------------------------
@@ -626,22 +617,22 @@ async function passOverTarget(
       read.rate,
     );
   }
-  const base = await readKeepLockBases(github, repo, item.base, [{ path: keepLockPathOf(item.path), records: [], localKeep: scaffold }]);
-  if (!base.ok) return failedPush(item, base.code, 'github', read.rate);
   // The PR base is judged by its own files: where it does not carry this project's keep.lock at the planned folder (a move that has
   // not reached that branch), the write goes to the project's other stored folder that it does carry, or nowhere.
   const placement = await placeOnBase(
     github,
     item.base,
     { project_id: item.project_id, host: GITHUB_HOST, owner: repo.owner, name: repo.name, path: item.path },
-    base.bases[0],
     item.alt_paths ?? [],
   );
-  if (placement.kind === 'refused') return failedPush(item, ERROR_CODES.KEEP_LOCK_PROJECT_MISMATCH, 'github', read.rate);
+  if (placement.kind === 'skipped') return withRate<PushOutcome>({ kind: 'skipped', item, code: SKIP_CODES.KEEP_LOCK_NOT_ON_BASE }, read.rate);
   if (placement.kind === 'moved') {
     // The new folder is judged as it stands: no other folder is looked at again.
     return passOverTarget(env, keys, apiKeys, { ...item, path: placement.path, alt_paths: [] }, pass);
   }
+  // Another project's keep.lock at the folder is refused here (`KEEP_LOCK_PROJECT_MISMATCH`), before anything is pushed.
+  const base = await readKeepLockBases(github, repo, item.base, [{ path: keepLockPathOf(item.path), records: [], localKeep: scaffold }]);
+  if (!base.ok) return failedPush(item, base.code, 'github', read.rate);
   if (!deliveryWorthGating(base.bases[0].keep, item.branch, delivery.provider, config.name, undefined, values)) {
     return withRate<PushOutcome>({ kind: 'skipped', item, code: SKIP_CODES.NOTHING_TO_DEPLOY }, read.rate);
   }

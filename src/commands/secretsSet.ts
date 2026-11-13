@@ -58,6 +58,7 @@ import { PACING_RESERVE, PoolItem, RateInfo, mergeRates, runPool } from '../util
 import type { Sleep } from '../utils/backoff';
 import {
   KeepLockFileSpec,
+  SkippedFile,
   newPrBranchName,
   openKeepLockPullRequest,
   readKeepLockBases,
@@ -126,6 +127,8 @@ export interface PrResult {
   readonly keep_lock_paths: readonly string[];
   readonly keep_lock_diverged: boolean;
   readonly locations: readonly LocationRef[];
+  /** Folders left out because the base branch keeps the project's keep.lock in another stored folder. Present only when there are some. */
+  readonly keep_lock_skipped?: readonly SkippedFile[];
 }
 
 export type FailedItem =
@@ -140,7 +143,7 @@ export interface SecretSetResult {
   readonly removed?: readonly LocationRef[];
   readonly prs: readonly PrResult[];
   /** Repos whose keep.lock on the default branch already carries these entries: no PR was needed. */
-  readonly no_pr: ReadonlyArray<{ readonly repo: string; readonly reason: 'NO_DIFF_VS_BASE' }>;
+  readonly no_pr: ReadonlyArray<{ readonly repo: string; readonly reason: 'NO_DIFF_VS_BASE'; readonly keep_lock_skipped?: readonly SkippedFile[] }>;
   readonly failed: readonly FailedItem[];
   /**
    * Repos that were asked for but needed no PR because none of their locations
@@ -743,7 +746,7 @@ const refsFor = (outcomes: readonly Extract<LocationOutcome, { kind: 'updated' }
 
 type RepoOutcome =
   | { readonly kind: 'pr'; readonly pr: PrResult }
-  | { readonly kind: 'no_pr'; readonly repo: string }
+  | { readonly kind: 'no_pr'; readonly repo: string; readonly skipped: readonly SkippedFile[] }
   | { readonly kind: 'failed'; readonly repo: string; readonly code: string };
 
 async function openRepoPr(
@@ -768,6 +771,8 @@ async function openRepoPr(
       path: keepLockPathOf(file.path),
       records: mine.map((o): EditSaveRecord => ({ branch: o.location.branch, entries: [{ variable: name, entry: o.entry }] })),
       localKeep: mine[0].serverKeep,
+      // The project's other stored folders in this repo: the base decides, at the write, which of them it lives in.
+      alternates: target.files.filter((f) => f.project_id === file.project_id && f.path !== file.path).map((f) => keepLockPathOf(f.path)),
     }));
 
   const repo: RepoRef = { owner: target.owner, name: target.name };
@@ -777,7 +782,7 @@ async function openRepoPr(
   );
   if (!opened.ok) {
     return opened.reason === 'NO_DIFF_VS_BASE'
-      ? { kind: 'no_pr', repo: label }
+      ? { kind: 'no_pr', repo: label, skipped: opened.skipped ?? [] }
       : { kind: 'failed', repo: label, code: opened.code };
   }
 
@@ -796,6 +801,7 @@ async function openRepoPr(
       keep_lock_paths: opened.paths,
       keep_lock_diverged: diverged,
       locations: refsFor(pushed),
+      ...(opened.skipped === undefined ? {} : { keep_lock_skipped: opened.skipped }),
     },
   };
 }
@@ -889,7 +895,7 @@ export async function runSecretSet(req: SetRequest, env: SetEnv, hooks: RunHooks
     unchanged: outcomes.flatMap((o) => (o.kind === 'unchanged' ? [locationRef(o.location)] : [])),
     ...(outcomes.some((o) => o.kind === 'removed') ? { removed: outcomes.flatMap((o) => (o.kind === 'removed' ? [locationRef(o.location)] : [])) } : {}),
     prs: present.flatMap((o) => (o.kind === 'pr' ? [o.pr] : [])),
-    no_pr: present.flatMap((o) => (o.kind === 'no_pr' ? [{ repo: o.repo, reason: 'NO_DIFF_VS_BASE' as const }] : [])),
+    no_pr: present.flatMap((o) => (o.kind === 'no_pr' ? [{ repo: o.repo, reason: 'NO_DIFF_VS_BASE' as const, ...(o.skipped.length === 0 ? {} : { keep_lock_skipped: o.skipped }) }] : [])),
     failed: [
       ...failedLocations,
       ...present.flatMap((o): FailedItem[] => (o.kind === 'failed' ? [{ kind: 'repo', repo: o.repo, code: o.code }] : [])),

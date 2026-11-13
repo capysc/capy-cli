@@ -33,6 +33,7 @@ import {
 } from '../deploy/githubApi';
 import { resolveGh } from '../utils/gh';
 import { refusePiped } from './pipedValue';
+import { kindOfKeepText, probeKeepLockAt } from './keepLockProbe';
 
 const GREEN = (s: string) => `\x1b[32m${s}\x1b[0m`;
 const YELLOW = (s: string) => `\x1b[33m${s}\x1b[0m`;
@@ -95,7 +96,15 @@ export type KeepLockReport =
       readonly committed: false;
       readonly reason?: 'NO_DIFF_VS_BASE';
       readonly error?: KeepLockError;
+      /** Files left out because this base branch keeps the project's keep.lock in another stored folder. Present only when there are some. */
+      readonly skipped?: readonly SkippedFile[];
     };
+
+/** A file a write left out, and why (`KEEP_LOCK_NOT_ON_BASE`). */
+export interface SkippedFile {
+  readonly path: string;
+  readonly code: string;
+}
 
 export interface KeepLockPrOutcome {
   readonly keep_lock: KeepLockReport;
@@ -377,6 +386,12 @@ export interface KeepLockFileSpec {
   readonly records: readonly EditSaveRecord[];
   readonly localKeep: KeepFile;
   /**
+   * The OTHER keep.lock paths (repo paths, e.g. `backend/keep.lock`) this project is stored at in the same repo. If the base has no
+   * file at `path` but does at one of these, the project lives there on this branch: this file is skipped, never scaffolded
+   * (`KEEP_LOCK_NOT_ON_BASE`). With no file at any of them (first-time setup) it is created as before. Absent: not judged.
+   */
+  readonly alternates?: readonly string[];
+  /**
    * Replaces folding `records`: the caller works out the new keep.lock from the base's own
    * (the batch deploy writes a delivery record, which `records` cannot say). Absent: `records` are folded.
    */
@@ -396,6 +411,8 @@ interface Plan {
   readonly headCommit: string;
   readonly baseTree: string;
   readonly bases: readonly BaseKeep[];
+  /** Files left out of `files`, with the reason. */
+  readonly skipped: readonly SkippedFile[];
 }
 
 async function readBase(target: Target, base: string, spec: KeepLockFileSpec): Promise<Step<BaseKeep>> {
@@ -405,9 +422,33 @@ async function readBase(target: Target, base: string, spec: KeepLockFileSpec): P
     return ok({ path: spec.path, keep: { ...spec.localKeep, variables: {} }, existed: false });
   }
   const parsed = parseKeep(file.value);
-  return parsed === undefined
-    ? failWith(ERROR_CODES.KEEP_PR_READ_FAILED)
-    : ok({ path: spec.path, keep: parsed, existed: true });
+  if (parsed === undefined) return failWith(ERROR_CODES.KEEP_PR_READ_FAILED);
+  // Another project's keep.lock is never written into: this project's entries would be folded into it under that project's id.
+  if (kindOfKeepText(file.value, spec.localKeep.project_id) === 'other') return failWith(ERROR_CODES.KEEP_LOCK_PROJECT_MISMATCH);
+  return ok({ path: spec.path, keep: parsed, existed: true });
+}
+
+/**
+ * The files the base has no keep.lock for while it has this project's at another stored folder: the project lives there on this
+ * branch, so no empty keep.lock is created here. Read only; a read that fails does not count as "present".
+ */
+async function skippedFor(target: Target, base: string, specs: readonly KeepLockFileSpec[], bases: readonly BaseKeep[]): Promise<readonly SkippedFile[]> {
+  const judged = await Promise.all(
+    specs.map(async (spec, i): Promise<readonly SkippedFile[]> => {
+      const alternates = spec.alternates ?? [];
+      if (bases[i].existed || alternates.length === 0) return [];
+      const kinds = await Promise.all(
+        alternates.map((alt) => {
+          const read = specs.findIndex((s) => s.path === alt);
+          return read === -1
+            ? probeKeepLockAt(target.github, target.repo, alt, base, spec.localKeep.project_id)
+            : Promise.resolve(bases[read].existed ? 'present' : 'absent');
+        }),
+      );
+      return kinds.includes('present') ? [{ path: spec.path, code: ERROR_CODES.KEEP_LOCK_NOT_ON_BASE }] : [];
+    }),
+  );
+  return judged.flat();
 }
 
 /** Reads every spec's keep.lock from `base`. */
@@ -430,7 +471,9 @@ async function planCommit(target: Target, base: string, specs: readonly KeepLock
   const bases = await readBases(target, base, specs);
   if (!bases.ok) return bases;
 
+  const skipped = await skippedFor(target, base, specs, bases.value);
   const changed = specs.flatMap((spec, i) => {
+    if (skipped.some((s) => s.path === spec.path)) return [];
     const before = bases.value[i];
     const folded = spec.fold === undefined ? spec.records.reduce(foldEditSaveIntoKeep, before.keep) : spec.fold(before.keep);
     const content = serializeKeep(folded);
@@ -438,9 +481,9 @@ async function planCommit(target: Target, base: string, specs: readonly KeepLock
     return noDiff ? [] : [{ path: spec.path, content }];
   });
   if (changed.length === 0) {
-    return { ok: false, report: { changed: true, committed: false, reason: 'NO_DIFF_VS_BASE' } };
+    return { ok: false, report: { changed: true, committed: false, reason: 'NO_DIFF_VS_BASE', ...(skipped.length > 0 ? { skipped } : {}) } };
   }
-  return ok({ files: changed, headCommit: head.value.commitSha, baseTree: head.value.treeSha, bases: bases.value });
+  return ok({ files: changed, headCommit: head.value.commitSha, baseTree: head.value.treeSha, bases: bases.value, skipped });
 }
 
 /** What a pull request that writes files says about itself. Names only: never a value. */
@@ -546,8 +589,10 @@ export type KeepLockPullRequestResult =
       readonly paths: readonly string[];
       /** What the base branch held before the PR, for the caller's own comparisons. */
       readonly bases: readonly BaseKeep[];
+      /** Files left out (`KEEP_LOCK_NOT_ON_BASE`). Present only when there are some. */
+      readonly skipped?: readonly SkippedFile[];
     }
-  | { readonly ok: false; readonly code: string; readonly reason?: 'NO_DIFF_VS_BASE' };
+  | { readonly ok: false; readonly code: string; readonly reason?: 'NO_DIFF_VS_BASE'; readonly skipped?: readonly SkippedFile[] };
 
 /** The code a failed step carries (`KEEP_PR_READ_FAILED` when it carries none). */
 function failureCode(failure: Failure): string {
@@ -594,7 +639,7 @@ export async function openKeepLockPullRequest(
     if (!plan.ok) {
       const report = plan.report;
       return report.changed && !report.committed && report.reason === 'NO_DIFF_VS_BASE'
-        ? { ok: false, code: 'NO_DIFF_VS_BASE', reason: 'NO_DIFF_VS_BASE' }
+        ? { ok: false, code: 'NO_DIFF_VS_BASE', reason: 'NO_DIFF_VS_BASE', ...(report.skipped === undefined ? {} : { skipped: report.skipped }) }
         : { ok: false, code: failureCode(plan) };
     }
     const branch = deps.branchName();
@@ -605,7 +650,14 @@ export async function openKeepLockPullRequest(
         ? await publish(target, base.base, plan.value, branch, { command: req.command, records })
         : await publishFiles(target, base.base, plan.value, branch, req.wording);
     if (report.changed && report.committed) {
-      return { ok: true, pr_url: report.pr_url, base: base.base, paths: plan.value.files.map((f) => f.path), bases: plan.value.bases };
+      return {
+        ok: true,
+        pr_url: report.pr_url,
+        base: base.base,
+        paths: plan.value.files.map((f) => f.path),
+        bases: plan.value.bases,
+        ...(plan.value.skipped.length === 0 ? {} : { skipped: plan.value.skipped }),
+      };
     }
     return { ok: false, code: report.changed && !report.committed && report.error ? report.error.code : ERROR_CODES.KEEP_PR_CREATE_FAILED };
   } catch {

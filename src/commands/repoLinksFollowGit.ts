@@ -2,39 +2,32 @@
  * A project lives wherever git has a `keep.lock` carrying its `project_id`. The
  * stored repo links ("this project was seen at owner/name, folder X") only say
  * where the project was SEEN; after a `git mv` of a project's files there are
- * two of them, and the old one is stale.
+ * two of them. Both stay: each git branch gets the move at its own time, and a
+ * branch that has not got it yet still needs the old one.
  *
  * For one project in one repo, on the base branch a run reads, each stored path
- * is judged by that branch's own `keep.lock` at that path:
+ * is judged by that branch's own `keep.lock` at that path (`StoredPathKind`):
  *
- *   present   the file exists and carries this project's id        (a)
- *   absent    no file there                                         (b)
- *   other     the file exists and carries ANOTHER project's id      (c)
- *   unknown   it could not be read, or has no readable project id
- *
- * The rule (`judgePaths`):
  *  - At least one path is present: only the present ones (and any unknown, which
- *    is not proof of anything) are written. An absent path is never written, so
- *    no empty keep.lock is scaffolded there.
+ *    is not proof of anything) are planned. An absent path is not planned, so no
+ *    empty keep.lock is scaffolded there.
  *  - No path is present: the stored paths are used as before (first-time setup
  *    does not change).
- *  - An `other` path is never written, in either case: this project's entries
- *    must not be folded into another project's keep.lock.
+ *  - An `other` path is never planned: this project's entries must not be folded
+ *    into another project's keep.lock.
  *
- * A stale link (absent, while a present one exists for the same project and
- * repo) is reported only when the evidence is the repo's DEFAULT branch, and
- * `deleteStaleLinks` then asks the service to forget it, best effort. A project's
- * last link is never stale: a present link always remains.
+ * The write point (`keepLockPr.ts`) holds the same line again against the files
+ * the base branch has at the moment of writing. Rows are never removed.
  *
  * Reading only: nothing here writes to GitHub. Never throws.
  */
 import type { GithubApi, RepoRef } from '../deploy/githubApi';
-import type { KeepFile } from '../types/index';
-import type { KnownRepo, OrgRepoLink, ServiceClient } from '../service/serviceClient';
+import type { OrgRepoLink } from '../service/serviceClient';
 import { PoolItem, runPool } from '../utils/pool';
 import { RepoTarget, keepLockPathOf, repoKey } from './secretsSet';
+import { StoredPathKind, probeKeepLockAt } from './keepLockProbe';
 
-export type StoredPathKind = 'present' | 'absent' | 'other' | 'unknown';
+export { kindOfKeepText, projectIdOfKeepText, type StoredPathKind } from './keepLockProbe';
 
 /** A stored link, as far as judging it is concerned. */
 export interface StoredPath {
@@ -46,49 +39,17 @@ export interface StoredPath {
   readonly path: string;
 }
 
-/** Whose branch the judgement was read from: only the repo's default branch may lead to a deletion. */
-export type Evidence = 'default' | 'other';
-
 /** How many keep.lock reads run at once. */
 const PROBE_CONCURRENCY = 6;
-/** The service's own timeout for one best-effort delete. */
-const DELETE_TIMEOUT_MS = 3000;
 
 // ---------------------------------------------------------------------------
 // One path
 // ---------------------------------------------------------------------------
 
-/** The project id a keep.lock's text carries, or `undefined` when it is not readable. */
-export function projectIdOfKeepText(raw: string): string | undefined {
-  const parsed = ((): unknown => {
-    try {
-      return JSON.parse(raw);
-    } catch {
-      return undefined;
-    }
-  })();
-  const id = typeof parsed === 'object' && parsed !== null ? (parsed as Record<string, unknown>).project_id : undefined;
-  return typeof id === 'string' && id.length > 0 ? id : undefined;
-}
-
-/** What a keep.lock's text says about `projectId`: present (its own), other (someone else's) or unknown. */
-export function kindOfKeepText(raw: string, projectId: string): StoredPathKind {
-  const found = projectIdOfKeepText(raw);
-  if (found === undefined) return 'unknown';
-  return found === projectId ? 'present' : 'other';
-}
-
-/** One path judged by the keep.lock `base` holds there. Any failure to read is `unknown`. */
-export async function probeStoredPath(github: GithubApi, path: StoredPath, base: string): Promise<StoredPathKind> {
+/** One stored path judged by the keep.lock `base` holds there. Any failure to read is `unknown`. */
+export function probeStoredPath(github: GithubApi, path: StoredPath, base: string): Promise<StoredPathKind> {
   const repo: RepoRef = { owner: path.owner, name: path.name };
-  const read = await Promise.resolve()
-    .then(() => github.getFile(repo, keepLockPathOf(path.path), base))
-    .then(
-      (got) => got,
-      () => undefined,
-    );
-  if (read === undefined || !read.ok) return 'unknown';
-  return read.value === null ? 'absent' : kindOfKeepText(read.value, path.project_id);
+  return probeKeepLockAt(github, repo, keepLockPathOf(path.path), base, path.project_id);
 }
 
 // ---------------------------------------------------------------------------
@@ -98,9 +59,7 @@ export async function probeStoredPath(github: GithubApi, path: StoredPath, base:
 export interface Judged<T> {
   /** The paths a write may go to. */
   readonly keep: readonly T[];
-  /** Absent paths while a present one exists: the links that no longer say where the project lives. */
-  readonly stale: readonly T[];
-  /** Paths holding another project's keep.lock: never written, never deleted. */
+  /** Paths holding another project's keep.lock: never written. */
   readonly foreign: readonly T[];
 }
 
@@ -110,7 +69,6 @@ export function judgePaths<T>(entries: ReadonlyArray<{ readonly item: T; readonl
   const itemsOf = (wanted: (kind: StoredPathKind) => boolean): readonly T[] => entries.filter((e) => wanted(e.kind)).map((e) => e.item);
   return {
     keep: itemsOf((kind) => kind !== 'other' && (!anyPresent || kind !== 'absent')),
-    stale: anyPresent ? itemsOf((kind) => kind === 'absent') : [],
     foreign: itemsOf((kind) => kind === 'other'),
   };
 }
@@ -120,25 +78,21 @@ const pathKeyOf = (p: StoredPath): string => `${groupKeyOf(p)}\u0000${p.path}`;
 
 export interface Followed<T> {
   readonly keep: readonly T[];
-  /** Empty unless the evidence is the default branch. */
-  readonly stale: readonly T[];
   readonly foreign: readonly T[];
 }
 
 /**
- * Judges every stored path against `bases` (each repo's base branch by `repoKey`; `evidence` says whether
- * those are default branches). A repo with no known base, or no `github`, is not judged: its paths are kept
- * as they are. The input order is kept.
+ * Judges every stored path against `bases` (each repo's base branch by `repoKey`). A repo with no known base, or no
+ * `github`, is not judged: its paths are kept as they are. The input order is kept.
  */
 export async function followGit<T extends StoredPath>(
   github: GithubApi | undefined,
   paths: readonly T[],
   bases: Readonly<Record<string, string>>,
-  evidence: Evidence,
   signal?: AbortSignal,
 ): Promise<Followed<T>> {
   const judgeable = github === undefined ? [] : paths.filter((p) => bases[repoKey(p)] !== undefined);
-  if (github === undefined || judgeable.length === 0) return { keep: paths, stale: [], foreign: [] };
+  if (github === undefined || judgeable.length === 0) return { keep: paths, foreign: [] };
 
   const distinct = judgeable.filter((p, i) => judgeable.findIndex((o) => pathKeyOf(o) === pathKeyOf(p)) === i);
   const probed = await runPool({
@@ -151,43 +105,24 @@ export async function followGit<T extends StoredPath>(
   const kindByPath = new Map(distinct.flatMap((p, i): Array<readonly [string, StoredPathKind]> => (probed.results[i] === undefined ? [] : [[pathKeyOf(p), probed.results[i]]])));
   const kindOf = (p: T): StoredPathKind => kindByPath.get(pathKeyOf(p)) ?? 'unknown';
 
-  const groups = [...new Set(paths.map(groupKeyOf))].map((key) => judgePaths(paths.filter((p) => groupKeyOf(p) === key).map((item) => ({ item, kind: kindOf(item) }))));
-  const once = (items: readonly T[]): readonly T[] => items.filter((p, i) => items.findIndex((o) => pathKeyOf(o) === pathKeyOf(p)) === i);
-  const stale = once(groups.flatMap((g) => g.stale));
-  const foreign = once(groups.flatMap((g) => g.foreign));
-  const dropped = new Set([...stale, ...foreign].map(pathKeyOf));
-  return {
-    keep: paths.filter((p) => !dropped.has(pathKeyOf(p))),
-    stale: evidence === 'default' ? stale : [],
-    foreign,
-  };
+  const judged = [...new Set(paths.map(groupKeyOf))].map((key) => judgePaths(paths.filter((p) => groupKeyOf(p) === key).map((item) => ({ item, kind: kindOf(item) }))));
+  const kept = new Set(judged.flatMap((j) => j.keep).map(pathKeyOf));
+  const foreign = judged.flatMap((j) => j.foreign).filter((p, i, all) => all.findIndex((o) => pathKeyOf(o) === pathKeyOf(p)) === i);
+  return { keep: paths.filter((p) => kept.has(pathKeyOf(p))), foreign };
 }
 
 // ---------------------------------------------------------------------------
 // The links a run plans from
 // ---------------------------------------------------------------------------
 
-export interface FollowedLinks {
-  readonly links: readonly OrgRepoLink[];
-  /** The links to forget (default-branch evidence only). */
-  readonly stale: readonly OrgRepoLink[];
-}
-
 /** The same rule over org links (`capy secrets deploy`): the links a run may read and write through. */
 export async function followGitLinks(
   github: GithubApi | undefined,
   links: readonly OrgRepoLink[],
   bases: Readonly<Record<string, string>>,
-  evidence: Evidence,
   signal?: AbortSignal,
-): Promise<FollowedLinks> {
-  const followed = await followGit(github, links, bases, evidence, signal);
-  return { links: followed.keep, stale: followed.stale };
-}
-
-export interface FollowedTargets {
-  readonly targets: readonly RepoTarget[];
-  readonly stale: readonly StoredPath[];
+): Promise<readonly OrgRepoLink[]> {
+  return (await followGit(github, links, bases, signal)).keep;
 }
 
 /**
@@ -198,86 +133,43 @@ export async function followGitTargets(
   github: GithubApi | undefined,
   targets: readonly RepoTarget[],
   bases: Readonly<Record<string, string>>,
-  evidence: Evidence,
   signal?: AbortSignal,
-): Promise<FollowedTargets> {
+): Promise<readonly RepoTarget[]> {
   const stored = targets.flatMap((t) => t.files.map((file) => ({ project_id: file.project_id, host: t.host, owner: t.owner, name: t.name, path: file.path })));
-  const followed = await followGit(github, stored, bases, evidence, signal);
-  if (followed.keep.length === stored.length) return { targets, stale: followed.stale };
+  const followed = await followGit(github, stored, bases, signal);
+  if (followed.keep.length === stored.length) return targets;
   const kept = new Set(followed.keep.map(pathKeyOf));
-  const narrowed = targets
+  return targets
     .map((t) => ({ ...t, files: t.files.filter((file) => kept.has(pathKeyOf({ project_id: file.project_id, host: t.host, owner: t.owner, name: t.name, path: file.path }))) }))
     .filter((t) => t.files.length > 0);
-  return { targets: narrowed, stale: followed.stale };
-}
-
-// ---------------------------------------------------------------------------
-// Forgetting stale links
-// ---------------------------------------------------------------------------
-
-/** What the service client offers for forgetting one link. */
-export type LinkDeleter = Pick<ServiceClient, 'deleteProjectRepo'>;
-
-/**
- * Asks the service to forget each stale link. Best effort, and silent: a failure (network, 403, an older
- * service with no such route) is dropped and changes nothing the command reports. A client with no such
- * call does nothing. Never throws.
- */
-export async function deleteStaleLinks(
-  client: Partial<LinkDeleter> | undefined,
-  orgId: string,
-  stale: readonly StoredPath[],
-): Promise<void> {
-  const deleteOne = client?.deleteProjectRepo;
-  if (deleteOne === undefined || stale.length === 0) return;
-  const distinct = stale.filter((p, i) => stale.findIndex((o) => pathKeyOf(o) === pathKeyOf(p)) === i);
-  await Promise.all(
-    distinct.map((p) => {
-      const link: KnownRepo = { host: p.host, owner: p.owner, name: p.name, path: p.path };
-      return Promise.resolve()
-        .then(() => deleteOne.call(client, orgId, p.project_id, link, DELETE_TIMEOUT_MS))
-        .then(
-          () => undefined,
-          () => undefined,
-        );
-    }),
-  );
 }
 
 // ---------------------------------------------------------------------------
 // A write onto one base branch (`capy secrets deploy`'s keep.lock PR)
 // ---------------------------------------------------------------------------
 
-/** What the base holds at the planned folder: no file, this project's, or another's. */
-function kindOfOwn(own: { readonly existed: boolean; readonly keep: Pick<KeepFile, 'project_id'> }, projectId: string): StoredPathKind {
-  if (!own.existed) return 'absent';
-  return own.keep.project_id === projectId ? 'present' : 'other';
-}
-
 export type Placement =
   /** Write at the folder as planned. */
   | { readonly kind: 'here' }
   /** This branch keeps the project's files in another stored folder: write there. */
   | { readonly kind: 'moved'; readonly path: string }
-  /** The folder holds another project's keep.lock and the project has nowhere else on this branch. */
-  | { readonly kind: 'refused' };
+  /** This branch has the project's keep.lock in several other stored folders and not at the planned one: nothing says which, nothing is written. */
+  | { readonly kind: 'skipped' };
 
 /**
- * Where a write onto `base` goes: `ownPath` as planned, or, when this base branch does not carry the project's
- * keep.lock there (a move that has not reached this branch), the one other stored folder that does. Judged by this
- * branch's own files, whatever the default branch says. `own` is what the base holds at `ownPath` (already read).
+ * Where a write onto `base` goes. Judged by this branch's own files, whatever the default branch says:
+ *  - the planned folder carries the project's keep.lock: there;
+ *  - it does not, and exactly one other stored folder does: that one;
+ *  - it does not, and several others do: nowhere (`skipped`);
+ *  - no stored folder carries it (first-time setup), or no other folder is stored: the planned one, as before.
+ * Another project's file at the planned folder, with nowhere else to go, is left to the write point, which refuses it.
  */
-export async function placeOnBase(
-  github: GithubApi,
-  base: string,
-  ownPath: StoredPath,
-  own: { readonly existed: boolean; readonly keep: Pick<KeepFile, 'project_id'> },
-  others: readonly string[],
-): Promise<Placement> {
-  const ownKind = kindOfOwn(own, ownPath.project_id);
-  if (ownKind === 'present') return { kind: 'here' };
+export async function placeOnBase(github: GithubApi, base: string, ownPath: StoredPath, others: readonly string[]): Promise<Placement> {
+  if (others.length === 0) return { kind: 'here' };
+  const own = await probeStoredPath(github, ownPath, base);
+  if (own === 'present') return { kind: 'here' };
   const kinds = await Promise.all(others.map(async (path) => ({ path, kind: await probeStoredPath(github, { ...ownPath, path }, base) })));
   const living = kinds.filter((k) => k.kind === 'present');
   if (living.length === 1) return { kind: 'moved', path: living[0].path };
-  return ownKind === 'other' ? { kind: 'refused' } : { kind: 'here' };
+  return living.length > 1 ? { kind: 'skipped' } : { kind: 'here' };
 }

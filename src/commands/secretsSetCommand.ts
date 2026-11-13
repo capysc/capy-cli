@@ -76,7 +76,7 @@ import {
 import { bindAnswer, shownValueUnavailable, type BoundAnswer } from '../sync/noFolder';
 import { renderSecretSetConfirmation, stoppingAfter, TERMINAL_STYLE } from './secretsSetText';
 import { PoolItem, runPool } from '../utils/pool';
-import { deleteStaleLinks, followGitTargets } from './repoLinksFollowGit';
+import { followGitTargets } from './repoLinksFollowGit';
 
 export interface SecretsSetOpts {
   readonly json?: boolean;
@@ -101,8 +101,7 @@ export interface SecretsSetOpts {
 /** Injectable seam: tests pass fakes for the service, GitHub and stdin. */
 export interface SecretsSetIo {
   readonly orgId: string;
-  /** `deleteProjectRepo` is optional: a client without it never forgets a stale link. */
-  readonly client: Pick<ServiceClient, 'getSecretIndex' | 'getOrgRepos'> & Partial<Pick<ServiceClient, 'deleteProjectRepo'>>;
+  readonly client: Pick<ServiceClient, 'getSecretIndex' | 'getOrgRepos'>;
   readonly env: SetEnv;
   readonly stdinIsTTY: boolean;
   /** The whole of stdin as one piped value (the real, uncapped-wait read). */
@@ -498,9 +497,8 @@ export async function runSecretsSet(name: string, opts: SecretsSetOpts, io: Secr
   const planning = noPr ? { targets: [], notLinked: [] } : planRepos(located, loaded.links);
   const narrowed = narrowRepos(planning.targets, opts.noPrFor ?? [], noPr, json);
   const bases = await resolveBases(narrowed.length > 0 ? io.env.github() : undefined, narrowed, io.control?.planning);
-  // A project lives where the repo's default branch has its keep.lock: a folder that branch does not carry, while another does, is left out.
-  const followed = await followGitTargets(narrowed.length > 0 ? io.env.github() : undefined, narrowed, bases, 'default', io.control?.planning);
-  const targets = followed.targets;
+  // A project lives where the repo's default branch has its keep.lock: a folder that branch does not carry, while another does, is left out of the plan (the rows stay).
+  const targets = await followGitTargets(narrowed.length > 0 ? io.env.github() : undefined, narrowed, bases, io.control?.planning);
   const sel: Selection = { name, located, targets, notLinked: planning.notLinked, bases, reposUnavailable: loaded.unavailable };
 
   if (opts.dryRun === true) {
@@ -566,8 +564,6 @@ export async function runSecretsSet(name: string, opts: SecretsSetOpts, io: Secr
     // Said once per phase when a stop is noticed with items still running; silent when nothing is in progress.
     onStopping: ({ inFlight }) => (json || inFlight === 0 ? undefined : console.error(stoppingAfter(inFlight))),
   });
-  // Best effort and silent: the folders the default branch no longer carries are forgotten. Never changes the result.
-  await deleteStaleLinks(io.client, io.orgId, followed.stale);
   const cancelled = result.cancelled ?? [];
   // A stopped run is partial too: what was done is real, the rest is listed as cancelled.
   const failed = result.failed.length > 0 || cancelled.length > 0;
