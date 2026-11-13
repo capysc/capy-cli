@@ -60,6 +60,8 @@ export interface GateOptions {
   readonly cwd?: string;
   /** A difference nobody can answer is thrown to the caller instead of ending the process (a multi-folder run reports it per folder). */
   readonly throwConflicts?: boolean;
+  /** The branch the command is about to switch to (`capy checkout <branch>`): it answers "which branch" for a folder that records none (see `CliOptions.branchHint`). */
+  readonly branchHint?: string;
 }
 
 /** `in-sync`: the command may go on. `stopped`: the person cancelled; the command writes nothing and ends (exit 0). */
@@ -109,7 +111,7 @@ const runBareCapy: SyncRunner = (opts, protocol) =>
       // working directory the header's branch is compared (so `capy checkout <branch>`, the recovery, can run); in another
       // checkout it is that folder's coded failure, so a multi-folder run goes on to the next folder.
       const onBranchMismatch = opts.cwd === undefined ? 'follow-env-header' : 'throw';
-      return new CapyCommand({ protocol, silentAuthOnly: protocol, quiet: true, conflictFlags: opts.conflictFlags, dryRun: opts.dryRun, onBranchMismatch }, opts.devMode === true).runSync();
+      return new CapyCommand({ protocol, silentAuthOnly: protocol, quiet: true, conflictFlags: opts.conflictFlags, dryRun: opts.dryRun, onBranchMismatch, branchHint: opts.branchHint },opts.devMode === true).runSync();
     },
     'up-to-date',
   );
