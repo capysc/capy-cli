@@ -488,6 +488,8 @@ export const ERROR_CODES = {
   // not-found family — replaces server-prose string matching in serviceClient
   PROJECT_NOT_FOUND: 'PROJECT_NOT_FOUND',
   BRANCH_NOT_FOUND: 'BRANCH_NOT_FOUND',
+  /** `capy branch -D` named the branch the folder is on. Exit 1. */
+  CANNOT_DELETE_CURRENT_BRANCH: 'CANNOT_DELETE_CURRENT_BRANCH',
   // No .env header, no .capy/branch, and no unambiguous local fallback.
   NO_ACTIVE_BRANCH: 'NO_ACTIVE_BRANCH',
   // .capy/branch and the .env header name different, real branches (an interrupted checkout) and the run cannot follow either.
