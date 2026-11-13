@@ -113,6 +113,8 @@ export async function selectBranchWithServer(deps: {
   listBranches: () => Promise<Branch[]>;
   promptPick: (branches: Branch[], defaultName?: string) => Promise<string>;
   syncedBranches: string[];
+  /** A branch the caller already named (`capy checkout <branch>`): it wins over auto-selection and the picker when the server has it. */
+  preferred?: string;
 }): Promise<string> {
   const listBranches = async (): Promise<Branch[]> => {
     try {
@@ -135,6 +137,8 @@ export async function selectBranchWithServer(deps: {
       ERROR_CODES.BRANCH_NOT_FOUND,
     );
   }
+
+  if (deps.preferred !== undefined && branches.some((b) => b.name === deps.preferred)) return deps.preferred;
 
   const auto = autoSelectBranch(branches, deps.syncedBranches);
   if (auto) return auto;

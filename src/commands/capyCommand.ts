@@ -298,10 +298,8 @@ export class CapyCommand {
     const selected = await selectBranchWithServer({
       listBranches: () => this.serviceClient.listBranches(projectState.projectId!),
       syncedBranches: syncedBranchNames(this.projectManager.readSyncState()),
+      preferred: this.branchNamedForUnrecordedFolder(),
       promptPick: async (branches, defaultName) => {
-        // `capy checkout <branch>` names the answer for a folder that records no branch at all: nobody is asked.
-        const named = this.namedBranchForUnrecordedFolder(branches);
-        if (named !== undefined) return named;
         // Off a terminal nobody can pick: the run ends with a code and the command that records the choice.
         if (this.protocol) {
           throw new CapyError(
@@ -330,15 +328,16 @@ export class CapyCommand {
   }
 
   /**
-   * The branch `capy checkout <branch>` named (`options.branchHint`), when this folder records no branch at all (no
-   * `.env` file of any kind, no `.capy/branch`, nothing `deriveActiveBranch` reads) and the server has that branch.
+   * The branch `capy checkout <branch>` named (`options.branchHint`), when this folder has no EXPLICIT record of a
+   * branch: no `.env` file at the env path (so no header either) and no `.capy/branch`. What `deriveActiveBranch` only
+   * infers (a sole pinned branch in keep.lock, a sole synced branch) does not count: the person named a branch.
    * Otherwise `undefined`: the branch is picked, or refused off a terminal, as it is for any other folder.
    */
-  private namedBranchForUnrecordedFolder(branches: ReadonlyArray<{ readonly name: string }>): string | undefined {
+  private branchNamedForUnrecordedFolder(): string | undefined {
     const hint = this.options.branchHint;
-    if (hint === undefined || !branches.some((b) => b.name === hint)) return undefined;
+    if (hint === undefined) return undefined;
     const recorded =
-      this.projectManager.deriveActiveBranch() !== null || existsSync(this.projectManager.getEnvPath(this.options.envPath));
+      this.projectManager.readActiveBranch() !== null || existsSync(this.projectManager.getEnvPath(this.options.envPath));
     return recorded ? undefined : hint;
   }
 
