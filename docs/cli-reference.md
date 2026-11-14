@@ -622,6 +622,8 @@ capy projects rename [new-name] [options]
 
 JSON support: yes (`--json`)
 
+Dry run: yes (`--dry-run`)
+
 ## `capy secrets`
 
 List every secret name across the active organization, grouped by value (read-only, never shows a value)

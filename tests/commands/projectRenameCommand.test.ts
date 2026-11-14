@@ -1,5 +1,5 @@
 import { describe, it, expect, spyOn, mock, afterAll, beforeEach, afterEach } from 'bun:test';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -17,8 +17,10 @@ import { ServiceClient } from '../../src/service/serviceClient';
 import { serializeKeep } from '../../src/files/fileManager';
 import type { KeepFile } from '../../src/types/index';
 
-type Reply = { readonly status: number; readonly body: unknown };
+type Reply = { readonly status: number; readonly body: unknown; readonly raw?: string };
 const reply = (status: number, body: unknown): Reply => ({ status, body });
+/** An answer whose body is sent as given, not as JSON. */
+const rawReply = (status: number, raw: string): Reply => ({ status, body: null, raw });
 
 const respond = mock((_method: string, _path: string, _body: string): Reply => reply(500, { error: 'unexpected request' }));
 
@@ -27,7 +29,7 @@ const server = Bun.serve({
   async fetch(req) {
     const url = new URL(req.url);
     const answer = respond(req.method, `${url.pathname}${url.search}`, await req.text());
-    return new Response(JSON.stringify(answer.body), { status: answer.status, headers: { 'Content-Type': 'application/json' } });
+    return new Response(answer.raw ?? JSON.stringify(answer.body), { status: answer.status, headers: { 'Content-Type': 'application/json' } });
   },
 });
 
@@ -359,12 +361,42 @@ describe('capy projects rename', () => {
     });
   });
 
-  describe('when keep.lock cannot be rewritten after the service renamed', () => {
-    it('refuses with KEEP_LOCK_UPDATE_FAILED and says the project was renamed; no copy is half-written', async () => {
+  describe('a keep.lock copy that cannot be rewritten is found out before the service is called', () => {
+    const unreadable: ReadonlyArray<readonly [string, string, 'tracked' | 'working']> = [
+      ['the tracked copy is not JSON', '{ not json', 'tracked'],
+      ['the working copy is not JSON', '{ not json', 'working'],
+      ['the tracked copy is not an object', '[]', 'tracked'],
+      ['the working copy has no variables key', JSON.stringify({ version: '3.0', org_id: 'org_1', project_id: 'proj_web', project_name: 'old-name' }), 'working'],
+      ['the tracked copy has no variables key', JSON.stringify({ version: '3.0', org_id: 'org_1', project_id: 'proj_web', project_name: 'old-name' }), 'tracked'],
+    ];
+    for (const [label, bad, which] of unreadable) {
+      for (const dryRun of [false, true]) {
+        it(`${label}${dryRun ? ' (dry run)' : ''}: INVALID_FORMAT, no request at all, both files byte-identical`, async () => {
+          const dir = enterFolder(which === 'tracked' ? bad : serializeKeep(KEEP));
+          mkdirSync(join(dir, '.capy'));
+          writeFileSync(join(dir, '.capy', 'keep.lock'), which === 'working' ? bad : serializeKeep(KEEP));
+          const before = [lockOf(dir), lockOf(dir, '.capy/keep.lock')];
+
+          const out = await capture(() => renameProjectCommand('new-name', { json: true, dryRun }));
+
+          // A tracked copy that is not JSON is already refused when the folder is read; both are coded, before any request.
+          expect(out.exitCode).toBe(1);
+          expect(JSON.parse(out.stdout)).toMatchObject({ ok: false, code: 'INVALID_FORMAT' });
+          expect(JSON.parse(out.stdout).renamed).toBeUndefined();
+          expect(requests()).toEqual([]);
+          expect([lockOf(dir), lockOf(dir, '.capy/keep.lock')]).toEqual(before);
+        });
+      }
+    }
+  });
+
+  describe('when keep.lock cannot be written after the service renamed', () => {
+    it('refuses with KEEP_LOCK_UPDATE_FAILED and says the project was renamed; a re-run repairs the file', async () => {
+      if (process.getuid?.() === 0) return; // root writes through a read-only file
       const dir = enterFolder();
-      mkdirSync(join(dir, '.capy'));
-      writeFileSync(join(dir, '.capy', 'keep.lock'), '{ not json');
+      const path = join(dir, 'keep.lock');
       const before = lockOf(dir);
+      chmodSync(path, 0o444);
 
       const out = await capture(() => renameProjectCommand('new-name', { json: true }));
 
@@ -376,8 +408,50 @@ describe('capy projects rename', () => {
         project: { id: 'proj_web', name: 'new-name' },
         previous_name: 'old-name',
       });
+      expect(renames()).toHaveLength(1);
       expect(lockOf(dir)).toBe(before);
+
+      // The file is writable again: the same command, run once more, finishes the job (the service has nothing to change).
+      chmodSync(path, 0o644);
+      service({ onRename: () => reply(200, { ok: true, changed: false, project: { id: 'proj_web', name: 'new-name' } }) });
+      const again = await capture(() => renameProjectCommand('new-name', { json: true }));
+
+      expect(again.exitCode).toBeUndefined();
+      expect(JSON.parse(again.stdout)).toMatchObject({ ok: true, changed: false });
+      expect(lockOf(dir)).toBe(renamedLock('new-name'));
     });
+  });
+
+  describe('a 200 from the service that is not the renamed project', () => {
+    const malformed: ReadonlyArray<readonly [string, Reply]> = [
+      ['{ok:true} with no project', reply(200, { ok: true })],
+      ['a null body', reply(200, null)],
+      ['an array body', reply(200, [])],
+      ['a project with no name', reply(200, { ok: true, changed: true, project: { id: 'proj_web' } })],
+      ['a project with an empty name', reply(200, { ok: true, changed: true, project: { id: 'proj_web', name: '' } })],
+      ['a project with no id', reply(200, { ok: true, changed: true, project: { name: 'new-name' } })],
+      ['another project', reply(200, { ok: true, changed: true, project: { id: 'proj_api', name: 'new-name' } })],
+      ['a body that is not JSON', rawReply(200, '<html>gateway</html>')],
+      ['an empty body', rawReply(200, '')],
+    ];
+    for (const [label, answer] of malformed) {
+      it(`${label}: SERVICE_ERROR, never "renamed", keep.lock untouched`, async () => {
+        const dir = enterFolder();
+        mkdirSync(join(dir, '.capy'));
+        writeFileSync(join(dir, '.capy', 'keep.lock'), serializeKeep(KEEP));
+        const before = [lockOf(dir), lockOf(dir, '.capy/keep.lock')];
+        service({ onRename: () => answer });
+
+        const out = await capture(() => renameProjectCommand('new-name', { json: true }));
+
+        expect(out.exitCode).toBe(1);
+        const body = JSON.parse(out.stdout);
+        expect(body).toMatchObject({ ok: false, code: 'SERVICE_ERROR' });
+        expect(body.renamed).toBeUndefined();
+        expect(renames()).toHaveLength(1);
+        expect([lockOf(dir), lockOf(dir, '.capy/keep.lock')]).toEqual(before);
+      });
+    }
   });
 
   describe('--dry-run', () => {

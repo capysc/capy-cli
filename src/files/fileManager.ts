@@ -88,13 +88,28 @@ function serializeEntries(entries: KeepFile['variables'][string]): readonly Reco
   }));
 }
 
+/** One keep.lock copy and the bytes it is to hold. */
+export interface KeepRewrite {
+  readonly path: string;
+  readonly content: string;
+}
+
 /** What the keep.lock at `path` would contain with `project_name` set to `projectName`. Throws INVALID_FORMAT when it cannot be read as a keep. */
 function renamedKeepContent(path: string, projectName: string): string {
   const parsed: unknown = parseKeepJson(path);
   if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
     throw new CapyError('Invalid keep.lock file format', ERROR_CODES.INVALID_FORMAT, { path });
   }
-  return serializeKeep({ ...(parsed as KeepFile), project_name: projectName });
+  return serializeRenamedKeep(path, { ...(parsed as KeepFile), project_name: projectName });
+}
+
+/** `serializeKeep` of a keep it cannot serialize (no `variables`, say) is an INVALID_FORMAT for that file, never a bare TypeError. */
+function serializeRenamedKeep(path: string, keep: KeepFile): string {
+  try {
+    return serializeKeep(keep);
+  } catch (error) {
+    throw new CapyError('Invalid keep.lock file format', ERROR_CODES.INVALID_FORMAT, { path, error });
+  }
 }
 
 function parseKeepJson(path: string): unknown {
@@ -314,14 +329,19 @@ export class FileManager {
   }
 
   /**
-   * Sets `project_name` in every keep.lock copy that exists (see `keepLockPaths`), through `serializeKeep`, so a
-   * lockfile that is already in canonical form changes on that one line and nowhere else. Every copy is read and
-   * checked before the first is written: an unreadable copy leaves all of them as they were. Returns the paths written.
+   * The plan for setting `project_name` in every keep.lock copy that exists (see `keepLockPaths`): the new bytes per
+   * path, through `serializeKeep`, so a lockfile already in canonical form changes on that one line and nowhere else.
+   * Every copy is read, parsed and serialized here and nothing is written: a copy that cannot be rewritten (not
+   * JSON, not an object, no `variables`) throws INVALID_FORMAT, so the caller finds out before it renames anything.
    */
-  writeKeepProjectName(projectName: string): readonly string[] {
-    const rewritten = this.keepLockPaths().map((path) => ({ path, content: renamedKeepContent(path, projectName) }));
-    rewritten.forEach(({ path, content }) => this.writeKeepContentTo(path, content));
-    return rewritten.map(({ path }) => path);
+  planKeepProjectName(projectName: string): readonly KeepRewrite[] {
+    return this.keepLockPaths().map((path) => ({ path, content: renamedKeepContent(path, projectName) }));
+  }
+
+  /** Writes a plan from `planKeepProjectName`. Returns the paths written. */
+  writeKeepRewrites(rewrites: readonly KeepRewrite[]): readonly string[] {
+    rewrites.forEach(({ path, content }) => this.writeKeepContentTo(path, content));
+    return rewrites.map(({ path }) => path);
   }
 
   /**

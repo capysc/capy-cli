@@ -128,7 +128,33 @@ function renameForm(org: OrgRef, project: ProjectRef, suggestion: string | undef
 /** The client calls the flow makes: resolving the org hands it over already signed in. */
 interface RenameClient {
   listProjects(): Promise<ReadonlyArray<{ readonly id: string; readonly name: string; readonly organization_id: string }>>;
-  renameProject(orgId: string, projectId: string, name: string): Promise<{ readonly changed: boolean; readonly project: ProjectRef; readonly previous_name?: string }>;
+  /** What the service answered, unchecked: `renamedProjectOf` says whether it can be used. */
+  renameProject(orgId: string, projectId: string, name: string): Promise<unknown>;
+}
+
+/** The renamed project of a 200 answer, or null when the answer does not carry this project's id and name. */
+function renamedProjectOf(answer: unknown, projectId: string): ProjectRef | null {
+  if (typeof answer !== 'object' || answer === null) return null;
+  const project: unknown = (answer as { project?: unknown }).project;
+  if (typeof project !== 'object' || project === null) return null;
+  const { id, name } = project as { id?: unknown; name?: unknown };
+  if (id !== projectId || typeof name !== 'string') return null;
+  return name === '' ? null : { id, name };
+}
+
+/** The service answered 200 with something that is not the renamed project (or not JSON). Nothing is claimed about the rename. */
+function badServiceAnswer(): CapyError {
+  return new CapyError(
+    'The service answered, but not with the renamed project.', // COPY-FLAG
+    ERROR_CODES.SERVICE_ERROR,
+    { status: 200, reason: 'unusable_response' },
+  );
+}
+
+/** The optional fields of a usable answer: `changed` is true only when the service says so, `previous_name` only when it is text. */
+function answerExtras(answer: unknown): { readonly changed: boolean; readonly previousName: string | undefined } {
+  const { changed, previous_name: previous } = answer as { changed?: unknown; previous_name?: unknown };
+  return { changed: changed === true, previousName: typeof previous === 'string' ? previous : undefined };
 }
 
 /** The live projects of the org other than the one being renamed. */
@@ -140,6 +166,9 @@ function othersIn(
 }
 
 async function renameFlow(typed: string | undefined, folder: FolderProject, opts: RenameProjectOpts): Promise<RenameOutcome> {
+  // Before any network call: every keep.lock copy must be one that can be rewritten, or nothing is renamed.
+  const planned = typed === undefined ? [] : new FileManager().planKeepProjectName(typed);
+
   // The folder's own org wins inside resolveOrgContext; nothing is ever asked.
   const { orgId, orgName, serviceClient } = await resolveOrgContext(opts.apiUrl, opts.devMode === true, { promptForOrg: false });
   const org: OrgRef = { id: orgId, name: orgName };
@@ -152,29 +181,37 @@ async function renameFlow(typed: string | undefined, folder: FolderProject, opts
     return { kind: 'needs-input', project, org, elicitation: renameForm(org, project, suggestion), suggestion };
   }
 
-  if (opts.dryRun === true) return dryRunOutcome(typed, project, org, client);
+  if (opts.dryRun === true) return dryRunOutcome(typed, project, org, client, shownPaths(planned.map((p) => p.path)));
 
-  const result = await client.renameProject(orgId, folder.id, typed);
-  // The local file follows the service's answer (its trimmed name), even when the service had nothing to change.
-  const written = await settle(async () => new FileManager().writeKeepProjectName(result.project.name));
-  if (!written.ok) return { kind: 'local-failed', project: result.project, previousName: result.previous_name ?? folder.name, org };
-  return {
-    kind: 'renamed',
-    project: result.project,
-    previousName: result.previous_name ?? folder.name,
-    changed: result.changed,
-    org,
-    files: shownPaths(written.value),
-  };
+  const sent = await settle(() => client.renameProject(orgId, folder.id, typed));
+  // An answer that is not JSON is as unusable as one without the project: it is neither a rename nor a refusal.
+  if (!sent.ok) throw sent.error instanceof CapyError ? sent.error : badServiceAnswer();
+  const renamed = renamedProjectOf(sent.value, folder.id);
+  if (renamed === null) throw badServiceAnswer();
+  const { changed, previousName } = answerExtras(sent.value);
+
+  // The local files follow the service's answer (its stored name), even when the service had nothing to change.
+  const written = await settle(async () => {
+    const files = new FileManager();
+    return files.writeKeepRewrites(files.planKeepProjectName(renamed.name));
+  });
+  if (!written.ok) return { kind: 'local-failed', project: renamed, previousName: previousName ?? folder.name, org };
+  return { kind: 'renamed', project: renamed, previousName: previousName ?? folder.name, changed, org, files: shownPaths(written.value) };
 }
 
-/** What a real run would do, read from the project list alone. */
-async function dryRunOutcome(name: string, project: ProjectRef, org: OrgRef, client: RenameClient): Promise<RenameOutcome> {
+/** What a real run would do, read from the project list and the planned keep.lock rewrites alone. */
+async function dryRunOutcome(
+  name: string,
+  project: ProjectRef,
+  org: OrgRef,
+  client: RenameClient,
+  files: readonly string[],
+): Promise<RenameOutcome> {
   const all = await client.listProjects();
   if (!all.some((p) => p.id === project.id)) return { kind: 'not-found', project };
   const clash = existingProjectNamed(othersIn(all, project.id), org.id, name);
   if (clash !== undefined) return { kind: 'exists', existing: clash, org };
-  return { kind: 'dry-run', project, name, org, files: shownPaths(new FileManager().keepLockPaths()) };
+  return { kind: 'dry-run', project, name, org, files };
 }
 
 const NAME_EXISTS_MESSAGE = 'This organization already has a project with that name.'; // COPY-FLAG: same wording as `capy project create`

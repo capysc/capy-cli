@@ -121,6 +121,7 @@ export const DRY_RUN_COMMANDS: ReadonlySet<string> = new Set([
   'project create',
   'project delete',
   'project restore',
+  'projects rename',
   'remove',
   'secrets',
   'secrets set',
