@@ -607,6 +607,21 @@ capy projects [options]
 
 JSON support: yes (`--json`)
 
+### `capy projects rename`
+
+Rename the project of this folder, and update its keep.lock (owners only)
+
+```
+capy projects rename [new-name] [options]
+```
+
+| Option | Description | Default |
+|---|---|---|
+| `--non-tty` | same as --json: never ask, and answer in JSON (agents/CI) |  |
+| `--json` | emit machine-readable JSON instead of the human UI |  |
+
+JSON support: yes (`--json`)
+
 ## `capy secrets`
 
 List every secret name across the active organization, grouped by value (read-only, never shows a value)
@@ -1143,6 +1158,7 @@ Every refusal carries a stable `code` — branch on it, never on message text.
 - `BRANCH_CREATE_FAILED`
 - `BRANCH_PROTECTION_REQUIRED`
 - `BRANCH_PROTECTION_INVALID`
+- `KEEP_LOCK_UPDATE_FAILED`
 - `ORG_SELECTION_REQUIRED`
 - `REPO_LINKS_UNSUPPORTED`
 - `DRY_RUN_UNSUPPORTED`
