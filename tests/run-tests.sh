@@ -74,6 +74,7 @@ ISOLATED_FILES=(
   tests/commands/bareCapyCommit.test.ts
   tests/commands/initialSetupTrackedKeep.test.ts
   tests/commands/initialSetupLocalTrackedKeep.test.ts
+  tests/commands/agentSetup.test.ts
   tests/sync/missingEnvFile.test.ts
   tests/commands/deployGate.test.ts
   tests/system/systemStore.test.ts
