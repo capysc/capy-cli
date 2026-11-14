@@ -830,7 +830,7 @@ export class ServiceClient {
     }
   }
 
-  async createInvite(orgId: string, email: string, role?: string, projectId?: string): Promise<{ invite_id: string; org_id: string; email: string; role: string; user_id: string; project_id: string | null }> {
+  async createInvite(orgId: string, email: string, role?: string, projectId?: string): Promise<{ invite_id: string; org_id: string; email: string; role: string; user_id: string; project_id: string | null; email_sent?: boolean }> {
     return this.request('POST', `/orgs/${orgId}/invite`, { email, role, project_id: projectId });
   }
 
