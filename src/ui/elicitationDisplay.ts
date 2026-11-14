@@ -114,3 +114,37 @@ export function createProjectDisplay(input: CreateDisplayInput): string {
 export function pairEmailDisplay(): string {
   return table(['', ''], [['Email', TO_CHOOSE]]); // COPY-FLAG
 }
+
+export interface SetupDisplayInput {
+  /** The organization's name, when it is decided. */
+  readonly org?: string;
+  /** The project's name, when it is decided (an existing one, or the name given for a new one). */
+  readonly project?: string;
+  /** The first branch, when it is decided. */
+  readonly branch?: string;
+  /** Whether the first branch is protected, when it is decided. */
+  readonly isProtected?: boolean;
+  /** How many variables the folder's `.env` holds. 0 or absent: no row. */
+  readonly variables?: number;
+  /** What a branch is, shown under the table. */
+  readonly branchDescription: string;
+}
+
+function variablesCell(count: number): string {
+  return `${count} ${count === 1 ? 'variable' : 'variables'} to encrypt and push`; // COPY-FLAG
+}
+
+/**
+ * The table for bare `capy` setting up a folder with nobody to ask: where it goes, what is decided so far, and how
+ * many variables of the `.env` will be encrypted and pushed. It is the whole summary, so there is no second confirmation.
+ */
+export function setupDisplay(input: SetupDisplayInput): string {
+  const rows: ReadonlyArray<readonly [string, string]> = [
+    ['Org', input.org ?? TO_CHOOSE],
+    ['Project', input.project ?? TO_CHOOSE],
+    ['First branch', input.branch ?? TO_CHOOSE], // COPY-FLAG
+    ['Protected', protectedCell(input.isProtected)], // COPY-FLAG
+    ...(input.variables !== undefined && input.variables > 0 ? [['Variables', variablesCell(input.variables)] as const] : []),
+  ];
+  return `${table(['', ''], rows)}\n\n${input.branchDescription}`;
+}

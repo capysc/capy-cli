@@ -11,6 +11,7 @@ import { refuseWebMode } from './core/webModeRemoved';
 import { ACCENT } from './ui/colors';
 import { conflictOption, rawConflictFlagsOf, resolveOption } from './sync/conflicts';
 import { answersByProtocol } from './sync/gate';
+import { registerBareSetupOptions, setupOptionsFrom } from './core/bareSetupFlags';
 
 // Prod talks to api.capy.sc and ~/.capy, full stop. Strip the environment's
 // attempts to move it before anything can read them — see config/prodPins.ts
@@ -94,6 +95,8 @@ program
       process.exit(1);
     }
 
+    // The flags that answer the setup questions of a folder that is not a project yet (only bare `capy` has them).
+    const setup = setupOptionsFrom(options);
     const cliOptions: CliOptions = {
       envPath: options.envPath,
       verbose: options.verbose,
@@ -101,7 +104,8 @@ program
       dryRun: options.dryRun,
       conflictFlags: rawConflictFlagsOf(cmd),
       // Off a terminal, under --dry-run, or given --resolve nobody can answer the menu: the flags do (CAP-717).
-      protocol: answersByProtocol({ conflictFlags: rawConflictFlagsOf(cmd), dryRun: options.dryRun === true }),
+      protocol: answersByProtocol({ conflictFlags: rawConflictFlagsOf(cmd), dryRun: options.dryRun === true, json: setup.json, nonTty: setup.nonTty }),
+      setup,
     };
 
     const command = new CapyCommand(cliOptions);
@@ -1211,5 +1215,9 @@ program
     const { mergeKeepLockCommand } = await import('./commands/mergeKeepLockCommand');
     process.exit(mergeKeepLockCommand(ancestor, ours, theirs, ourLabel, baseLabel, theirLabel, markerSize));
   });
+
+// Bare `capy` gets the setup flags (`--org`, `--project`, `--name`, `--branch`, `--protected`, `--json`, `--non-tty`); a
+// subcommand's own flags of those names are untouched.
+registerBareSetupOptions(program, process.argv);
 
 program.parse(process.argv);

@@ -407,6 +407,32 @@ export interface SessionStore {
   sessions: Record<string, OrgSession>;
 }
 
+/**
+ * The answers bare `capy` takes as flags when this folder is not a project yet. Each one, when given, answers its
+ * prompt (terminal) or its question (agent mode), so that question is not asked.
+ */
+export interface SetupAnswers {
+  /** `--org`: an organization id or name. */
+  readonly org?: string;
+  /** `--project`: an existing project's id or name, or `new`. */
+  readonly project?: string;
+  /** `--name`: the name of a new project. */
+  readonly name?: string;
+  /** `--branch`: the first branch. */
+  readonly branch?: string;
+  /** `--protected` / `--no-protected` as typed, as `yes` or `no`; anything else is refused with BRANCH_PROTECTION_INVALID. */
+  readonly protectedAnswer?: string;
+}
+
+export interface SetupOptions extends SetupAnswers {
+  /** `--json` (or `--non-tty`, which means the same). */
+  readonly json: boolean;
+  /** `--non-tty`: treat stdin as not a terminal. */
+  readonly nonTty: boolean;
+  /** Nobody can answer a prompt: `--json`, `--non-tty`, or stdin that is not a terminal. Setup then never prompts and answers in JSON. */
+  readonly agentMode: boolean;
+}
+
 export interface CliOptions {
   envPath?: string;
   verbose?: boolean;
@@ -423,6 +449,8 @@ export interface CliOptions {
   quiet?: boolean;
   /** Never the browser sign-in: a command that runs the sync as its first step and has no one to sign in is told why instead. */
   silentAuthOnly?: boolean;
+  /** What bare `capy` was told about setting up a folder that is not a project yet (`core/bareSetupFlags.ts`). Absent: no flags, a terminal. */
+  setup?: SetupOptions;
   /**
    * Bare `capy` as a command's first step (sync/gate.ts), not typed by a person: what to do when `.capy/branch` and the
    * `.env` header name different, real branches (an interrupted checkout). Absent (a person ran `capy`): stop with the
@@ -989,6 +1017,11 @@ export const ERROR_CODES = {
   // --- A git repo belongs to one organization ---
   /** The folder's tracked keep.lock names organization A, and `capy redeem` or `capy org` was asked to bring organization B into it. Nothing in the folder was changed. Exit 1. */
   REPO_ORG_MISMATCH: 'REPO_ORG_MISMATCH',
+  // --- Bare `capy` in a folder that is not a project yet, with nobody to ask (agent mode) ---
+  /** Bare `capy` in an unlinked folder, in agent mode, has questions left to answer. The refusal carries one `elicitation` form with every unanswered question. Nothing was created or written. Exit 3. */
+  INIT_INPUT_REQUIRED: 'INIT_INPUT_REQUIRED',
+  /** Bare `capy` could not read the organization's projects (the lookup failed, which is not the same as "it has none"). Nothing was created. Exit 1. */
+  PROJECT_LOOKUP_FAILED: 'PROJECT_LOOKUP_FAILED',
 } as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES];

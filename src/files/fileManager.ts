@@ -469,7 +469,7 @@ export class FileManager {
    * save a backup as .env.pre-capy.old with all values commented out,
    * and add .env.pre-capy.old to .gitignore.
    */
-  backupPlaintextEnv(path?: string): boolean {
+  backupPlaintextEnv(path?: string, say: (line: string) => void = (line) => console.log(line)): boolean {
     const envPath = path || join(this.projectRoot, '.env');
     if (!existsSync(envPath)) return false;
 
@@ -498,7 +498,7 @@ export class FileManager {
     const header = '# From Capy: These are your old secrets, which we have saved for you.\n# We recommend deleting this file or putting it somewhere safe because the values are unencrypted.\n\n';
     writeFileSync(oldPath, header + commented, { encoding: 'utf-8', mode: 0o600 });
     this.updateGitignore(['.env.pre-capy.old']);
-    console.log(`Saved plaintext backup to ${oldPath}`);
+    say(`Saved plaintext backup to ${oldPath}`);
     return true;
   }
 
