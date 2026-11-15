@@ -94,7 +94,7 @@ export async function loadScreenData(serviceClient: ServiceClient, orgId: string
   const [withBranches, links, index, adminIds, members] = await Promise.all([
     Promise.all(listed.map(async (p) => ({
       p,
-      branches: (await serviceClient.listBranches(p.id)).map((b) => ({ name: b.name, protected: b.is_protected })),
+      branches: (await serviceClient.listBranches(p.id)).map((b) => ({ id: b.id, name: b.name, protected: b.is_protected })),
     }))),
     loadOrgRepos(serviceClient, orgId),
     readUnlessForbidden(() => serviceClient.getSecretIndex(orgId)),
@@ -154,10 +154,11 @@ export class ProjectsCommand {
     // Same CAP-273 contract as `usersCommand`/`listCommand`: under --json, no
     // progress output at all, so stdout stays pure JSON even on a TTY.
     const spinner = json ? null : new Spinner('Loading projects...');
-    spinner?.start();
 
     try {
+      // The spinner starts once the org is known: resolving it may ask which org.
       const { orgId, serviceClient } = await resolveOrgContext(this.apiUrl, this.devMode);
+      spinner?.start();
       const summaries = await this.loadProjectSummaries(serviceClient, includeDeleted);
       const projects = withRepos(summaries, await loadOrgRepos(serviceClient, orgId));
 
@@ -172,14 +173,17 @@ export class ProjectsCommand {
   /** The interactive screen (`ui/projectsScreen.ts`): live projects only, with the same loading spinner. */
   private async runInteractive(dryRun: boolean): Promise<void> {
     const spinner = new Spinner('Loading projects...');
-    spinner.start();
     try {
+      // The spinner starts once the org is known: resolving it may ask which org.
       const { orgId, orgName, userId, serviceClient } = await resolveOrgContext(this.apiUrl, this.devMode);
-      const data = await loadScreenData(serviceClient, orgId);
+      spinner.start();
+      const data = { ...(await loadScreenData(serviceClient, orgId)), selfUserId: userId };
       const { createLocationDecryptor } = await import('./secretsValueDecryptor');
       const { createEditActions } = await import('./secretsEditActions');
       const { createDeployActions } = await import('./secretsDeployActions');
       const { createProjectDeleteActions } = await import('./projectDeleteActions');
+      const { createProjectUsersActions } = await import('./projectUsersActions');
+      const { createProjectManageActions } = await import('./projectManageActions');
       const { runProjectsScreen } = await import('../ui/projectsScreenDriver');
       spinner.stop();
       await runProjectsScreen(
@@ -189,6 +193,8 @@ export class ProjectsCommand {
         dryRun,
         createDeployActions(orgId, userId, serviceClient, dryRun, this.devMode),
         createProjectDeleteActions(serviceClient, { id: orgId, name: orgName }),
+        createProjectUsersActions(serviceClient, orgId, userId),
+        createProjectManageActions(serviceClient, orgId),
       );
     } catch (err) {
       spinner.fail('Failed to load projects');

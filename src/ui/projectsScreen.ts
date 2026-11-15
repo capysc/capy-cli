@@ -24,9 +24,11 @@
 import type { MemberDetail, SecretIndexLocation, SecretIndexRow, SecretIndexSkipped } from '../service/serviceClient';
 import { formatRepo, type ProjectRepoSummary } from '../commands/projectsCommand';
 import { DRY_RUN_LABEL } from '../commands/secretsSetText';
+import { ERROR_CODES } from '../types';
 import { formatRelativeTime } from './relativeTime';
 import { ACCENT } from './colors';
 import { filterByQuery } from './searchMatch';
+import { oscHyperlink } from './osc8';
 import { clipLine, truncateCell } from './pickerTable';
 import { BEHIND_LABEL, DEPLOYED_LABEL, TARGET_STATUS_HEADING } from '../core/deployStatus';
 import { DELETE_CANCELLED_TEXT, DELETE_DRY_RUN_TEXT, deleteQuestion } from '../commands/projectLifecycleCommand';
@@ -37,7 +39,41 @@ import {
   initialSecretsScreenState,
   render as renderSecrets,
   scopeRowKey,
+  BOX_DIVIDER,
+  BOX_FULL_WIDTH,
+  betweenRules,
+  searchInput,
+  sortedCopy,
 } from './secretsScreen';
+import {
+  type BranchRef,
+  type ManageDialog,
+  type ManageEffect,
+  type ManageFinished,
+  type ManageRefusal,
+  type TokenRow,
+  SETTINGS_ROWS,
+  manageDone,
+  manageKey,
+  manageTokensLoaded,
+  renderManage,
+  settingsLabel,
+  startBranch,
+  startSettings,
+} from './projectManage';
+import {
+  type ProjectUserRow,
+  type UsersDialog,
+  type UsersEffect,
+  type UsersFinished,
+  projectUserRows,
+  renderUsersDialog,
+  startChange,
+  startInvite,
+  usersCopied,
+  usersDialogDone,
+  usersDialogKey,
+} from './projectUsers';
 
 // ── ANSI and keys (the same ones `capy secrets` reads) ─────────────────────────
 
@@ -55,13 +91,9 @@ const KEY_RIGHT = `${ESC}[C`;
 const KEY_LEFT = `${ESC}[D`;
 const KEY_PGUP = `${ESC}[5~`;
 const KEY_PGDN = `${ESC}[6~`;
-const KEY_TAB = '\t';
-const KEY_SHIFT_TAB = `${ESC}[Z`;
 const KEY_ESC = ESC;
 const KEY_ESC_ESC = `${ESC}${ESC}`;
 const KEY_CTRL_C = '\x03';
-/** Ctrl+X: delete the project (the one under the cursor on the list, or the one that is open). */
-const KEY_CTRL_X = '\x18';
 const KEY_ENTER = '\r';
 const KEY_BACKSPACE = '\x7f';
 const KEY_BACKSPACE2 = '\b';
@@ -77,8 +109,8 @@ export interface ProjectItem {
   readonly name: string;
   /** Absent from services that predate it: `null`. */
   readonly createdAt: string | null;
-  readonly branches: readonly { readonly name: string; readonly protected: boolean }[];
-  /** Linked repos; absent when they were not returned to the caller (the Git repos tab is then hidden). `[]`: none linked. */
+  readonly branches: readonly { readonly id: string; readonly name: string; readonly protected: boolean }[];
+  /** Linked repos; absent when they were not returned to the caller (the Git Repos tab is then hidden). `[]`: none linked. */
   readonly repos?: readonly ProjectRepoSummary[];
 }
 
@@ -102,18 +134,22 @@ export interface ProjectsData {
   readonly members: readonly MemberDetail[] | null;
   /** Whether the org's repo links were returned (the Linked repo column). */
   readonly reposShown: boolean;
+  /** The caller's user id: their own row on the Users tab is locked (nobody changes their own role). Absent: unknown. */
+  readonly selfUserId?: string;
 }
 
 /**
  * What the index says about one project: `hidden` when it was not returned for
- * it (no index, a skipped project, or one the caller does not administer),
- * `empty` when it was and the project has no secrets yet, `rows` otherwise.
+ * it (no index, a project skipped for any other reason, or one the caller does
+ * not administer), `empty` when it was and the project has no secrets yet
+ * (including one skipped as NO_KEEP_FILE: nobody has pushed to it), `rows` otherwise.
  */
 export type ProjectIndexState = 'hidden' | 'empty' | 'rows';
 
 export function projectIndexState(index: ProjectsIndex | null, projectId: string): ProjectIndexState {
   if (index === null) return 'hidden';
-  if (index.skipped.some((s) => s.project_id === projectId)) return 'hidden';
+  const skip = index.skipped.find((s) => s.project_id === projectId);
+  if (skip !== undefined) return skip.code === ERROR_CODES.NO_KEEP_FILE ? 'empty' : 'hidden';
   if (index.rows.some((r) => r.locations.some((l) => l.project_id === projectId))) return 'rows';
   return index.coveredProjectIds !== null && index.coveredProjectIds.includes(projectId) ? 'empty' : 'hidden';
 }
@@ -165,23 +201,27 @@ export function lastUpdatedOf(index: ProjectsIndex | null, project: ProjectItem)
 
 // ── Tabs ──────────────────────────────────────────────────────────────────────
 
-export type ProjectTab = 'secrets' | 'users' | 'repos' | 'branches' | 'deployments' | 'connectors';
-/** Tab moves forward through this order (wrapping), Shift-Tab back. Secrets is selected when a project opens. */
-export const PROJECT_TABS: readonly ProjectTab[] = ['secrets', 'users', 'repos', 'branches', 'deployments', 'connectors'];
+export type ProjectTab = 'secrets' | 'users' | 'repos' | 'branches' | 'deployments' | 'connectors' | 'settings';
+/** → moves forward through this order (wrapping), ← back. Secrets is selected when a project opens. */
+export const PROJECT_TABS: readonly ProjectTab[] = ['secrets', 'users', 'repos', 'branches', 'deployments', 'connectors', 'settings'];
 
 const TAB_LABELS: Readonly<Record<ProjectTab, string>> = {
   secrets: 'Secrets', // COPY-FLAG
   users: 'Users', // COPY-FLAG
-  repos: 'Git repos', // COPY-FLAG
-  branches: 'Capy branches', // COPY-FLAG
+  repos: 'Git Repos', // COPY-FLAG
+  branches: 'Capy Branches', // COPY-FLAG
   deployments: 'Deployments', // COPY-FLAG
   connectors: 'Connectors', // COPY-FLAG
+  settings: 'Settings', // COPY-FLAG
 };
+
+/** The Settings tab's actions, in order. Enter runs the one under the cursor. */
+// The Settings rows are `projectManage.ts`'s SETTINGS_ROWS.
 
 /**
  * The tabs a project shows: only those whose data the service returned to the
  * caller. Secrets, Deployments and Connectors come from the secrets index;
- * Users from the member list; Git repos from the project's linked repos.
+ * Users from the user list; Git Repos from the project's linked repos.
  */
 export function visibleTabs(data: ProjectsData, project: ProjectItem): readonly ProjectTab[] {
   const indexShown = projectIndexState(data.index, project.id) !== 'hidden';
@@ -192,6 +232,8 @@ export function visibleTabs(data: ProjectsData, project: ProjectItem): readonly 
     branches: true,
     deployments: indexShown,
     connectors: indexShown,
+    // Always shown: the service decides who may delete (a refusal is shown in its words).
+    settings: true,
   };
   return PROJECT_TABS.filter((t) => shown[t]);
 }
@@ -215,15 +257,13 @@ interface TabTable {
  * project (their org role).
  */
 export function projectMembers(members: readonly MemberDetail[], projectId: string): readonly { readonly email: string; readonly role: string }[] {
-  return members.flatMap((m) => {
-    const membership = m.projects.find((p) => p.id === projectId);
-    if (membership !== undefined) return [{ email: m.email, role: membership.role ?? m.role }];
-    return ORG_WIDE_ROLES.includes(m.role) ? [{ email: m.email, role: m.role }] : [];
-  });
+  return projectUserRows(members, projectId).map((r) => ({ email: r.email, role: r.role }));
 }
 
-/** Org roles that reach every project (the service's own role values). */
-const ORG_WIDE_ROLES: readonly string[] = ['owner', 'admin'];
+/** The Users tab's rows for `project`, with the caller's own row locked. */
+function userRowsOf(data: ProjectsData, projectId: string): readonly ProjectUserRow[] {
+  return projectUserRows(data.members ?? [], projectId, data.selfUserId ?? null);
+}
 
 /** One deploy target of one branch, as `capy secrets` records it: when it was last deployed, and whether it is behind or pending. */
 export interface DeploymentEntry {
@@ -273,13 +313,32 @@ export function projectConnectors(rows: readonly SecretIndexRow[]): readonly { r
   );
 }
 
+/**
+ * The repo's page on GitHub, at the project's folder (`/tree/HEAD/<folder>`: GitHub resolves HEAD to the
+ * default branch). `null` for a repo not on GitHub: it is shown as text, with no link.
+ */
+export function repoUrl(repo: ProjectRepoSummary): string | null {
+  if (repo.host.toLowerCase() !== 'github.com') return null;
+  const base = `https://github.com/${repo.owner}/${repo.name}`;
+  return repo.path === '.' ? base : `${base}/tree/HEAD/${repo.path}`;
+}
+
+/** The Git Repos tab's lines with each GitHub URL made clickable (OSC 8). A URL cut short to fit stays plain text. */
+function linkRepoLines(lines: readonly string[], repos: readonly ProjectRepoSummary[]): readonly string[] {
+  const urls = repos.map(repoUrl).filter((u): u is string => u !== null);
+  return lines.map((line) => {
+    const url = urls.find((u) => line.includes(u));
+    return url === undefined ? line : line.replace(url, oscHyperlink(url, url));
+  });
+}
+
 /** The table a (non-Secrets) tab shows. */
 export function tabTable(data: ProjectsData, project: ProjectItem, tab: ProjectTab, now?: Date): TabTable {
   const rows = data.index === null ? [] : projectRows(data.index.rows, project.id);
   if (tab === 'users') {
     return { headings: ['EMAIL', 'ROLE'], rows: projectMembers(data.members ?? [], project.id).map((m) => [m.email, m.role]) }; // COPY-FLAG: EMAIL, ROLE
   }
-  if (tab === 'repos') return { headings: ['REPO'], rows: (project.repos ?? []).map((r) => [formatRepo(r)]) };
+  if (tab === 'repos') return { headings: ['REPO'], rows: (project.repos ?? []).map((r) => [repoUrl(r) ?? formatRepo(r)]) }; // COPY-FLAG: REPO
   if (tab === 'branches') {
     return { headings: ['BRANCH'], rows: project.branches.map((b) => [b.protected ? `${b.name} (protected)` : b.name]) };
   }
@@ -317,6 +376,12 @@ export interface ProjectView {
   readonly secrets: SecretsScreenState;
   /** The first line shown of a (non-Secrets) tab's table. */
   readonly scroll: number;
+  /** The Users tab's selected row. */
+  readonly userCursor: number;
+  /** The Settings tab's selected row. */
+  readonly settingsCursor: number;
+  /** The Capy Branches tab's selected branch. */
+  readonly branchCursor: number;
 }
 
 export interface ProjectsScreenState {
@@ -329,8 +394,12 @@ export interface ProjectsScreenState {
   readonly cursor: number;
   /** The project that is open, or `null` on the list. */
   readonly open: ProjectView | null;
-  /** The delete question (Ctrl+X), over the list or the open project; `null` when closed. */
+  /** The delete question (Settings → Delete project), over the open project; `null` when closed. */
   readonly dialog: DeleteDialog | null;
+  /** The Users tab's dialog (invite, change a role, remove), over the open project; `null` when closed. */
+  readonly usersDialog: UsersDialog | null;
+  /** The Settings and Capy Branches tabs' dialog (deploy tokens, branch actions), over the open project; `null` when closed. */
+  readonly manage: ManageDialog | null;
   /** Short lines shown above the footer until the next key (what a delete did). */
   readonly notes: readonly string[];
   readonly quit: boolean;
@@ -339,12 +408,21 @@ export interface ProjectsScreenState {
 }
 
 export function initialProjectsScreenState(data: ProjectsData, dryRun: boolean = false): ProjectsScreenState {
-  return { data, dryRun, query: '', cursor: 0, open: null, dialog: null, notes: [], quit: false, exitText: null };
+  return { data, dryRun, query: '', cursor: 0, open: null, dialog: null, usersDialog: null, manage: null, notes: [], quit: false, exitText: null };
 }
 
-/** The projects the search shows, in the service's order. */
+/** Most recently updated first; projects with no known time last; then by name. */
+export function sortProjects(data: Pick<ProjectsData, 'projects' | 'index'>): readonly ProjectItem[] {
+  const at = (p: ProjectItem): number => {
+    const iso = lastUpdatedOf(data.index, p);
+    return iso === null ? -Infinity : timeOf(iso) ?? -Infinity;
+  };
+  return sortedCopy(data.projects, (a, b) => at(b) - at(a) || a.name.localeCompare(b.name));
+}
+
+/** The projects the search shows, most recently updated first. */
 export function filteredProjects(state: Pick<ProjectsScreenState, 'data' | 'query'>): readonly ProjectItem[] {
-  return filterByQuery(state.data.projects, state.query, (p) => p.name);
+  return filterByQuery(sortProjects(state.data), state.query, (p) => p.name);
 }
 
 function clampIndex(index: number, length: number): number {
@@ -358,7 +436,7 @@ function projectById(data: ProjectsData, id: string): ProjectItem | undefined {
 
 // ── Reducer ───────────────────────────────────────────────────────────────────
 
-// ── Delete (Ctrl+X) ───────────────────────────────────────────────────────────
+// ── Delete (Settings tab) ───────────────────────────────────────────────────────
 //
 // `capy project delete`'s rules, through `commands/projectDeleteActions.ts`:
 // the same summary first, then the same question with No as the default
@@ -387,14 +465,16 @@ export type DeleteFinished = { readonly ok: true; readonly lines: readonly strin
 
 export type DeleteDialog =
   | { readonly step: 'loading'; readonly project: ProjectRefLite }
-  | { readonly step: 'confirm'; readonly project: ProjectRefLite; readonly lines: readonly string[] }
+  | { readonly step: 'confirm'; readonly project: ProjectRefLite; readonly lines: readonly string[]; readonly scroll?: number }
   | { readonly step: 'deleting'; readonly project: ProjectRefLite }
-  | { readonly step: 'refused'; readonly project: ProjectRefLite; readonly refusal: ScreenRefusal };
+  | { readonly step: 'refused'; readonly project: ProjectRefLite; readonly refusal: ScreenRefusal; readonly scroll?: number };
 
 /** The screen's own effects: the ones `capy secrets` does not have. */
 export type ProjectsOwnEffect =
   | { readonly type: 'projectDeletePreview'; readonly project: ProjectRefLite }
-  | { readonly type: 'projectDelete'; readonly project: ProjectRefLite };
+  | { readonly type: 'projectDelete'; readonly project: ProjectRefLite }
+  | UsersEffect
+  | ManageEffect;
 
 /** Opens the delete question for `project`: its summary is read first. */
 function startDelete(state: ProjectsScreenState, project: ProjectItem): ProjectsReduceResult {
@@ -405,6 +485,9 @@ function startDelete(state: ProjectsScreenState, project: ProjectItem): Projects
 function handleDialogKey(state: ProjectsScreenState, dialog: DeleteDialog, key: string): ProjectsReduceResult {
   const isEsc = key === KEY_ESC || key === KEY_ESC_ESC || key === KEY_CTRL_C;
   if (dialog.step === 'deleting') return noEffect(state);
+  // A long summary or refusal scrolls; the question and its keys stay put.
+  const scrolled = scrollDialog(dialog, key);
+  if (scrolled !== null) return noEffect({ ...state, dialog: scrolled });
   if (dialog.step === 'refused') return noEffect({ ...state, dialog: null });
   if (dialog.step === 'loading') return noEffect(isEsc ? { ...state, dialog: null, notes: [DELETE_CANCELLED_TEXT] } : state);
   if (key === 'y' || key === 'Y') {
@@ -415,6 +498,21 @@ function handleDialogKey(state: ProjectsScreenState, dialog: DeleteDialog, key: 
   // No is the default: Enter answers it, like the terminal question.
   if (key === 'n' || key === 'N' || key === KEY_ENTER || isEsc) return noEffect({ ...state, dialog: null, notes: [DELETE_CANCELLED_TEXT] });
   return noEffect(state);
+}
+
+/** The dialog scrolled by `key` (↑↓, PgUp/PgDn), or `null` when `key` is not a scroll key. The render keeps the window inside the lines. */
+function scrollDialog(dialog: DeleteDialog, key: string): DeleteDialog | null {
+  if (dialog.step !== 'confirm' && dialog.step !== 'refused') return null;
+  const delta = ((): number | null => {
+    if (key === KEY_UP) return -1;
+    if (key === KEY_DOWN) return 1;
+    if (key === KEY_PGUP) return -PAGE_SIZE;
+    if (key === KEY_PGDN) return PAGE_SIZE;
+    return null;
+  })();
+  if (delta === null) return null;
+  const count = dialog.step === 'confirm' ? dialog.lines.length : dialog.refusal.lines.length + 1;
+  return { ...dialog, scroll: Math.max(0, Math.min(Math.max(0, count - 1), (dialog.scroll ?? 0) + delta)) };
 }
 
 /** The summary arrived: the question is asked, or the refusal shown. Dropped when the dialog has moved on. */
@@ -465,6 +563,8 @@ export function handleKey(state: ProjectsScreenState, key: string): ProjectsRedu
   // The notes last until the next key.
   if (state.notes.length > 0) return handleKey({ ...state, notes: [] }, key);
   if (state.dialog) return handleDialogKey(state, state.dialog, key);
+  if (state.usersDialog && state.open) return handleUsersDialogKey(state, state.open, state.usersDialog, key);
+  if (state.manage && state.open) return handleManageKey(state, state.manage, key);
   if (state.open) return handleProjectKey(state, state.open, key);
   return handleListKey(state, key);
 }
@@ -477,12 +577,11 @@ function openProject(state: ProjectsScreenState, project: ProjectItem): Projects
     title: project.name,
     otherProjects: index === null ? {} : otherProjectCounts(index.rows, project.id),
     hints: [
-      { key: 'tab', label: 'next tab' }, // COPY-FLAG
-      { key: 'ctrl+x', label: 'delete project' }, // COPY-FLAG
+      { key: '←→', label: 'switch tab' }, // COPY-FLAG
     ],
   };
   const tab = visibleTabs(state.data, project)[0] ?? 'branches';
-  return { ...state, open: { projectId: project.id, tab, secrets: initialSecretsScreenState(rows, state.dryRun, scope), scroll: 0 } };
+  return { ...state, open: { projectId: project.id, tab, secrets: initialSecretsScreenState(rows, state.dryRun, scope), scroll: 0, userCursor: 0, settingsCursor: 0, branchCursor: 0 } };
 }
 
 /** The list: a search bar that is always live (like `capy secrets`), arrows to move, Enter to open. */
@@ -499,10 +598,6 @@ function handleListKey(state: ProjectsScreenState, key: string): ProjectsReduceR
   if (key === KEY_ENTER) {
     const project = projects[clampIndex(state.cursor, projects.length)];
     return noEffect(project ? openProject(state, project) : state);
-  }
-  if (key === KEY_CTRL_X) {
-    const project = projects[clampIndex(state.cursor, projects.length)];
-    return project ? startDelete(state, project) : noEffect(state);
   }
   if (key === KEY_BACKSPACE || key === KEY_BACKSPACE2) return noEffect(withQuery(state, state.query.slice(0, -1)));
   if (key.length === 1 && key.charCodeAt(0) >= 0x20 && key.charCodeAt(0) !== 0x7f) return noEffect(withQuery(state, state.query + key));
@@ -523,27 +618,20 @@ function secretsIdle(secrets: SecretsScreenState): boolean {
 /**
  * Whether `key` belongs to the embedded secrets screen. Everything does while
  * one of its dialogs (details, edit, deploy, sort) is open. On its list, the
- * project screen keeps Tab, Shift-Tab and Ctrl-C, and Esc once the search is
- * empty (Esc then goes back instead of quitting).
+ * project screen keeps ←/→ (they switch tabs) and Ctrl-C, and Esc once the
+ * search is empty (Esc then goes back instead of quitting). Tab and Shift-Tab
+ * stay the secrets screen's: they move its column, as in `capy secrets`.
  */
 function secretsOwnsKey(secrets: SecretsScreenState, key: string): boolean {
   if (!secretsIdle(secrets)) return true;
-  if (key === KEY_TAB || key === KEY_SHIFT_TAB || key === KEY_CTRL_C || key === KEY_CTRL_X) return false;
+  if (key === KEY_LEFT || key === KEY_RIGHT || key === KEY_CTRL_C) return false;
   if (key === KEY_ESC || key === KEY_ESC_ESC) return secrets.search.query !== '';
   return true;
 }
 
-/** On the embedded list, ←/→ move its column (Tab is the project screen's). */
-function translateForSecrets(secrets: SecretsScreenState, key: string): string {
-  if (!secretsIdle(secrets)) return key;
-  if (key === KEY_RIGHT) return KEY_TAB;
-  if (key === KEY_LEFT) return KEY_SHIFT_TAB;
-  return key;
-}
-
 /** One key, passed to the embedded secrets screen. When it quits (an edit or deploy finished), so does this screen, with its text. */
 function forwardToSecrets(state: ProjectsScreenState, view: ProjectView, key: string): ProjectsReduceResult {
-  const stepped = handleSecretsKey(view.secrets, translateForSecrets(view.secrets, key));
+  const stepped = handleSecretsKey(view.secrets, key);
   if (stepped.state.quit) return { state: { ...state, quit: true, exitText: stepped.state.exitText }, effect: stepped.effect };
   return { state: { ...state, open: { ...view, secrets: stepped.state } }, effect: stepped.effect };
 }
@@ -555,7 +643,7 @@ function onSecretsScreen(data: ProjectsData, view: ProjectView): boolean {
 
 /**
  * Inside a project. On the Secrets tab, keys go to the embedded secrets screen
- * (see `secretsOwnsKey`). Otherwise: Tab / Shift-Tab change tab, Esc goes back
+ * (see `secretsOwnsKey`). Otherwise: ← / → change tab, Esc goes back
  * to the list, the arrows scroll the tab's table, Ctrl-C quits.
  */
 function handleProjectKey(state: ProjectsScreenState, view: ProjectView, key: string): ProjectsReduceResult {
@@ -564,10 +652,13 @@ function handleProjectKey(state: ProjectsScreenState, view: ProjectView, key: st
   if (onSecretsScreen(state.data, view) && secretsOwnsKey(view.secrets, key)) return forwardToSecrets(state, view, key);
   if (key === KEY_CTRL_C) return noEffect({ ...state, quit: true });
   if (key === KEY_ESC || key === KEY_ESC_ESC) return noEffect({ ...state, open: null });
-  if (key === KEY_CTRL_X) return startDelete(state, project);
+  // Settings: Enter runs the action under the cursor (its only one, Delete project, asks first).
   const tabs = visibleTabs(state.data, project);
-  if (key === KEY_TAB) return noEffect({ ...state, open: { ...view, tab: stepTab(tabs, view.tab, 1), scroll: 0 } });
-  if (key === KEY_SHIFT_TAB) return noEffect({ ...state, open: { ...view, tab: stepTab(tabs, view.tab, -1), scroll: 0 } });
+  if (key === KEY_RIGHT) return noEffect({ ...state, open: { ...view, tab: stepTab(tabs, view.tab, 1), scroll: 0 } });
+  if (key === KEY_LEFT) return noEffect({ ...state, open: { ...view, tab: stepTab(tabs, view.tab, -1), scroll: 0 } });
+  if (view.tab === 'users') return handleUsersTabKey(state, view, project, key);
+  if (view.tab === 'settings') return handleSettingsTabKey(state, view, project, key);
+  if (view.tab === 'branches') return handleBranchesTabKey(state, view, project, key);
   const lastLine = Math.max(0, tabTable(state.data, project, view.tab).rows.length - 1);
   const scrollBy = (delta: number): ProjectsReduceResult =>
     noEffect({ ...state, open: { ...view, scroll: Math.max(0, Math.min(lastLine, view.scroll + delta)) } });
@@ -578,10 +669,135 @@ function handleProjectKey(state: ProjectsScreenState, view: ProjectView, key: st
   return noEffect(state);
 }
 
+// ── Users tab ─────────────────────────────────────────────────────────────────
+//
+// The rules and dialogs are `projectUsers.ts`; this wires them to the screen:
+// the cursor over the tab's rows, the dialog over the project, and the org's
+// users read again after each change.
+
+/** On the Users tab: the arrows move the cursor, Enter opens the row's role choices, i invites. */
+function handleUsersTabKey(state: ProjectsScreenState, view: ProjectView, project: ProjectItem, key: string): ProjectsReduceResult {
+  const rows = userRowsOf(state.data, project.id);
+  const ref = { id: project.id, name: project.name };
+  const moveTo = (cursor: number): ProjectsReduceResult => noEffect({ ...state, open: { ...view, userCursor: clampIndex(cursor, rows.length) } });
+  if (key === KEY_UP) return moveTo(view.userCursor - 1);
+  if (key === KEY_DOWN) return moveTo(view.userCursor + 1);
+  if (key === KEY_PGUP) return moveTo(view.userCursor - PAGE_SIZE);
+  if (key === KEY_PGDN) return moveTo(view.userCursor + PAGE_SIZE);
+  if (key === 'i' || key === 'I') return noEffect({ ...state, usersDialog: startInvite(ref) });
+  const row = rows[clampIndex(view.userCursor, rows.length)];
+  if (key === KEY_ENTER && row !== undefined) {
+    const opened = startChange(ref, row);
+    return noEffect({ ...state, usersDialog: opened.dialog, notes: opened.notes });
+  }
+  return noEffect(state);
+}
+
+function handleUsersDialogKey(state: ProjectsScreenState, view: ProjectView, dialog: UsersDialog, key: string): ProjectsReduceResult {
+  const stepped = usersDialogKey(dialog, key, { dryRun: state.dryRun, rows: userRowsOf(state.data, view.projectId) });
+  return { state: { ...state, usersDialog: stepped.dialog, notes: stepped.notes }, effect: stepped.effect };
+}
+
+/**
+ * An invite, role change or removal came back. The org's users, read again,
+ * replace the old list (the cursor stays inside it); a new person's redeem
+ * command is also kept for after the screen closes, so it is not lost.
+ */
+export function applyUsersDone(state: ProjectsScreenState, finished: UsersFinished): ProjectsScreenState {
+  if (state.usersDialog === null || state.usersDialog.step !== 'working') return state;
+  const stepped = usersDialogDone(state.usersDialog, finished);
+  const data = finished.ok && finished.members !== null ? { ...state.data, members: finished.members } : state.data;
+  const open = state.open === null
+    ? null
+    : { ...state.open, userCursor: clampIndex(state.open.userCursor, userRowsOf(data, state.open.projectId).length) };
+  const exitText = finished.ok && finished.redeemCommand !== undefined
+    ? [state.exitText, ...finished.lines, '', 'Send them this command:', '', `  ${finished.redeemCommand}`].filter((l) => l !== null).join('\n') // reused from `capy invite`
+    : state.exitText;
+  return { ...state, data, open, usersDialog: stepped.dialog, notes: stepped.notes, exitText };
+}
+
+// ── Settings and Capy Branches tabs ─────────────────────────────────────────
+//
+// The rules and dialogs are `projectManage.ts`; this wires them to the screen.
+
+/** On the Settings tab: the arrows move the cursor; Enter copies the id, opens the deploy tokens, or asks to delete. */
+function handleSettingsTabKey(state: ProjectsScreenState, view: ProjectView, project: ProjectItem, key: string): ProjectsReduceResult {
+  const moveTo = (cursor: number): ProjectsReduceResult => noEffect({ ...state, open: { ...view, settingsCursor: clampIndex(cursor, SETTINGS_ROWS.length) } });
+  if (key === KEY_UP) return moveTo(view.settingsCursor - 1);
+  if (key === KEY_DOWN) return moveTo(view.settingsCursor + 1);
+  if (key !== KEY_ENTER) return noEffect(state);
+  const row = SETTINGS_ROWS[clampIndex(view.settingsCursor, SETTINGS_ROWS.length)];
+  if (row === 'delete') return startDelete(state, project);
+  const started = startSettings({ id: project.id, name: project.name }, row);
+  return { state: { ...state, manage: started.dialog, notes: started.notes }, effect: started.effect };
+}
+
+/** On the Capy Branches tab: the arrows move the cursor; Enter offers the branch's actions. */
+function handleBranchesTabKey(state: ProjectsScreenState, view: ProjectView, project: ProjectItem, key: string): ProjectsReduceResult {
+  const moveTo = (cursor: number): ProjectsReduceResult => noEffect({ ...state, open: { ...view, branchCursor: clampIndex(cursor, project.branches.length) } });
+  if (key === KEY_UP) return moveTo(view.branchCursor - 1);
+  if (key === KEY_DOWN) return moveTo(view.branchCursor + 1);
+  if (key === KEY_PGUP) return moveTo(view.branchCursor - PAGE_SIZE);
+  if (key === KEY_PGDN) return moveTo(view.branchCursor + PAGE_SIZE);
+  const branch = project.branches[clampIndex(view.branchCursor, project.branches.length)];
+  if (key !== KEY_ENTER || branch === undefined) return noEffect(state);
+  const started = startBranch({ id: project.id, name: project.name }, branch);
+  return noEffect({ ...state, manage: started.dialog, notes: started.notes });
+}
+
+function handleManageKey(state: ProjectsScreenState, dialog: ManageDialog, key: string): ProjectsReduceResult {
+  const stepped = manageKey(dialog, key, { dryRun: state.dryRun, members: state.data.members ?? [] });
+  return { state: { ...state, manage: stepped.dialog, notes: stepped.notes }, effect: stepped.effect };
+}
+
+/** The project's id was copied (or not). */
+export function applyIdCopied(state: ProjectsScreenState, ok: boolean): ProjectsScreenState {
+  return { ...state, notes: [ok ? 'Copied the project ID.' : 'Could not copy the project ID.'] }; // COPY-FLAG
+}
+
+/** The deploy tokens arrived (or were refused). */
+export function applyTokensLoaded(
+  state: ProjectsScreenState,
+  loaded: { readonly ok: true; readonly tokens: readonly TokenRow[] } | { readonly ok: false; readonly refusal: ManageRefusal },
+): ProjectsScreenState {
+  return { ...state, manage: manageTokensLoaded(state.manage, loaded) };
+}
+
+/** `data` with `projectId`'s branches replaced; the index forgets the locations of a branch that is gone. */
+function withBranches(data: ProjectsData, projectId: string, branches: readonly BranchRef[]): ProjectsData {
+  const names = new Set(branches.map((b) => b.name));
+  const index = data.index === null
+    ? null
+    : {
+        ...data.index,
+        rows: data.index.rows
+          .map((r) => ({ ...r, locations: r.locations.filter((l) => l.project_id !== projectId || names.has(l.branch)) }))
+          .filter((r) => r.locations.length > 0),
+      };
+  return { ...data, index, projects: data.projects.map((p) => (p.id === projectId ? { ...p, branches } : p)) };
+}
+
+/** A token revoke or branch change came back: what was read again replaces the old, and the dialog moves on. */
+export function applyManageDone(state: ProjectsScreenState, finished: ManageFinished): ProjectsScreenState {
+  if (state.manage === null || state.manage.step !== 'working' || state.open === null) return state;
+  const stepped = manageDone(state.manage, finished);
+  const withMembers = finished.ok && finished.members !== undefined ? { ...state.data, members: finished.members } : state.data;
+  const data = finished.ok && finished.branches !== undefined ? withBranches(withMembers, state.open.projectId, finished.branches) : withMembers;
+  const project = projectById(data, state.open.projectId);
+  const open = { ...state.open, branchCursor: clampIndex(state.open.branchCursor, project?.branches.length ?? 0) };
+  return { ...state, data, open, manage: stepped.dialog, notes: stepped.notes };
+}
+
+/** The copy of a redeem command finished. */
+export function applyUsersCopied(state: ProjectsScreenState, ok: boolean): ProjectsScreenState {
+  return { ...state, usersDialog: usersCopied(state.usersDialog, ok) };
+}
+
 // ── Rendering ─────────────────────────────────────────────────────────────────
 
 function visLen(s: string): number {
-  return Array.from(s.replace(/\x1b\[[0-9;]*m/g, '')).length;
+  // Colour codes and OSC 8 hyperlink markers take no columns.
+  return Array.from(s.replace(/\x1b\[[0-9;]*m|\x1b\]8;;[^\x1b]*\x1b\\/g, '')).length;
 }
 
 function padTo(text: string, width: number): string {
@@ -629,7 +845,9 @@ function listColumns(data: ProjectsData, available: number): readonly ListColumn
     : [{ heading: 'LAST UPDATED', width: 14, cell: (p) => lastUpdatedCell(data.index, p) }]; // COPY-FLAG
   const fixed = [...variables, ...updated].reduce((sum, c) => sum + c.width + MARGIN, 0);
   const rest = Math.max(16, available - 2 - fixed);
-  const nameW = data.reposShown ? Math.max(16, Math.floor(rest * 0.5)) : rest;
+  // NAME is as wide as the longest name (never under its heading), capped at half the room when repos share it.
+  const longest = data.projects.reduce((w, p) => Math.max(w, visLen(p.name)), visLen('NAME'));
+  const nameW = data.reposShown ? Math.min(Math.max(16, Math.floor(rest * 0.5)), longest) : Math.min(rest, longest);
   const repo: readonly ListColumn[] = data.reposShown
     ? [{ heading: 'LINKED REPO', width: Math.max(10, rest - nameW - MARGIN), cell: linkedRepoCell }] // COPY-FLAG
     : [];
@@ -650,19 +868,22 @@ function renderList(state: ProjectsScreenState, termWidth: number, termHeight: n
   const cursor = clampIndex(state.cursor, projects.length);
   const columns = listColumns(state.data, available);
   const gap = ' '.repeat(MARGIN);
-  const placeholder = `${DIM}type to filter by project name${RESET}`; // COPY-FLAG
-  const query = state.query === '' ? placeholder : `${ACCENT}${state.query}${RESET}`;
+  const query = searchInput(state.query, 'type to filter by project name', true); // COPY-FLAG
 
   const head: readonly string[] = [
     `${m}${BOLD}capy projects${RESET}${dryRunTag(state.dryRun)} ${DIM}(${total} project${total === 1 ? '' : 's'})${RESET}`,
-    `${m}${DIM}search:${RESET} ${query}▏ ${DIM}${projects.length}/${total}${RESET}`,
+    // Its lines stop one space short of each edge of the terminal, as in `capy secrets`.
+    ...betweenRules(`${m}${DIM}search:${RESET} ${query} ${DIM}${projects.length}/${total}${RESET}`, termWidth - 2).map((l, i) => (i === 1 ? l : ` ${l}`)),
     '',
-    `${m}${DIM}  ${columns.map((c) => padTo(c.heading, c.width)).join(gap)}${RESET}`,
+    `${m}${DIM}${columns.map((c) => padTo(c.heading, c.width)).join(gap)}${RESET}`,
+    '',
   ];
+  // Rows start one column left of the margin with a one-column ▶ pointer, so each name sits under its heading.
+  // The highlight runs to one column short of the right edge: the same space each side.
   const rows = projects.map((p, i) => {
-    const pointer = i === cursor ? '▶ ' : '  ';
+    const pointer = i === cursor ? '▶' : ' ';
     const line = pointer + columns.map((c) => padTo(c.cell(p), c.width)).join(gap);
-    return i === cursor ? `${INVERSE}${padTo(line, available)}${RESET}` : line;
+    return i === cursor ? `${INVERSE}${padTo(line, Math.max(available, termWidth - 2))}${RESET}` : line;
   });
   const footer: readonly string[] = [
     '',
@@ -670,21 +891,82 @@ function renderList(state: ProjectsScreenState, termWidth: number, termHeight: n
     m + joinHints([
       renderHint(null, '↑↓ navigate'), // COPY-FLAG
       renderHint('enter', 'open'), // COPY-FLAG
-      renderHint('ctrl+x', 'delete'), // COPY-FLAG
       renderHint('esc', 'clear/quit'), // COPY-FLAG
     ]),
   ];
   const bodyHeight = Math.max(3, termHeight - head.length - footer.length);
   const offset = scrollFor(cursor, rows.length, bodyHeight);
   const emptyLine = total === 0 ? 'No projects found.' : 'No projects match.'; // COPY-FLAG: "No projects match." is new
-  const body = rows.length === 0 ? [`${m}${DIM}${emptyLine}${RESET}`] : rows.slice(offset, offset + bodyHeight).map((l) => m + l);
+  const body = rows.length === 0 ? [`${m}${DIM}${emptyLine}${RESET}`] : rows.slice(offset, offset + bodyHeight).map((l) => m.slice(1) + l);
   return [...head, ...body, ...footer];
 }
 
-/** The tab bar: every visible tab, the selected one highlighted, then how to move between them. */
+/**
+ * The tabs on one line, each ` label ` (a space each side): the selected one a highlighted block,
+ * the others dim. Every tab is padded alike, so switching tabs moves nothing.
+ */
+function tabRow(tabs: readonly ProjectTab[], selected: ProjectTab): string {
+  // The selected tab's padding is half blocks (▐ … ▌) in the highlight's colour (the inverse background
+  // is the text colour): half a cell each side, so the block starts inside the box's corner, not over it.
+  return tabs.map((t) => (t === selected ? `${BOLD}▐${INVERSE}${TAB_LABELS[t]}${RESET}${BOLD}▌${RESET}` : `${DIM} ${TAB_LABELS[t]} ${RESET}`)).join('');
+}
+
+/** Columns the tab row needs: each label and its two spaces. */
+function tabRowWidth(tabs: readonly ProjectTab[]): number {
+  return tabs.reduce((sum, t) => sum + visLen(TAB_LABELS[t]) + 2, 0);
+}
+
+/** The tab bar on its own, used when the box does not fit: the tab row and the hint to switch. */
 function tabBarLine(tabs: readonly ProjectTab[], selected: ProjectTab): string {
-  const labels = tabs.map((t) => (t === selected ? `${INVERSE}${BOLD} ${TAB_LABELS[t]} ${RESET}` : `${DIM} ${TAB_LABELS[t]} ${RESET}`));
-  return `${' '.repeat(MARGIN)}${labels.join(' ')}  ${DIM}⇥${RESET}`;
+  return `${' '.repeat(MARGIN)}${tabRow(tabs, selected)}  ${DIM}←→${RESET}`;
+}
+
+/** Lines the boxed layout adds around the content: a blank line, the tab row, the box's top and its bottom. */
+const BOX_CHROME_LINES = 4;
+/** The box's side borders and one space of padding inside each: `│ ` and ` │`. */
+const BOX_SIDE_COLUMNS = 4;
+
+/** Whether the boxed layout fits `width` (otherwise the one-line tab bar is used). */
+function boxFits(tabs: readonly ProjectTab[], width: number): boolean {
+  return width >= Math.max(1 + tabRowWidth(tabs) + 1, 30);
+}
+
+/**
+ * A rule the full `width`, the tab row, then the content in a square box exactly
+ * `width` columns wide, with one space of padding inside its sides.
+ *
+ *  ─────────────────────────────
+ *   Secrets  Users  Git Repos      (the selected tab highlighted)
+ *  ┌───────────────────────────┐
+ *  │ content                   │
+ *  └───────────────────────────┘
+ */
+function boxedTabs(tabs: readonly ProjectTab[], selected: ProjectTab, content: readonly string[], width: number): readonly string[] {
+  const dim = (text: string): string => `${DIM}${text}${RESET}`;
+  const rule = '─'.repeat(Math.max(0, width - 2));
+  // Each line brings its own left space (screen margins less one), so a row can sit a column left of the text;
+  // the right side is always one space.
+  const inner = Math.max(1, width - 3);
+  const side = dim('│');
+  // clipLine keeps colour codes intact; the padding is counted on what is visible.
+  const fit = (l: string, room: number): string => {
+    const clipped = clipLine(l, room);
+    return clipped + ' '.repeat(Math.max(0, room - visLen(clipped)));
+  };
+  const boxLine = (l: string): string => {
+    if (l === BOX_DIVIDER) return dim(`├${rule}┤`);
+    // A row marked full width meets both sides (a highlighted row's bar runs side to side).
+    if (l.startsWith(BOX_FULL_WIDTH)) return `${side}${fit(l.slice(BOX_FULL_WIDTH.length), width - 2)}${RESET}${side}`;
+    // Content comes with the screen margin; in the box one space of padding takes its place.
+    return `${side}${fit(l.startsWith(' ') ? l.slice(1) : l, inner)}${RESET} ${side}`;
+  };
+  return [
+    '', // a blank line above the tabs
+    tabRow(tabs, selected),
+    dim(`┌${rule}┐`),
+    ...content.map(boxLine),
+    dim(`└${rule}┘`),
+  ];
 }
 
 /** A tab's table: dim headings, then its rows from `scroll`, fitted to `available` columns. `(none)` when it has no rows. */
@@ -698,17 +980,105 @@ function tabTableLines(table: TabTable, scroll: number, height: number, availabl
     i === natural.length - 1 ? Math.max(4, available - natural.slice(0, -1).reduce((sum, n) => sum + n + MARGIN, 0)) : w,
   );
   const line = (cells: readonly string[]): string => cells.map((c, i) => padTo(c, widths[i])).join(gap).trimEnd();
-  const shown = table.rows.slice(scroll, scroll + Math.max(1, height - 1));
-  return [`${m}${DIM}${line(table.headings)}${RESET}`, ...shown.map((r) => m + line(r))];
+  const shown = table.rows.slice(scroll, scroll + Math.max(1, height - 3));
+  // The headings with a blank line above and below them.
+  return ['', `${m}${DIM}${line(table.headings)}${RESET}`, '', ...shown.map((r) => m + line(r))];
 }
 
-function projectFooter(): string {
+/** A (non-embedded) tab's lines: the no-secrets note, the Settings actions, or the tab's table. */
+function tabBody(
+  state: ProjectsScreenState,
+  project: ProjectItem,
+  view: ProjectView,
+  height: number,
+  available: number,
+  width: number,
+  boxed: boolean,
+): readonly string[] {
+  const m = ' '.repeat(MARGIN);
+  if (view.tab === 'secrets') return NO_SECRETS_YET_LINES.map((l) => `${m}${l}`);
+  if (view.tab === 'settings') return settingsLines(project.id, view.settingsCursor, width, boxed);
+  if (view.tab === 'branches') return branchLines(project, view.branchCursor, width, boxed);
+  if (view.tab === 'repos') return linkRepoLines(tabTableLines(tabTable(state.data, project, view.tab), view.scroll, height, available), project.repos ?? []);
+  if (view.tab === 'users') return usersTabLines(userRowsOf(state.data, project.id), view.userCursor, height, available, width, boxed);
+  return tabTableLines(tabTable(state.data, project, view.tab), view.scroll, height, available);
+}
+
+/**
+ * The Users tab: EMAIL and ROLE, with a cursor drawn like the secrets rows (the highlight side to side in
+ * the box) but with no caret. Locked rows (owner, admins, you) are dim.
+ */
+function usersTabLines(
+  rows: readonly ProjectUserRow[],
+  cursor: number,
+  height: number,
+  available: number,
+  width: number,
+  boxed: boolean,
+): readonly string[] {
+  const m = ' '.repeat(MARGIN);
+  if (rows.length === 0) return ['', `${m}${DIM}(none)${RESET}`];
+  const gap = ' '.repeat(MARGIN);
+  const emailW = Math.min(Math.max(visLen('EMAIL'), ...rows.map((r) => visLen(r.email))), Math.max(10, available - 16));
+  const selected = clampIndex(cursor, rows.length);
+  const bodyHeight = Math.max(1, height - 3);
+  const offset = scrollFor(selected, rows.length, bodyHeight);
+  const line = (r: ProjectUserRow, pointer: string): string => `${pointer}${padTo(r.email, emailW)}${gap}${r.role}`;
+  const shown = rows.slice(offset, offset + bodyHeight).map((r, i) => {
+    if (offset + i === selected) {
+      // No caret: carets mark rows that open (collapsible); these rows open a picker, so they are only highlighted.
+      const bar = `${INVERSE}${padTo(line(r, ' '), Math.max(1, width - 2))}${RESET}`;
+      return boxed ? BOX_FULL_WIDTH + bar : m.slice(1) + bar;
+    }
+    const text = line(r, ' ');
+    return r.lock === null ? m.slice(1) + text : `${m.slice(1)}${DIM}${text}${RESET}`;
+  });
+  return ['', `${m}${DIM}${padTo('EMAIL', emailW)}${gap}ROLE${RESET}`, '', ...shown]; // COPY-FLAG: EMAIL, ROLE
+}
+
+function projectFooter(tab: ProjectTab): string {
+  const lead = ((): readonly string[] => {
+    // The Settings tab has actions, not a table: Enter runs the one under the cursor.
+    if (tab === 'settings') return [renderHint(null, '↑↓ navigate'), renderHint('enter', 'select')]; // COPY-FLAG
+    if (tab === 'branches') return [renderHint(null, '↑↓ navigate'), renderHint('enter', 'actions')]; // COPY-FLAG
+    if (tab === 'users') return [renderHint(null, '↑↓ navigate'), renderHint('enter', 'change role'), renderHint('i', 'invite')]; // COPY-FLAG
+    return [renderHint(null, '↑↓ scroll')]; // COPY-FLAG
+  })();
   return joinHints([
-    renderHint(null, '↑↓ scroll'), // COPY-FLAG
-    renderHint('tab', 'next tab'), // COPY-FLAG
-    renderHint('ctrl+x', 'delete project'), // COPY-FLAG
+    ...lead,
+    renderHint('←→', 'switch tab'), // COPY-FLAG
     renderHint('esc', 'back'), // COPY-FLAG
   ]);
+}
+
+/**
+ * The Settings tab: its actions as rows, the first highlighted (the only one so far), with no caret, drawn like the
+ * secrets rows otherwise: in the box the highlight runs side to side; on its own it starts one column in and
+ * stops one column short of the right edge. `width` is the terminal's.
+ */
+function settingsLines(projectId: string, cursor: number, width: number, boxed: boolean): readonly string[] {
+  return ['', ...actionRows(SETTINGS_ROWS.map((row) => settingsLabel(row, projectId)), cursor, width, boxed)];
+}
+
+/**
+ * Rows you act on (Settings, Capy Branches): the one under the cursor highlighted, with no caret (carets mark
+ * rows that open). In the box the highlight runs side to side; on its own it starts one column in and stops
+ * one column short of the right edge. `width` is the terminal's.
+ */
+function actionRows(labels: readonly string[], cursor: number, width: number, boxed: boolean): readonly string[] {
+  const m = ' '.repeat(MARGIN);
+  const selected = clampIndex(cursor, labels.length);
+  return labels.map((label, i) => {
+    if (i !== selected) return `${m}${label}`;
+    const bar = `${INVERSE}${padTo(` ${label}`, Math.max(1, width - 2))}${RESET}`;
+    return boxed ? BOX_FULL_WIDTH + bar : m.slice(1) + bar;
+  });
+}
+
+/** The Capy Branches tab: each branch (protected ones say so), with a cursor. */
+function branchLines(project: ProjectItem, cursor: number, width: number, boxed: boolean): readonly string[] {
+  if (project.branches.length === 0) return ['', `${' '.repeat(MARGIN)}${DIM}(none)${RESET}`];
+  return ['', ...actionRows(project.branches.map((b) => (b.protected ? `${b.name} (protected)` : b.name)), cursor, width, boxed)];
 }
 
 /** The notes (what a delete did), dim, above the footer. */
@@ -717,21 +1087,25 @@ function noteLines(notes: readonly string[]): readonly string[] {
 }
 
 /** The delete question: `capy project delete`'s summary, then its question; or the refusal. */
-function renderDialog(state: ProjectsScreenState, dialog: DeleteDialog): readonly string[] {
+function renderDialog(state: ProjectsScreenState, dialog: DeleteDialog, termHeight: number): readonly string[] {
   const m = ' '.repeat(MARGIN);
   const head = [`${m}${BOLD}capy projects${RESET}${dryRunTag(state.dryRun)}`, ''];
   if (dialog.step === 'loading') return [...head, `${m}${DIM}Loading project...${RESET}`, '', m + renderHint('esc', 'cancel')]; // COPY-FLAG
   if (dialog.step === 'deleting') return [...head, `${m}${DIM}Deleting project ${dialog.project.name}...${RESET}`]; // COPY-FLAG
-  if (dialog.step === 'refused') {
-    return [...head, `${m}${dialog.refusal.message}`, ...dialog.refusal.lines.map((l) => `${m}${l}`), '', m + renderHint('esc', 'back')];
-  }
-  return [
-    ...head,
-    ...dialog.lines.map((l) => `${m}${l}`),
-    `${m}${BOLD}${deleteQuestion(dialog.project.name)}${RESET}`,
-    '',
-    m + joinHints([renderHint('y', 'yes'), renderHint('n', 'no'), renderHint('enter', 'no')]), // COPY-FLAG
-  ];
+  const body = dialog.step === 'refused'
+    ? [dialog.refusal.message, ...dialog.refusal.lines].map((l) => `${m}${l}`)
+    : dialog.lines.map((l) => `${m}${l}`);
+  const question = dialog.step === 'refused' ? [] : [`${m}${BOLD}${deleteQuestion(dialog.project.name)}${RESET}`];
+  const keys = dialog.step === 'refused'
+    ? [renderHint('esc', 'back')]
+    : [renderHint('y', 'yes'), renderHint('n', 'no'), renderHint('enter', 'no')]; // COPY-FLAG
+  // The question and its keys stay at the bottom; the lines above them scroll when they do not fit.
+  const room = Math.max(1, termHeight - head.length - question.length - 2);
+  const overflows = body.length > room;
+  const top = Math.min(dialog.scroll ?? 0, Math.max(0, body.length - room));
+  const shown = overflows ? body.slice(top, top + room) : body;
+  const scrollHint = overflows ? [renderHint(null, '↑↓ scroll')] : []; // COPY-FLAG
+  return [...head, ...shown, ...question, '', m + joinHints([...scrollHint, ...keys])];
 }
 
 /**
@@ -745,33 +1119,61 @@ function renderProject(state: ProjectsScreenState, view: ProjectView, termWidth:
   const tabs = visibleTabs(state.data, project);
   const width = Math.max(1, termWidth);
   const finish = (lines: readonly string[]): string => lines.map((l) => clipLine(l, width) + CLEAR_EOL).join('\n');
+  const boxed = boxFits(tabs, width);
+  // Inside the box the content has the box's inner width, and the chrome's lines less height.
+  const innerWidth = boxed ? Math.max(1, width - BOX_SIDE_COLUMNS) : width;
+  const innerHeight = (titleLines: number): number => Math.max(3, termHeight - titleLines - (boxed ? BOX_CHROME_LINES : 2));
+  // Over the box, the title starts one column in, where the tabs' text does (it comes with the 2-space margin).
+  const frame = (title: string, content: readonly string[]): string =>
+    finish(boxed ? [title.startsWith(' ') ? title.slice(1) : title, ...boxedTabs(tabs, view.tab, content, width)] : [title, '', tabBarLine(tabs, view.tab), ...content]);
 
   if (onSecretsScreen(state.data, view)) {
     const secrets = view.secrets;
     if (secrets.edit !== null || secrets.deploy !== null || secrets.sortMenu !== null) return renderSecrets(secrets, termWidth, termHeight);
-    // Each of its lines ends in CLEAR_EOL; they are re-fitted to the terminal here (its search bar can be wider).
-    const [title, ...rest] = renderSecrets(secrets, termWidth, Math.max(1, termHeight - 1))
+    // In the box, the box's top is the search bar's top border.
+    const shown: SecretsScreenState = boxed && secrets.scope !== undefined ? { ...secrets, scope: { ...secrets.scope, inBox: true } } : secrets;
+    // Each of its lines ends in CLEAR_EOL; they are re-fitted to the box here (its search bar can be wider).
+    // In the box it is rendered wide enough that its rows (marked full width) fill the box side to side.
+    const [title, ...rest] = renderSecrets(shown, boxed ? width + 2 : innerWidth, innerHeight(1) + 1)
       .split('\n')
       .map((l) => (l.endsWith(CLEAR_EOL) ? l.slice(0, -CLEAR_EOL.length) : l));
-    return finish([title, tabBarLine(tabs, view.tab), ...rest]);
+    return frame(title, rest);
   }
 
   const m = ' '.repeat(MARGIN);
-  const available = Math.max(20, termWidth - MARGIN * 2);
-  const head: readonly string[] = [`${m}${BOLD}${project.name}${RESET}${dryRunTag(state.dryRun)}`, tabBarLine(tabs, view.tab), ''];
-  const footer: readonly string[] = ['', ...noteLines(state.notes), m + projectFooter()];
-  const bodyHeight = Math.max(3, termHeight - head.length - footer.length);
-  const body = view.tab === 'secrets'
-    ? NO_SECRETS_YET_LINES.map((l) => `${m}${l}`)
-    : tabTableLines(tabTable(state.data, project, view.tab), view.scroll, bodyHeight, available);
-  return finish([...head, ...body, ...footer]);
+  const title = `${m}${BOLD}${project.name}${RESET}${dryRunTag(state.dryRun)}`;
+  const footer: readonly string[] = ['', ...noteLines(state.notes), m + projectFooter(view.tab)];
+  const bodyHeight = Math.max(3, innerHeight(1) - footer.length);
+  const available = Math.max(20, boxed ? innerWidth : innerWidth - MARGIN * 2);
+  const body = tabBody(state, project, view, bodyHeight, available, width, boxed);
+  const filler = Array.from({ length: Math.max(0, bodyHeight - body.length) }, () => '');
+  return frame(title, [...body, ...filler, ...footer]);
 }
 
 /** Pure render: a total function of state and terminal size. No line is wider than the terminal. */
 export function render(state: ProjectsScreenState, termWidth: number, termHeight: number): string {
   const width = Math.max(1, termWidth);
   if (state.dialog) {
-    return renderDialog(state, state.dialog)
+    return renderDialog(state, state.dialog, termHeight)
+      .slice(0, Math.max(1, termHeight))
+      .map((l) => clipLine(l, width) + CLEAR_EOL)
+      .join('\n');
+  }
+  if (state.manage && state.open) {
+    const m = ' '.repeat(MARGIN);
+    const project = projectById(state.data, state.open.projectId);
+    const head = [`${m}${BOLD}capy projects${RESET}${dryRunTag(state.dryRun)} ${DIM}${project?.name ?? ''}${RESET}`, ''];
+    return [...head, ...renderManage(state.manage, width, m, state.data.members ?? [])]
+      .slice(0, Math.max(1, termHeight))
+      .map((l) => clipLine(l, width) + CLEAR_EOL)
+      .join('\n');
+  }
+  if (state.usersDialog && state.open) {
+    const m = ' '.repeat(MARGIN);
+    const project = projectById(state.data, state.open.projectId);
+    const head = [`${m}${BOLD}capy projects${RESET}${dryRunTag(state.dryRun)} ${DIM}${project?.name ?? ''}${RESET}`, ''];
+    // The dialog wraps its own long lines (a redeem command), so it is never clipped mid-command.
+    return [...head, ...renderUsersDialog(state.usersDialog, width, m)]
       .slice(0, Math.max(1, termHeight))
       .map((l) => clipLine(l, width) + CLEAR_EOL)
       .join('\n');

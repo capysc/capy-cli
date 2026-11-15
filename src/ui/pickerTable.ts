@@ -85,10 +85,12 @@ const padCell = (text: string, width: number): string => {
  * becomes `…`. Used on every line the edit flow draws.
  */
 export function clipLine(line: string, width: number): string {
-  const parts = line.split(/(\x1b\[[0-9;]*m)/);
+  // Colour codes and OSC 8 hyperlink markers take no columns, and are kept even after a cut,
+  // so a link opened before the cut is still closed.
+  const parts = line.split(/(\x1b\[[0-9;]*m|\x1b\]8;;[^\x1b]*\x1b\\)/);
   const folded = parts.reduce<{ readonly out: string; readonly used: number; readonly cut: boolean }>(
     (acc, part) => {
-      if (/^\x1b\[[0-9;]*m$/.test(part)) return { ...acc, out: acc.out + part };
+      if (/^(\x1b\[[0-9;]*m|\x1b\]8;;[^\x1b]*\x1b\\)$/.test(part)) return { ...acc, out: acc.out + part };
       if (acc.cut || part === '') return acc;
       const chars = Array.from(part);
       const room = width - acc.used;

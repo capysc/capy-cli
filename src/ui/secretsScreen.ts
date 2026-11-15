@@ -306,7 +306,7 @@ function comparatorFor(sort: SortMode): (a: SecretIndexRow, b: SecretIndexRow) =
 }
 
 /** A sorted copy of `items` (`toSorted` is ES2023 and this package supports Node 18): the input is never changed. */
-function sortedCopy<T>(items: readonly T[], cmp: (a: T, b: T) => number): readonly T[] {
+export function sortedCopy<T>(items: readonly T[], cmp: (a: T, b: T) => number): readonly T[] {
   return Array.from(items).sort(cmp);
 }
 
@@ -362,6 +362,12 @@ export interface SecretsScreenScope {
   readonly otherProjects: Readonly<Record<string, number>>;
   /** Key hints the embedding screen adds to the list footer (dropped first when narrow). */
   readonly hints: readonly { readonly key: string; readonly label: string }[];
+  /**
+   * True when the embedding screen draws this inside a box whose sides take the
+   * place of the margins: the box's top stands in for the search bar's top rule,
+   * and the rule under it spans the width less the margins.
+   */
+  readonly inBox?: boolean;
 }
 
 /** The key `SecretsScreenScope.otherProjects` uses for a row: its (name, value hash) pair. */
@@ -573,6 +579,9 @@ export function handleKey(state: SecretsScreenState, rawKey: string): ReduceResu
 
   if (state.popup) {
     if (key === 'd' || key === 'D' || key === KEY_CTRL_D) return openDeployOnCursor(state);
+    // ↑/↓ and PgUp/PgDn move to the next row with its details open, as `capy edit` does.
+    const step = openRowStep(key);
+    if (step !== 0) return moveOpenRow(state, state.popup, step);
     return key === 'e' || key === 'E' || key === KEY_CTRL_E ? openEditOnCursor(state) : noEffect(handlePopupKey(state, key));
   }
 
@@ -706,6 +715,35 @@ function handleSortMenuKey(state: SecretsScreenState, menu: SortMenuState, key: 
   return state;
 }
 
+/** How far a key moves the cursor while a row is open: ±1 for ↑/↓, ±PAGE_SIZE for PgUp/PgDn, 0 for any other key. */
+function openRowStep(key: string): number {
+  if (key === KEY_UP) return -1;
+  if (key === KEY_DOWN) return 1;
+  if (key === KEY_PGUP) return -PAGE_SIZE;
+  if (key === KEY_PGDN) return PAGE_SIZE;
+  return 0;
+}
+
+/** Fresh details for `row`: its value loading and hidden. The locations table keeps the column it was showing. */
+function popupFor(row: SecretIndexRow, locationColumn: LocationColumn): PopupState {
+  return { rowName: row.name, rowHash: row.value_hash, revealed: false, value: { status: 'loading' }, panOffset: 0, locationColumn };
+}
+
+/**
+ * Moves the cursor `step` rows with the details kept open: they reopen on the new row, its value
+ * fetched again and hidden (a revealed value never carries over to another row). A value still
+ * arriving for the row left behind is dropped, as `rowName`/`rowHash` no longer match. At either
+ * end of the list nothing changes.
+ */
+function moveOpenRow(state: SecretsScreenState, popup: PopupState, step: number): ReduceResult {
+  const rows = filteredRows(state);
+  const from = clampIndex(state.cursorIndex, rows.length);
+  const to = clampIndex(from + step, rows.length);
+  const row = rows[to];
+  if (row === undefined || to === from) return noEffect(state);
+  return { state: { ...state, cursorIndex: to, popup: popupFor(row, popup.locationColumn) }, effect: { type: 'fetchValue', row } };
+}
+
 function handlePopupKey(state: SecretsScreenState, key: string): SecretsScreenState {
   const popup = state.popup;
   if (!popup) return state;
@@ -794,15 +832,7 @@ function handleListKey(state: SecretsScreenState, key: string): ReduceResult {
   if (key === '\r') {
     const row = rows[clampIndex(state.cursorIndex, rows.length)];
     if (!row) return noEffect(state);
-    const popup: PopupState = {
-      rowName: row.name,
-      rowHash: row.value_hash,
-      revealed: false,
-      value: { status: 'loading' },
-      panOffset: 0,
-      locationColumn: LOCATION_COLUMN_ORDER[0],
-    };
-    return { state: { ...state, popup }, effect: { type: 'fetchValue', row } };
+    return { state: { ...state, popup: popupFor(row, LOCATION_COLUMN_ORDER[0]) }, effect: { type: 'fetchValue', row } };
   }
 
   if (key === KEY_BACKSPACE || key === KEY_BACKSPACE2) {
@@ -1128,26 +1158,53 @@ function buildNameCell(left: string, tag: string, width: number): string {
   return fittedLeft + ' '.repeat(separatorWidth) + tag;
 }
 
-function columnHeaderLabel(column: ColumnMode, scoped: boolean = false): string {
-  // Embedded, ←/→ move the column (Tab belongs to the embedding screen).
-  if (scoped) return `${COLUMN_HEADINGS[column]} ←→`;
+function columnHeaderLabel(column: ColumnMode): string {
+  // Tab moves the column, embedded or not.
   return `${COLUMN_HEADINGS[column]} ⇥`;
+}
+
+/**
+ * The line a screen drawn in a box (`SecretsScreenScope.inBox`) emits where the box should draw a
+ * divider across itself, joined to both sides. A marker, never shown: the box replaces it.
+ */
+export const BOX_DIVIDER = '\u0000box-divider';
+
+/**
+ * Prefix on a line a boxed screen wants drawn edge to edge, side to side with no padding (the table rows,
+ * so a highlighted row meets both sides). A marker, never shown: the box strips it.
+ */
+export const BOX_FULL_WIDTH = '\u0000box-full';
+
+/** A line between two dim rules the full `width` (the search bar, a table header). */
+export function betweenRules(bar: string, width: number): readonly string[] {
+  const rule = `${DIM}${'─'.repeat(Math.max(1, width))}${RESET}`;
+  return [rule, bar, rule];
+}
+
+/** The insertion cursor: one inverted cell, a block like Claude Code's. */
+const BLOCK_CURSOR = `${INVERSE} ${RESET}`;
+
+/**
+ * What is typed with the block cursor, as Claude Code shows it: after the
+ * query once something is typed; on an empty query, at the start, with the
+ * dim placeholder after it.
+ */
+export function searchInput(query: string, placeholder: string, focused: boolean): string {
+  if (query !== '') return `${ACCENT}${query}${RESET}${focused ? BLOCK_CURSOR : ''}`;
+  if (!focused) return '';
+  return `${BLOCK_CURSOR}${DIM}${placeholder}${RESET}`;
 }
 
 /**
  * Always-visible search bar (fzf-style — there's no separate "search mode"
  * to enter). Shows a dim placeholder when empty and a `<matched>/<total>`
- * count; the insertion caret only appears when the list view actually owns
+ * count; the cursor only appears when the list view actually owns
  * keystrokes (i.e. no popup is open).
  */
 function searchBarLine(state: SecretsScreenState, matchedCount: number): string {
-  const focused = state.popup === null;
-  const caret = focused ? '▏' : '';
-  const placeholder = `${DIM}type to filter — name, project, branch, connector, target, or exact value${RESET}`;
-  const typedQuery = `${ACCENT}${state.search.query}${RESET}`;
-  const queryDisplay = state.search.query !== '' ? typedQuery : focused ? placeholder : '';
+  const placeholder = 'type to filter — name, project, branch, connector, target, or exact value';
   const countLabel = `${matchedCount}/${state.rows.length}`;
-  return `${DIM}search:${RESET} ${queryDisplay}${caret} ${DIM}${countLabel}${RESET}`;
+  return `${DIM}search:${RESET} ${searchInput(state.search.query, placeholder, state.popup === null)} ${DIM}${countLabel}${RESET}`;
 }
 
 /**
@@ -1169,7 +1226,14 @@ export function render(state: SecretsScreenState, termWidth: number, termHeight:
   if (state.deploy) return renderDeployScreen(state.deploy, termWidth, termHeight, state.dryRun, screenTitle(state));
   if (state.sortMenu) return renderSortMenuScreen(state, state.sortMenu, termWidth, termHeight);
   const m = ' '.repeat(MARGIN);
+  // Drawn inside the `capy projects` box (see SecretsScreenScope.inBox).
+  const inBox = state.scope?.inBox === true;
+  // Rows start with the ▶ (no padding before it); in a box they run side to side.
+  const rowPad = '';
   const available = Math.max(40, termWidth - MARGIN * 2);
+  // A highlighted row (and an open row's details lines) runs from the row's start, one column in, to one
+  // column short of the right edge: the same space each side. In a box its width is the box's inside.
+  const barWidth = inBox ? available : Math.max(available, termWidth - 2);
   const matched = filteredRowsWithReasons(state);
   const rows = matched.map((mr) => mr.row);
   const matchActive = state.search.query.trim() !== '';
@@ -1177,20 +1241,29 @@ export function render(state: SecretsScreenState, termWidth: number, termHeight:
 
   const headerLines: readonly string[] = [
     `${m}${BOLD}${screenTitle(state)}${RESET}${dryRunTag(state.dryRun)} ${DIM}(${state.rows.length} secret${state.rows.length === 1 ? '' : 's'})${RESET}`,
-    m + searchBarLine(state, rows.length),
-    '',
+    ...(inBox
+      ? // The box's top is the search bar's top border; under it, the box draws a divider side to side.
+        [m + searchBarLine(state, rows.length), BOX_DIVIDER]
+      : // Its lines stop one space short of each edge of the terminal.
+        betweenRules(m + searchBarLine(state, rows.length), termWidth - 2).map((l, i) => (i === 1 ? l : ` ${l}`))),
   ];
 
   const { nameW, middleW, updatedW, gap } = mainTableLayout(available);
 
-  const headerLine = pad('NAME', nameW) + gap + pad(columnHeaderLabel(state.column, state.scope !== undefined), middleW) + gap + pad('UPDATED', updatedW);
+  // The rows sit one column left of the header, so NAME is one narrower to keep the other headings over their columns.
+  const headerLine = pad('NAME', nameW - 1) + gap + pad(columnHeaderLabel(state.column), middleW) + gap + pad('UPDATED', updatedW);
   // Everything pushed before the body, in one array — `preBodyLines.length`
   // below stands in for what used to be `lines.length` read mid-mutation.
-  const preBodyLines: readonly string[] = [...headerLines, m + DIM + headerLine + RESET];
+  // The table header with a blank line above and below it.
+  // In a box the rows run edge to edge but the header keeps the box's one space each side, so its trailing padding goes.
+  const shownHeader = inBox ? headerLine.trimEnd() : headerLine;
+  const preBodyLines: readonly string[] = [...headerLines, '', m + DIM + shownHeader + RESET, ''];
 
   const bodyLines: readonly string[] = matched.map(({ row, reasons }, i) => {
     const isSelected = i === cursorIndex;
-    const pointer = isSelected ? '▶ ' : '  ';
+    // One column: with the rows a column left of the margin, the name sits under NAME.
+    // ▼ while the row's details are open under it, ▶ otherwise.
+    const pointer = isSelected ? (state.popup !== null ? '▼' : '▶') : ' ';
     // Strongest reason only (reasons is already priority-ordered) — a
     // compact blue tag, right-justified against the NAME column's own edge
     // (see `buildNameCell`), and only while a query is actually active (an
@@ -1205,28 +1278,35 @@ export function render(state: SecretsScreenState, termWidth: number, termHeight:
     const updatedCell = pad(formatUpdatedCell(row), updatedW);
     const line = nameCell + gap + middleCell + gap + updatedCell;
     // A coloured cell's own RESET would end the highlight mid-row, so the highlight is re-applied after each one.
-    return isSelected ? INVERSE + padVis(line, available).replaceAll(RESET, RESET + INVERSE) + RESET : line;
+    return isSelected ? INVERSE + rowPad + padVis(line, barWidth).replaceAll(RESET, RESET + INVERSE) + rowPad + RESET : rowPad + line;
   });
 
   const withPopup: readonly string[] =
     state.popup && rows[cursorIndex]
-      ? spliceIn(bodyLines, cursorIndex, buildPopupLines(rows[cursorIndex], state.popup, available, otherProjectsOf(state, rows[cursorIndex])))
+      ? spliceIn(bodyLines, cursorIndex, buildPopupLines(rows[cursorIndex], state.popup, available, otherProjectsOf(state, rows[cursorIndex]), barWidth).map((l) => rowPad + l))
       : bodyLines;
 
-  const reserved = preBodyLines.length + 1 /* table header already pushed above */ + 2 /* footer */;
-  const bodyHeight = Math.max(6, termHeight - reserved);
+  const noteLines: readonly string[] = state.note === null ? [] : [`${m}${DIM}${state.note}${RESET}`];
+  // In a box the screen is drawn wide enough for its rows to meet both sides; text keeps one space each side of it.
+  const footerWidth = Math.max(1, inBox ? termWidth - MARGIN * 3 : termWidth - MARGIN);
+  const footerLines: readonly string[] = ['', ...noteLines, m + clipLine(footerLine(state, footerWidth), footerWidth)];
+
+  // The rows get whatever the header and footer leave, so the footer always fits on screen.
+  const bodyHeight = Math.max(1, termHeight - preBodyLines.length - footerLines.length);
   const scrollOffset = computeScrollOffset(withPopup, cursorIndex, bodyHeight, state.popup !== null);
   const slice = withPopup.slice(scrollOffset, scrollOffset + bodyHeight);
 
   const bodyOutputLines: readonly string[] =
-    rows.length === 0 ? [`${m}${DIM}No secrets match.${RESET}`] : slice.map((line) => m + line);
+    // The rows sit one column further left than the margin, so the ▶ pointer hangs just outside the text column.
+    // In a box, the rows (and an open row's details) are marked to run edge to edge, side to side.
+    rows.length === 0 ? [`${m}${DIM}No secrets match.${RESET}`] : slice.map((line) => (inBox ? BOX_FULL_WIDTH + line : m.slice(1) + line));
 
-  const noteLines: readonly string[] = state.note === null ? [] : [`${m}${DIM}${state.note}${RESET}`];
-  const footerLines: readonly string[] = ['', ...noteLines, m + clipLine(footerLine(state, termWidth - MARGIN), Math.max(1, termWidth - MARGIN))];
+  // Always full height: blank lines under the rows put the footer on the last line.
+  const fill = Math.max(0, termHeight - preBodyLines.length - bodyOutputLines.length - footerLines.length);
+  const lines: readonly string[] = [...preBodyLines, ...bodyOutputLines, ...Array.from({ length: fill }, () => ''), ...footerLines];
 
-  const lines: readonly string[] = [...preBodyLines, ...bodyOutputLines, ...footerLines];
-
-  return lines.map((l) => l + CLEAR_EOL).join('\n');
+  // A terminal too short for even the header keeps the footer: the top lines go first.
+  return lines.slice(-Math.max(1, termHeight)).map((l) => l + CLEAR_EOL).join('\n');
 }
 
 /** The marker every screen carries while `--dry-run` is on, so nobody mistakes it for the real thing. */
@@ -1324,13 +1404,15 @@ function computeScrollOffset(lines: readonly string[], cursorIndex: number, body
   return Math.min(target, Math.max(0, lines.length - bodyHeight));
 }
 
-function buildPopupLines(row: SecretIndexRow, popup: PopupState, width: number, otherProjects: number = 0): readonly string[] {
-  const indent = '  ';
-  const inner = '   ';
-  const ruleWidth = Math.max(10, width - indent.length);
-  const rule = `${indent}${DIM}╶${'─'.repeat(Math.max(0, ruleWidth - 2))}╴${RESET}`;
+function buildPopupLines(row: SecretIndexRow, popup: PopupState, width: number, otherProjects: number = 0, barWidth: number = width): readonly string[] {
+  // The section starts in the ▶ pointer's column; its text sits two columns in from each side of the row.
+  const indent = '';
+  const inner = '  ';
+  const ruleWidth = Math.max(10, barWidth);
+  // Its lines are plain ─, one column in from each side of the row: they start and end a column short of the text.
+  const rule = `${indent} ${DIM}${'─'.repeat(Math.max(0, ruleWidth - 2))}${RESET}`;
   const labelW = 15;
-  const contentWidth = Math.max(20, ruleWidth - inner.length - 1);
+  const contentWidth = Math.max(20, ruleWidth - inner.length * 2);
   const valueWidth = Math.max(10, contentWidth - labelW);
 
   const field = (label: string, value: string) => `${indent}${inner}${DIM}${pad(label, labelW)}${RESET}${value}`;
@@ -1348,7 +1430,9 @@ function buildPopupLines(row: SecretIndexRow, popup: PopupState, width: number, 
     `${indent}${inner}${BOLD}locations${RESET}`,
   ];
 
-  const locationLines = buildLocationTable(row.locations, popup.locationColumn, width, indent.length + inner.length).map((l) => `${indent}${inner}${l}`);
+  // The table's header with a blank line above and below it, like every table's.
+  const [locationHeader, ...locationRows] = buildLocationTable(row.locations, popup.locationColumn, width, indent.length + inner.length).map((l) => `${indent}${inner}${l}`);
+  const locationLines: readonly string[] = ['', locationHeader, '', ...locationRows];
 
   const usersHeaderLines: readonly string[] = ['', `${indent}${inner}${BOLD}users${RESET}`];
   const userLines: readonly string[] =
@@ -1445,7 +1529,8 @@ interface FooterHint {
  * When the footer is wider than the terminal, whole hints are dropped in this
  * order (never cut mid-word) until it fits. `esc` and `sort` are never dropped.
  */
-const FOOTER_DROP_ORDER: readonly FooterHint['id'][] = ['scope', 'deploy', 'edit', 'navigate', 'inspect', 'column'];
+// Embedded, the scope's hints (how to switch tab) go last: without them the screen's own tabs cannot be found.
+const FOOTER_DROP_ORDER: readonly FooterHint['id'][] = ['deploy', 'edit', 'navigate', 'inspect', 'column', 'scope'];
 
 const renderHint = (h: FooterHint): string => (h.key === null ? `${DIM}${h.label}${RESET}` : `${BOLD}${h.key}${RESET}${DIM} ${h.label}${RESET}`);
 const joinHints = (hints: readonly FooterHint[]): string => hints.map(renderHint).join(`${DIM} · ${RESET}`);
@@ -1472,12 +1557,12 @@ function footerLine(state: SecretsScreenState, width: number): string {
           { id: 'deploy', key: 'ctrl+d', label: 'deploy' }, // COPY-FLAG
         ]
       : [];
-  // Embedded (`SecretsScreenScope`): the column moves with ←/→ (Tab belongs to the embedding screen), Esc goes back, and the scope's own hints come before Esc.
+  // Embedded (`SecretsScreenScope`): Tab still moves the column (←/→ belong to the embedding screen), Esc goes back, and the scope's own hints come before Esc.
   const scope = state.scope;
   const scopeHints: readonly FooterHint[] = (scope?.hints ?? []).map((h) => ({ id: 'scope', key: h.key, label: h.label }));
   const hints: readonly FooterHint[] = [
     { id: 'navigate', key: null, label: '↑↓ navigate' }, // COPY-FLAG
-    scope === undefined ? { id: 'column', key: 'tab', label: 'column' } : { id: 'column', key: '←→', label: 'column' }, // COPY-FLAG
+    { id: 'column', key: 'tab', label: 'column' }, // COPY-FLAG
     { id: 'inspect', key: 'enter', label: 'inspect' }, // COPY-FLAG
     ...editHints,
     ...scopeHints,

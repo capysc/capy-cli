@@ -235,10 +235,10 @@ function renderProjectDeleted(ctx: ErrorContext): string {
     name ? `  ${grey(`Project "${name}" was deleted.`)}` : '', // COPY-FLAG
     id ? `  ${grey(`ID: ${id}`)}` : '', // COPY-FLAG
     '',
-    `  To restore it, an organization owner runs:`, // COPY-FLAG
+    `  To restore it, an organization owner or admin runs:`, // COPY-FLAG
     `    ${bold(`capy project restore ${target}`)}`,
     '',
-    `  ${grey('Only an owner can restore a project.')}`, // COPY-FLAG
+    `  ${grey('Only an owner or admin can restore a project.')}`, // COPY-FLAG
     '',
   ];
   return lines.filter(l => l !== '').join('\n') + '\n';

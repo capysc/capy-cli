@@ -759,7 +759,7 @@ export class ServiceClient {
    * bootstrap when running in a directory with no local keep.lock.
    */
   async listProjects(options?: { includeDeleted?: boolean }): Promise<Array<{ id: string; name: string; organization_id: string; deleted_at?: string | null; created_at?: string | null }>> {
-    // CAP-729: only an org owner's `include_deleted=1` is honoured; for anyone else the service ignores it.
+    // CAP-729: only an org owner's or admin's `include_deleted=1` is honoured; for anyone else the service ignores it.
     // `created_at` is absent from services that predate it; callers treat it as unknown.
     const query = options?.includeDeleted === true ? '?include_deleted=1' : '';
     const data = await this.request<{
@@ -789,6 +789,11 @@ export class ServiceClient {
     await this.request<{ success: boolean }>(
       'DELETE', `/projects/${projectId}/branches/${branchId}`,
     );
+  }
+
+  /** `PATCH /projects/:projectId/branches/:branchId {is_protected}`: protect or unprotect a branch (project admins; never `development`). */
+  async setBranchProtected(projectId: string, branchId: string, isProtected: boolean): Promise<void> {
+    await this.request('PATCH', `/projects/${projectId}/branches/${branchId}`, { is_protected: isProtected });
   }
 
   async listBranches(projectId: string): Promise<Branch[]> {

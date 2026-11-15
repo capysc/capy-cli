@@ -655,7 +655,7 @@ function buildTopCells(model: EditModel): { value: string; action: string }[] {
   ];
 }
 
-function buildTable(model: EditModel, width: number): string[] {
+function buildTable(model: EditModel, width: number, barWidth: number = width): string[] {
   // 4 columns: KEY, VALUE, STATUS, UPDATED. UPDATED absorbs slack so the
   // row fills the full width.
   const keyW = Math.max(12, Math.floor(width * 0.32));
@@ -665,14 +665,16 @@ function buildTable(model: EditModel, width: number): string[] {
   const fixed = keyW + valW + statusW + gap.length * 3;
   const updatedW = Math.max(8, width - fixed);
 
-  const headerRow = pad('KEY', keyW) + gap + pad('VALUE', valW) + gap + pad('STATUS', statusW) + gap + pad('UPDATED', updatedW);
+  // The table is drawn one column left of the margin: the rows start there with a one-column ▶ pointer,
+  // and everything else is indented one space, so each key sits under KEY (one narrower to keep the columns over theirs).
+  const headerRow = pad('KEY', keyW - 1) + gap + pad('VALUE', valW) + gap + pad('STATUS', statusW) + gap + pad('UPDATED', updatedW);
   const rowLines = model.state.rows.map((row, i) => {
     const isSelected = i === model.cursorIndex;
-    const pointer = isSelected ? '▶' : ' ';
-    const line = pad(`${pointer} ${row.key}`, keyW) + gap + pad(maskedSnippet(row), valW) + gap + padVis(rowBadge(row), statusW) + gap + pad(row.updatedLabel, updatedW);
-    return isSelected && !model.editing ? INVERSE + padVis(line, width) + RESET : line;
+    const pointer = isSelected ? (model.popupOpen ? '▼' : '▶') : ' '; // ▼ while its panel is open under it
+    const line = pad(`${pointer}${row.key}`, keyW) + gap + pad(maskedSnippet(row), valW) + gap + padVis(rowBadge(row), statusW) + gap + pad(row.updatedLabel, updatedW);
+    return isSelected && !model.editing ? INVERSE + padVis(line, barWidth) + RESET : line;
   });
-  return [`${BOLD}Variables${RESET}`, DIM + headerRow + RESET, ...rowLines];
+  return [` ${BOLD}Variables${RESET}`, '', ` ${DIM}${headerRow}${RESET}`, '', ...rowLines];
 }
 
 /** The value as one line of at most `width` visible chars, masked or (revealed) panned. Returns the pan actually used. */
@@ -700,14 +702,16 @@ function buildPopup(model: EditModel, width: number): { lines: string[]; pan: nu
   const row = model.state.rows[model.cursorIndex];
   if (!row) return { lines: [], pan: model.popupPan };
 
-  const indent = '  '; // popup is inset 2 cols from the table margin
-  const inner = '   '; // content inside the popup is indented 3 more cols
-  const ruleWidth = Math.max(10, width - indent.length);
-  const rule = `${indent}${DIM}╶${'─'.repeat(ruleWidth - 2)}╴${RESET}`;
+  // As in `capy secrets`: the panel starts in the ▶ column and spans the row's highlight (`width`); its lines
+  // are plain ─, one column in from each end, and its text sits two columns in from each side.
+  const indent = '';
+  const inner = '  ';
+  const ruleWidth = Math.max(10, width);
+  const rule = ` ${DIM}${'─'.repeat(ruleWidth - 2)}${RESET}`;
 
   // Width available for value content inside the popup
   const labelW = 9;
-  const contentWidth = Math.max(20, ruleWidth - inner.length - 1);
+  const contentWidth = Math.max(20, ruleWidth - inner.length * 2);
   const valueContentWidth = Math.max(10, contentWidth - labelW);
 
   const head = [rule, '', `${indent}${inner}${BOLD}${truncate(row.key, contentWidth)}${RESET}`, ''];
@@ -788,18 +792,20 @@ export function render(model: EditModel, termWidth: number, termHeight: number):
   const cellLine2 = topCells.map((c, i) => DIM + pad(c.action, cellWidth(i)) + RESET).join('');
   const headLines = [m + header, '', m + cellLine1, m + cellLine2, ''];
 
-  // Build the single-column table. If the popup is open, splice it in after the cursor row.
-  // Table layout: [0] "Variables", [1] column header, [2+] data rows.
-  const table = buildTable(model, available);
-  const cursorLine = 2 + model.cursorIndex;
-  const popup = model.popupOpen && model.state.rows[model.cursorIndex] ? buildPopup(model, available) : undefined;
+  // Table layout: [0] "Variables", [1] blank, [2] column header, [3] blank, [4+] data rows.
+  // The rows start one column left of the margin; a highlighted row (and the panel under it) runs to one
+  // column short of the right edge, so it has the same space each side.
+  const barWidth = Math.max(available, termWidth - 2);
+  const table = buildTable(model, available, barWidth);
+  const cursorLine = 4 + model.cursorIndex;
+  const popup = model.popupOpen && model.state.rows[model.cursorIndex] ? buildPopup(model, barWidth) : undefined;
   const tableLines = popup === undefined ? table : [...table.slice(0, cursorLine + 1), ...popup.lines, ...table.slice(cursorLine + 1)];
 
   // Reserve space for header lines already pushed + footer (2) + status (1)
   const bodyHeight = Math.max(6, termHeight - (headLines.length + 3));
   const scrollOffset = scrollFor(model.scrollOffset, cursorLine, bodyHeight, model.popupOpen, tableLines.length);
 
-  const body = tableLines.slice(scrollOffset, scrollOffset + bodyHeight).map((l) => m + l);
+  const body = tableLines.slice(scrollOffset, scrollOffset + bodyHeight).map((l) => m.slice(1) + l);
   const status = model.status ? [`${m}${model.status.isError ? RED : GREEN}${model.status.text}${RESET}`] : [];
   const lines = [...headLines, ...body, '', footerOf(model), ...status];
 

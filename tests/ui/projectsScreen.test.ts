@@ -19,6 +19,7 @@ import { filteredRows, scopeRowKey } from '../../src/ui/secretsScreen';
 const ESC = '\x1b';
 const DOWN = `${ESC}[B`;
 const RIGHT = `${ESC}[C`;
+const LEFT = `${ESC}[D`;
 const strip = (s: string): string => s.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '');
 
 const loc = (over: Partial<SecretIndexLocation> = {}): SecretIndexLocation => ({
@@ -58,7 +59,7 @@ const data = (over: Partial<ProjectsData> = {}): ProjectsData => ({
     project(),
     project({ id: 'p2', name: 'api', repos: [{ host: 'github.com', owner: 'acme', name: 'api', path: '.', github_repo_id: 1 }] }),
     project({ id: 'p3', name: 'web', createdAt: null }),
-    project({ id: 'p4', name: 'empty', createdAt: '2026-02-02T00:00:00.000Z' }),
+    project({ id: 'p4', name: 'empty', createdAt: '2025-12-01T00:00:00.000Z' }),
   ],
   index: { rows: ROWS, skipped: [], coveredProjectIds: ['p1', 'p2', 'p3', 'p4'] },
   members: [],
@@ -68,6 +69,13 @@ const data = (over: Partial<ProjectsData> = {}): ProjectsData => ({
 
 const press = (state: ProjectsScreenState, ...keys: readonly string[]): ProjectsScreenState =>
   keys.reduce((s, k) => handleKey(s, k).state, state);
+
+/** Opens the project with this id, moving the cursor down to it first: the list's order is the screen's, not the fixture's. */
+const openById = (d: ProjectsData, id: string): ProjectsScreenState => {
+  const start = initialProjectsScreenState(d);
+  const at = filteredProjects(start).findIndex((p) => p.id === id);
+  return press(start, ...Array.from({ length: at }, () => DOWN), '\r');
+};
 const type = (state: ProjectsScreenState, text: string): ProjectsScreenState => press(state, ...Array.from(text));
 
 describe('project data from the secrets index', () => {
@@ -102,7 +110,7 @@ describe('project data from the secrets index', () => {
     expect(lastUpdatedOf(d.index, d.projects[1])).toBe('2026-01-01T00:00:00.000Z');
     expect(lastUpdatedOf(d.index, d.projects[2])).toBeNull();
     // No secrets yet: creation time.
-    expect(lastUpdatedOf(d.index, d.projects[3])).toBe('2026-02-02T00:00:00.000Z');
+    expect(lastUpdatedOf(d.index, d.projects[3])).toBe('2025-12-01T00:00:00.000Z');
     // Not returned: unknown.
     expect(lastUpdatedOf(null, d.projects[0])).toBeNull();
   });
@@ -117,6 +125,9 @@ describe('project data from the secrets index', () => {
     expect(projectIndexState({ ...d.index!, coveredProjectIds: null }, 'p4')).toBe('hidden');
     expect(projectIndexState({ ...d.index!, coveredProjectIds: null }, 'p1')).toBe('rows');
     expect(projectIndexState({ ...d.index!, skipped: [{ project_id: 'p1', project_name: 'web', code: 'X' }] }, 'p1')).toBe('hidden');
+    // Nobody has pushed to it yet: no secrets, not hidden — even when the caller's covered list is unknown.
+    expect(projectIndexState({ ...d.index!, coveredProjectIds: null, skipped: [{ project_id: 'p4', project_name: 'empty', code: 'NO_KEEP_FILE' }] }, 'p4')).toBe('empty');
+    expect(variableCount({ ...d.index!, coveredProjectIds: null, skipped: [{ project_id: 'p4', project_name: 'empty', code: 'NO_KEEP_FILE' }] }, 'p4')).toBe(0);
   });
 });
 
@@ -152,6 +163,16 @@ describe('project list', () => {
     expect(strip(frame).split('\n').every((l) => Array.from(l).length <= 50)).toBe(true);
   });
 
+  test('most recently updated first; projects with no known time last, then by name', () => {
+    // p1: May (changed_at) · p2: Jan (created) · p4: Dec 2025 (created) · p3: no time at all.
+    expect(filteredProjects(initialProjectsScreenState(data())).map((p) => p.id)).toEqual(['p1', 'p2', 'p4', 'p3']);
+  });
+
+  test('NAME is as wide as the longest name, not half the screen', () => {
+    const header = strip(render(initialProjectsScreenState(data()), 160, 20)).split('\n').find((l) => l.includes('NAME')) ?? '';
+    expect(header).toMatch(/NAME {2,6}VARIABLES/);
+  });
+
   test('Enter opens the project under the cursor', () => {
     const s = press(initialProjectsScreenState(data()), DOWN, '\r');
     expect(s.open?.projectId).toBe('p2');
@@ -180,9 +201,11 @@ describe('inside a project: the embedded secrets screen', () => {
     expect(back.quit).toBe(false);
   });
 
-  test('←/→ move the secrets list\'s column (Tab is the project screen\'s)', () => {
-    const s = press(opened(), RIGHT);
+  test('Tab moves the secrets list\'s column, as in capy secrets; → switches the project\'s tab', () => {
+    const s = press(opened(), '\t');
     expect(s.open?.secrets.column).toBe('branch');
+    expect(s.open?.tab).toBe('secrets');
+    expect(press(opened(), RIGHT).open?.secrets.column).not.toBe('branch');
   });
 
   test('Enter opens the row\'s details and asks for its value, exactly as capy secrets does', () => {
@@ -208,7 +231,9 @@ describe('inside a project: the embedded secrets screen', () => {
 
 describe('inside a project: tabs', () => {
   const TAB = '\t';
-  const SHIFT_TAB = `${ESC}[Z`;
+  // The project's tabs move with the arrows; Tab is the secrets screen's (it moves a column).
+  const NEXT = RIGHT;
+  const PREV = LEFT;
   const members = [
     { membershipId: 'm1', userId: 'u1', email: 'owner@acme.dev', role: 'owner', status: 'active', createdAt: 'x', projects: [] },
     { membershipId: 'm2', userId: 'u2', email: 'pa@acme.dev', role: 'project-admin', status: 'active', createdAt: 'x', projects: [{ id: 'p1', name: 'web', role: 'project-admin' as const, branches: [] }] },
@@ -222,21 +247,21 @@ describe('inside a project: tabs', () => {
     row('DB_URL', [loc({ branch: 'production', targets: [{ provider: 'vercel', target: 'web-app', deployed_at: '2026-03-01T00:00:00.000Z', stale: true, pending: true }] })]),
   ];
   const full = (): ProjectsData => data({ members, index: { rows: withTargets, skipped: [], coveredProjectIds: ['p1', 'p2', 'p3', 'p4'] } });
-  const openFirst = (d: ProjectsData): ProjectsScreenState => press(initialProjectsScreenState(d), '\r');
-  const tabs = (n: number): readonly string[] => Array.from({ length: n }, () => TAB);
+  const openFirst = (d: ProjectsData): ProjectsScreenState => openById(d, 'p1');
+  const tabs = (n: number): readonly string[] => Array.from({ length: n }, () => NEXT);
 
-  test('Secrets is selected when a project opens; Tab walks every tab in order and wraps, Shift-Tab goes back', () => {
+  test('Secrets is selected when a project opens; → walks every tab in order and wraps, ← goes back', () => {
     const s0 = openFirst(full());
     expect(s0.open?.tab).toBe('secrets');
-    const order = [1, 2, 3, 4, 5, 6].map((n) => press(s0, ...tabs(n)).open?.tab);
-    expect(order).toEqual(['users', 'repos', 'branches', 'deployments', 'connectors', 'secrets']);
-    expect(press(s0, SHIFT_TAB).open?.tab).toBe('connectors');
+    const order = [1, 2, 3, 4, 5, 6, 7].map((n) => press(s0, ...tabs(n)).open?.tab);
+    expect(order).toEqual(['users', 'repos', 'branches', 'deployments', 'connectors', 'settings', 'secrets']);
+    expect(press(s0, PREV).open?.tab).toBe('settings');
   });
 
   test('the tab bar names every tab, and Esc on any tab goes back to the list', () => {
-    const s = press(openFirst(full()), TAB);
+    const s = press(openFirst(full()), NEXT);
     const frame = strip(render(s, 140, 24));
-    ['Secrets', 'Users', 'Git repos', 'Capy branches', 'Deployments', 'Connectors'].forEach((label) => expect(frame).toContain(label));
+    ['Secrets', 'Users', 'Git Repos', 'Capy Branches', 'Deployments', 'Connectors', 'Settings'].forEach((label) => expect(frame).toContain(label));
     expect(press(s, ESC).open).toBeNull();
   });
 
@@ -244,32 +269,34 @@ describe('inside a project: tabs', () => {
     const member = data({ index: null, reposShown: false, members, projects: [project({ repos: undefined })] });
     const s = openFirst(member);
     expect(s.open?.tab).toBe('users');
-    expect([s, press(s, TAB), press(s, TAB, TAB)].map((x) => x.open?.tab)).toEqual(['users', 'branches', 'users']);
+    expect([s, press(s, NEXT), press(s, NEXT, NEXT)].map((x) => x.open?.tab)).toEqual(['users', 'branches', 'settings']);
     const frame = strip(render(s, 140, 24));
     expect(frame).not.toContain('Secrets');
-    expect(frame).not.toContain('Git repos');
+    expect(frame).not.toContain('Git Repos');
     expect(frame).not.toContain('Deployments');
     expect(frame).not.toContain('Connectors');
   });
 
   test('without the member list, the Users tab is hidden', () => {
     const s = openFirst(data({ members: null }));
-    expect(press(s, TAB).open?.tab).toBe('repos');
+    expect(press(s, NEXT).open?.tab).toBe('repos');
   });
 
   test('Users: the project\'s members with their project role, plus org owners and admins', () => {
-    const s = press(openFirst(full()), TAB);
+    const s = press(openFirst(full()), NEXT);
     const frame = strip(render(s, 140, 24));
     expect(frame).toContain('owner@acme.dev');
     expect(frame).toMatch(/pa@acme\.dev\s+project-admin/);
     expect(frame).not.toContain('other@acme.dev');
   });
 
-  test('Capy branches and Git repos come from GET /projects', () => {
+  test('Capy branches and Git repos come from GET /projects; a GitHub repo is a clickable link to its folder', () => {
     const d = data({ projects: [project({ branches: [{ name: 'production', protected: true }], repos: [{ host: 'github.com', owner: 'acme', name: 'web', path: 'apps/web', github_repo_id: 3 }] })] });
     const s = openFirst(d);
-    expect(strip(render(press(s, TAB, TAB), 120, 20))).toContain('acme/web/apps/web');
-    expect(strip(render(press(s, TAB, TAB, TAB), 120, 20))).toContain('production (protected)');
+    const url = 'https://github.com/acme/web/tree/HEAD/apps/web';
+    const reposFrame = render(press(s, NEXT, NEXT), 120, 20);
+    expect(reposFrame).toContain(`\x1b]8;;${url}\x1b\\${url}\x1b]8;;\x1b\\`);
+    expect(strip(render(press(s, NEXT, NEXT, NEXT), 120, 20))).toContain('production (protected)');
   });
 
   test('Deployments: one line per target and branch, latest delivery, behind and pending as capy secrets says them', () => {
@@ -284,7 +311,7 @@ describe('inside a project: tabs', () => {
   });
 
   test('Connectors: per variable and branch, connector.provider first, service.provider as the fallback', () => {
-    const s = press(openFirst(full()), SHIFT_TAB);
+    const s = press(openFirst(full()), PREV, PREV);
     expect(s.open?.tab).toBe('connectors');
     const frame = strip(render(s, 140, 24));
     expect(frame).toMatch(/API_KEY\s+production\s+\[dokploy\] web-svc/);
@@ -293,15 +320,15 @@ describe('inside a project: tabs', () => {
   });
 
   test('a project with no secrets yet: the Secrets tab says so and how to fix it', () => {
-    const s = press(initialProjectsScreenState(data()), DOWN, DOWN, DOWN, '\r');
+    const s = openById(data(), 'p4');
     expect(s.open?.projectId).toBe('p4');
     expect(s.open?.tab).toBe('secrets');
     const frame = strip(render(s, 120, 20));
     expect(frame).toContain('This project has no secrets yet.');
     expect(frame).toContain('capy push');
-    // Typing does nothing there; Tab still moves on.
+    // Typing does nothing there; → still moves on.
     expect(type(s, 'abc').open?.secrets.search.query).toBe('');
-    expect(press(s, TAB).open?.tab).toBe('users');
+    expect(press(s, NEXT).open?.tab).toBe('users');
   });
 
   test('while the secrets details are open, Tab is theirs (it cycles their column), not the project\'s', () => {
@@ -311,19 +338,18 @@ describe('inside a project: tabs', () => {
   });
 
   test('the secrets search survives a trip to another tab', () => {
-    const s = press(type(openFirst(full()), 'DB'), TAB, SHIFT_TAB);
+    const s = press(type(openFirst(full()), 'DB'), NEXT, PREV);
     expect(s.open?.tab).toBe('secrets');
     expect(s.open?.secrets.search.query).toBe('DB');
   });
 
-  test('Ctrl+X inside a project (on any tab) opens the delete question for that project', () => {
-    const fromSecrets = handleKey(openFirst(full()), '\x18');
-    expect(fromSecrets.effect).toEqual({ type: 'projectDeletePreview', project: { id: 'p1', name: 'web' } });
-    const fromBranches = handleKey(press(openFirst(full()), ...tabs(3)), '\x18');
-    expect(fromBranches.state.dialog).toEqual({ step: 'loading', project: { id: 'p1', name: 'web' } });
-    // While the edit dialog is open, Ctrl+X is the edit dialog's key, not a delete.
-    const editing = press(openFirst(full()), '\x05');
-    expect(handleKey(editing, '\x18').state.dialog).toBeNull();
+  test('Enter on Delete project (the Settings tab\'s third row) opens the delete question for that project; Ctrl+X deletes nothing', () => {
+    const settings = press(openFirst(full()), PREV); // ← from Secrets wraps to the last tab
+    expect(settings.open?.tab).toBe('settings');
+    const result = handleKey(press(settings, '\x1b[B', '\x1b[B'), '\r');
+    expect(result.effect).toEqual({ type: 'projectDeletePreview', project: { id: 'p1', name: 'web' } });
+    expect(result.state.dialog).toEqual({ step: 'loading', project: { id: 'p1', name: 'web' } });
+    expect(handleKey(press(openFirst(full()), ...tabs(3)), '\x18').state.dialog).toBeNull();
   });
 
   test('no line of any tab is wider than the terminal', () => {

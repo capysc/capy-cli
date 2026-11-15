@@ -49,7 +49,7 @@ describe('createProjectDeleteActions', () => {
     const { client, calls } = fakeClient();
     const done = await createProjectDeleteActions(client, ORG).run(WEB);
     expect(calls).toEqual([['org_1', 'p1', false]]);
-    expect(done).toEqual({ ok: true, lines: ['Deleted project web.', 'An owner can restore it with: capy project restore p1'] });
+    expect(done).toEqual({ ok: true, lines: ['Deleted project web.', 'An owner or admin can restore it with: capy project restore p1'] });
   });
 
   test('live deploy tokens: refused with the code, the tokens, and the exact --force command', async () => {

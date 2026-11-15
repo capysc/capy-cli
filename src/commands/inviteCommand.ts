@@ -146,6 +146,59 @@ const INVITABLE_BY_ROLE: Record<string, ReadonlyArray<typeof ROLES[number]['valu
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
+type InviteKeyOps = {
+  coDecrypt: (oid: string, ct: string) => Promise<{ plaintext: string }>;
+  wrapOuterLayer: (oid: string, pt: string, notAfter?: number) => Promise<{ ciphertext: string }>;
+};
+
+/** Reads and unwraps the org master key (double-wrapped: KMS outer + K_local inner). Throws on failure. */
+export async function unwrapInviterKey(orgId: string, userId: string, serviceClient: InviteKeyOps): Promise<Buffer> {
+  const keyOps = {
+    coDecrypt: (oid: string, ct: string) => serviceClient.coDecrypt(oid, ct).then(r => r.plaintext),
+    wrapOuterLayer: (oid: string, pt: string) => serviceClient.wrapOuterLayer(oid, pt).then(r => r.ciphertext),
+  };
+  return unwrapMasterKey(orgId, userId, keyOps);
+}
+
+/**
+ * The invite itself, shared by `capy invite` and the Users tab of `capy projects`:
+ *
+ * 1. Generate invite token T.
+ * 2. Inner wrap M with HKDF(T, salt=orgId:email): the recipient email is bound
+ *    into the HKDF salt so only they can unwrap.
+ * 3. The service outer wraps (KMS layer), bound to (orgId, notAfter) so the
+ *    redeem code can't outlive its window even if forwarded.
+ * 4. Create the invite record on the service.
+ * 5. Build the redeem code (carries the same notAfter the wrap was bound to).
+ *
+ * Returns the redeem code; throws whatever the service throws.
+ */
+export async function wrapAndCreateInvite(args: {
+  orgId: string;
+  email: string;
+  role: string;
+  projectId: string | undefined;
+  masterKey: Buffer;
+  notAfter: number;
+  serviceClient: InviteKeyOps & { createInvite: (orgId: string, email: string, role?: string, projectId?: string) => Promise<unknown> };
+}): Promise<string> {
+  const { orgId, email, role, projectId, masterKey, notAfter, serviceClient } = args;
+  const inviteToken = generateInviteToken();
+  const innerBlob = innerWrap(masterKey, inviteToken, orgId, email);
+  const { ciphertext: outerBlob } = await serviceClient.wrapOuterLayer(
+    orgId,
+    Buffer.from(innerBlob, 'base64').toString('base64'),
+    notAfter,
+  );
+  await serviceClient.createInvite(orgId, email, role, projectId);
+  return buildRedeemCode(inviteToken, outerBlob, orgId, notAfter);
+}
+
+/** The default invite lifetime's expiry (ms epoch): `CAPY_INVITE_TTL_SECONDS`, else the default. */
+export function defaultInviteNotAfter(): number {
+  return Date.now() + resolveInviteTtlMs();
+}
+
 export class InviteCommand {
   private apiUrl?: string;
   private devMode: boolean;
@@ -226,32 +279,13 @@ export class InviteCommand {
         planInput, serviceClient, interactive,
       });
 
-      // 1. Generate invite token T
-      const inviteToken = generateInviteToken();
-
-      // 2. Inner wrap M with HKDF(T, salt=orgId:email)
-      //    The recipient email is bound into the HKDF salt so only they can unwrap.
-      const innerBlob = innerWrap(masterKey, inviteToken, orgId, email);
-
-      // 3. Service outer wraps (KMS layer), bound to (orgId, notAfter) so
-      //    the redeem code can't outlive its window even if forwarded.
+      // 1–4. Wrap the key for the invitee and create the invite record.
       const notAfter = resolveNotAfter(opts);
-      const { ciphertext: outerBlob } = await serviceClient.wrapOuterLayer(
-        orgId,
-        Buffer.from(innerBlob, 'base64').toString('base64'),
-        notAfter,
-      );
-
-      // 4. Create invite record on service
-      const inviteResult = await serviceClient.createInvite(orgId, email, role, projectId);
+      const redeemCode = await wrapAndCreateInvite({ orgId, email, role, projectId, masterKey, notAfter, serviceClient });
 
       // 4b. Fan out any additional project assignments picked in the checkbox.
       // Abort noisily only if every extra assignment fails.
       const failures = await this.fanOutExtraProjectInvites(orgId, email, role, extraProjectIds, serviceClient);
-      void inviteResult;
-
-      // 5. Build redeem code (carries the same notAfter the wrap was bound to).
-      const redeemCode = buildRedeemCode(inviteToken, outerBlob, orgId, notAfter);
 
       const roleName = ROLES.find(r => r.value === role)?.name ?? role;
       const redeemCommand = `capy redeem ${redeemCode}`;
@@ -349,11 +383,7 @@ export class InviteCommand {
     serviceClient: { coDecrypt: (oid: string, ct: string) => Promise<{ plaintext: string }>; wrapOuterLayer: (oid: string, pt: string) => Promise<{ ciphertext: string }> },
   ): Promise<Buffer> {
     try {
-      const keyOps = {
-        coDecrypt: (oid: string, ct: string) => serviceClient.coDecrypt(oid, ct).then(r => r.plaintext),
-        wrapOuterLayer: (oid: string, pt: string) => serviceClient.wrapOuterLayer(oid, pt).then(r => r.ciphertext),
-      };
-      return await unwrapMasterKey(orgId, userId, keyOps);
+      return await unwrapInviterKey(orgId, userId, serviceClient);
     } catch {
       console.error('Failed to unwrap master key. Re-authenticate and try again.');
       process.exit(1);

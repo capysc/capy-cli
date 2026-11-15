@@ -294,7 +294,8 @@ describe('STATUS column (CAP-702)', () => {
     const tableLines = (st: SecretsScreenState, width = 100) => {
       const lines = stripAnsiForTest(render(st, width, 40)).split('\n');
       const start = lines.findIndex((l) => l.includes('LOCATION'));
-      return lines.slice(start, start + 1 + locs.length);
+      // The header, then (past the blank line under it) its rows.
+      return [lines[start], ...lines.slice(start + 2, start + 2 + locs.length)];
     };
 
     test('DEPLOY STATUS is the default middle column, one badge per location, in location order', () => {
@@ -340,7 +341,7 @@ describe('STATUS column (CAP-702)', () => {
           expect(detailsHeader.length).toBe(mainHeader.length);
           // Every location row's values start exactly under its headers.
           const start = lines.indexOf(detailsHeader);
-          lines.slice(start + 1, start + 1 + locs.length).forEach((l) => {
+          lines.slice(start + 2, start + 2 + locs.length).forEach((l) => {
             expect(l[mainMiddleX - 1]).toBe(' ');
             expect(l[mainMiddleX]).not.toBe(' ');
             expect(l[mainHeader.indexOf('UPDATED')]).not.toBe(' ');
@@ -900,16 +901,16 @@ describe('navigation bounds', () => {
 
 describe('render scroll viewport', () => {
   test('a short terminal only shows a window of rows, following the cursor', () => {
-    const rows = Array.from({ length: 30 }, (_, i) => row({ name: `VAR_${i}` }));
+    const rows = Array.from({ length: 30 }, (_, i) => row({ name: `VAR_${String(i).padStart(2, "0")}` }));
     const s0 = initialSecretsScreenState(rows);
     const out0 = render(s0, 100, 15);
-    expect(out0).toContain('VAR_0');
+    expect(out0).toContain('VAR_00');
     expect(out0).not.toContain('VAR_29');
 
     const s1 = pressKeys(s0, ...Array.from({ length: 25 }, () => KEY_DOWN));
     const out1 = render(s1, 100, 15);
     expect(out1).toContain('VAR_25');
-    expect(out1).not.toContain('VAR_0');
+    expect(out1).not.toContain('VAR_00');
   });
 });
 
@@ -921,6 +922,21 @@ describe('details popup open/close', () => {
     expect(s1.popup?.rowName).toBe('API_KEY');
     expect(s1.popup?.value).toEqual({ status: 'loading' });
     expect(effect).toEqual({ type: 'fetchValue', row: s0.rows[0] });
+  });
+
+  test('↑/↓ with a row open move to the next row with its details open, fetching its value hidden', () => {
+    const s0 = initialSecretsScreenState([row({ name: 'A_KEY' }), row({ name: 'B_KEY' })]);
+    const opened = pressKeys(s0, ENTER, 'r'); // open A_KEY and reveal it
+    expect(opened.popup?.revealed).toBe(true);
+    const { state: down, effect } = handleKey(opened, KEY_DOWN);
+    expect(down.cursorIndex).toBe(1);
+    expect(down.popup?.rowName).toBe('B_KEY');
+    expect(down.popup?.revealed).toBe(false); // a revealed value never carries over
+    expect(down.popup?.value).toEqual({ status: 'loading' });
+    expect(effect).toEqual({ type: 'fetchValue', row: s0.rows[1] });
+    // At the end of the list nothing changes and nothing is fetched.
+    expect(handleKey(down, KEY_DOWN)).toEqual({ state: down, effect: null });
+    expect(pressKeys(down, KEY_UP).popup?.rowName).toBe('A_KEY');
   });
 
   test('Esc closes the popup', () => {

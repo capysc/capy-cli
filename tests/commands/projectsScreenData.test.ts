@@ -47,7 +47,7 @@ describe('loadScreenData', () => {
     expect(data.projects.map((p) => p.id)).toEqual(['p1', 'p2']);
     expect(data.projects[0].createdAt).toBe('2026-01-01T00:00:00.000Z');
     expect(data.projects[1].createdAt).toBeNull();
-    expect(data.projects[1].branches).toEqual([{ name: 'development', protected: true }]);
+    expect(data.projects[1].branches).toEqual([{ id: 'p2-b', name: 'development', protected: true }]);
     expect(data.projects[0].repos?.map((r) => r.name)).toEqual(['web']);
     expect(data.index).toEqual({ rows: [], skipped: [], coveredProjectIds: ['p1', 'p2'] });
     expect(data.members).toEqual([]);

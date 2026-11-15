@@ -1,7 +1,7 @@
 /**
  * `capy project delete` and `capy project restore` (CAP-729).
  *
- * A delete hides a project; it destroys nothing, and an org owner can restore
+ * A delete hides a project; it destroys nothing, and an org owner or admin can restore
  * it. The service decides everything that matters (who may delete, whether live
  * deploy tokens block it, whether the project is the system store); this file
  * resolves the name the person typed, asks the question, and shows the answer.
@@ -502,7 +502,7 @@ export function deleteQuestion(projectName: string): string {
 export function deletedLines(project: { readonly id: string; readonly name: string }): readonly string[] {
   return [
     `Deleted project ${project.name}.`, // COPY-FLAG
-    `An owner can restore it with: ${restoreHint(project.id)}`, // COPY-FLAG
+    `An owner or admin can restore it with: ${restoreHint(project.id)}`, // COPY-FLAG
   ];
 }
 
@@ -606,7 +606,7 @@ async function restoreFlow(ref: string, opts: RestoreProjectOpts): Promise<Resto
   // Agent mode never opens a prompt, not even to pick an organization.
   const { orgId, orgName, serviceClient } = await resolveOrgContext(opts.apiUrl, opts.devMode === true, { promptForOrg: !agentMode });
   const org: OrgRef = { id: orgId, name: orgName };
-  // Only an owner's `include_deleted` is honoured; for anyone else the service answers with the live projects, and the id still works.
+  // Only an owner's or admin's `include_deleted` is honoured; for anyone else the service answers with the live projects, and the id still works.
   const picked = await pickProject(resolveRef(await serviceClient.listProjects({ includeDeleted: true }), ref, true), {
     json,
     agentMode,

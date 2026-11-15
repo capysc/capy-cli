@@ -219,7 +219,7 @@ describe('InteractiveTable', () => {
     it('shows member count in title', () => {
       const output = table.renderTable(MEMBERS, 120, 30);
       const plain = stripAnsi(output);
-      expect(plain).toContain('Organization Members (3 users)');
+      expect(plain).toContain('Organization Users (3 users)');
     });
 
     it('omits Added column in narrow terminal', () => {
@@ -241,7 +241,7 @@ describe('InteractiveTable', () => {
     it('singular "user" for single member', () => {
       const output = table.renderTable([MEMBERS[0]], 120, 30);
       const plain = stripAnsi(output);
-      expect(plain).toContain('Organization Members (1 user)');
+      expect(plain).toContain('Organization Users (1 user)');
       expect(plain).not.toContain('1 users');
     });
 

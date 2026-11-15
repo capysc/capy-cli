@@ -91,7 +91,7 @@ export class UsersCommand {
     }
     const member = memberDetails.members.find((m) => m.email.toLowerCase() === email.toLowerCase());
     if (!member) {
-      console.error(`No member with email "${email}" in this organization.`);
+      console.error(`No user with email "${email}" in this organization.`); // COPY-FLAG: was "member"
       process.exit(1);
     }
     return { projectId: project.id, branchId: (branch as any).id, userId: member.userId };
@@ -109,7 +109,10 @@ export class UsersCommand {
     process.exit(1);
   }
 
-  /** Loads the member list + the caller's own role, reporting spinner success/failure. Exits on failure. */
+  /**
+   * Loads the org's users + the caller's own role. The spinner clears on success (the table that follows
+   * says how many there are); on failure it says so. Exits on failure.
+   */
   private async loadMembersOrExit(
     serviceClient: ServiceClient,
     orgId: string,
@@ -120,10 +123,10 @@ export class UsersCommand {
         serviceClient.listMemberDetails(orgId),
         serviceClient.getOrgMe(orgId),
       ]);
-      spinner?.succeed(`${result.members.length} member${result.members.length !== 1 ? 's' : ''}`);
+      spinner?.stop();
       return { members: result.members, callerRole: me.role, currentUserId: me.user_id };
     } catch (err: any) {
-      spinner?.fail('Failed to load members');
+      spinner?.fail('Failed to load users'); // COPY-FLAG: was "members" ("member" is only the role)
       console.error(`  ${err.message}`);
       process.exit(1);
     }
@@ -149,10 +152,10 @@ export class UsersCommand {
     serviceClient.setTokenProvider(() => authService.getValidToken());
     await this.authenticateForUsersOrExit(authService, orgId);
 
-    // Fetch member details. In --json mode emit NO progress at all so stdout stays
+    // Fetch the users. In --json mode emit NO progress at all so stdout stays
     // pure JSON even on a TTY (the Spinner already routes to stderr when piped; this
     // also covers an interactive run). CAP-273.
-    const spinner = opts.json ? null : new Spinner('Loading members...');
+    const spinner = opts.json ? null : new Spinner('Loading users...'); // COPY-FLAG: was "members"
     spinner?.start();
     const { members, callerRole, currentUserId } = await this.loadMembersOrExit(serviceClient, orgId, spinner);
 
@@ -160,7 +163,8 @@ export class UsersCommand {
       console.log(
         JSON.stringify(
           {
-            members: members.map((m: any) => ({
+            // `users`: "member" names only the role (`role: "member"`).
+            users: members.map((m: any) => ({
               membershipId: m.membershipId,
               userId: m.userId,
               email: m.email,
@@ -188,7 +192,7 @@ export class UsersCommand {
     }
 
     if (members.length === 0) {
-      console.log('\n  No members found.\n');
+      console.log('\n  No users found.\n'); // COPY-FLAG: was "members"
       return;
     }
 
