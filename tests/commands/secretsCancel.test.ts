@@ -29,12 +29,13 @@ import {
   fakeService,
   indexRows,
   makeEnv,
-  manyLocs,
+  manyProjectLocs,
   manyRepos,
   standardRepos,
+  type ProjectId,
 } from '../helpers/secretsWorld';
 
-const loc = (project: 'pA' | 'pB' | 'pC' | 'pD', branch: string, isProtected = false): SetLocation => ({
+const loc = (project: ProjectId, branch: string, isProtected = false): SetLocation => ({
   project_id: project,
   project_name: PROJECT_NAMES[project],
   branch,
@@ -61,7 +62,8 @@ const SOLO: RepoTarget = { host: 'github.com', owner: 'Acme', name: 'solo', file
 
 const request = (over: Partial<SetRequest> = {}): SetRequest => ({ name: NAME, value: SENTINEL, locations: FIVE, repos: [MONO, SOLO], bases: { 'github.com/acme/mono': 'main', 'github.com/acme/solo': 'trunk' }, ...over });
 
-const TEN = manyLocs(10);
+// Ten locations in ten projects: the locations of one project are pushed one at a time, so six at once needs six projects.
+const TEN = manyProjectLocs(10);
 const TEN_SET: readonly SetLocation[] = TEN.map((l) => loc(l.project, l.branch, l.protected === true));
 const TEN_REQUEST = (over: Partial<SetRequest> = {}): SetRequest => request({ locations: TEN_SET, ...over });
 
@@ -115,7 +117,7 @@ describe('stopping the pushes', () => {
     const github = fakeGithub(standardRepos(TEN));
     const result = await runSecretSet(TEN_REQUEST(), makeEnv(service as never, github), { stopPushes: stop.signal });
     expect(result.prs.map((p) => p.repo)).toEqual(['Acme/mono']); // solo's project (pC) was never pushed
-    expect(result.prs[0].locations).toHaveLength(6);
+    expect(result.prs[0].locations).toHaveLength(2); // the 6 pushed are in 6 projects; 2 of them (pA, pB) are in mono
     expect(github.createPull.mock.calls).toHaveLength(1);
     const text = renderSecretSetConfirmation(result);
     expect(text.split('\n')[0]).toBe(`✓ ${NAME} updated in 6 of 10 locations (cancelled).`);
@@ -186,7 +188,10 @@ describe('stopping the PRs', () => {
 describe('progress', () => {
   test('pushing then PRs, counted as each item FINISHES (with how many are running)', async () => {
     const onProgress = mock((_p: RunProgress) => undefined);
-    await runSecretSet(request(), makeEnv(fakeService(), fakeGithub(standardRepos())), { onProgress });
+    // Five locations in five projects (the locations of one project are pushed one at a time, so five at once needs five projects).
+    const fiveProjects = [...FIVE.filter((l) => l.branch !== 'staging'), loc('px1', 'development')];
+    const service = fakeService({ locs: [...LOCATIONS, { project: 'px1', branch: 'development' }] });
+    await runSecretSet(request({ locations: fiveProjects }), makeEnv(service, fakeGithub(standardRepos())), { onProgress });
     expect(progressOf(onProgress.mock.calls.map((c) => c[0]))).toEqual([
       'pushing 0/5', 'pushing 1/5', 'pushing 2/5', 'pushing 3/5', 'pushing 4/5', 'pushing 5/5',
       'prs 0/2', 'prs 1/2', 'prs 2/2',

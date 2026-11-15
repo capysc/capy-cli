@@ -13,6 +13,7 @@ import { ACCENT } from '../ui/colors';
 import { orgProjectQuestion } from '../ui/projectQuestions';
 import { gateFirst, type GateOptions } from '../sync/gate';
 import { conflictFlagsOrExit } from '../sync/conflicts';
+import { switchRepoOrgRefusal, exitWithRepoOrgRefusal } from '../core/repoOrgGuard';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -31,6 +32,9 @@ async function resolveAuthResultWithFallback(authService: AuthService, currentOr
   if (plainSilent.success) return plainSilent;
   return authService.authenticate(currentOrgId);
 }
+
+/** The error `detectProjectState` already raises for a keep.lock it cannot use. */
+const invalidKeepLockError = (): CapyError => new CapyError('Invalid keep.lock file format', ERROR_CODES.INVALID_FORMAT);
 
 /** The branch a first project is bootstrapped with. */
 const FIRST_BRANCH = 'development';
@@ -62,6 +66,7 @@ export class OrgCommand {
       await this._execute();
     } catch (error: any) {
       if (error?.name === 'ExitPromptError') throw error;
+      if (error instanceof CapyError && error.code === ERROR_CODES.REPO_ORG_MISMATCH) exitWithRepoOrgRefusal(error);
       const { displayErrorAndExit } = await import('../ui/errorScreen');
       await displayErrorAndExit(error);
     }
@@ -101,6 +106,18 @@ export class OrgCommand {
       ],
       default: currentOrgId,
     }]);
+
+    // A git repo belongs to one organization (the tracked keep.lock's org_id): switching to another one, an
+    // existing one or a new one, must not touch this folder. Refuse at the pick, before the re-auth, before any
+    // organization is created, before anything is written. `currentOrgId` is read from the tracked file.
+    const repoRefusal = switchRepoOrgRefusal(currentOrgId, currentOrg?.name, orgId === CREATE_NEW_ORG ? undefined : orgId);
+    if (repoRefusal) throw repoRefusal;
+
+    // A tracked keep.lock that exists but names no organization (an empty or falsy org_id) gives the guard nothing
+    // to compare, and a first project would then be written into the folder. Refuse only those writes, as the
+    // existing invalid-keep.lock error; every other path is as before.
+    const keepNamesNoOrg = projectState.hasKeepFile && !currentOrgId;
+    if (keepNamesNoOrg && orgId === CREATE_NEW_ORG) throw invalidKeepLockError();
 
     if (orgId === currentOrgId && currentOrg) {
       console.log(`Already on ${B(currentOrg.name)}.`);
@@ -177,6 +194,7 @@ export class OrgCommand {
     const orgProjects = projects.filter(p => p.organization_id === selectedOrg.id);
 
     if (orgProjects.length === 0) {
+      if (keepNamesNoOrg) throw invalidKeepLockError();
       await this.createFirstProjectInOrg(selectedOrg, authResult.user_id!, hasProject);
       return;
     }

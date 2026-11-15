@@ -62,7 +62,7 @@ export function createProjectUsersActions(serviceClient: UsersServiceClient, org
     }
     const masterKey = await unwrapInviterKey(orgId, userId, serviceClient);
     const notAfter = defaultInviteNotAfter();
-    const redeemCode = await wrapAndCreateInvite({ orgId, email, role, projectId: project.id, masterKey, notAfter, serviceClient });
+    const { redeemCode } = await wrapAndCreateInvite({ orgId, email, role, projectId: project.id, masterKey, notAfter, serviceClient });
     return {
       lines: [
         `Invite created for ${email} as ${PROJECT_ROLE_LABELS[role]}`, // reused from `capy invite`

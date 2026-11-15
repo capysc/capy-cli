@@ -200,6 +200,48 @@ describe('InviteCommand', () => {
     });
   });
 
+  describe('the heads-up email', () => {
+    test('a service that emailed the invitee is reported, and the code is still printed', async () => {
+      mockCreateInvite.mockResolvedValue({ id: 'inv-1', email_sent: true });
+      const cap = captureOutput();
+      try {
+        await new InviteCommand().execute('bob@example.com', { role: 'admin', nonTty: true });
+      } finally {
+        cap.restore();
+      }
+      expect(cap.out()).toContain('We emailed bob@example.com a heads-up');
+      expect(cap.out()).toMatch(/redeem [A-Za-z0-9_\-+/=]{20,}/);
+    });
+
+    test('--json carries emailSent', async () => {
+      mockCreateInvite.mockResolvedValue({ id: 'inv-1', email_sent: true });
+      const cap = captureOutput();
+      try {
+        await new InviteCommand().execute('bob@example.com', { json: true, role: 'admin' });
+      } finally {
+        cap.restore();
+      }
+      expect(JSON.parse(cap.out()).emailSent).toBe(true);
+    });
+
+    test('an older service that says nothing about email claims nothing', async () => {
+      const cap = captureOutput();
+      try {
+        await new InviteCommand().execute('bob@example.com', { json: true, role: 'admin' });
+      } finally {
+        cap.restore();
+      }
+      expect(JSON.parse(cap.out()).emailSent).toBe(false);
+      const human = captureOutput();
+      try {
+        await new InviteCommand().execute('bob@example.com', { role: 'admin', nonTty: true });
+      } finally {
+        human.restore();
+      }
+      expect(human.out()).not.toContain('We emailed');
+    });
+  });
+
   describe('the rail describes the run that happened', () => {
     test('a re-issue that asked nothing reports nothing outstanding', async () => {
       // `capy invite <existing member>` with no --role takes the pure re-issue

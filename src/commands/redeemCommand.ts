@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, unlinkSync } from 'fs';
+import { existsSync, unlinkSync } from 'fs';
 import { join } from 'path';
 import { AuthService } from '../auth/authService';
 import { ServiceClient } from '../service/serviceClient';
@@ -7,6 +7,8 @@ import { wrapAndSaveMasterKey, hasOrgKey } from '../crypto/keyResolver';
 import { FileManager } from '../files/fileManager';
 import { isMembershipRevokedError } from '../errors/membershipRevoked';
 import { cleanupOrgData } from '../cleanup/orgCleanup';
+import { AuthResult } from '../types/index';
+import { redeemRepoOrgRefusal, exitWithRepoOrgRefusal, readTrackedRepoOrgId } from '../core/repoOrgGuard';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -21,16 +23,12 @@ export class RedeemCommand {
 
   async execute(code: string): Promise<void> {
     // 1. Parse redeem code → T + target org + double-wrapped ciphertext + expiry
-    let token: Buffer;
-    let ciphertext: string;
-    let targetOrgId: string;
-    let notAfter: number;
-    try {
-      ({ token, orgId: targetOrgId, ciphertext, notAfter } = parseRedeemCode(code));
-    } catch (err: any) {
-      console.error(`Invalid redeem code: ${err.message}`);
-      process.exit(1);
-    }
+    const { token, orgId: targetOrgId, ciphertext, notAfter } = this.parseCodeOrExit(code);
+
+    // A git repo belongs to one organization (the tracked keep.lock's org_id). Refuse to redeem another
+    // organization into it, before anything else: no sign-in, no network call, no key save, no file write.
+    const repoRefusal = redeemRepoOrgRefusal(process.cwd(), targetOrgId);
+    if (repoRefusal) exitWithRepoOrgRefusal(repoRefusal);
 
     // Pre-flight expiry check so we don't bother the user with a sign-in
     // ceremony just to fail at co-decrypt. Server enforces this independently.
@@ -45,37 +43,11 @@ export class RedeemCommand {
     //    The crypto layer (HKDF with email binding) is the real identity proof,
     //    not the OAuth ceremony.
     const authService = new AuthService(this.apiUrl, this.devMode);
-    let authResult = await authService.authenticateSilent(targetOrgId);
-    if (!authResult.success) {
-      // No cached session — need interactive auth
-      authResult = await authService.authenticate(targetOrgId);
-      if (!authResult.success) {
-        console.error(`Authentication failed. You need a ${B('Capy')} account to redeem an invite.`);
-        process.exit(1);
-      }
-    }
-
-    let userId = authResult.user_id!;
-    let orgId = authResult.organization_id!;
+    const authResult = await this.authenticateOrExit(authService, targetOrgId);
 
     // 3. If we got a session for a different org (or no org), refresh into the target org.
     //    Multi-org sessions let both orgs coexist — no save/restore needed.
-    if (orgId !== targetOrgId) {
-      const switched = await authService.authenticateSilent(targetOrgId);
-      if (!switched.success) {
-        // Silent refresh failed — try full OAuth scoped to the target org
-        const oauthResult = await authService.authenticate(targetOrgId);
-        if (!oauthResult.success) {
-          console.error('Failed to authenticate for the invited organization. You may not have access.');
-          process.exit(1);
-        }
-        orgId = oauthResult.organization_id!;
-        userId = oauthResult.user_id!;
-      } else {
-        orgId = targetOrgId;
-        userId = switched.user_id!;
-      }
-    }
+    const { orgId, userId } = await this.landOnTargetOrg(authService, authResult, targetOrgId);
 
     // Explicit membership guard: tryPasswordAuth / OAuth may succeed but
     // return a token scoped to a DIFFERENT org the user already belongs to
@@ -96,7 +68,9 @@ export class RedeemCommand {
 
     // 4. Regardless of whether crypto setup is needed, always update local
     //    state so the next `capy` run targets the redeemed org.
-    const orgName = authResult.organizations?.find(o => o.id === orgId)?.name || orgId;
+    //    The guard above proved orgId === targetOrgId, so the display name is
+    //    looked up by the invite's own org id, not by a value from the sign-in result.
+    const orgName = authResult.organizations?.find(o => o.id === targetOrgId)?.name || targetOrgId;
     this.switchLocalContext(orgId, userId, orgName);
 
     const serviceClient = new ServiceClient(this.apiUrl, this.devMode);
@@ -105,23 +79,7 @@ export class RedeemCommand {
     // 5. Always verify membership via co-decrypt, even if local key exists.
     //    A kicked user still has the local org key — co-decrypt is the
     //    server-side gate that proves current membership.
-    let innerBlob: string;
-    try {
-      const result = await serviceClient.coDecrypt(orgId, ciphertext, notAfter);
-      innerBlob = result.plaintext;
-    } catch (err: any) {
-      // Co-decrypt can fail for many reasons — expired invite, tampered
-      // code, network blip, KMS hiccup. Only when the server explicitly
-      // tags the failure with code=MEMBERSHIP_REVOKED do we clean up the
-      // local wrapped M for this user in this org. Every other failure
-      // leaves local state intact so the user can retry.
-      if (isMembershipRevokedError(err)) {
-        cleanupOrgData(orgId, userId);
-      }
-      console.error(`\nCo-decryption failed: ${err.message}`);
-      console.error('You may not be a member of this organization, or the invite has been revoked.');
-      process.exit(1);
-    }
+    const innerBlob = await this.coDecryptOrExit(serviceClient, orgId, userId, ciphertext, notAfter);
 
     // 6. If user already has the master key and co-decrypt passed, they're good
     if (hasOrgKey(orgId, userId)) {
@@ -136,14 +94,7 @@ export class RedeemCommand {
     //    The HKDF salt includes the recipient's email, so this fails
     //    cryptographically if the wrong user tries to unwrap.
     const userEmail = authResult.user_email || '';
-    let masterKey: Buffer;
-    try {
-      const { innerUnwrap } = await import('../crypto/inviteCrypto');
-      masterKey = innerUnwrap(innerBlob, token, orgId, userEmail);
-    } catch {
-      console.error(`Failed to unwrap invite. You're signed in as ${B(userEmail)} — this invite may be for a different account.`);
-      process.exit(1);
-    }
+    const masterKey = await this.unwrapOrExit(innerBlob, token, orgId, userEmail);
 
     // 8. Double-wrap M (inner local key + outer KMS) and store locally
     const keyOps = {
@@ -160,10 +111,85 @@ export class RedeemCommand {
     console.log('');
   }
 
+  private parseCodeOrExit(code: string): ReturnType<typeof parseRedeemCode> {
+    try {
+      return parseRedeemCode(code);
+    } catch (err: any) {
+      console.error(`Invalid redeem code: ${err.message}`);
+      return process.exit(1);
+    }
+  }
+
+  private async authenticateOrExit(authService: AuthService, targetOrgId: string): Promise<AuthResult> {
+    const silent = await authService.authenticateSilent(targetOrgId);
+    if (silent.success) return silent;
+    // No cached session — need interactive auth
+    const interactive = await authService.authenticate(targetOrgId);
+    if (!interactive.success) {
+      console.error(`Authentication failed. You need a ${B('Capy')} account to redeem an invite.`);
+      return process.exit(1);
+    }
+    return interactive;
+  }
+
+  private async landOnTargetOrg(
+    authService: AuthService,
+    authResult: AuthResult,
+    targetOrgId: string,
+  ): Promise<{ orgId: string; userId: string }> {
+    const orgId = authResult.organization_id!;
+    const userId = authResult.user_id!;
+    if (orgId === targetOrgId) return { orgId, userId };
+    const switched = await authService.authenticateSilent(targetOrgId);
+    if (switched.success) return { orgId: targetOrgId, userId: switched.user_id! };
+    // Silent refresh failed — try full OAuth scoped to the target org
+    const oauthResult = await authService.authenticate(targetOrgId);
+    if (!oauthResult.success) {
+      console.error('Failed to authenticate for the invited organization. You may not have access.');
+      return process.exit(1);
+    }
+    return { orgId: oauthResult.organization_id!, userId: oauthResult.user_id! };
+  }
+
+  private async coDecryptOrExit(
+    serviceClient: ServiceClient,
+    orgId: string,
+    userId: string,
+    ciphertext: string,
+    notAfter: number,
+  ): Promise<string> {
+    try {
+      const result = await serviceClient.coDecrypt(orgId, ciphertext, notAfter);
+      return result.plaintext;
+    } catch (err: any) {
+      // Co-decrypt can fail for many reasons — expired invite, tampered
+      // code, network blip, KMS hiccup. Only when the server explicitly
+      // tags the failure with code=MEMBERSHIP_REVOKED do we clean up the
+      // local wrapped M for this user in this org. Every other failure
+      // leaves local state intact so the user can retry.
+      if (isMembershipRevokedError(err)) {
+        cleanupOrgData(orgId, userId);
+      }
+      console.error(`\nCo-decryption failed: ${err.message}`);
+      console.error('You may not be a member of this organization, or the invite has been revoked.');
+      return process.exit(1);
+    }
+  }
+
+  private async unwrapOrExit(innerBlob: string, token: Buffer, orgId: string, userEmail: string): Promise<Buffer> {
+    try {
+      const { innerUnwrap } = await import('../crypto/inviteCrypto');
+      return innerUnwrap(innerBlob, token, orgId, userEmail);
+    } catch {
+      console.error(`Failed to unwrap invite. You're signed in as ${B(userEmail)} — this invite may be for a different account.`);
+      return process.exit(1);
+    }
+  }
+
   /**
-   * Update sync-state to point to the redeemed org, and delete keep.lock
-   * if it points to a different org. This ensures the next `capy` run goes
-   * through init for the correct org instead of syncing a stale project.
+   * Update sync-state to point to the redeemed org. A keep.lock for a different org never reaches here: `execute`
+   * refuses that before anything is written (a git repo belongs to one organization). A keep.lock that is unparseable
+   * or names no organization is still removed, so the next `capy` run goes through init instead of failing on it.
    */
   private switchLocalContext(orgId: string, userId: string, orgName: string): void {
     const fileManager = new FileManager();
@@ -180,19 +206,12 @@ export class RedeemCommand {
     // stale copy left behind here would make readKeepFile() keep preferring
     // it over the freshly re-initialized tracked file.
     const workingKeepPath = join(process.cwd(), '.capy', 'keep.lock');
-    if (existsSync(keepPath)) {
-      try {
-        const keepContent = JSON.parse(readFileSync(keepPath, 'utf-8'));
-        if (keepContent.org_id !== orgId) {
-          unlinkSync(keepPath);
-          if (existsSync(workingKeepPath)) unlinkSync(workingKeepPath);
-          console.log('  Removed stale keep.lock (different org)');
-        }
-      } catch {
-        unlinkSync(keepPath);
-        if (existsSync(workingKeepPath)) unlinkSync(workingKeepPath);
-        console.log('  Removed invalid keep.lock');
-      }
+    // Unparseable, or parseable but naming no organization (no non-empty string org_id): neither can be a repo's
+    // identity, so both copies go and the next `capy` run goes through init.
+    if (existsSync(keepPath) && readTrackedRepoOrgId(process.cwd()) === undefined) {
+      unlinkSync(keepPath);
+      if (existsSync(workingKeepPath)) unlinkSync(workingKeepPath);
+      console.log('  Removed invalid keep.lock');
     }
   }
 }

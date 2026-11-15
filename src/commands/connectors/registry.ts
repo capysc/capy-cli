@@ -141,6 +141,15 @@ export interface ConnectOpts {
    */
   environment?: string;
   /**
+   * Vercel DISCOVERY only (flag `--import-environment`, repeatable): the
+   * environments to import, each as `<environment>` (lands on a Capy branch of
+   * the same name) or `<environment>=<branch>`. When given, ONLY these
+   * environments are in the plan. Absent or empty: every environment, each on
+   * a branch of its own name. Refused with `--environment`, and without
+   * `--discover`. See `vercelEnvironmentMap.ts`.
+   */
+  importEnvironments?: readonly string[];
+  /**
    * Dokploy DISCOVERY mode only, set INTERNALLY by `discover()`'s own
    * per-environment sequence — never a CLI flag, never read from
    * `process.argv`. Discovery's plan already resolved this service's
@@ -380,6 +389,13 @@ export interface ConnectorModule {
    * existed before this field, whose output stays byte-identical.
    */
   displayName?: string;
+  /**
+   * Whether this connector's discovery takes `--import-environment` (a chosen
+   * set of environments, each on a chosen Capy branch). Omitted: it does not,
+   * and `connectCommand` refuses the option before any request rather than
+   * letting it be ignored.
+   */
+  acceptsImportEnvironments?: boolean;
   /**
    * Set when rotating runs an interactive auth step the user must complete by
    * hand (e.g. Stripe shells out to `stripe login`, which opens a browser).

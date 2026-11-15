@@ -127,8 +127,16 @@ program
   .command('branch')
   .description('List secret branches')
   .option('-D <name>', 'Delete a branch')
+  .option('--yes', 'skip the confirmation prompt')
   .option('--json', 'emit machine-readable JSON instead of the human UI')
+  .option('--non-tty', 'treat stdin as not a terminal; never prompt (agents/CI)')
   .action(async (options, command) => {
+    const deleteOpts = { yes: options.yes, json: options.json, nonTty: options.nonTty };
+    if (options.D) {
+      // Nobody to ask and no --yes: refused here, before any prompt, sign-in or request.
+      const { needsConfirmation, refuseNeedsConfirmation } = await import('./commands/branchDeleteCommand');
+      if (needsConfirmation(deleteOpts)) refuseNeedsConfirmation(options.json === true);
+    }
     const { AuthService } = await import('./auth/authService');
     const { ServiceClient } = await import('./service/serviceClient');
     const { ProjectManager } = await import('./core/projectManager');
@@ -153,36 +161,21 @@ program
 
     // Delete branch
     if (options.D) {
-      const deleteName = options.D;
-      const branches = await serviceClient.listBranches(projectState.projectId!);
-      const branch = branches.find(b => b.name === deleteName);
-
-      if (!branch) {
-        console.log(`Branch "${deleteName}" not found`);
-        process.exit(1);
-      }
-
-      if (branch.name === projectState.activeBranch) {
-        console.log(`Cannot delete the current branch. Switch first with: ${B('capy-dev checkout <other-branch>')}`);
-        process.exit(1);
-      }
-
-      const inquirer = (await import('inquirer')).default;
-      const { confirm } = await inquirer.prompt([{
-        type: 'confirm',
-        name: 'confirm',
-        message: `Delete branch "${deleteName}"? This will remove all its secrets.`,
-        default: false,
-      }]);
-
-      if (!confirm) return;
-
-      await serviceClient.deleteBranch(projectState.projectId!, branch.id);
-
-      // v4: branches no longer stored in keep.lock, no cleanup needed
-      const keep = pm.readKeepFile();
-
-      console.log(`Deleted branch "${deleteName}"`);
+      // v4: branches no longer stored in keep.lock, no cleanup needed after a delete.
+      const { runBranchDelete, promptConfirm } = await import('./commands/branchDeleteCommand');
+      await runBranchDelete(
+        {
+          projectId: projectState.projectId!,
+          activeBranch: projectState.activeBranch,
+          checkoutHint: 'capy-dev',
+          emphasize: B,
+          listBranches: (projectId) => serviceClient.listBranches(projectId),
+          deleteBranch: (projectId, branchId) => serviceClient.deleteBranch(projectId, branchId),
+          confirm: promptConfirm,
+        },
+        options.D,
+        deleteOpts,
+      );
       return;
     }
 
@@ -817,7 +810,7 @@ program
     await cmd.execute({ json: options.json });
   });
 
-program
+const projectsCmd = program
   .command('projects')
   .description('List projects in the active organization and their branches')
   .option('--deleted', 'also list deleted projects, marked as deleted, with the date (owners and admins only)') // COPY-FLAG
@@ -826,6 +819,17 @@ program
     const { ProjectsCommand } = await import('./commands/projectsCommand');
     const cmd = new ProjectsCommand(process.env.CAPY_API_URL, true);
     await cmd.execute({ json: options.json, deleted: options.deleted === true, dryRun: command.optsWithGlobals().dryRun === true });
+  });
+
+projectsCmd
+  .command('rename [new-name]')
+  .description('Rename the project of this folder, and update its keep.lock (owners only)') // COPY-FLAG
+  .option('--non-tty', 'same as --json: never ask, and answer in JSON (agents/CI)') // COPY-FLAG
+  .option('--json', 'emit machine-readable JSON instead of the human UI')
+  .action(async (name: string | undefined, _options: any, command: any) => {
+    const { renameProjectCommand, renameProjectOptsFrom } = await import('./commands/projectRenameCommand');
+    // Read from the merged view: the parent `projects` takes `--json`, and the program takes `--dry-run`.
+    await renameProjectCommand(name, { ...renameProjectOptsFrom(command), apiUrl: process.env.CAPY_API_URL, devMode: true });
   });
 
 const secretsCmd = program
@@ -1257,6 +1261,16 @@ program
       const { SCREEN_WIDE } = await import('./ui/screens/generated');
       await openScreen(url, { kind: 'dialog', wide: SCREEN_WIDE[name] });
     }
+  });
+
+// Hidden: git calls this as the keep.lock merge driver (`<cmd> %O %A %B`); it is not for people.
+program
+  .command('merge-keep-lock <ancestor> <ours> <theirs> [ourLabel] [baseLabel] [theirLabel] [markerSize]', { hidden: true })
+  // COPY-FLAG
+  .description('Merge keep.lock (git merge driver)')
+  .action(async (ancestor: string, ours: string, theirs: string, ourLabel?: string, baseLabel?: string, theirLabel?: string, markerSize?: string) => {
+    const { mergeKeepLockCommand } = await import('./commands/mergeKeepLockCommand');
+    process.exit(mergeKeepLockCommand(ancestor, ours, theirs, ourLabel, baseLabel, theirLabel, markerSize));
   });
 
 program.parse(process.argv);

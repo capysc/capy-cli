@@ -171,9 +171,17 @@ program
   .command('branch')
   .description('List secret branches')
   .option('-D <name>', 'Delete a branch')
+  .option('--yes', 'skip the confirmation prompt')
   .option('--json', 'emit machine-readable JSON instead of the human UI')
+  .option('--non-tty', 'treat stdin as not a terminal; never prompt (agents/CI)')
   .action(async (options, command) => {
     assertNotLocalOnly('branch');
+    const deleteOpts = { yes: options.yes, json: options.json, nonTty: options.nonTty };
+    if (options.D) {
+      // Nobody to ask and no --yes: refused here, before any prompt, sign-in or request.
+      const { needsConfirmation, refuseNeedsConfirmation } = await import('./commands/branchDeleteCommand');
+      if (needsConfirmation(deleteOpts)) refuseNeedsConfirmation(options.json === true);
+    }
     const { AuthService } = await import('./auth/authService');
     const { ServiceClient } = await import('./service/serviceClient');
     const { ProjectManager } = await import('./core/projectManager');
@@ -198,33 +206,20 @@ program
 
     // Delete branch
     if (options.D) {
-      const deleteName = options.D;
-      const branches = await serviceClient.listBranches(projectState.projectId!);
-      const branch = branches.find(b => b.name === deleteName);
-
-      if (!branch) {
-        console.log(`Branch "${deleteName}" not found`);
-        process.exit(1);
-      }
-
-      if (branch.name === projectState.activeBranch) {
-        console.log(`Cannot delete the current branch. Switch first with: ${B('capy checkout <other-branch>')}`);
-        process.exit(1);
-      }
-
-      const inquirer = (await import('inquirer')).default;
-      const { confirm } = await inquirer.prompt([{
-        type: 'confirm',
-        name: 'confirm',
-        message: `Delete branch "${deleteName}"? This will remove all its secrets.`,
-        default: false,
-      }]);
-
-      if (!confirm) return;
-
-      await serviceClient.deleteBranch(projectState.projectId!, branch.id);
-
-      console.log(`Deleted branch "${deleteName}"`);
+      const { runBranchDelete, promptConfirm } = await import('./commands/branchDeleteCommand');
+      await runBranchDelete(
+        {
+          projectId: projectState.projectId!,
+          activeBranch: projectState.activeBranch,
+          checkoutHint: 'capy',
+          emphasize: B,
+          listBranches: (projectId) => serviceClient.listBranches(projectId),
+          deleteBranch: (projectId, branchId) => serviceClient.deleteBranch(projectId, branchId),
+          confirm: promptConfirm,
+        },
+        options.D,
+        deleteOpts,
+      );
       return;
     }
 
@@ -859,7 +854,7 @@ program
     await cmd.execute({ json: options.json });
   });
 
-program
+const projectsCmd = program
   .command('projects')
   .description('List projects in the active organization and their branches')
   .option('--deleted', 'also list deleted projects, marked as deleted, with the date (owners and admins only)') // COPY-FLAG
@@ -870,6 +865,18 @@ program
     const cmd = new ProjectsCommand();
     // The program-level `--dry-run`, wherever it was typed: the screen's edit, deploy and delete only plan.
     await cmd.execute({ json: options.json, deleted: options.deleted === true, dryRun: command.optsWithGlobals().dryRun === true });
+  });
+
+projectsCmd
+  .command('rename [new-name]')
+  .description('Rename the project of this folder, and update its keep.lock (owners only)') // COPY-FLAG
+  .option('--non-tty', 'same as --json: never ask, and answer in JSON (agents/CI)') // COPY-FLAG
+  .option('--json', 'emit machine-readable JSON instead of the human UI')
+  .action(async (name: string | undefined, _options: any, command: any) => {
+    assertNotLocalOnly('projects rename');
+    const { renameProjectCommand, renameProjectOptsFrom } = await import('./commands/projectRenameCommand');
+    // Read from the merged view: the parent `projects` takes `--json`, and the program takes `--dry-run`.
+    await renameProjectCommand(name, renameProjectOptsFrom(command));
   });
 
 const secretsCmd = program
@@ -1132,6 +1139,13 @@ program
     '--environment <names>',
     'dokploy/vercel discover: restrict the plan to these environment names, comma-separated (e.g. staging,preview); vercel import: which Vercel environment to read (default: the current branch\'s name)',
   )
+  .option(
+    '--import-environment <environment[=branch]>',
+    // COPY-FLAG: new option description, minimal/neutral wording.
+    'vercel discover: import only this environment, on a branch of the same name or on <branch> (repeatable; e.g. preview=staging)',
+    collectRepeatable,
+    [],
+  )
   .addOption(resolveOption())
   .addOption(conflictOption())
   .action(async (provider, options, command) => {
@@ -1163,6 +1177,7 @@ program
       yes: options.yes === true,
       overwrite: options.overwrite === true,
       environment: options.environment,
+      importEnvironments: options.importEnvironment,
       project: options.project,
       team: options.team,
       conflictFlags: rawConflictFlagsOf(command),
@@ -1200,6 +1215,16 @@ program
   .action(async () => {
     const { LockCommand } = await import('./commands/lockCommand');
     await new LockCommand().execute();
+  });
+
+// Hidden: git calls this as the keep.lock merge driver (`<cmd> %O %A %B`); it is not for people.
+program
+  .command('merge-keep-lock <ancestor> <ours> <theirs> [ourLabel] [baseLabel] [theirLabel] [markerSize]', { hidden: true })
+  // COPY-FLAG
+  .description('Merge keep.lock (git merge driver)')
+  .action(async (ancestor: string, ours: string, theirs: string, ourLabel?: string, baseLabel?: string, theirLabel?: string, markerSize?: string) => {
+    const { mergeKeepLockCommand } = await import('./commands/mergeKeepLockCommand');
+    process.exit(mergeKeepLockCommand(ancestor, ours, theirs, ourLabel, baseLabel, theirLabel, markerSize));
   });
 
 program.parse(process.argv);

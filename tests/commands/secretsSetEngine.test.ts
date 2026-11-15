@@ -89,7 +89,9 @@ describe('pushing locations', () => {
     const { service, env } = world();
     const result = await runSecretSet({ name: NAME, value: SENTINEL, locations: ALL, repos: [] }, env);
 
-    expect(pushedBranches(service)).toEqual(['pA/production', 'pA/staging', 'pB/production', 'pC/development']);
+    // One push per branch. The two pA branches go one after the other (production first); the order against other projects is not the point.
+    expect(pushedBranches(service).toSorted()).toEqual(['pA/production', 'pA/staging', 'pB/production', 'pC/development']);
+    expect(pushedBranches(service).indexOf('pA/production')).toBeLessThan(pushedBranches(service).indexOf('pA/staging'));
     expect(pushedValue(service, 'pA', 'production')).toBe(SENTINEL);
     expect(pushedValue(service, 'pC', 'development')).toBe(SENTINEL);
     expect(result.updated).toEqual([
@@ -105,15 +107,17 @@ describe('pushing locations', () => {
 
   test('only this variable changes: the other variable line is carried over byte for byte and its keep entry is untouched', async () => {
     const { service, env } = world();
+    // What the service held BEFORE the push (a read after it answers what was pushed).
+    const heldBefore = await service.getDecryptData('pA', 'staging');
     await runSecretSet({ name: NAME, value: SENTINEL, locations: [loc('pA', 'staging')], repos: [] }, env);
 
     const [, keepJson, blob] = service.pushSecrets.mock.calls[0];
-    const before = String((await service.getDecryptData('pA', 'staging')).env_content).split('\n');
+    const before = String(heldBefore.env_content).split('\n');
     const after = String(blob).split('\n');
     expect(after[0]).toBe(before[0]); // OTHER_VAR line: identical ciphertext
     expect(after[1]).not.toBe(before[1]);
     const keep = JSON.parse(String(keepJson)) as KeepFile;
-    const beforeKeep = JSON.parse(String((await service.getDecryptData('pA', 'staging')).keep_file)) as KeepFile;
+    const beforeKeep = JSON.parse(String(heldBefore.keep_file)) as KeepFile;
     expect(keep.variables[OTHER_NAME]).toEqual(beforeKeep.variables[OTHER_NAME]);
     expect(keep.variables[NAME].find((e) => e.branch === 'staging')?.value_hash).not.toBe(
       beforeKeep.variables[NAME].find((e) => e.branch === 'staging')?.value_hash,

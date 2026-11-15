@@ -52,6 +52,8 @@ import {
   conflictRefusalFor,
   exitOnConflictRefusal,
   gateConflicts,
+  isConflictRefusal,
+  hasConflictFlags,
   parseConflictFlags,
   sourceRowsOf,
   type ConflictView,
@@ -96,6 +98,9 @@ export async function listOrgProjectsOrUnavailable(
 
 /** The menu's stand-in when the answers come from `--resolve` instead of a person. */
 const PROTOCOL_ACTION = 'protocol';
+
+/** What the menu's "Retrieve all pinned values" says when the pinned snapshot cannot be fetched. */
+const PINNED_FETCH_FAILED_MESSAGE = 'Could not fetch pinned values from remote.';
 
 /** What one pass of bare `capy`'s sync did. */
 export type SyncOutcome =
@@ -229,7 +234,27 @@ export class CapyCommand {
    */
   async runSync(): Promise<SyncOutcome> {
     const projectState = await this.detectOrRecoverProjectState();
-    return projectState === undefined ? 'up-to-date' : this.syncProject(projectState);
+    if (projectState === undefined) return 'up-to-date';
+    const named = this.branchNamedForUnrecordedFolder();
+    return named === undefined ? this.syncProject(projectState) : this.syncNamedBranch(projectState, named);
+  }
+
+  /**
+   * `syncProject` for a folder that had no record of a branch before this run and was given one by name
+   * (`options.branchHint`). If the run ends in an error before that branch's `.env` exists, the folder goes back to
+   * how it was found: the `.capy/branch` written for the name is cleared (`writeActiveBranch('')`, the one writer), so
+   * a branch the person cannot read (403) or could not fetch does not stay recorded and gate every later command.
+   * A `ConflictRefusal` is the protocol's stop for a decision, not a failure: the record stays for the rerun.
+   * A stop the person chose ("Continue working") is a return value, not an error, so it keeps the record too.
+   */
+  private async syncNamedBranch(projectState: ProjectState, named: string): Promise<SyncOutcome> {
+    try {
+      return await this.syncProject(projectState);
+    } catch (err) {
+      const leftBehind = this.projectManager.readActiveBranch() === named && !existsSync(this.projectManager.getEnvPath(this.options.envPath));
+      if (leftBehind && !isConflictRefusal(err)) this.projectManager.writeActiveBranch('');
+      throw err;
+    }
   }
 
   /**
@@ -294,6 +319,7 @@ export class CapyCommand {
     const selected = await selectBranchWithServer({
       listBranches: () => this.serviceClient.listBranches(projectState.projectId!),
       syncedBranches: syncedBranchNames(this.projectManager.readSyncState()),
+      preferred: this.branchNamedForUnrecordedFolder(),
       promptPick: async (branches, defaultName) => {
         // Off a terminal nobody can pick: the run ends with a code and the command that records the choice.
         if (this.protocol) {
@@ -320,6 +346,20 @@ export class CapyCommand {
     });
     this.projectManager.writeActiveBranch(selected);
     return selected;
+  }
+
+  /**
+   * The branch `capy checkout <branch>` named (`options.branchHint`), when this folder has no EXPLICIT record of a
+   * branch: no `.env` file at the env path (so no header either) and no `.capy/branch`. What `deriveActiveBranch` only
+   * infers (a sole pinned branch in keep.lock, a sole synced branch) does not count: the person named a branch.
+   * Otherwise `undefined`: the branch is picked, or refused off a terminal, as it is for any other folder.
+   */
+  private branchNamedForUnrecordedFolder(): string | undefined {
+    const hint = this.options.branchHint;
+    if (hint === undefined) return undefined;
+    const recorded =
+      this.projectManager.readActiveBranch() !== null || existsSync(this.projectManager.getEnvPath(this.options.envPath));
+    return recorded ? undefined : hint;
   }
 
   /**
@@ -417,12 +457,28 @@ export class CapyCommand {
     console.log(`Created local project "${projectName}" (this machine only).\n`);
 
     const projectState = await this.projectManager.detectProjectState();
-    await this.syncProject(projectState);
+    const outcome = await this.syncProject(projectState);
+
+    // First setup is the one moment the tracked keep.lock is Capy's to create: when the sync pinned the .env, the
+    // file the user commits carries those pins. "up-to-date" (nothing to pin) and "stopped" leave the first write.
+    if (outcome === 'changed' && !this.options.dryRun) this.writePinnedKeepOnFirstSetup();
 
     // One additional TTY-only prompt at the very end of a successful init —
     // skipped under --dry-run (a dry run must never prompt or write), and a
     // no-op if AGENTS.md/CLAUDE.md already has the section.
     if (!this.options.dryRun) await offerAgentsSetupAfterInit();
+  }
+
+  /**
+   * Local-only first setup: copies the keep.lock the sync just wrote (the working copy, which `readKeepFile` prefers)
+   * into the tracked file and stages it. `syncProject` is shared by every command and leaves the tracked file alone;
+   * only this first-setup path writes it.
+   */
+  private writePinnedKeepOnFirstSetup(): void {
+    const pinned = this.safeReadKeep();
+    if (pinned === null) return;
+    this.fileManager.writeInitialKeepFile(pinned);
+    this.stageKeepLock();
   }
 
   /** First run in this directory. */
@@ -666,11 +722,7 @@ export class CapyCommand {
     console.log('> .gitignore updated (added .env, .capy/)');
 
     // Stage keep.lock in git so collaborators don't hit "untracked file" errors on pull
-    try {
-      execSync('git add keep.lock', { stdio: 'pipe' });
-    } catch {
-      // Not a git repo — fine
-    }
+    this.stageKeepLock();
 
     // Check if there's an existing .env file with variables to sync
     const localEnvPath = this.projectManager.getEnvPath(this.options.envPath);
@@ -720,6 +772,9 @@ export class CapyCommand {
 
         if (syncResult.ok) {
           syncSpinner.succeed(`keep.lock created (pinned to ${initBranch}, ${localVarCount} secrets)`);
+
+          // The pins were written after the first staging above — stage again so the staged copy carries them
+          this.stageKeepLock();
 
           // Install git hooks
           this.installGitHooks();
@@ -934,7 +989,7 @@ export class CapyCommand {
 
       try {
         // Prefer the server's copy — it carries server-assigned changed_at
-        this.fileManager.writeKeepFile(
+        this.fileManager.writeInitialKeepFile(
           SyncEngine.adoptServerKeep(initPushResult.keep_file, updatedKeep, initBranch),
         );
 
@@ -1097,6 +1152,15 @@ export class CapyCommand {
     this.installGitHooks();
   }
 
+  /** Stages keep.lock in git. Silent when this is not a git repository. */
+  private stageKeepLock(): void {
+    try {
+      execSync('git add keep.lock', { stdio: 'pipe' });
+    } catch {
+      // Not a git repo — fine
+    }
+  }
+
   /**
    * Install git hooks (post-checkout, post-merge) — see ../git/syncHooks.
    * No pre-push hook.
@@ -1212,6 +1276,20 @@ export class CapyCommand {
 
     console.log(grey('\u2514' + '\u2500'.repeat(maxLen) + '\u2518'));
     console.log('');
+  }
+
+  /**
+   * Off a terminal (`--json`, `--non-tty`, an agent), whether this run retrieves the whole `.env` by itself: the file does
+   * not exist (the file's existence is the signal, never its text), keep.lock pins something for the branch to retrieve,
+   * nobody is answering rows with `--resolve`, there is no `--env-path`, and it is not a `--dry-run` (which changes nothing). A file that exists,
+   * even an empty one, is never retrieved this way: its differences are reported as always. At a terminal the menu is unchanged.
+   */
+  private retrievesMissingEnvByProtocol(pinnedCount: number, hasKeep: boolean): boolean {
+    if (!this.protocol || this.options.dryRun === true || !hasKeep || pinnedCount === 0) return false;
+    // `--env-path` reads another file than the one the retrieve writes (the default `.env`): that case is left as it was.
+    if (this.options.envPath !== undefined) return false;
+    if (hasConflictFlags(parseConflictFlags(this.options.conflictFlags ?? {}))) return false;
+    return !existsSync(this.projectManager.getEnvPath());
   }
 
   private async syncProject(projectState: ProjectState, retried: boolean = false): Promise<SyncOutcome> {
@@ -1732,8 +1810,12 @@ export class CapyCommand {
     const menuChoices: MenuChoice[] = [...stateMenuChoices, { name: 'Continue working', value: 'skip' }].map((c) =>
       localMode && c.value === 'commit_local' ? { ...c, name: 'Commit all local values' } : c,
     );
+    // Off a terminal, a folder with no `.env` file at all has no local copy: nothing here can be read as deleted, so
+    // the whole file is retrieved in one run, exactly as the menu's "Retrieve all pinned values" does it.
+    const retrievesMissingEnv = this.retrievesMissingEnvByProtocol(Object.keys(pinned).length, currentKeep !== null);
+    const protocolAction = retrievesMissingEnv ? 'retrieve_pinned' : PROTOCOL_ACTION;
     const { action } = this.protocol
-      ? { action: PROTOCOL_ACTION }
+      ? { action: protocolAction }
       : await inquirer.prompt([{
           type: 'list',
           name: 'action',
@@ -1767,6 +1849,8 @@ export class CapyCommand {
                 keepHash,
               );
           if (!blob?.env_file) {
+            // No `.env` to begin with and no snapshot to fill it from: write nothing, end with a code.
+            if (retrievesMissingEnv) throw new CapyError(PINNED_FETCH_FAILED_MESSAGE, ERROR_CODES.SNAPSHOT_NOT_FOUND);
             return { kind: 'proceed', finalEnv: { ...localPlaintext } };
           }
           const encrypted = this.fileManager.parseEnvContent(blob.env_file);
@@ -1780,11 +1864,21 @@ export class CapyCommand {
               }
             }),
           );
+          // No `.env` to begin with: unless the names read from the snapshot are EXACTLY the pinned names (`pinned` leaves
+          // placeholders out, and a snapshot holds no line for one), write nothing (and keep.lock stays as it is), end with a
+          // code. A name missing would lose its pin; a name keep.lock does not pin would gain one.
+          const pinnedNames = Object.keys(pinned);
+          const sameNames = pinnedNames.length === Object.keys(fetchedEnv).length && pinnedNames.every((name) => Object.hasOwn(fetchedEnv, name));
+          if (retrievesMissingEnv && !sameNames) {
+            throw new CapyError(PINNED_FETCH_FAILED_MESSAGE, ERROR_CODES.DECRYPT_KEY_MISMATCH);
+          }
           return { kind: 'proceed', finalEnv: fetchedEnv };
         } catch (err) {
           this.debugError('retrieve_pinned fetch failed', err);
           if (isProjectDeletedError(err)) throw err;
-          console.log('Could not fetch pinned values from remote.');
+          // No `.env` to begin with: nothing is written and the run ends with the failure's own code.
+          if (retrievesMissingEnv) throw err instanceof CapyError ? err : new CapyError(PINNED_FETCH_FAILED_MESSAGE, ERROR_CODES.SERVICE_ERROR);
+          console.log(PINNED_FETCH_FAILED_MESSAGE);
           return { kind: 'abort' };
         }
       }

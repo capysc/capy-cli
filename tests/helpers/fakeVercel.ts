@@ -43,6 +43,12 @@ export interface FakeVercelData {
   pageSize?: number;
   /** Set `pagination.next` on the env list, to exercise the truncation warning. */
   envListNext?: number;
+  /** HTTP status for the whole team list (`GET /v2/teams`), e.g. 403 for a token scoped to one team. */
+  teamsStatus?: number;
+  /** HTTP status for one team (`GET /v2/teams/{idOrSlug}`), keyed by the id or slug asked for. */
+  teamStatus?: Readonly<Record<string, number>>;
+  /** HTTP status for a project lookup (`GET /v9/projects/{idOrName}`), keyed by the id or name asked for. */
+  projectStatus?: Readonly<Record<string, number>>;
 }
 
 export interface FakeCall {
@@ -75,9 +81,23 @@ export function fakeVercelFetch(data: FakeVercelData): VercelFetchLike {
   return (async (url: string, init: { method: string; headers: Record<string, string> }) => {
     if (init.method !== 'GET') throw new Error(`fakeVercel: unexpected non-GET ${init.method} ${url}`);
     const u = new URL(url);
-    const teamId = u.searchParams.get('teamId') ?? undefined;
+    const slug = u.searchParams.get('slug') ?? undefined;
+    // Vercel's `slug` query scopes a request like `teamId` does; an unknown slug scopes to nothing.
+    const slugScope = slug === undefined ? undefined : (data.teams ?? []).find((t) => t.slug === slug)?.id ?? `unknown-slug:${slug}`;
+    const teamId = u.searchParams.get('teamId') ?? slugScope;
     const path = u.pathname;
 
+    if (path === '/v2/teams' && data.teamsStatus !== undefined) {
+      return json({ error: { code: 'forbidden', message: 'forced' } }, data.teamsStatus);
+    }
+    const teamRoute = /^\/v2\/teams\/([^/]+)$/.exec(path);
+    if (teamRoute) {
+      const idOrSlug = decodeURIComponent(teamRoute[1]);
+      const forced = data.teamStatus?.[idOrSlug];
+      if (forced !== undefined) return json({ error: { code: 'forced', message: 'forced' } }, forced);
+      const hit = (data.teams ?? []).find((t) => t.id === idOrSlug || t.slug === idOrSlug);
+      return hit ? json(hit) : json({ error: { code: 'not_found', message: 'nope' } }, 404);
+    }
     if (path === '/v2/teams') {
       return json({ teams: data.teams ?? [], pagination: { count: (data.teams ?? []).length, next: null, prev: null } });
     }
@@ -92,8 +112,13 @@ export function fakeVercelFetch(data: FakeVercelData): VercelFetchLike {
     const projectRoute = /^\/v9\/projects\/([^/]+)$/.exec(path);
     if (projectRoute) {
       const idOrName = decodeURIComponent(projectRoute[1]);
+      const forced = data.projectStatus?.[idOrName];
+      if (forced !== undefined) return json({ error: { code: 'forced', message: 'forced' } }, forced);
       const hit = (data.projects[teamId ?? 'personal'] ?? []).find((p) => p.id === idOrName || p.name === idOrName);
-      return hit ? json(hit) : json({ error: { code: 'not_found', message: 'nope' } }, 404);
+      // Vercel always says which account owns a project; the fake adds it only for a slug-scoped
+      // lookup (the one reader of `accountId`), so older exact-shape assertions keep their shape.
+      const owned = hit && slug !== undefined && teamId !== undefined ? { ...hit, accountId: teamId } : hit;
+      return owned ? json(owned) : json({ error: { code: 'not_found', message: 'nope' } }, 404);
     }
     const customRoute = /^\/v9\/projects\/([^/]+)\/custom-environments$/.exec(path);
     if (customRoute) {

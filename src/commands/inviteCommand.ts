@@ -180,8 +180,8 @@ export async function wrapAndCreateInvite(args: {
   projectId: string | undefined;
   masterKey: Buffer;
   notAfter: number;
-  serviceClient: InviteKeyOps & { createInvite: (orgId: string, email: string, role?: string, projectId?: string) => Promise<unknown> };
-}): Promise<string> {
+  serviceClient: InviteKeyOps & { createInvite: (orgId: string, email: string, role?: string, projectId?: string) => Promise<{ email_sent?: boolean }> };
+}): Promise<{ redeemCode: string; emailSent: boolean }> {
   const { orgId, email, role, projectId, masterKey, notAfter, serviceClient } = args;
   const inviteToken = generateInviteToken();
   const innerBlob = innerWrap(masterKey, inviteToken, orgId, email);
@@ -190,8 +190,12 @@ export async function wrapAndCreateInvite(args: {
     Buffer.from(innerBlob, 'base64').toString('base64'),
     notAfter,
   );
-  await serviceClient.createInvite(orgId, email, role, projectId);
-  return buildRedeemCode(inviteToken, outerBlob, orgId, notAfter);
+  const inviteResult = await serviceClient.createInvite(orgId, email, role, projectId);
+  // The service emails the invitee a heads-up. That email never carries
+  // the redeem code — the service must not see it — so the command is
+  // still the inviter's to send. Absent on older services.
+  const emailSent = inviteResult.email_sent === true;
+  return { redeemCode: buildRedeemCode(inviteToken, outerBlob, orgId, notAfter), emailSent };
 }
 
 /** The default invite lifetime's expiry (ms epoch): `CAPY_INVITE_TTL_SECONDS`, else the default. */
@@ -281,7 +285,7 @@ export class InviteCommand {
 
       // 1–4. Wrap the key for the invitee and create the invite record.
       const notAfter = resolveNotAfter(opts);
-      const redeemCode = await wrapAndCreateInvite({ orgId, email, role, projectId, masterKey, notAfter, serviceClient });
+      const { redeemCode, emailSent } = await wrapAndCreateInvite({ orgId, email, role, projectId, masterKey, notAfter, serviceClient });
 
       // 4b. Fan out any additional project assignments picked in the checkbox.
       // Abort noisily only if every extra assignment fails.
@@ -333,6 +337,7 @@ export class InviteCommand {
           projectIds: grantedProjectIds,
           redeemCode,
           redeemCommand,
+          emailSent,
           expiresAt: new Date(notAfter).toISOString(),
           projectAssignmentFailures: failures,
           stops: finalStops,
@@ -348,6 +353,10 @@ export class InviteCommand {
       }
       console.log('');
 
+      if (emailSent) {
+        console.log(`  \x1b[90mWe emailed ${email} a heads-up. The command is still yours to send.\x1b[0m`);
+        console.log('');
+      }
       console.log('  Send them this command:');
       console.log('');
       console.log(`    ${B('capy')} redeem ${redeemCode}`);

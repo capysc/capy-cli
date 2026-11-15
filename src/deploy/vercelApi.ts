@@ -81,6 +81,8 @@ export interface VercelProject {
   /** `null`/absent/'' all mean the repo root. */
   rootDirectory: string | null;
   link: VercelGitLink | null;
+  /** The team (or personal account) that owns the project. Read when a run knows the team only by its slug. */
+  accountId?: string;
 }
 
 /** How a custom environment picks the git branches it deploys: Vercel's branch matcher. A type this client does not know is dropped, never guessed at. */
@@ -149,6 +151,7 @@ export type VercelErrorCode =
  */
 export type VercelResource =
   | { readonly kind: 'teams' }
+  | { readonly kind: 'team'; readonly team: string }
   | { readonly kind: 'projects' }
   | { readonly kind: 'project'; readonly project: string }
   | { readonly kind: 'project_envs'; readonly project: string }
@@ -191,6 +194,7 @@ export interface MapVercelApiErrorOptions {
 function deniedResource(resource: VercelResource | undefined): string {
   if (!resource) return 'the request';
   if (resource.kind === 'teams') return 'the team list';
+  if (resource.kind === 'team') return `team ${resource.team}`;
   if (resource.kind === 'projects') return 'the project list';
   if (resource.kind === 'project') return `project ${resource.project}`;
   if (resource.kind === 'project_deployments') return `the deployments of project ${resource.project}`;
@@ -287,8 +291,11 @@ export interface VercelEnvList {
 /** The read-only surface the connector needs. No method here can write. */
 export interface VercelClient {
   listTeams(): Promise<readonly VercelTeam[]>;
+  /** One team by its id or slug — what a run that names its team asks for, instead of every team the token sees. */
+  getTeam(idOrSlug: string): Promise<VercelTeam>;
   listProjects(teamId?: string): Promise<readonly VercelProject[]>;
-  getProject(idOrName: string, teamId?: string): Promise<VercelProject>;
+  /** `teamSlug` scopes the request by slug (Vercel's `slug` query) when no `teamId` is known. */
+  getProject(idOrName: string, teamId?: string, teamSlug?: string): Promise<VercelProject>;
   listCustomEnvironments(projectId: string, teamId?: string): Promise<readonly VercelCustomEnvironment[]>;
   listEnvs(projectId: string, teamId?: string): Promise<VercelEnvList>;
   /** The project's most recent preview deployments (one page, newest first, at most `limit`). */
@@ -428,6 +435,15 @@ export function createVercelClient(token: string, options: VercelClientOptions =
       return collect(undefined, [], 1);
     },
 
+    async getTeam(idOrSlug) {
+      const parsed = parseTeam(await get(`/v2/teams/${enc(idOrSlug)}`, { kind: 'team', team: idOrSlug }));
+      if (!parsed) {
+        // COPY-FLAG: new user-facing string, minimal/neutral wording.
+        throw new VercelApiError('bad_response', null, 'Vercel returned a team this client cannot read.');
+      }
+      return parsed;
+    },
+
     async listProjects(teamId) {
       const collect = async (from: string | undefined, seen: readonly string[], page: number): Promise<readonly VercelProject[]> => {
         const body = await get('/v10/projects', { kind: 'projects' }, { limit: PAGE_LIMIT, from, teamId });
@@ -447,8 +463,9 @@ export function createVercelClient(token: string, options: VercelClientOptions =
       return collect(undefined, [], 1);
     },
 
-    async getProject(idOrName, teamId) {
-      const parsed = parseProject(await get(`/v9/projects/${enc(idOrName)}`, { kind: 'project', project: idOrName }, { teamId }));
+    async getProject(idOrName, teamId, teamSlug) {
+      const scope = { teamId, slug: teamId === undefined ? teamSlug : undefined };
+      const parsed = parseProject(await get(`/v9/projects/${enc(idOrName)}`, { kind: 'project', project: idOrName }, scope));
       if (!parsed) {
         // COPY-FLAG: new user-facing string, minimal/neutral wording.
         throw new VercelApiError('bad_response', null, 'Vercel returned a project this client cannot read.');
@@ -531,7 +548,8 @@ function parseProject(raw: unknown): VercelProject | null {
   const id = nonEmptyString(rec?.id);
   const name = nonEmptyString(rec?.name);
   if (!rec || !id || !name) return null;
-  return { id, name, rootDirectory: nonEmptyString(rec.rootDirectory) ?? null, link: parseGitLink(rec.link) };
+  const accountId = nonEmptyString(rec.accountId);
+  return { id, name, rootDirectory: nonEmptyString(rec.rootDirectory) ?? null, link: parseGitLink(rec.link), ...(accountId ? { accountId } : {}) };
 }
 
 function parseTargets(raw: unknown): readonly string[] {
@@ -694,7 +712,74 @@ export function describeVercelTokenProblem(code: string, tokenEnv: string): { re
 
 export type ResolveTeamResult =
   | { ok: true; teamId: string | undefined; teamSlug?: string }
-  | { ok: false; code: string; message: string };
+  | { ok: false; code: string; message: string; link?: { label: string; url: string }; remedy?: string };
+
+/** Vercel's own team id format (`team_…`), as opposed to a slug. A machine id, never prose. */
+export const isVercelTeamId = (value: string): boolean => value.startsWith('team_');
+
+/** The code of a failed call, read off the typed error; `undefined` for anything else. */
+const vercelErrorCodeOf = (err: unknown): VercelErrorCode | undefined => (err instanceof VercelApiError ? err.code : undefined);
+
+/**
+ * The team a run named with `--team <slug|id>`, looked up on its own
+ * (`GET /v2/teams/{idOrSlug}`) rather than by listing every team the token
+ * sees: a token scoped to one team, or below it, may read its team or its
+ * projects without being allowed the whole list.
+ *
+ * When Vercel refuses even that one team (403): a team id is used as given
+ * when no project is named (discovery); when the run also named its
+ * project, the project is asked for under the team instead — by id, or by
+ * slug with Vercel's `slug` query — and the team is the account that owns it.
+ * The project routes then do the authorizing, so a genuine denial is reported
+ * for the project, not the team. A 404 for the team is `VERCEL_TEAM_NOT_FOUND`;
+ * every other failure keeps its own code.
+ */
+export async function resolveNamedTeam(
+  client: Pick<VercelClient, 'getTeam' | 'getProject'>,
+  requested: string,
+  project: string | undefined,
+): Promise<ResolveTeamResult> {
+  const want = requested.trim();
+  try {
+    const team = await client.getTeam(want);
+    return { ok: true, teamId: team.id, teamSlug: team.slug };
+  } catch (err) {
+    const code = vercelErrorCodeOf(err);
+    if (code === 'not_found') {
+      // COPY-FLAG: new user-facing string, minimal/neutral wording.
+      return { ok: false, code: ERROR_CODES.VERCEL_TEAM_NOT_FOUND, message: `No Vercel team "${want}".` };
+    }
+    if (code !== 'forbidden') return { ok: false, ...mapVercelApiError(err) };
+    if (project) return teamFromProject(client, want, project);
+    // No project to ask for (discovery): an id needs no lookup — the project list then authorizes.
+    return isVercelTeamId(want) ? { ok: true, teamId: want } : { ok: false, ...mapVercelApiError(err) };
+  }
+}
+
+/** The account that owns `project`, asked for under the team the run named. See `resolveNamedTeam`. */
+async function teamFromProject(
+  client: Pick<VercelClient, 'getProject'>,
+  team: string,
+  project: string,
+): Promise<ResolveTeamResult> {
+  const byId = isVercelTeamId(team);
+  try {
+    const found = await client.getProject(project, byId ? team : undefined, byId ? undefined : team);
+    // Named by id, the team is already known; the lookup only proves the project is reachable under it.
+    if (byId) return { ok: true, teamId: team };
+    if (!found.accountId) {
+      // COPY-FLAG: new user-facing string, minimal/neutral wording.
+      return { ok: false, code: ERROR_CODES.VERCEL_API_ERROR, message: `Vercel did not say which team owns project ${project}.` };
+    }
+    return { ok: true, teamId: found.accountId, teamSlug: team };
+  } catch (err) {
+    if (vercelErrorCodeOf(err) === 'not_found') {
+      // COPY-FLAG: new user-facing string, minimal/neutral wording.
+      return { ok: false, code: ERROR_CODES.VERCEL_PROJECT_NOT_FOUND, message: `No Vercel project ${project} in team ${team}.` };
+    }
+    return { ok: false, ...mapVercelApiError(err) };
+  }
+}
 
 /**
  * Which team scope to read: `--team <slug|id>` when given; otherwise the

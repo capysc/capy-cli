@@ -121,13 +121,20 @@ describe('one unlock per run', () => {
       await coBehaviour?.();
       return { plaintext: await kms.coDecrypt(o, ct) };
     });
-    const getDecryptData = mock(async (projectId: string, branch?: string) => ({
-      env_content: `${world.NAME}=capy:${(await import('../../src/crypto/resourceId')).deriveResourceId(branch ?? '', world.NAME)}:${enc.Encryptor.encrypt(world.OLD_VALUE, keyOf(projectId))}`,
-      decrypt_key: '',
-      expires_at: '',
-      keep_file: JSON.stringify(world.serverKeep(projectId as import('../helpers/secretsWorld').ProjectId, locs)),
-    }));
     const pushSecrets = mock((...a: Parameters<typeof inner.pushSecrets>) => inner.pushSecrets(...a));
+    // Like the real service, a read answers what the last push of that branch sent (the stored value until one is made).
+    const getDecryptData = mock(async (projectId: string, branch?: string) => {
+      const last = pushSecrets.mock.calls.filter((c) => c[0] === projectId && c[3] === branch).at(-1);
+      return {
+        env_content:
+          last === undefined
+            ? `${world.NAME}=capy:${(await import('../../src/crypto/resourceId')).deriveResourceId(branch ?? '', world.NAME)}:${enc.Encryptor.encrypt(world.OLD_VALUE, keyOf(projectId))}`
+            : String(last[2]),
+        decrypt_key: '',
+        expires_at: '',
+        keep_file: last === undefined ? JSON.stringify(world.serverKeep(projectId as import('../helpers/secretsWorld').ProjectId, locs)) : String(last[1]),
+      };
+    });
     const client = { coDecrypt: co, wrapOuterLayer: async (o: string, pt: string) => ({ ciphertext: await kms.wrapOuterLayer(o, pt) }), getDecryptData, pushSecrets };
     return { client: client as unknown as InstanceType<Svc['ServiceClient']>, co, getDecryptData, pushSecrets, keyOf };
   }

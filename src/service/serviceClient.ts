@@ -57,6 +57,8 @@ const SERVER_CODES = new Set<string>([
   ERROR_CODES.PROJECT_DELETED,
   ERROR_CODES.PROJECT_HAS_LIVE_DEPLOY_TOKENS,
   ERROR_CODES.PROJECT_NOT_DELETED,
+  // A save that kept conflicting with other writes to the same project's keep: HTTP 409. Nothing was saved.
+  ERROR_CODES.KEEP_WRITE_CONFLICT,
 ]);
 
 /**
@@ -127,6 +129,14 @@ export interface LiveDeployTokenInfo {
   deploy_id: string;
   label: string | null;
   created_at: string;
+}
+
+/** `PATCH /orgs/:orgId/projects/:projectId` answered 200. `previous_name` is absent when nothing changed. */
+export interface RenameProjectResponse {
+  ok: true;
+  changed: boolean;
+  project: { id: string; name: string };
+  previous_name?: string;
 }
 
 /** CAP-729: `DELETE /orgs/:orgId/projects/:projectId` answered 200. */
@@ -778,6 +788,11 @@ export class ServiceClient {
     return this.request('POST', `/orgs/${orgId}/projects/${encodeURIComponent(projectId)}/restore`, {});
   }
 
+  /** Rename a project (org owner only). `changed` is false when the project already had that name. */
+  async renameProject(orgId: string, projectId: string, name: string): Promise<RenameProjectResponse> {
+    return this.request('PATCH', `/orgs/${orgId}/projects/${encodeURIComponent(projectId)}`, { name });
+  }
+
   async createBranch(projectId: string, name: string, isProtected: boolean = false): Promise<Branch> {
     return this.request<Branch>(
       'POST', `/projects/${projectId}/branches`,
@@ -833,7 +848,7 @@ export class ServiceClient {
     }
   }
 
-  async createInvite(orgId: string, email: string, role?: string, projectId?: string): Promise<{ invite_id: string; org_id: string; email: string; role: string; user_id: string; project_id: string | null }> {
+  async createInvite(orgId: string, email: string, role?: string, projectId?: string): Promise<{ invite_id: string; org_id: string; email: string; role: string; user_id: string; project_id: string | null; email_sent?: boolean }> {
     return this.request('POST', `/orgs/${orgId}/invite`, { email, role, project_id: projectId });
   }
 

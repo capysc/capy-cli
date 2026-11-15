@@ -51,6 +51,7 @@ import type { Sleep } from '../utils/backoff';
 import { KeepLockFileSpec, codeForApiFailure, newPrBranchName, openKeepLockPullRequest, readKeepLockBases } from '../commands/keepLockPr';
 import { GITHUB_HOST, KeyResolver, RepoTarget, keepLockPathOf, realGithub, repoKey, repoLabel, resolveBases } from '../commands/secretsSet';
 import { createRunKeyResolver } from '../crypto/keyResolver';
+import { followGitLinks, placeOnBase } from '../commands/repoLinksFollowGit';
 import { deployJsonPathOf } from '../commands/deployDiscover/facts';
 
 // ---------------------------------------------------------------------------
@@ -76,6 +77,10 @@ export const SKIP_CODES = {
   NOTHING_TO_DEPLOY: 'NOTHING_TO_DEPLOY',
   /** Every picked value on the service was changed outside Capy and the caller chose to keep the service's (CAP-717). */
   KEPT_ON_PLATFORM: 'KEPT_ON_PLATFORM',
+  /** The PR base carries the project's keep.lock in other stored folders but not at the planned one, and nothing says which to write: nothing is written. */
+  KEEP_LOCK_NOT_ON_BASE: ERROR_CODES.KEEP_LOCK_NOT_ON_BASE,
+  /** Every folder the project is stored at holds another project's keep.lock on the default branch: nothing is read or written. */
+  KEEP_LOCK_PROJECT_MISMATCH: ERROR_CODES.KEEP_LOCK_PROJECT_MISMATCH,
 } as const;
 export type SkipCode = (typeof SKIP_CODES)[keyof typeof SKIP_CODES];
 
@@ -122,6 +127,11 @@ export interface BatchTarget {
   /** The PR base: the target's `gitBaseBranch`, else the repo's default branch. */
   readonly base: string;
   readonly config: TargetConfig;
+  /**
+   * The project's OTHER stored folders in this repo, present only when it has some. A PR base that does not carry
+   * the keep.lock at `path` (a move that has not reached that branch) is written at the one of these that it does.
+   */
+  readonly alt_paths?: readonly string[];
   /**
    * The selected names this target ships: the only variables the deploy delivers and records (CAP-715).
    * Every other variable of the target, and every other line Capy manages in its Dokploy block, is left as it is.
@@ -180,6 +190,9 @@ function classifyLocation(
   loc: DeployLocation,
   reads: readonly LinkRead[],
   names: readonly string[],
+  othersOf: (link: OrgRepoLink) => readonly string[],
+  /** The project has no folder to read: every stored one holds another project's keep.lock. */
+  mismatched: boolean,
 ): { readonly targets: readonly BatchTarget[]; readonly skipped: readonly PlanSkipped[] } {
   const skip = (target: string | null, provider: string | null, code: SkipCode): PlanSkipped => ({
     project: loc.project_name,
@@ -188,6 +201,7 @@ function classifyLocation(
     provider,
     code,
   });
+  if (mismatched) return { targets: [], skipped: [skip(null, null, SKIP_CODES.KEEP_LOCK_PROJECT_MISMATCH)] };
   const readable = reads.flatMap((r) => (r.read.ok ? [{ link: r.link, targets: r.read.targets, base: r.read.base }] : []));
   // A location whose deploy.json could not be read is not decided: it is in `read_failed`, not here.
   if (readable.length < reads.length) return { targets: [], skipped: [] };
@@ -215,6 +229,7 @@ function classifyLocation(
       path: link.path,
       base: config.gitBaseBranch ?? base,
       config,
+      ...(othersOf(link).length === 0 ? {} : { alt_paths: othersOf(link) }),
       picked: config.vars.filter((v) => names.includes(v)),
     }));
   const skipped = [...notOnDefault, ...foundSkips];
@@ -236,15 +251,25 @@ export async function planBatchDeploy(
   links: readonly OrgRepoLink[],
   signal?: AbortSignal,
 ): Promise<BatchPlan> {
-  const linksOf = (loc: DeployLocation): readonly OrgRepoLink[] =>
+  const storedOf = (loc: DeployLocation): readonly OrgRepoLink[] =>
     links.filter((l) => l.project_id === loc.project_id && l.host.toLowerCase() === GITHUB_HOST);
-  const used = req.locations.flatMap(linksOf);
-  const repos = unique(used.map((l) => repoKey(l))).map((k) => refOf(used.find((l) => repoKey(l) === k) as OrgRepoLink));
+  const stored = req.locations.flatMap(storedOf);
+  const repos = unique(stored.map((l) => repoKey(l))).map((k) => refOf(stored.find((l) => repoKey(l) === k) as OrgRepoLink));
   if (repos.length > 0 && github === undefined) {
     return { ...EMPTY_PLAN, read_failed: [{ repo: GITHUB_HOST, code: ERROR_CODES.KEEP_PR_GH_UNAVAILABLE }] };
   }
 
   const bases = await resolveBases(github, repos, signal);
+  // A project lives where the default branch has its keep.lock: a stored folder that branch does not carry (while another does),
+  // or that holds another project's keep.lock, is not looked at for a deploy.json, and so yields no target. The rows stay.
+  const followed = await followGitLinks(github, stored, bases, signal);
+  const live = new Set(followed.links);
+  // Projects left with nothing to write to: their stored folders hold another project's keep.lock on the default branch.
+  const mismatched = new Set(followed.blocked.map((l) => l.project_id));
+  const linksOf = (loc: DeployLocation): readonly OrgRepoLink[] => storedOf(loc).filter((l) => live.has(l));
+  const othersOf = (link: OrgRepoLink): readonly string[] =>
+    [...new Set(stored.filter((o) => o.project_id === link.project_id && repoKey(o) === repoKey(link) && o.path !== link.path).map((o) => o.path))];
+  const used = req.locations.flatMap(linksOf);
   const fileKeys = unique(used.map((l) => `${repoKey(l)}\u0000${l.path}`));
   const files = await runPool({
     items: fileKeys,
@@ -267,6 +292,8 @@ export async function planBatchDeploy(
       loc,
       linksOf(loc).map((link): LinkRead => ({ link, read: readByKey[`${repoKey(link)}\u0000${link.path}`] })),
       req.names,
+      othersOf,
+      mismatched.has(loc.project_id) && linksOf(loc).length === 0,
     ),
   );
   const allTargets = perLocation.flatMap((p) => p.targets);
@@ -599,6 +626,22 @@ async function passOverTarget(
       read.rate,
     );
   }
+  // The PR base is judged by its own files: where it does not carry this project's keep.lock at the planned folder (a move that has
+  // not reached that branch), the write goes to the project's other stored folder that it does carry, or nowhere.
+  const placement = await placeOnBase(
+    github,
+    item.base,
+    { project_id: item.project_id, host: GITHUB_HOST, owner: repo.owner, name: repo.name, path: item.path },
+    item.alt_paths ?? [],
+  );
+  // An other stored folder could not be read: what this branch holds is unknown, so nothing is pushed or created (retriable).
+  if (placement.kind === 'unreadable') return failedPush(item, ERROR_CODES.KEEP_PR_READ_FAILED, 'github', read.rate);
+  if (placement.kind === 'skipped') return withRate<PushOutcome>({ kind: 'skipped', item, code: SKIP_CODES.KEEP_LOCK_NOT_ON_BASE }, read.rate);
+  if (placement.kind === 'moved') {
+    // The new folder is judged as it stands: no other folder is looked at again.
+    return passOverTarget(env, keys, apiKeys, { ...item, path: placement.path, alt_paths: [] }, pass);
+  }
+  // Another project's keep.lock at the folder is refused here (`KEEP_LOCK_PROJECT_MISMATCH`), before anything is pushed.
   const base = await readKeepLockBases(github, repo, item.base, [{ path: keepLockPathOf(item.path), records: [], localKeep: scaffold }]);
   if (!base.ok) return failedPush(item, base.code, 'github', read.rate);
   if (!deliveryWorthGating(base.bases[0].keep, item.branch, delivery.provider, config.name, undefined, values)) {
