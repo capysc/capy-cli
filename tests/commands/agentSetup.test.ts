@@ -549,6 +549,32 @@ describe('a marker and answers that differ from it: refused, nothing changed', (
     expectNoLeak(unknown);
   });
 
+  test('--org naming another organization is refused even when it is the only setup flag, or comes with only --name', async () => {
+    await strandedSetup({ orgs: [ORG, OTHER_ORG] });
+    const calls = fakeWorld({ orgs: [ORG, OTHER_ORG] });
+    const sync = spyOn(CapyCommand.prototype as unknown as { syncProject: () => Promise<string> }, 'syncProject').mockResolvedValue('up-to-date');
+    const alone = await run({ org: 'Other' });
+    expect(alone.exitCode).toBe(1);
+    expect(alone.json).toMatchObject({ ok: false, code: 'SETUP_PENDING_MISMATCH', differs: ['--org'], project: { id: 'proj-new', name: 'demo' } });
+    const withName = await run({ org: 'Other', name: 'demo' });
+    expect(withName.json).toMatchObject({ ok: false, code: 'SETUP_PENDING_MISMATCH', differs: ['--org'] });
+    expect(sync).not.toHaveBeenCalled();
+    expectStranded(calls);
+    expectNoLeak(alone);
+    expectNoLeak(withName);
+  });
+
+  test('the right --org alone is not a resume: the folder syncs as before, the flag is reported as not applied, the marker stays', async () => {
+    await strandedSetup({ orgs: [ORG, OTHER_ORG] });
+    const calls = fakeWorld({ orgs: [ORG, OTHER_ORG] });
+    const sync = spyOn(CapyCommand.prototype as unknown as { syncProject: () => Promise<string> }, 'syncProject').mockResolvedValue('up-to-date');
+    const out = await run({ org: 'Acme' });
+    expect(out.exitCode).toBeUndefined();
+    expect(sync).toHaveBeenCalledTimes(1);
+    expect(out.json).toEqual({ ok: true, ignored_flags: ['--org'] });
+    expectStranded(calls);
+  });
+
   test('the same organization, by name or by id, is the resume', async () => {
     await strandedSetup({ orgs: [ORG, OTHER_ORG] });
     const byName = fakeWorld({ orgs: [ORG, OTHER_ORG] });

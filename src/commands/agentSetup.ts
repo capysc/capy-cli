@@ -561,6 +561,9 @@ export async function agentResume(deps: AgentSetupDeps, setup: SetupOptions, sta
 
   const differs = pendingDisagreements(setup, pending, { projectId: pending.project_id, projectName });
   if (differs.length > 0) return pendingMismatch(pending, projectName, differs);
+  // A typed --org is checked whatever else was typed: another organization is a refusal, never a sync.
+  const orgDiffers = await orgMismatch(deps, setup, pending, projectName);
+  if (orgDiffers !== undefined) return orgDiffers;
   const complete = setup.name === projectName && setup.branch !== undefined && setup.protectedAnswer !== undefined;
   if (!complete) return syncStep(typed);
 
@@ -576,13 +579,20 @@ function orgAgrees(typed: string | undefined, orgs: readonly OrgRef[], pending: 
   return choice.kind === 'picked' && choice.org.id === pending.org_id;
 }
 
+/** With `--org` typed: the refusal when it does not name the pending setup's organization (the session resolves it). Nothing is written. */
+async function orgMismatch(deps: AgentSetupDeps, setup: SetupOptions, pending: PendingSetup, projectName: string): Promise<AgentOutcome | undefined> {
+  if (setup.org === undefined) return undefined;
+  const signed = await signIn(deps, pending.org_id);
+  if (!signed.ok) return refusalOutcome(signed.refusal);
+  return orgAgrees(setup.org, orgRefsOf(signed.auth), pending) ? undefined : pendingMismatch(pending, projectName, ['--org']);
+}
+
 async function resumeSetup(deps: AgentSetupDeps, setup: SetupOptions, pending: PendingSetup, projectName: string): Promise<LinkedStep> {
   const env = await settle(async () => envFactsOf(deps));
   if (!env.ok) return refusalOutcome(refusalFor(env.error));
   const signed = await signIn(deps, pending.org_id);
   if (!signed.ok) return refusalOutcome(signed.refusal);
   const orgs = orgRefsOf(signed.auth);
-  if (!orgAgrees(setup.org, orgs, pending)) return pendingMismatch(pending, projectName, ['--org']);
   const org = orgs.find((o) => o.id === pending.org_id) ?? { id: pending.org_id, name: pending.org_id };
   const scoped = await scopeToOrg(deps, org);
   if (!scoped.ok) return refusalOutcome(scoped.refusal);
