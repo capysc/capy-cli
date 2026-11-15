@@ -36,10 +36,12 @@ mock.module('inquirer', () => ({
 
 import { CapyCommand } from '../../src/commands/capyCommand';
 import { AuthService } from '../../src/auth/authService';
+import { ProjectManager } from '../../src/core/projectManager';
 import { ServiceClient } from '../../src/service/serviceClient';
 import { PromptEngine } from '../../src/ui/promptEngine';
 import { CapyError, ERROR_CODES } from '../../src/types/index';
-import type { KeepFile, SetupOptions } from '../../src/types/index';
+import type { KeepFile, SetupOptions, SyncState } from '../../src/types/index';
+import { FileManager } from '../../src/files/fileManager';
 
 const ORIGIN = process.cwd();
 const dirs = mock((_: string) => undefined);
@@ -247,7 +249,7 @@ describe('every answer given: create, then link, then push', () => {
       env_found: true,
     });
     expect(readJson(folder('keep.lock'))).toMatchObject({ org_id: 'org-1', project_id: 'proj-new', project_name: 'demo' });
-    expect(Object.keys(readJson(folder('keep.lock')).variables).sort()).toEqual(['API_KEY', 'DB_URL']);
+    expect(Object.keys(readJson(folder('keep.lock')).variables).toSorted()).toEqual(['API_KEY', 'DB_URL']);
     expect(readFileSync(folder('.capy', 'branch'), 'utf-8')).toBe('development');
     // The .env is ciphertext now, and no value reached the output.
     expect(readFileSync(folder('.env'), 'utf-8')).not.toContain(SENTINEL);
@@ -391,6 +393,273 @@ describe('a run that stopped after the project was created', () => {
     expect(readFileSync(folder('.env'), 'utf-8')).not.toContain(SENTINEL);
     expect(finished.stdout).not.toContain(SENTINEL);
     expect(finished.stderr).not.toContain(SENTINEL);
+  });
+});
+
+const readSyncStateFile = (): SyncState => JSON.parse(readFileSync(folder('.capy', 'sync-state'), 'utf-8')) as SyncState;
+const MARKER = { org_id: 'org-1', project_id: 'proj-new', branch: 'development', protected: false } as const;
+/** What a run must not have printed, on either stream. */
+const expectNoLeak = (out: Captured): void => {
+  expect(out.stdout).not.toContain(SENTINEL);
+  expect(out.stderr).not.toContain(SENTINEL);
+};
+
+/** A setup that created the project and linked the folder and then failed on the first branch: the marker is left behind. */
+async function strandedSetup(world: World = {}): Promise<void> {
+  writeFileSync(folder('.env'), `API_KEY=${SENTINEL}\n`, 'utf-8');
+  const first = fakeWorld({ ...world, branchFails: true });
+  const failed = await run({ ...ALL_ANSWERS, ...(world.orgs === undefined ? {} : { org: 'Acme' }) });
+  expect(failed.json).toMatchObject({ ok: false, code: 'BRANCH_CREATE_FAILED' });
+  expect(first.initializeProject).toHaveBeenCalledTimes(1);
+  mock.restore();
+}
+
+/** The folder, the marker and the .env exactly as a refused rerun must leave them. */
+function expectStranded(calls: Calls): void {
+  expect(calls.initializeProject).not.toHaveBeenCalled();
+  expect(calls.createBranch).not.toHaveBeenCalled();
+  expect(calls.pushSecrets).not.toHaveBeenCalled();
+  expect(readSyncStateFile().pending_setup).toEqual(MARKER);
+  expect(readJson(folder('keep.lock'))).toMatchObject({ project_id: 'proj-new', variables: {} });
+  expect(existsSync(folder('.capy', 'branch'))).toBe(false);
+  expect(readFileSync(folder('.env'), 'utf-8')).toBe(`API_KEY=${SENTINEL}\n`);
+}
+
+describe('the pending-setup marker', () => {
+  test('is written when the folder is linked, next to what the sync state already held, and is gone when setup is done', async () => {
+    writeFileSync(folder('.env'), `API_KEY=${SENTINEL}\n`, 'utf-8');
+    fakeWorld({ branchFails: true });
+    await run(ALL_ANSWERS);
+    expect(readSyncStateFile()).toMatchObject({ user_id: 'user-1', pending_setup: MARKER });
+    mock.restore();
+
+    fakeWorld();
+    const finished = await run(ALL_ANSWERS);
+    expect(finished.json).toMatchObject({ ok: true, resumed: true });
+    expect(readSyncStateFile().pending_setup).toBeUndefined();
+    expect(readSyncStateFile().user_id).toBe('user-1');
+    expectNoLeak(finished);
+  });
+
+  test('a setup that finishes in one run never leaves one', async () => {
+    fakeWorld();
+    const out = await run(ALL_ANSWERS);
+    expect(out.json).toMatchObject({ ok: true, created: true });
+    expect(readSyncStateFile().pending_setup).toBeUndefined();
+  });
+
+  test('a setup that fails at the push keeps it, so the rerun can finish', async () => {
+    writeFileSync(folder('.env'), `API_KEY=${SENTINEL}\n`, 'utf-8');
+    const calls = fakeWorld();
+    calls.pushSecrets.mockImplementation(async () => {
+      throw new CapyError('The service is down', ERROR_CODES.NETWORK_ERROR);
+    });
+    const failed = await run(ALL_ANSWERS);
+    expect(failed.exitCode).toBe(1);
+    expect(failed.json).toMatchObject({ ok: false, code: 'NETWORK_ERROR' });
+    expect(readSyncStateFile().pending_setup).toEqual(MARKER);
+    expectNoLeak(failed);
+  });
+});
+
+describe('a linked folder with no marker is a healthy project', () => {
+  test('the same --name, --branch and --protected are not a resume: it syncs as it always has, creates and pushes nothing, and says the flags were not applied', async () => {
+    writeFileSync(folder('.env'), `API_KEY=${SENTINEL}\n`, 'utf-8');
+    fakeWorld();
+    await run(ALL_ANSWERS);
+    expect(readSyncStateFile().pending_setup).toBeUndefined();
+    mock.restore();
+
+    const calls = fakeWorld();
+    const sync = spyOn(CapyCommand.prototype as unknown as { syncProject: () => Promise<string> }, 'syncProject').mockResolvedValue('up-to-date');
+    const before = readFileSync(folder('keep.lock'), 'utf-8');
+    const out = await run(ALL_ANSWERS);
+
+    expect(out.exitCode).toBeUndefined();
+    expect(sync).toHaveBeenCalledTimes(1);
+    expect(calls.initializeProject).not.toHaveBeenCalled();
+    expect(calls.listBranches).not.toHaveBeenCalled();
+    expect(calls.createBranch).not.toHaveBeenCalled();
+    expect(calls.pushSecrets).not.toHaveBeenCalled();
+    expect(readFileSync(folder('keep.lock'), 'utf-8')).toBe(before);
+    expect(out.json).toEqual({ ok: true, ignored_flags: ['--name', '--branch', '--protected'] });
+    expectNoLeak(out);
+  });
+
+  test('a different --branch on a healthy project creates no branch either', async () => {
+    fakeWorld();
+    await run(ALL_ANSWERS);
+    mock.restore();
+
+    const calls = fakeWorld();
+    spyOn(CapyCommand.prototype as unknown as { syncProject: () => Promise<string> }, 'syncProject').mockResolvedValue('up-to-date');
+    const out = await run({ name: 'demo', branch: 'feature', protectedAnswer: 'yes', org: 'Acme' });
+    expect(calls.createBranch).not.toHaveBeenCalled();
+    expect(calls.listBranches).not.toHaveBeenCalled();
+    expect(out.json).toEqual({ ok: true, ignored_flags: ['--org', '--name', '--branch', '--protected'] });
+  });
+
+  test('no setup flags: nothing extra is printed', async () => {
+    fakeWorld();
+    await run(ALL_ANSWERS);
+    mock.restore();
+    fakeWorld();
+    spyOn(CapyCommand.prototype as unknown as { syncProject: () => Promise<string> }, 'syncProject').mockResolvedValue('up-to-date');
+    const out = await run({});
+    expect(out.stdout).toBe('');
+  });
+
+  test('a marker that names another project than keep.lock does is stale: the normal sync, nothing created', async () => {
+    fakeWorld();
+    await run(ALL_ANSWERS);
+    mock.restore();
+    const fm = new FileManager(process.cwd());
+    fm.writeSyncState({ ...readSyncStateFile(), pending_setup: { ...MARKER, project_id: 'proj-other' } });
+
+    const calls = fakeWorld();
+    const sync = spyOn(CapyCommand.prototype as unknown as { syncProject: () => Promise<string> }, 'syncProject').mockResolvedValue('up-to-date');
+    const out = await run(ALL_ANSWERS);
+    expect(sync).toHaveBeenCalledTimes(1);
+    expect(calls.createBranch).not.toHaveBeenCalled();
+    expect(calls.pushSecrets).not.toHaveBeenCalled();
+    expect(out.json).toMatchObject({ ok: true, ignored_flags: ['--name', '--branch', '--protected'] });
+  });
+});
+
+describe('a marker and answers that differ from it: refused, nothing changed', () => {
+  test('--org naming another organization (by name) is SETUP_PENDING_MISMATCH', async () => {
+    await strandedSetup({ orgs: [ORG, OTHER_ORG] });
+    const calls = fakeWorld({ orgs: [ORG, OTHER_ORG] });
+    const out = await run({ ...ALL_ANSWERS, org: 'Other' });
+    expect(out.exitCode).toBe(1);
+    expect(out.json).toMatchObject({ ok: false, code: 'SETUP_PENDING_MISMATCH', differs: ['--org'], project: { id: 'proj-new', name: 'demo' } });
+    expectStranded(calls);
+    expectNoLeak(out);
+  });
+
+  test('--org naming another organization (by id), or one that does not exist, is refused the same way', async () => {
+    await strandedSetup({ orgs: [ORG, OTHER_ORG] });
+    const calls = fakeWorld({ orgs: [ORG, OTHER_ORG] });
+    const byId = await run({ ...ALL_ANSWERS, org: 'org-2' });
+    expect(byId.json).toMatchObject({ code: 'SETUP_PENDING_MISMATCH', differs: ['--org'] });
+    const unknown = await run({ ...ALL_ANSWERS, org: 'nope' });
+    expect(unknown.json).toMatchObject({ code: 'SETUP_PENDING_MISMATCH', differs: ['--org'] });
+    expectStranded(calls);
+    expectNoLeak(byId);
+    expectNoLeak(unknown);
+  });
+
+  test('the same organization, by name or by id, is the resume', async () => {
+    await strandedSetup({ orgs: [ORG, OTHER_ORG] });
+    const byName = fakeWorld({ orgs: [ORG, OTHER_ORG] });
+    const out = await run({ ...ALL_ANSWERS, org: 'acme' });
+    expect(out.json).toMatchObject({ ok: true, resumed: true });
+    expect(byName.initializeProject).not.toHaveBeenCalled();
+    expect(readSyncStateFile().pending_setup).toBeUndefined();
+    expectNoLeak(out);
+  });
+
+  test('a different --branch is refused', async () => {
+    await strandedSetup();
+    const calls = fakeWorld();
+    const out = await run({ ...ALL_ANSWERS, branch: 'main' });
+    expect(out.exitCode).toBe(1);
+    expect(out.json).toMatchObject({ ok: false, code: 'SETUP_PENDING_MISMATCH', differs: ['--branch'], branch: { name: 'development', protected: false } });
+    expectStranded(calls);
+    expectNoLeak(out);
+  });
+
+  test('a different --protected is refused', async () => {
+    await strandedSetup();
+    const calls = fakeWorld();
+    const out = await run({ ...ALL_ANSWERS, protectedAnswer: 'yes' });
+    expect(out.exitCode).toBe(1);
+    expect(out.json).toMatchObject({ ok: false, code: 'SETUP_PENDING_MISMATCH', differs: ['--protected'] });
+    expectStranded(calls);
+    expectNoLeak(out);
+  });
+
+  test('several differences are all named, and an unknown --protected word is a difference too', async () => {
+    await strandedSetup();
+    const calls = fakeWorld();
+    const out = await run({ ...ALL_ANSWERS, branch: 'main', protectedAnswer: 'maybe' });
+    expect(out.json).toMatchObject({ code: 'SETUP_PENDING_MISMATCH', differs: ['--branch', '--protected'] });
+    expectStranded(calls);
+    expectNoLeak(out);
+  });
+
+  test('a different --name or --project is refused too', async () => {
+    await strandedSetup();
+    const calls = fakeWorld();
+    const name = await run({ ...ALL_ANSWERS, name: 'other' });
+    expect(name.json).toMatchObject({ code: 'SETUP_PENDING_MISMATCH', differs: ['--name'] });
+    const project = await run({ ...ALL_ANSWERS, project: 'web' });
+    expect(project.json).toMatchObject({ code: 'SETUP_PENDING_MISMATCH', differs: ['--project'] });
+    expectStranded(calls);
+    expectNoLeak(name);
+    expectNoLeak(project);
+  });
+
+  test('the answers that agree finish the setup on the same project and clear the marker', async () => {
+    await strandedSetup();
+    const calls = fakeWorld();
+    const out = await run({ ...ALL_ANSWERS, project: 'new' });
+    expect(out.exitCode).toBeUndefined();
+    expect(out.json).toMatchObject({ ok: true, created: false, resumed: true, project: { id: 'proj-new', name: 'demo' }, branch: { name: 'development', protected: false }, pushed: 1 });
+    expect(calls.initializeProject).not.toHaveBeenCalled();
+    expect(calls.createBranch).toHaveBeenCalledTimes(1);
+    expect(calls.pushSecrets).toHaveBeenCalledTimes(1);
+    expect(readSyncStateFile().pending_setup).toBeUndefined();
+    expectNoLeak(out);
+  });
+
+  test('a marker with no setup flags at all is not a resume: the folder syncs as before and the marker stays', async () => {
+    await strandedSetup();
+    const calls = fakeWorld();
+    const sync = spyOn(CapyCommand.prototype as unknown as { syncProject: () => Promise<string> }, 'syncProject').mockResolvedValue('up-to-date');
+    const out = await run({});
+    expect(sync).toHaveBeenCalledTimes(1);
+    expect(calls.createBranch).not.toHaveBeenCalled();
+    expect(calls.pushSecrets).not.toHaveBeenCalled();
+    expect(out.stdout).toBe('');
+    expect(readSyncStateFile().pending_setup).toEqual(MARKER);
+  });
+});
+
+describe('agent mode: a failure the setup steps did not code still ends as coded JSON', () => {
+  test('a plain error from a read is a coded refusal, not a stack or prose', async () => {
+    await strandedSetup();
+    fakeWorld();
+    spyOn(FileManager.prototype, 'readEnvMeta').mockImplementation(() => {
+      throw new Error('disk exploded');
+    });
+    const out = await run(ALL_ANSWERS);
+    expect(out.exitCode).toBe(1);
+    expect(out.json).toMatchObject({ ok: false, code: 'SERVICE_ERROR' });
+    expect(typeof out.json!.error).toBe('string');
+    expectNoLeak(out);
+  });
+
+  test('a CapyError keeps its own code', async () => {
+    await strandedSetup();
+    fakeWorld();
+    spyOn(FileManager.prototype, 'readEnvMeta').mockImplementation(() => {
+      throw new CapyError('Cannot read the file', ERROR_CODES.PERMISSION_DENIED);
+    });
+    const out = await run(ALL_ANSWERS);
+    expect(out.exitCode).toBe(1);
+    expect(out.json).toMatchObject({ ok: false, code: 'PERMISSION_DENIED' });
+    expectNoLeak(out);
+  });
+
+  test('the same on a folder that is not a project yet (the organization key lookup)', async () => {
+    fakeWorld();
+    spyOn(ProjectManager.prototype, 'readSyncState').mockImplementationOnce(() => null).mockImplementationOnce(() => null).mockImplementation(() => {
+      throw new Error('state unreadable');
+    });
+    const out = await run(ALL_ANSWERS);
+    expect(out.exitCode).toBe(1);
+    expect(out.json).toMatchObject({ ok: false, code: 'SERVICE_ERROR' });
   });
 });
 

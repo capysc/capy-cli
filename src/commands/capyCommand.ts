@@ -19,6 +19,7 @@ import {
   SyncState,
   AuthResult,
   ProjectInitResult,
+  SetupOptions,
   CapyError,
   ERROR_CODES,
   getSyncKeepHash,
@@ -63,8 +64,8 @@ import { initProjectQuestion } from '../ui/projectQuestions';
 import { reportRepoLinkForCommand } from '../core/repoLinkReporter';
 import { orgKeyMissingMessage } from '../core/orgKeyMissing';
 import { NEW_PROJECT, answerProblem, chooseOrg, chooseProject, orgChoiceProblem, projectChoiceProblem } from '../core/initPlan';
-import { agentResume, agentSetup, type AgentOutcome, type AgentSetupDeps } from './agentSetup';
-import { refuse, settle } from './projectLifecycleCommand';
+import { agentResume, agentSetup, type AgentOutcome, type AgentSetupDeps, type LinkedStep } from './agentSetup';
+import { refuse, refusalFor, settle } from './projectLifecycleCommand';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -194,8 +195,10 @@ export class CapyCommand {
     // A bad --resolve / --conflict is refused before anything is read.
     conflictFlagsOrExit(this.options.conflictFlags ?? {}, false);
     // Nobody to ask (`--json`, `--non-tty`, no terminal): setting up a folder asks nothing and answers in JSON.
-    const forAgent = await this.agentOutcome();
-    if (forAgent !== undefined) return this.endForAgent(forAgent);
+    const forAgent = await this.agentStep();
+    if (forAgent !== undefined && forAgent.kind !== 'sync') return this.endForAgent(forAgent);
+    // Setup flags typed on a folder that is already a project apply to nothing; the answer says so.
+    const ignoredFlags = forAgent?.ignoredFlags ?? [];
     try {
       const projectState = await this.detectOrRecoverProjectState();
 
@@ -211,6 +214,7 @@ export class CapyCommand {
       }
 
       await this.syncProject(projectState);
+      this.reportIgnoredFlags(ignoredFlags);
       // CAP-697: auth is established by now. Reporting never changes this command's output or exit code.
       if (!isLocalOnly() && projectState.organizationId && projectState.projectId) {
         await reportRepoLinkForCommand({
@@ -235,16 +239,28 @@ export class CapyCommand {
 
   /**
    * Agent mode only (`options.setup.agentMode`): the folder is not a project yet, or it is the rerun of a setup that
-   * stopped half way. Everything else (a linked folder, local-only mode, any state that cannot be read) is left to the
-   * path below, exactly as it was.
+   * stopped half way. A linked folder otherwise (and local-only mode, and any state that cannot be read) is left to
+   * the path below, exactly as it was. Whatever the setup steps read or write, a failure in agent mode ends as a
+   * refusal with a code, never as an uncoded error screen.
    */
-  private async agentOutcome(): Promise<AgentOutcome | undefined> {
+  private async agentStep(): Promise<AgentOutcome | Extract<LinkedStep, { kind: 'sync' }> | undefined> {
     const setup = this.options.setup;
     if (setup === undefined || !setup.agentMode) return undefined;
+    const guarded = await settle(() => this.agentStepUnguarded(setup));
+    return guarded.ok ? guarded.value : { kind: 'refusal', refusal: refusalFor(guarded.error) };
+  }
+
+  private async agentStepUnguarded(setup: SetupOptions): Promise<LinkedStep | undefined> {
     const detected = await settle(() => this.detectOrRecoverProjectState());
     if (!detected.ok) return undefined;
     if (detected.value === undefined) return isLocalOnly() ? undefined : agentSetup(this.agentSetupDeps(), setup);
     return agentResume(this.agentSetupDeps(), setup, detected.value);
+  }
+
+  /** Agent mode: the setup flags that were typed and applied to nothing, as one JSON result. Nothing is printed when there are none. */
+  private reportIgnoredFlags(flags: readonly string[]): void {
+    if (flags.length === 0) return;
+    console.log(JSON.stringify({ ok: true, ignored_flags: flags }, null, 2));
   }
 
   /** Prints what agent-mode setup ended with: the result, or the coded refusal (exit code and all). */

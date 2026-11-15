@@ -9,15 +9,17 @@
  *   - everything is answered (by flags): it validates the answers against the service again, then creates the
  *     project, links the folder (keep.lock) straight away, creates the first branch, and pushes the `.env`.
  *
- * Linking right after the project exists is what makes a failed run resumable: the same command, run again in a
- * folder whose keep.lock names the project it asked for, finishes what is missing instead of creating a second
- * project (`agentResume`).
+ * Linking right after the project exists is what makes a failed run resumable: the link also leaves a pending-setup
+ * marker in the folder's `.capy` sync state (org, project, first branch, protection). The same command, run again in
+ * a folder whose marker names the project keep.lock names, with answers that agree with the marker, finishes what is
+ * missing instead of creating a second project (`agentResume`). The last step clears the marker. A linked folder with
+ * no marker is a healthy project: its setup flags change nothing.
  *
  * Every refusal is coded and every decision keys on a code, a status or a typed field, never on message text. JSON goes
  * to stdout and prose to stderr. No value from the `.env` is ever written to either: names and counts only.
  */
 import { existsSync } from 'fs';
-import type { AuthResult, CliOptions, KeepFile, ProjectInitResult, ProjectState, SetupOptions } from '../types/index';
+import type { AuthResult, CliOptions, KeepFile, PendingSetup, ProjectInitResult, ProjectState, SetupOptions } from '../types/index';
 import { CapyError, ERROR_CODES, setSyncKeepHash } from '../types/index';
 import type { AuthService } from '../auth/authService';
 import { silentAuthFailureMessage } from '../auth/authService';
@@ -28,6 +30,7 @@ import { SyncEngine } from '../sync/syncEngine';
 import { hasOrgKey, resolveProjectKey, type KeyServiceOps } from '../crypto/keyResolver';
 import { excludeSystemProject } from '../system/reservedProjectName';
 import { orgKeyMissingMessage } from '../core/orgKeyMissing';
+import { givenSetupFlags, pendingDisagreements, pendingSetupOf } from '../core/pendingSetup';
 import {
   FIRST_BRANCH_DEFAULT,
   answerProblem,
@@ -214,6 +217,14 @@ interface NewProject {
   readonly isProtected: boolean;
 }
 
+/** The marker a setup leaves while it is unfinished: what a rerun has to agree with. */
+const pendingOf = (project: ProjectInitResult, plan: NewProject): PendingSetup => ({
+  org_id: project.org_id,
+  project_id: project.project_id,
+  branch: plan.branch,
+  protected: plan.isProtected,
+});
+
 /** Creates the project, links the folder, creates the first branch and pushes the `.env`, in that order. */
 async function createAndLink(deps: AgentSetupDeps, ctx: RunContext, plan: NewProject): Promise<AgentOutcome> {
   const created = await settle(() => deps.serviceClient.initializeProject(plan.name, ctx.org.id));
@@ -225,6 +236,7 @@ async function createAndLink(deps: AgentSetupDeps, ctx: RunContext, plan: NewPro
   const linked = await settle(async () => {
     deps.projectManager.writeSyncStateUserId(ctx.userId);
     deps.fileManager.writeKeepFile(identityKeep(project));
+    deps.projectManager.writePendingSetup(pendingOf(project, plan));
   });
   if (!linked.ok) return withProject(refusalFor(linked.error), ctx.org, ref);
 
@@ -267,9 +279,16 @@ async function finishSetup(
 
   const keep = deps.projectManager.readKeepFile() ?? identityKeep(project);
   const pushed = await pushFolderEnv(deps, ctx, project, keep, key.value, plan.branch);
+  // A push rewrites the sync state: the marker is written again, so it outlives the push until the last step is done.
+  const marked = await settle(async () => deps.projectManager.writePendingSetup(pendingOf(project, plan)));
   if (!pushed.ok) return withProject({ ...pushed.refusal, extra: { ...(pushed.refusal.extra ?? {}), branch: branchJson(plan.branch, plan.isProtected), pushed: 0 } }, ctx.org, ref);
+  if (!marked.ok) return withProject(refusalFor(marked.error), ctx.org, ref);
 
-  deps.installGitHooks();
+  const closed = await settle(async () => {
+    deps.installGitHooks();
+    deps.projectManager.clearPendingSetup();
+  });
+  if (!closed.ok) return withProject(refusalFor(closed.error), ctx.org, ref);
   return {
     kind: 'done',
     result: {
@@ -500,50 +519,92 @@ export async function agentSetup(deps: AgentSetupDeps, setup: SetupOptions): Pro
 // ---------------------------------------------------------------------------------------------------------------------
 
 /**
- * The same command, run again in a folder that is already linked to the project it asked for (`--name` is keep.lock's
- * project name) after a run that stopped after the project was created. It finishes the missing steps: the first
- * branch, the local branch file, the `.env` push. `undefined` when nothing is missing or the command is not that
- * rerun: bare `capy` then syncs the folder as it always has.
+ * What a linked folder's run does with the setup flags: end with a result or a refusal, or go on to the sync a linked
+ * folder always gets. `ignoredFlags` are the setup flags that were typed and applied to nothing (a healthy project is
+ * not set up again), so the sync's answer can say so.
  */
-export async function agentResume(deps: AgentSetupDeps, setup: SetupOptions, state: ProjectState): Promise<AgentOutcome | undefined> {
+export type LinkedStep = AgentOutcome | { readonly kind: 'sync'; readonly ignoredFlags: readonly string[] };
+
+const syncStep = (ignoredFlags: readonly string[]): LinkedStep => ({ kind: 'sync', ignoredFlags });
+
+/** The refusal for answers that differ from the setup the folder is in the middle of. Names the flags, never a value. */
+function pendingMismatch(pending: PendingSetup, projectName: string, flags: readonly string[]): AgentOutcome {
+  return refusalOutcome({
+    code: ERROR_CODES.SETUP_PENDING_MISMATCH,
+    message: 'An earlier setup of this folder did not finish, and these answers differ from it. Run the same command again with its answers.', // COPY-FLAG
+    exitCode: 1,
+    extra: {
+      org: { id: pending.org_id },
+      project: { id: pending.project_id, name: projectName },
+      branch: branchJson(pending.branch, pending.protected),
+      differs: flags,
+    },
+  });
+}
+
+/**
+ * The same command, run again in a folder that is already linked, after a run that stopped after the project was
+ * created. It resumes only when the folder carries the pending-setup marker for the project keep.lock names, and
+ * `--name`, `--branch` and `--protected` are all given and agree with it. It then finishes the missing steps: the
+ * first branch, the local branch file, the `.env` push.
+ *
+ * With the marker, and a typed flag that differs from it: a refusal (SETUP_PENDING_MISMATCH), nothing changed.
+ * In every other case the folder is a healthy project (or the flags are not that rerun): bare `capy` syncs the
+ * folder as it always has, and the setup flags that were typed are reported as ignored.
+ */
+export async function agentResume(deps: AgentSetupDeps, setup: SetupOptions, state: ProjectState): Promise<LinkedStep> {
   const { projectId, organizationId, projectName } = state;
-  const asksForThisProject = setup.name !== undefined && setup.name === projectName && (setup.project === undefined || setup.project === 'new');
-  const complete = setup.branch !== undefined && setup.protectedAnswer !== undefined;
-  if (!state.hasKeepFile || !asksForThisProject || !complete || projectId === undefined || organizationId === undefined) return undefined;
+  const typed = givenSetupFlags(setup);
+  const pending = pendingSetupOf(deps.projectManager.readSyncState());
+  const marked = pending !== undefined && state.hasKeepFile && pending.project_id === projectId && pending.org_id === organizationId;
+  if (!marked || projectName === undefined) return syncStep(typed);
+
+  const differs = pendingDisagreements(setup, pending, { projectId: pending.project_id, projectName });
+  if (differs.length > 0) return pendingMismatch(pending, projectName, differs);
+  const complete = setup.name === projectName && setup.branch !== undefined && setup.protectedAnswer !== undefined;
+  if (!complete) return syncStep(typed);
+
   const problem = answerProblem(setup);
   if (problem !== null) return problemOutcome(problem);
-  return resumeSetup(deps, setup, { projectId, organizationId, projectName: setup.name as string });
+  return resumeSetup(deps, setup, pending, projectName);
 }
 
-interface Linked {
-  readonly projectId: string;
-  readonly organizationId: string;
-  readonly projectName: string;
+/** Whether `--org`, when typed, names the organization of the pending setup. Not typed: it agrees. */
+function orgAgrees(typed: string | undefined, orgs: readonly OrgRef[], pending: PendingSetup): boolean {
+  if (typed === undefined) return true;
+  const choice = chooseOrg(orgs, typed);
+  return choice.kind === 'picked' && choice.org.id === pending.org_id;
 }
 
-async function resumeSetup(deps: AgentSetupDeps, setup: SetupOptions, linked: Linked): Promise<AgentOutcome | undefined> {
+async function resumeSetup(deps: AgentSetupDeps, setup: SetupOptions, pending: PendingSetup, projectName: string): Promise<LinkedStep> {
   const env = await settle(async () => envFactsOf(deps));
   if (!env.ok) return refusalOutcome(refusalFor(env.error));
-  const signed = await signIn(deps, linked.organizationId);
+  const signed = await signIn(deps, pending.org_id);
   if (!signed.ok) return refusalOutcome(signed.refusal);
-  const org = orgRefsOf(signed.auth).find((o) => o.id === linked.organizationId) ?? { id: linked.organizationId, name: linked.organizationId };
+  const orgs = orgRefsOf(signed.auth);
+  if (!orgAgrees(setup.org, orgs, pending)) return pendingMismatch(pending, projectName, ['--org']);
+  const org = orgs.find((o) => o.id === pending.org_id) ?? { id: pending.org_id, name: pending.org_id };
   const scoped = await scopeToOrg(deps, org);
   if (!scoped.ok) return refusalOutcome(scoped.refusal);
   const userId = scoped.auth.user_id;
   if (userId === undefined) return refusalOutcome(notSignedIn({ success: false, error: 'No user', error_code: 'no_session' }));
 
-  const plan: NewProject = { name: linked.projectName, branch: setup.branch as string, isProtected: setup.protectedAnswer === PROTECTED_YES };
-  const branches = await settle(() => deps.serviceClient.listBranches(linked.projectId));
+  const plan: NewProject = { name: projectName, branch: pending.branch, isProtected: pending.protected };
+  const branches = await settle(() => deps.serviceClient.listBranches(pending.project_id));
   if (!branches.ok) return refusalOutcome(refusalFor(branches.error));
 
   const branchMissing = !branches.value.some((b) => b.name === plan.branch);
   const noLocalBranch = deps.projectManager.readActiveBranch() === null;
-  const envUnpushed = env.value.variables > 0 && deps.fileManager.readEnvMeta(deps.options.envPath).project_id !== linked.projectId;
-  if (!branchMissing && !noLocalBranch && !envUnpushed) return undefined;
-
+  const envUnpushed = env.value.variables > 0 && deps.fileManager.readEnvMeta(deps.options.envPath).project_id !== pending.project_id;
   const ctx: RunContext = { org, auth: scoped.auth, userId, env: env.value, dryRun: deps.options.dryRun === true };
-  const project: ProjectInitResult = { org_id: org.id, project_id: linked.projectId, project_name: linked.projectName, created: false };
-  if (ctx.dryRun) return dryRunOutcome(ctx, { id: linked.projectId, name: linked.projectName }, branchJson(plan.branch, plan.isProtected), envUnpushed ? env.value.variables : 0);
+  if (!branchMissing && !noLocalBranch && !envUnpushed) {
+    // Nothing is left to do: the setup is complete, so the marker goes (a dry run changes nothing) and the folder syncs.
+    if (!ctx.dryRun) deps.projectManager.clearPendingSetup();
+    return syncStep([]);
+  }
+
+  const project: ProjectInitResult = { org_id: org.id, project_id: pending.project_id, project_name: projectName, created: false };
+  if (ctx.dryRun) return dryRunOutcome(ctx, { id: pending.project_id, name: projectName }, branchJson(plan.branch, plan.isProtected), envUnpushed ? env.value.variables : 0);
   const finished = await finishSetup(deps, ctx, project, plan, branchMissing);
   return finished.kind === 'done' ? { kind: 'done', result: { ...finished.result, created: false, resumed: true } } : finished;
 }

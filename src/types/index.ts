@@ -261,12 +261,25 @@ export interface ChangeSet {
   deletedLocal: EnvVariable[]; // Variables deleted locally (in sync state but not in local .env)
 }
 
+/**
+ * Agent-mode setup of a new project, from the moment the folder is linked to the project until the last step is done.
+ * Only a run that finds this (and finds it agrees with keep.lock and with the flags it was given) resumes a setup.
+ */
+export interface PendingSetup {
+  readonly org_id: string;
+  readonly project_id: string;
+  readonly branch: string;
+  readonly protected: boolean;
+}
+
 export interface SyncState {
   last_sync: string;
   synced_variables: string[];
   user_id?: string;
   org_id?: string;
   keep_hash?: string | Record<string, string>;
+  /** Present only while an agent-mode setup is unfinished. Absent from every state file written before it existed. */
+  pending_setup?: PendingSetup;
 }
 
 /** Read the keep_hash for a specific branch from sync-state (backwards compat with old string format). */
@@ -1022,6 +1035,8 @@ export const ERROR_CODES = {
   INIT_INPUT_REQUIRED: 'INIT_INPUT_REQUIRED',
   /** Bare `capy` could not read the organization's projects (the lookup failed, which is not the same as "it has none"). Nothing was created. Exit 1. */
   PROJECT_LOOKUP_FAILED: 'PROJECT_LOOKUP_FAILED',
+  /** Bare `capy` in a folder whose earlier setup did not finish, given answers (`--org`, `--name`, `--branch`, `--protected`) that differ from that setup's. Nothing was changed. Exit 1. */
+  SETUP_PENDING_MISMATCH: 'SETUP_PENDING_MISMATCH',
 } as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES];
