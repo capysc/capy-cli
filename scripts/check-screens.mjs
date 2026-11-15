@@ -26,9 +26,13 @@ const ALLOWED_DEPS = [
   '@inquirer/core',
   'open',
   'proper-lockfile',
+  // Not a screens dependency: the agent pairing handoff generates PNG QR
+  // images locally via src/ui/pairingPresentation.ts. Unlike terminal-only
+  // rendering, this path needs qrcode's PNG encoder.
+  'qrcode',
   // Not a screens dependency: `capy transport` and `capy pair` (CAP-684)
   // render a terminal QR code, zero-dependency and ~96KB unpacked — see
-  // src/ui/terminalQr.ts's header for why this one and not `qrcode`.
+  // src/ui/terminalQr.ts's header for the terminal-only dependency choice.
   'qrcode-terminal',
   // Not a screens dependency, and not new code either: `capy byoc` and
   // tlsBootstrap have always required undici to trust a self-signed CA. It
