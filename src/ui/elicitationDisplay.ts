@@ -74,6 +74,17 @@ export function restoreProjectDisplay(input: {
   ]);
 }
 
+/** The table for `capy kick`: the organization and the member who would be removed. */
+export function kickMemberDisplay(input: {
+  readonly org: { readonly id: string; readonly name: string };
+  readonly email: string;
+}): string {
+  return table(['', ''], [
+    ['Org', input.org.name],
+    ['Member', input.email], // COPY-FLAG
+  ]);
+}
+
 /** The table for a name that matches several projects: one numbered row per project, labelled as the options are. */
 export function chooseProjectDisplay(labels: readonly string[]): string {
   return table(['', 'Project'], labels.map((label, i) => [String(i + 1), label] as const)); // COPY-FLAG

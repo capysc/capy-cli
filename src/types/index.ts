@@ -1037,6 +1037,9 @@ export const ERROR_CODES = {
   PROJECT_LOOKUP_FAILED: 'PROJECT_LOOKUP_FAILED',
   /** Bare `capy` in a folder whose earlier setup did not finish, given answers (`--org`, `--name`, `--branch`, `--protected`) that differ from that setup's. Nothing was changed. Exit 1. */
   SETUP_PENDING_MISMATCH: 'SETUP_PENDING_MISMATCH',
+  // --- `capy kick` in agent mode ---
+  /** `capy kick <email>`: no member of the organization has that email. Nothing was changed. Exit 1. */
+  MEMBER_NOT_FOUND: 'MEMBER_NOT_FOUND',
 } as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES];

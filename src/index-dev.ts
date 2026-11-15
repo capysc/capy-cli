@@ -499,10 +499,15 @@ program
 program
   .command('kick <email>')
   .description('Remove a teammate from this organization')
+  .option('--yes', 'skip the confirmation question')
+  .option('--non-tty', 'same as --json: never ask, and answer in JSON (agents/CI)') // COPY-FLAG
+  .option('--json', 'emit machine-readable JSON instead of the human UI')
   .action(async (email, _options, command) => {
     const { KickCommand } = await import('./commands/kickCommand');
+    const { lifecycleOptsFrom } = await import('./commands/projectLifecycleCommand');
+    const { yes, nonTty, json } = lifecycleOptsFrom(command);
     const cmd = new KickCommand(process.env.CAPY_API_URL, true);
-    await cmd.execute(email);
+    await cmd.execute(email, { yes, nonTty, json });
   });
 
 const systemCmd = program
