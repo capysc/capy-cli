@@ -63,6 +63,7 @@ import { installSyncHooks } from '../git/syncHooks';
 import { initProjectQuestion } from '../ui/projectQuestions';
 import { reportRepoLinkForCommand } from '../core/repoLinkReporter';
 import { orgKeyMissingMessage } from '../core/orgKeyMissing';
+import { withoutPendingSetup } from '../core/pendingSetup';
 import { NEW_PROJECT, answerProblem, chooseOrg, chooseProject, orgChoiceProblem, projectChoiceProblem } from '../core/initPlan';
 import { agentResume, agentSetup, type AgentOutcome, type AgentSetupDeps, type LinkedStep } from './agentSetup';
 import { refuse, refusalFor, settle } from './projectLifecycleCommand';
@@ -2042,7 +2043,7 @@ export class CapyCommand {
     // Update sync state
     const existingSyncState = this.projectManager.readSyncState();
     this.fileManager.writeSyncState({
-      ...existingSyncState,
+      ...withoutPendingSetup(existingSyncState),
       last_sync: new Date().toISOString(),
       synced_variables: Object.keys(finalEnv),
       user_id: authResult.user_id,

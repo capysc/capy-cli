@@ -40,8 +40,10 @@ import { ProjectManager } from '../../src/core/projectManager';
 import { ServiceClient } from '../../src/service/serviceClient';
 import { PromptEngine } from '../../src/ui/promptEngine';
 import { CapyError, ERROR_CODES } from '../../src/types/index';
-import type { KeepFile, SetupOptions, SyncState } from '../../src/types/index';
+import type { CliOptions, KeepFile, SetupOptions, SyncState } from '../../src/types/index';
 import { FileManager } from '../../src/files/fileManager';
+import { deriveResourceId } from '../../src/crypto/resourceId';
+import { Encryptor } from '../../src/crypto/encryptor';
 
 const ORIGIN = process.cwd();
 const dirs = mock((_: string) => undefined);
@@ -136,14 +138,14 @@ interface Captured {
 }
 
 /** Runs bare `capy` in agent mode with these flags and captures what it printed and how it ended. */
-async function run(answers: Partial<SetupOptions> = {}): Promise<Captured> {
+async function run(answers: Partial<SetupOptions> = {}, extra: Partial<CliOptions> = {}): Promise<Captured> {
   const exitSpy = spyOn(process, 'exit').mockImplementation(((code?: number) => {
     throw new ExitSignal(code);
   }) as never);
   const logSpy = spyOn(console, 'log').mockImplementation(() => {});
   const errSpy = spyOn(console, 'error').mockImplementation(() => {});
   const setup: SetupOptions = { json: true, nonTty: true, agentMode: true, ...answers };
-  const thrown: unknown = await new CapyCommand({ setup, protocol: true }, false).execute().then(() => null, (err: unknown) => err);
+  const thrown: unknown = await new CapyCommand({ setup, protocol: true, ...extra }, false).execute().then(() => null, (err: unknown) => err);
   const stdout = logSpy.mock.calls.map((args) => args.map(String).join('\n')).join('\n');
   const stderr = errSpy.mock.calls.map((args) => args.map(String).join('\n')).join('\n');
   const exitCode = exitSpy.mock.calls.length > 0 ? (exitSpy.mock.calls[exitSpy.mock.calls.length - 1][0] as number | undefined) : undefined;
@@ -459,6 +461,60 @@ describe('the pending-setup marker', () => {
     expect(failed.json).toMatchObject({ ok: false, code: 'NETWORK_ERROR' });
     expect(readSyncStateFile().pending_setup).toEqual(MARKER);
     expectNoLeak(failed);
+  });
+});
+
+describe('a normal sync does not carry the marker forward', () => {
+  test('a setup finished by hand with bare capy leaves no marker behind', async () => {
+    writeFileSync(folder('.env'), `API_KEY=${SENTINEL}\n`, 'utf-8');
+    const first = fakeWorld();
+    first.pushSecrets.mockImplementation(async () => {
+      throw new CapyError('The service is down', ERROR_CODES.NETWORK_ERROR);
+    });
+    await run(ALL_ANSWERS);
+    expect(readSyncStateFile().pending_setup).toEqual(MARKER);
+    mock.restore();
+
+    const calls = fakeWorld();
+    spyOn(AuthService.prototype, 'getToken').mockReturnValue('token');
+    const remoteLine = `API_KEY=capy:${deriveResourceId('development', 'API_KEY')}:${Encryptor.encrypt('remote-value', 'a'.repeat(64))}\n`;
+    spyOn(ServiceClient.prototype, 'getDecryptData').mockResolvedValue({ keep_hash: 'a'.repeat(64), env_content: remoteLine } as never);
+    rmSync(folder('.env'), { force: true });
+    const asked = await run({});
+    expect(asked.json).toMatchObject({ ok: false, code: 'SECRETS_CONFLICT' });
+    expect(readSyncStateFile().pending_setup).toEqual(MARKER);
+
+    const out = await run({}, { conflictFlags: { resolve: ['API_KEY=remote'], conflict: asked.json!.conflict_id as string } });
+    expect(readSyncStateFile().pending_setup).toBeUndefined();
+  });
+});
+
+describe('a normal sync from the menu does not carry the marker forward', () => {
+  test('retrieving the remote values in a terminal clears a stranded marker', async () => {
+    writeFileSync(folder('.env'), `API_KEY=${SENTINEL}\n`, 'utf-8');
+    const first = fakeWorld();
+    first.pushSecrets.mockImplementation(async () => {
+      throw new CapyError('The service is down', ERROR_CODES.NETWORK_ERROR);
+    });
+    await run(ALL_ANSWERS);
+    expect(readSyncStateFile().pending_setup).toEqual(MARKER);
+    mock.restore();
+
+    fakeWorld();
+    spyOn(AuthService.prototype, 'getToken').mockReturnValue('token');
+    const remoteLine = `API_KEY=capy:${deriveResourceId('development', 'API_KEY')}:${Encryptor.encrypt('remote-value', 'a'.repeat(64))}\n`;
+    spyOn(ServiceClient.prototype, 'getDecryptData').mockResolvedValue({ keep_hash: 'a'.repeat(64), env_content: remoteLine } as never);
+    prompts.mockImplementation(() => Promise.resolve({ action: 'retrieve_remote' }));
+    const log = spyOn(console, 'log').mockImplementation(() => {});
+    const err = spyOn(console, 'error').mockImplementation(() => {});
+    const exit = spyOn(process, 'exit').mockImplementation(((code?: number) => { throw new ExitSignal(code); }) as never);
+    await new CapyCommand({}, false).execute().catch((e: unknown) => (e instanceof ExitSignal ? undefined : Promise.reject(e))).finally(() => {
+      exit.mockRestore();
+      log.mockRestore();
+      err.mockRestore();
+    });
+    expect(prompts).toHaveBeenCalledTimes(1);
+    expect(readSyncStateFile().pending_setup).toBeUndefined();
   });
 });
 

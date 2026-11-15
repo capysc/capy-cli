@@ -17,6 +17,16 @@ export function pendingSetupOf(state: SyncState | null): PendingSetup | undefine
   return valid ? { org_id, project_id, branch, protected: isProtected } : undefined;
 }
 
+/**
+ * `state` without the marker, for the writes of a normal sync: a sync that finished is not a setup that stopped, so the
+ * marker is not carried into it. (Setup's own writes put the marker back after each push until its last step clears it.)
+ */
+export function withoutPendingSetup(state: SyncState | null): Partial<SyncState> {
+  if (state === null) return {};
+  const { pending_setup: _marker, ...rest } = state;
+  return rest;
+}
+
 /** The setup flags that were typed, as the flags are spelled. */
 export function givenSetupFlags(setup: SetupAnswers): readonly string[] {
   const given: ReadonlyArray<readonly [string, unknown]> = [

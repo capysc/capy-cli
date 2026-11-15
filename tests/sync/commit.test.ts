@@ -247,4 +247,18 @@ describe('commitFolder: the folder after a commit is the server\'s latest plus t
     expect(folder.pin('KEEP')).toBeUndefined();
     expect(serverValues(after, STG, KEY)).toEqual({ X: 'x-stg', Y: 'y-stg' });
   });
+
+  test('a pending-setup marker is not carried into the sync state it writes; everything else in it is', async () => {
+    const synced = fakeCapyServer({ initial: SEED });
+    const folder = makeFolder({ projectKey: KEY, branch: DEV, keep: synced.state().keep as KeepFile, env: { X: 'x-1' }, client: synced.client });
+    made(folder);
+    folder.pm.writeSyncStateUserId('user-b');
+    folder.pm.writePendingSetup({ org_id: folder.ctx.orgId, project_id: folder.ctx.projectId, branch: DEV, protected: false });
+    expect(folder.pm.readSyncState()?.pending_setup).toBeDefined();
+
+    await commitFolder(folder.ctx, { set: { Z: 'z-new' }, remove: [] });
+    const state = folder.pm.readSyncState();
+    expect(state?.pending_setup).toBeUndefined();
+    expect(state).toMatchObject({ user_id: 'user-b', synced_variables: expect.arrayContaining(['Z']) });
+  });
 });
