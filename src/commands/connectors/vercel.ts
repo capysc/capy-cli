@@ -15,7 +15,15 @@
  *
  * Environment → Capy branch: `production`, `preview`, `development`, or a
  * custom environment's slug. One Vercel record that targets several
- * environments counts in each. What is NOT imported is reported by stable
+ * environments counts in each. With `--discover`, every environment is
+ * imported onto a branch of the same name, unless `--import-environment
+ * <environment>[=<branch>]` (repeatable) is given: then ONLY the named
+ * environments are imported, each onto its named branch (a branch that
+ * already exists is checked out and imported into as any import is; none is
+ * merged). The mapping is checked (`vercelEnvironmentMap.ts`) before any
+ * request, and every later step (plan, dry run, import, placeholders,
+ * skipped report, keep.lock rows, the discovery commit) uses the branch.
+ * What is NOT imported is reported by stable
  * reason, names only: `git_branch_scoped` (a preview record scoped to one git
  * branch — it is not an all-branches preview var), `vercel_system`,
  * `unsupported_type`, `duplicate_key`, `empty_value`.
@@ -93,6 +101,7 @@ import {
   DiscoveryPlan,
   DiscoveryPlanFolder,
   applyCollisionResolutions,
+  branchNameOf,
   findCandidateReposResult,
   orderEnvironments,
   resolveCollisions,
@@ -116,6 +125,7 @@ import {
   peekLocalKeepForFolder,
 } from './discoverySteps';
 import { buildVercelDiscoveryPlan, reportVercelDiscovery } from './vercelDiscovery';
+import { EnvironmentBranchChoice, optionConflict, parseEnvironmentChoices } from './vercelEnvironmentMap';
 import { VERCEL_CONNECTOR_SECRET_NAME } from '../../deploy/vercelApi';
 
 const VERCEL_COMMIT_MESSAGE = 'chore(capy): import Vercel environments';
@@ -329,7 +339,7 @@ export function discoveryConfirmMessage(folders: readonly DiscoveryPlanFolder[],
   const rows = folders.flatMap((f) => [
     `  ${f.folder || '.'} (${f.projectName})${f.initialized ? '' : ' — capy (init)'}`,
     ...orderEnvironments(f.environments).map((e) => {
-      const checkoutCmd = e.branchExists === true ? `capy checkout ${e.environmentName}` : `capy checkout -b ${e.environmentName}`;
+      const checkoutCmd = e.branchExists === true ? `capy checkout ${branchNameOf(e)}` : `capy checkout -b ${branchNameOf(e)}`;
       const importCmd = `capy connect vercel --project ${e.serviceId} --environment ${e.environmentName}${overwrite || e.willAutoOverwrite ? ' --overwrite' : ''}`;
       return `    ${checkoutCmd} && ${importCmd}  (${e.variableCount} var(s), ${e.skippedCount} skipped${keptNote(e.kept)})${e.willAutoOverwrite && !overwrite ? ' [auto-overwrite]' : ''}`;
     }),
@@ -647,6 +657,7 @@ export function createVercelConnector(deps: VercelConnectorDeps = {}): Connector
     client: VercelClient,
     tokenEnv: string,
     interactive: boolean,
+    choices: readonly EnvironmentBranchChoice[],
   ): Promise<DiscoveryOutcome> => {
     const dryRun = !!opts.dryRun;
     const promptable = interactive && !opts.json;
@@ -663,6 +674,8 @@ export function createVercelConnector(deps: VercelConnectorDeps = {}): Connector
         scan.repos as readonly CandidateRepo[],
         { peekLocalKeep: peekLocalKeepForFolder, listServerBranches: (projectId) => ctx.serviceClient.listBranches(projectId) },
         environmentFilter,
+        undefined,
+        choices,
       ),
       true,
     );
@@ -673,8 +686,9 @@ export function createVercelConnector(deps: VercelConnectorDeps = {}): Connector
       ...(team.teamId ? { team: { id: team.teamId, ...(team.teamSlug ? { slug: team.teamSlug } : {}) } } : {}),
     };
 
-    if (environmentFilter) {
-      const unknown = environmentFilter.filter((name) => !plan.allEnvironmentNames.includes(name));
+    const requestedEnvironments = choices.length > 0 ? choices.map((c) => c.environment) : environmentFilter;
+    if (requestedEnvironments) {
+      const unknown = requestedEnvironments.filter((name) => !plan.allEnvironmentNames.includes(name));
       if (unknown.length > 0) {
         return {
           ok: false,
@@ -770,6 +784,7 @@ export function createVercelConnector(deps: VercelConnectorDeps = {}): Connector
     description: 'One-time import of env vars from a Vercel project',
     kind: 'import',
     displayName: 'Vercel',
+    acceptsImportEnvironments: true,
 
     // Never reached: `connectCommand.ts` routes `kind === 'import'` to import().
     async connect(): Promise<ConnectResult> {
@@ -780,6 +795,11 @@ export function createVercelConnector(deps: VercelConnectorDeps = {}): Connector
     },
 
     async import(ctx: ResolvedContext, opts: ConnectOpts): Promise<ImportOutcome> {
+      // `--import-environment` chooses what discovery plans; a single import has no plan. Refused before any request.
+      if ((opts.importEnvironments ?? []).length > 0) {
+        // COPY-FLAG: new user-facing string, minimal/neutral wording.
+        return { ok: false, code: ERROR_CODES.VERCEL_IMPORT_ENVIRONMENT_NOT_APPLICABLE, message: '--import-environment only applies under --discover.' };
+      }
       const interactive = isInteractive(opts.nonTty);
 
       return withTokenRecovery(ctx.orgId, opts, interactive, (opened) => importFrom(ctx, opts, opened.client, interactive));
@@ -794,7 +814,15 @@ export function createVercelConnector(deps: VercelConnectorDeps = {}): Connector
     async discover(ctx: DiscoveryContext, opts: ConnectOpts): Promise<DiscoveryOutcome> {
       const interactive = isInteractive(opts.nonTty);
 
-      return withTokenRecovery(ctx.orgId, opts, interactive, (opened) => discoverFrom(ctx, opts, opened.client, opened.tokenEnv, interactive));
+      // The option's own text is checked first: a refusal here has made no request and changed nothing.
+      const parsed = parseEnvironmentChoices(opts.importEnvironments ?? []);
+      if (!parsed.ok) return parsed;
+      const conflict = optionConflict(parsed.choices, opts.environment);
+      if (conflict) return conflict;
+
+      return withTokenRecovery(ctx.orgId, opts, interactive, (opened) =>
+        discoverFrom(ctx, opts, opened.client, opened.tokenEnv, interactive, parsed.choices),
+      );
     },
 
     reportDiscovery: reportVercelDiscovery,

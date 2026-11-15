@@ -582,8 +582,13 @@ function matchDetail(
 // ── Grouping into Capy-project folders ──────────────────────────────────────
 
 export interface DiscoveryPlanEnv {
-  /** The Dokploy environment name — becomes the Capy branch name. */
+  /** The provider's environment name — becomes the Capy branch name unless `branchName` says otherwise. */
   environmentName: string;
+  /**
+   * The Capy branch this environment lands on, when it is not the environment's own name (a chosen mapping).
+   * Absent: the branch is `environmentName`. Read it through `branchNameOf`.
+   */
+  branchName?: string;
   serviceId: string;
   serviceKind: DiscoveryServiceKind;
   variableCount: number;
@@ -627,6 +632,11 @@ export interface DiscoveryPlanEnv {
    * did, never from this field.
    */
   willAutoOverwrite: boolean;
+}
+
+/** The Capy branch a plan environment lands on: its chosen `branchName`, else its own name. */
+export function branchNameOf(env: { environmentName: string; branchName?: string }): string {
+  return env.branchName ?? env.environmentName;
 }
 
 /** A nested service folded into another's Capy project (see this file's "Nested folders" doc) — display only; its environments already live in the OUTER folder's own `environments`. */
@@ -839,23 +849,20 @@ export function detectCollisions(folders: readonly DiscoveryPlanFolder[]): reado
     serviceId: string;
     serviceKind: DiscoveryServiceKind;
   }
-  const cells: Cell[] = folders.flatMap((f) =>
+  const cells: readonly Cell[] = folders.flatMap((f) =>
     f.environments.map((e) => ({
       repoDir: f.repoDir,
       folder: f.folder,
-      environmentName: e.environmentName,
+      environmentName: branchNameOf(e),
       projectName: f.projectName,
       serviceName: f.serviceName,
       serviceId: e.serviceId,
       serviceKind: e.serviceKind,
     })),
   );
-  const byCell = new Map<string, readonly Cell[]>();
-  for (const cell of cells) {
-    const key = `${cell.repoDir}\u0000${cell.folder}\u0000${cell.environmentName}`;
-    byCell.set(key, [...(byCell.get(key) ?? []), cell]);
-  }
-  return [...byCell.values()].flatMap((entries) => {
+  const cellKey = (cell: Cell): string => `${cell.repoDir}\u0000${cell.folder}\u0000${cell.environmentName}`;
+  const groups: ReadonlyArray<readonly Cell[]> = [...new Set(cells.map(cellKey))].map((key) => cells.filter((cell) => cellKey(cell) === key));
+  return groups.flatMap((entries) => {
     const distinctServices = new Set(entries.map((e) => `${e.projectName}\u0000${e.serviceName}`));
     if (distinctServices.size <= 1) return [];
     const [{ repoDir, folder, environmentName }] = entries;
@@ -887,6 +894,8 @@ export interface DiscoveryPlan {
   allEnvironmentNames: readonly string[];
   /** The `--environment` names this plan was filtered to, if any (CAP-657 follow-up) — for the plan header ("filtered to: staging"). Absent when no filter was passed. */
   environmentFilter?: readonly string[];
+  /** The chosen environment → Capy branch mapping this plan was built from, if any. Only the named environments are in the plan. Absent when none was chosen. */
+  environmentBranches?: ReadonlyArray<{ environment: string; branch: string }>;
   /** Vercel plan only (CAP-696): the team scope the plan read. Absent for Dokploy and for a personal-account Vercel plan. */
   team?: { id: string; slug?: string };
 }
@@ -982,11 +991,11 @@ export function applyCollisionResolutions(
   folders: readonly DiscoveryPlanFolder[],
   resolutions: readonly CollisionResolution[],
 ): readonly DiscoveryPlanFolder[] {
-  const winnerFor = new Map<string, string>();
-  for (const r of resolutions) winnerFor.set(`${r.repoDir}\u0000${r.folder}\u0000${r.environmentName}`, r.winnerServiceId);
+  const keyOf = (repoDir: string, folder: string, environmentName: string): string => `${repoDir}\u0000${folder}\u0000${environmentName}`;
+  const winnerFor = new Map<string, string>(resolutions.map((r) => [keyOf(r.repoDir, r.folder, r.environmentName), r.winnerServiceId] as const));
   return folders.flatMap((folder) => {
     const environments = folder.environments.filter((env) => {
-      const winner = winnerFor.get(`${folder.repoDir}\u0000${folder.folder}\u0000${env.environmentName}`);
+      const winner = winnerFor.get(keyOf(folder.repoDir, folder.folder, branchNameOf(env)));
       return winner === undefined || winner === env.serviceId;
     });
     return environments.length > 0 ? [{ ...folder, environments }] : [];
@@ -1006,12 +1015,12 @@ export function applyCollisionResolutions(
  * step left the folder on (the git-model copy `capy checkout -b`
  * performs), and is always the folder's FINAL branch when it's applied.
  */
-export function orderEnvironments<T extends { environmentName: string }>(environments: readonly T[]): readonly T[] {
-  const staging = environments.filter((e) => e.environmentName === 'staging');
-  const production = environments.filter((e) => e.environmentName === 'production');
+export function orderEnvironments<T extends { environmentName: string; branchName?: string }>(environments: readonly T[]): readonly T[] {
+  const staging = environments.filter((e) => branchNameOf(e) === 'staging');
+  const production = environments.filter((e) => branchNameOf(e) === 'production');
   const rest = sortedCopy(
-    environments.filter((e) => e.environmentName !== 'staging' && e.environmentName !== 'production'),
-    (a, b) => a.environmentName.localeCompare(b.environmentName),
+    environments.filter((e) => branchNameOf(e) !== 'staging' && branchNameOf(e) !== 'production'),
+    (a, b) => branchNameOf(a).localeCompare(branchNameOf(b)),
   );
   return [...staging, ...rest, ...production];
 }
@@ -1094,6 +1103,8 @@ export interface DiscoverySequenceDeps {
 
 export interface DiscoverySequenceEnvResult {
   environmentName: string;
+  /** The Capy branch this step ran on, when a chosen mapping made it differ from `environmentName`. */
+  branchName?: string;
   branchCreated: boolean;
   /** Whether THIS step's import ran with `--overwrite` — by user flag, auto-detection, or both; see this file's "Auto-overwrite" doc. */
   overwrote: boolean;
@@ -1184,7 +1195,7 @@ export async function runDiscoverySequence(
     const acc = await accPromise;
     if (acc.failure) return acc; // a prior environment already aborted this folder — nothing further runs.
 
-    const checkout = await deps.checkoutBranch(folder.repoDir, folder.folder, project.projectId, env.environmentName);
+    const checkout = await deps.checkoutBranch(folder.repoDir, folder.folder, project.projectId, branchNameOf(env));
     if (!checkout.ok) {
       return { ...acc, failure: { code: checkout.code, message: checkout.message } };
     }
@@ -1200,11 +1211,12 @@ export async function runDiscoverySequence(
 
     const result: DiscoverySequenceEnvResult = {
       environmentName: env.environmentName,
+      ...(env.branchName === undefined ? {} : { branchName: env.branchName }),
       branchCreated: checkout.created,
       overwrote: effectiveOverwrite,
       outcome,
     };
-    return { results: [...acc.results, result], lastBranch: env.environmentName };
+    return { results: [...acc.results, result], lastBranch: branchNameOf(env) };
   }, Promise.resolve({ results: [] }));
 
   if (final.failure) {

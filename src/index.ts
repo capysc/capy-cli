@@ -1141,6 +1141,13 @@ program
     '--environment <names>',
     'dokploy/vercel discover: restrict the plan to these environment names, comma-separated (e.g. staging,preview); vercel import: which Vercel environment to read (default: the current branch\'s name)',
   )
+  .option(
+    '--import-environment <environment[=branch]>',
+    // COPY-FLAG: new option description, minimal/neutral wording.
+    'vercel discover: import only this environment, on a branch of the same name or on <branch> (repeatable; e.g. preview=staging)',
+    collectRepeatable,
+    [],
+  )
   .addOption(resolveOption())
   .addOption(conflictOption())
   .action(async (provider, options, command) => {
@@ -1172,6 +1179,7 @@ program
       yes: options.yes === true,
       overwrite: options.overwrite === true,
       environment: options.environment,
+      importEnvironments: options.importEnvironment,
       project: options.project,
       team: options.team,
       conflictFlags: rawConflictFlagsOf(command),

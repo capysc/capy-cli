@@ -824,6 +824,7 @@ capy connect [provider] [options]
 | `-y, --yes` | dokploy import/discover: skip the confirmation prompt (import: --overwrite's clear/replace/import ask) — discover never prompts and needs --yes to write |  |
 | `--overwrite` | dokploy import: set the branch's vars to EXACTLY Dokploy's set — clear names not in Dokploy, replace differing values, import new ones |  |
 | `--environment <names>` | dokploy/vercel discover: restrict the plan to these environment names, comma-separated (e.g. staging,preview); vercel import: which Vercel environment to read (default: the current branch's name) |  |
+| `--import-environment <environment[=branch]>` | vercel discover: import only this environment, on a branch of the same name or on <branch> (repeatable; e.g. preview=staging) | `[]` |
 | `--resolve <NAME=pinned|local|remote|delete>` | answer a difference from Capy: pinned, local, remote or delete; NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict) | `[]` |
 | `--conflict <conflict_id>` | the conflict_id a conflict returned: binds --resolve to what was seen |  |
 
@@ -1099,6 +1100,9 @@ Every refusal carries a stable `code` — branch on it, never on message text.
 - `VERCEL_ENVIRONMENT_NOT_FOUND`
 - `VERCEL_CONFIRMATION_REQUIRED`
 - `VERCEL_MAPPING_COLLISION`
+- `VERCEL_ENVIRONMENT_DUPLICATE`
+- `VERCEL_BRANCH_DUPLICATE`
+- `VERCEL_IMPORT_ENVIRONMENT_NOT_APPLICABLE`
 - `VERCEL_TARGET_KEY_MISSING`
 - `VERCEL_TOKEN_REJECTED`
 - `VERCEL_NO_ACCESS`
@@ -1112,6 +1116,7 @@ Every refusal carries a stable `code` — branch on it, never on message text.
 - `VERCEL_ENV_LIST_TRUNCATED`
 - `VERCEL_PREVIEW_DEPLOYMENTS_UNAVAILABLE`
 - `CAPY_VALUE_KEPT`
+- `CONNECTOR_OPTION_NOT_APPLICABLE`
 - `CONNECTOR_PUSH_FAILED`
 - `CONNECTOR_FOLDER_NOT_INITIALIZED`
 - `CONNECTOR_PROJECT_LOOKUP_FAILED`

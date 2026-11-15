@@ -6,6 +6,7 @@ import { EXIT_NEEDS_INPUT, isInteractive } from '../ui/interactive';
 import { resolveOrgContext } from '../core/orgContext';
 import { conflictFlagsOrExit } from '../sync/conflicts';
 import { gateFirst, type GateOptions } from '../sync/gate';
+import { ERROR_CODES } from '../types/index';
 import type { DiscoveryContext } from './connectors/dokployDiscovery';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
@@ -117,6 +118,14 @@ export class ConnectCommand {
     const effective: ConnectOpts = { ...opts, devMode: this.devMode };
 
     const mod = await this.resolveProvider(provider);
+
+    // An option the connector does not take is refused here, before any request, never silently ignored.
+    if ((effective.importEnvironments ?? []).length > 0 && !mod.acceptsImportEnvironments) {
+      // COPY-FLAG: new user-facing string, minimal/neutral wording.
+      printFailure({ ok: false, code: ERROR_CODES.CONNECTOR_OPTION_NOT_APPLICABLE, message: `--import-environment does not apply to ${provider}.` }, !!effective.json);
+      process.exitCode = 1;
+      return { linked: false };
+    }
 
     // A bad --resolve / --conflict is refused before anything is read.
     conflictFlagsOrExit(effective.conflictFlags ?? {}, effective.json === true);
