@@ -41,6 +41,10 @@ describe('buildCliHelpDoc', () => {
     expect(doc.version).toBe('9.9.9');
     expect(typeof doc.conventions.json).toBe('string');
     expect(typeof doc.conventions.codes).toBe('string');
+    expect(doc.conventions.pairing.event).toBe('pairing_required');
+    expect(doc.conventions.pairing.stream).toBe('stderr');
+    expect(doc.conventions.pairing.format).toBe('ndjson');
+    expect(doc.conventions.pairing.instructions.join('\n')).toContain('Do not return only a link and code.');
   });
 
   test('CAP-703: publishes the deploy_dokploy_plan schema and the dokploy --discover mode (structured, supportsDryRun) under deploy', () => {
