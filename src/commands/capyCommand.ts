@@ -252,7 +252,7 @@ export class CapyCommand {
 
   private async agentStepUnguarded(setup: SetupOptions): Promise<LinkedStep | undefined> {
     const detected = await settle(() => this.detectOrRecoverProjectState());
-    if (!detected.ok) return undefined;
+    if (!detected.ok) return { kind: 'refusal', refusal: refusalFor(detected.error) };
     if (detected.value === undefined) return isLocalOnly() ? undefined : agentSetup(this.agentSetupDeps(), setup);
     return agentResume(this.agentSetupDeps(), setup, detected.value);
   }

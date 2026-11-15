@@ -663,6 +663,19 @@ describe('agent mode: a failure the setup steps did not code still ends as coded
   });
 });
 
+describe('agent mode: a keep.lock that cannot be read', () => {
+  test('is a coded refusal on stdout with the error\'s own code, never an error screen', async () => {
+    writeFileSync(folder('keep.lock'), '{not json', 'utf-8');
+    fakeWorld();
+    const out = await run(ALL_ANSWERS);
+    expect(out.exitCode).toBe(1);
+    expect(out.json).toMatchObject({ ok: false });
+    expect(out.json!.code).toBe('INVALID_FORMAT');
+    expect(out.stdout).not.toContain('\u001b[');
+    expect(out.stdout.trim().startsWith('{')).toBe(true);
+  });
+});
+
 describe('terminal mode (no setup flags)', () => {
   const runSetup = (command: CapyCommand): Promise<void> =>
     (command as unknown as { runInitialization: () => Promise<void> }).runInitialization();
