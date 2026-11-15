@@ -153,7 +153,7 @@ export class CheckoutCommand {
     if (!options.create) {
       conflictFlagsOrExit(options.conflictFlags ?? {}, options.json === true);
       if (!isRecoveryActive()) {
-        const gate: GateOptions = { devMode: this.devMode, json: options.json, nonTty: options.nonTty, conflictFlags: options.conflictFlags };
+        const gate: GateOptions = { devMode: this.devMode, json: options.json, nonTty: options.nonTty, conflictFlags: options.conflictFlags, branchHint: branchName };
         await gateFirst(gate);
       }
     }
