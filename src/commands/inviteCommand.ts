@@ -248,7 +248,10 @@ export class InviteCommand {
       // 4b. Fan out any additional project assignments picked in the checkbox.
       // Abort noisily only if every extra assignment fails.
       const failures = await this.fanOutExtraProjectInvites(orgId, email, role, extraProjectIds, serviceClient);
-      void inviteResult;
+      // The service emails the invitee a heads-up. That email never carries
+      // the redeem code — the service must not see it — so the command below
+      // is still the inviter's to send. Absent on older services.
+      const emailSent = inviteResult.email_sent === true;
 
       // 5. Build redeem code (carries the same notAfter the wrap was bound to).
       const redeemCode = buildRedeemCode(inviteToken, outerBlob, orgId, notAfter);
@@ -299,6 +302,7 @@ export class InviteCommand {
           projectIds: grantedProjectIds,
           redeemCode,
           redeemCommand,
+          emailSent,
           expiresAt: new Date(notAfter).toISOString(),
           projectAssignmentFailures: failures,
           stops: finalStops,
@@ -314,6 +318,10 @@ export class InviteCommand {
       }
       console.log('');
 
+      if (emailSent) {
+        console.log(`  \x1b[90mWe emailed ${email} a heads-up. The command is still yours to send.\x1b[0m`);
+        console.log('');
+      }
       console.log('  Send them this command:');
       console.log('');
       console.log(`    ${B('capy')} redeem ${redeemCode}`);
