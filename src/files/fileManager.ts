@@ -1,5 +1,5 @@
 import { readFileSync, writeFileSync, existsSync, appendFileSync, chmodSync, mkdirSync, unlinkSync } from 'fs';
-import { join, dirname } from 'path';
+import { join, dirname, basename } from 'path';
 import { EnvVariable, KeepFile, SyncState, CapyError, ERROR_CODES } from '../types/index';
 import { parse as parseDotenv } from 'dotenv';
 import { Encryptor } from '../crypto/encryptor';
@@ -494,10 +494,12 @@ export class FileManager {
       return line;
     }).join('\n');
 
-    const oldPath = envPath.replace(/\.env$/, '.env.pre-capy.old');
+    // Always longer than the source, so the backup can never land on the file it copies (`.env.local` has no `.env` suffix).
+    // For a path ending in `.env` this is the same path as before.
+    const oldPath = `${envPath}.pre-capy.old`;
     const header = '# From Capy: These are your old secrets, which we have saved for you.\n# We recommend deleting this file or putting it somewhere safe because the values are unencrypted.\n\n';
     writeFileSync(oldPath, header + commented, { encoding: 'utf-8', mode: 0o600 });
-    this.updateGitignore(['.env.pre-capy.old']);
+    this.updateGitignore([...new Set(['.env.pre-capy.old', basename(oldPath)])]);
     say(`Saved plaintext backup to ${oldPath}`);
     return true;
   }
