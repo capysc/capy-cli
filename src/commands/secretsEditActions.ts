@@ -32,7 +32,8 @@ import {
   runSecretSet,
 } from './secretsSet';
 import { holdsFor, type BoundAnswer } from '../sync/noFolder';
-import { describePlanBody, type SetPlanBody } from './secretsSetCommand';
+import { describePlanBody, mismatchFailures, type SetPlanBody } from './secretsSetCommand';
+import { followGitTargets } from './repoLinksFollowGit';
 import type { DryRunView } from './secretsSetText';
 import { CapyError, ERROR_CODES } from '../types/index';
 
@@ -57,12 +58,14 @@ export function dryRunView(body: SetPlanBody, request: RunRequest): DryRunView {
 
 async function planOnly(env: SetEnv, request: RunRequest): Promise<DryRunView> {
   const bases = request.bases ?? (await resolveBases(request.repos.length > 0 ? env.github() : undefined, request.repos));
+  // Only the folders the default branch carries are planned.
+  const { targets: repos } = await followGitTargets(request.repos.length > 0 ? env.github() : undefined, request.repos, bases);
   const body = await describePlanBody(
-    { name: request.name, located: request.locations, targets: request.repos, notLinked: [], bases },
+    { name: request.name, located: request.locations, targets: repos, notLinked: [], bases },
     env,
     request.value,
   );
-  return dryRunView(body, request);
+  return dryRunView(body, { ...request, repos });
 }
 
 /** What the locations that were read allow: the run goes on with these, or it stops for answers. */
@@ -144,8 +147,13 @@ export function createEditActionsWith(
         const reads = keys === undefined ? [] : await previewLocations(env, request.locations, request.name, request.value, keys);
         const settled: SettledLocations = stopPushes.aborted ? { kind: 'ready', locations: request.locations } : settleLocations(request, reads);
         if (settled.kind === 'conflicts') return { ok: false, code: ERROR_CODES.SECRETS_CONFLICT, conflicts: settled.conflicts };
-        const result = await runSecretSet({ ...request, locations: settled.locations, shown: settled.shown, answers: settled.answers, keys }, env, { onProgress, stopPushes, stopPrs });
-        return { ok: true, result };
+        // A project lives where the default branch has its keep.lock. The screen always starts a run with the default branches read
+        // (an empty map when that read failed); a caller that passes none gets them read here, so the rule is judged the same way.
+        const bases = request.bases ?? (request.repos.length > 0 ? await resolveBases(env.github(), request.repos) : undefined);
+        const followed = await followGitTargets(request.repos.length > 0 ? env.github() : undefined, request.repos, bases ?? {});
+        const ran = await runSecretSet({ ...request, repos: followed.targets, ...(bases === undefined ? {} : { bases }), locations: settled.locations, shown: settled.shown, answers: settled.answers, keys }, env, { onProgress, stopPushes, stopPrs });
+        // A repo whose project has nothing it may write to is a failed repo, never silently left out.
+        return { ok: true, result: { ...ran, failed: [...ran.failed, ...mismatchFailures(followed.mismatched)] } };
       } catch (err) {
         return { ok: false, code: codeOf(err) };
       }
