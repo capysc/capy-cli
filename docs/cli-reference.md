@@ -66,7 +66,9 @@ capy branch [options]
 | Option | Description | Default |
 |---|---|---|
 | `-D <name>` | Delete a branch |  |
+| `--yes` | skip the confirmation prompt |  |
 | `--json` | emit machine-readable JSON instead of the human UI |  |
+| `--non-tty` | treat stdin as not a terminal; never prompt (agents/CI) |  |
 
 JSON support: yes (`--json`)
 
@@ -1019,6 +1021,7 @@ Every refusal carries a stable `code` — branch on it, never on message text.
 - `QUOTA_EXCEEDED`
 - `PROJECT_NOT_FOUND`
 - `BRANCH_NOT_FOUND`
+- `CANNOT_DELETE_CURRENT_BRANCH`
 - `NO_ACTIVE_BRANCH`
 - `BRANCH_STATE_INCONSISTENT`
 - `SNAPSHOT_NOT_FOUND`

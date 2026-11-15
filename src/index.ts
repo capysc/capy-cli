@@ -171,9 +171,17 @@ program
   .command('branch')
   .description('List secret branches')
   .option('-D <name>', 'Delete a branch')
+  .option('--yes', 'skip the confirmation prompt')
   .option('--json', 'emit machine-readable JSON instead of the human UI')
+  .option('--non-tty', 'treat stdin as not a terminal; never prompt (agents/CI)')
   .action(async (options, command) => {
     assertNotLocalOnly('branch');
+    const deleteOpts = { yes: options.yes, json: options.json, nonTty: options.nonTty };
+    if (options.D) {
+      // Nobody to ask and no --yes: refused here, before any prompt, sign-in or request.
+      const { needsConfirmation, refuseNeedsConfirmation } = await import('./commands/branchDeleteCommand');
+      if (needsConfirmation(deleteOpts)) refuseNeedsConfirmation(options.json === true);
+    }
     const { AuthService } = await import('./auth/authService');
     const { ServiceClient } = await import('./service/serviceClient');
     const { ProjectManager } = await import('./core/projectManager');
@@ -198,33 +206,20 @@ program
 
     // Delete branch
     if (options.D) {
-      const deleteName = options.D;
-      const branches = await serviceClient.listBranches(projectState.projectId!);
-      const branch = branches.find(b => b.name === deleteName);
-
-      if (!branch) {
-        console.log(`Branch "${deleteName}" not found`);
-        process.exit(1);
-      }
-
-      if (branch.name === projectState.activeBranch) {
-        console.log(`Cannot delete the current branch. Switch first with: ${B('capy checkout <other-branch>')}`);
-        process.exit(1);
-      }
-
-      const inquirer = (await import('inquirer')).default;
-      const { confirm } = await inquirer.prompt([{
-        type: 'confirm',
-        name: 'confirm',
-        message: `Delete branch "${deleteName}"? This will remove all its secrets.`,
-        default: false,
-      }]);
-
-      if (!confirm) return;
-
-      await serviceClient.deleteBranch(projectState.projectId!, branch.id);
-
-      console.log(`Deleted branch "${deleteName}"`);
+      const { runBranchDelete, promptConfirm } = await import('./commands/branchDeleteCommand');
+      await runBranchDelete(
+        {
+          projectId: projectState.projectId!,
+          activeBranch: projectState.activeBranch,
+          checkoutHint: 'capy',
+          emphasize: B,
+          listBranches: (projectId) => serviceClient.listBranches(projectId),
+          deleteBranch: (projectId, branchId) => serviceClient.deleteBranch(projectId, branchId),
+          confirm: promptConfirm,
+        },
+        options.D,
+        deleteOpts,
+      );
       return;
     }
 
