@@ -917,6 +917,8 @@ export const ERROR_CODES = {
   BRANCH_PROTECTION_REQUIRED: 'BRANCH_PROTECTION_REQUIRED',
   /** `capy project create --protected` with something other than yes or no. Nothing is created. Exit 1. */
   BRANCH_PROTECTION_INVALID: 'BRANCH_PROTECTION_INVALID',
+  /** `capy projects rename`: the service renamed the project but this folder's keep.lock could not be rewritten. The refusal carries the renamed project. Exit 1. */
+  KEEP_LOCK_UPDATE_FAILED: 'KEEP_LOCK_UPDATE_FAILED',
   /** A command that acts on "the active organization" has none (no keep.lock here) and the person belongs to several, with nobody to ask. Exit 3. */
   ORG_SELECTION_REQUIRED: 'ORG_SELECTION_REQUIRED',
   /** `GET /orgs/:orgId/repos` answered 404: the service predates project -> repo links. Never a failure of the command that asked. */

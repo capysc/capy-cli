@@ -131,6 +131,14 @@ export interface LiveDeployTokenInfo {
   created_at: string;
 }
 
+/** `PATCH /orgs/:orgId/projects/:projectId` answered 200. `previous_name` is absent when nothing changed. */
+export interface RenameProjectResponse {
+  ok: true;
+  changed: boolean;
+  project: { id: string; name: string };
+  previous_name?: string;
+}
+
 /** CAP-729: `DELETE /orgs/:orgId/projects/:projectId` answered 200. */
 export interface DeleteProjectResponse {
   ok: true;
@@ -778,6 +786,11 @@ export class ServiceClient {
   /** CAP-729: bring a soft-deleted project back (org owner only). */
   async restoreProject(orgId: string, projectId: string): Promise<{ ok: true; project: { id: string; name: string } }> {
     return this.request('POST', `/orgs/${orgId}/projects/${encodeURIComponent(projectId)}/restore`, {});
+  }
+
+  /** Rename a project (org owner only). `changed` is false when the project already had that name. */
+  async renameProject(orgId: string, projectId: string, name: string): Promise<RenameProjectResponse> {
+    return this.request('PATCH', `/orgs/${orgId}/projects/${encodeURIComponent(projectId)}`, { name });
   }
 
   async createBranch(projectId: string, name: string, isProtected: boolean = false): Promise<Branch> {
