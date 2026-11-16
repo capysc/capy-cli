@@ -256,7 +256,7 @@ export class RecoverCommand {
       process.exit(1);
     }
     const serviceClient = new ServiceClient(this.apiUrl, this.devMode);
-    serviceClient.setTokenProvider(() => authService.getValidToken());
+    serviceClient.setTokenProvider((rejected) => authService.getValidToken(rejected));
 
     // 4. Overwrite gate.
     if (hasOrgKey(orgId, userId)) {

@@ -150,7 +150,7 @@ program
 
     const authService = new AuthService(undefined, true, projectState.userId);
     const serviceClient = new ServiceClient(undefined, true);
-    serviceClient.setTokenProvider(() => authService.getValidToken());
+    serviceClient.setTokenProvider((rejected) => authService.getValidToken(rejected));
     const authResult = await authService.authenticate(projectState.organizationId);
     if (!authResult.success) {
       console.error('Authentication failed');
@@ -602,7 +602,7 @@ program
       const syncState = pm.readSyncState();
       const authService = new AuthService(undefined, true, syncState?.user_id);
       const serviceClient = new ServiceClient(undefined, true);
-      serviceClient.setTokenProvider(() => authService.getValidToken());
+      serviceClient.setTokenProvider((rejected) => authService.getValidToken(rejected));
       const authResult = await authService.authenticateSilent(keep.org_id);
       if (!authResult.success) {
         throw new Error(`${authResult.error || 'Not authenticated'} — run ${B('capy-dev')} first`);
