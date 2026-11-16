@@ -285,6 +285,43 @@ export interface ProjectRepoReportResponse {
   known_repos: KnownRepo[];
 }
 
+/** One branch of a project as `GET /projects` lists it. */
+export interface ListedBranch {
+  id: string;
+  name: string;
+  is_protected: boolean;
+}
+
+/** One repo link of a project as `GET /projects` lists it (the fields of `OrgRepoLink` without the project columns). */
+export interface ListedRepo {
+  host: string;
+  owner: string;
+  name: string;
+  path: string;
+  github_repo_id: number | null;
+}
+
+/**
+ * One project in `GET /projects`. The fields after `created_at` are sent by a
+ * newer service and are absent from an older one:
+ * - `branches`: the project's branches (none for a deleted project).
+ * - `repos`: its linked repos; absent when the caller may not read them.
+ * - `variable_count`, `variables_updated_at`, `index_status`: a summary of the
+ *   project's variables; `null` when unknown or when the caller may not see it.
+ */
+export interface ListedProject {
+  id: string;
+  name: string;
+  organization_id: string;
+  deleted_at?: string | null;
+  created_at?: string | null;
+  branches?: ListedBranch[];
+  repos?: ListedRepo[];
+  variable_count?: number | null;
+  variables_updated_at?: string | null;
+  index_status?: string | null;
+}
+
 export interface OrgRepoLink {
   project_id: string;
   project_name: string;
@@ -777,14 +814,16 @@ export class ServiceClient {
   /**
    * List all projects in the caller's organization. Used by the client to
    * bootstrap when running in a directory with no local keep.lock.
+   *
+   * A newer service also puts each project's branches, repo links and a
+   * variable summary in this one response (see `ListedProject`); an older one
+   * sends none of them.
    */
-  async listProjects(options?: { includeDeleted?: boolean }): Promise<Array<{ id: string; name: string; organization_id: string; deleted_at?: string | null; created_at?: string | null }>> {
+  async listProjects(options?: { includeDeleted?: boolean }): Promise<ListedProject[]> {
     // CAP-729: only an org owner's `include_deleted=1` is honoured; for anyone else the service ignores it.
     // `created_at` is absent from services that predate it; callers treat it as unknown.
     const query = options?.includeDeleted === true ? '?include_deleted=1' : '';
-    const data = await this.request<{
-      projects: Array<{ id: string; name: string; organization_id: string; deleted_at?: string | null; created_at?: string | null }>;
-    }>('GET', `/projects${query}`);
+    const data = await this.request<{ projects: ListedProject[] }>('GET', `/projects${query}`);
     return data.projects;
   }
 
