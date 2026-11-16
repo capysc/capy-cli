@@ -172,7 +172,7 @@ export async function pairCommand(options: PairOptions = {}): Promise<void> {
     }
 
     const serviceClient = new ServiceClient(options.apiUrl, devMode);
-    serviceClient.setTokenProvider(() => authService.getValidToken());
+    serviceClient.setTokenProvider((rejected) => authService.getValidToken(rejected));
 
     const { sealed } = await serviceClient.pickupDevicePairing(authorize.device_code);
     const envelope = parsePairEnvelope(sealed);

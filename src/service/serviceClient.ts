@@ -306,8 +306,13 @@ export interface OrgReposResponse {
  * needed. ServiceClient calls this before every request — no local token
  * cache — so token rotation (org switch, create-org, redeem, expiry) is
  * invisible to ServiceClient and callers.
+ *
+ * Called with no argument it returns the current token. Called with the
+ * access token the service just rejected (a 401), it must return a token that
+ * is NOT that one (another process already refreshed, or a refresh made now),
+ * or null when it cannot.
  */
-export type TokenProvider = () => Promise<ServiceToken | null>;
+export type TokenProvider = (rejectedAccessToken?: string) => Promise<ServiceToken | null>;
 
 /**
  * A 404 from the repo-links route means the service predates the route (decided
@@ -443,14 +448,18 @@ export class ServiceClient {
     }
   }
 
-  private async request<T>(method: string, path: string, body?: unknown, options?: { timeout?: number; _retried?: boolean; onRateLimit?: (rate: RateInfo) => void }): Promise<T> {
+  /** The token for a request: the one the retry already holds, else the provider's current one, else none. */
+  private async tokenFor(held: ServiceToken | undefined): Promise<ServiceToken | null> {
+    if (held) return held;
+    return this.tokenProvider ? this.tokenProvider() : null;
+  }
+
+  private async request<T>(method: string, path: string, body?: unknown, options?: { timeout?: number; _retried?: boolean; _token?: ServiceToken; onRateLimit?: (rate: RateInfo) => void }): Promise<T> {
+    const token = await this.tokenFor(options?._token);
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token.access_token}` } : {}),
     };
-    const token = this.tokenProvider ? await this.tokenProvider() : null;
-    if (token) {
-      headers['Authorization'] = `Bearer ${token.access_token}`;
-    }
 
     const timeoutMs = options?.timeout ?? 30000;
     const res = await this.fetchOnce(method, path, headers, body, timeoutMs);
@@ -461,12 +470,13 @@ export class ServiceClient {
       const data = await readJsonWithin(res, timeoutMs).catch(() => ({})) as Record<string, any>;
 
       if (res.status === 401) {
-        // The provider already refreshes proactively on expiry; a 401 here
-        // means either the server rejected the token for a non-expiry reason
-        // (e.g., membership revoked) or a race with the refresh cycle. Retry
-        // once — the next provider() call will fetch a fresh token.
-        if (!options?._retried && this.tokenProvider) {
-          return this.request<T>(method, path, body, { ...options, _retried: true });
+        // A 401 is decided by its STATUS alone. The token we sent was rejected, so re-sending
+        // it cannot help: ask the provider for a token other than that one (another process
+        // already refreshed it, or the provider refreshes now) and retry once with it. No
+        // different token, or a 401 on the retry: the failure below.
+        const retryToken = !options?._retried && this.tokenProvider ? await this.tokenProvider(token?.access_token) : null;
+        if (retryToken && retryToken.access_token !== token?.access_token) {
+          return this.request<T>(method, path, body, { ...options, _retried: true, _token: retryToken });
         }
         const detail = data.error || 'Unknown auth error';
         throw new CapyError(

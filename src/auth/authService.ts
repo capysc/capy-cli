@@ -83,20 +83,38 @@ export function silentAuthFailureMessage(result: AuthResult): string {
  * itself — it lies to our code about when the cached copy is stale, which
  * is exactly the decision we want to exercise.
  */
-function resolveExpiresAt(expiresInSeconds: number): number {
+function resolveExpiresAt(expiresInSeconds: number, accessToken?: string): number {
   const override = process.env.CAPY_TOKEN_TTL_SECONDS;
-  const ttl = override ? Number(override) : expiresInSeconds;
-  return Date.now() + ttl * 1000;
+  if (override) return Date.now() + Number(override) * 1000;
+  const fromResponse = Date.now() + expiresInSeconds * 1000;
+  const jwtExpiry = accessToken === undefined ? undefined : decodeJwtExpiryMs(accessToken);
+  return jwtExpiry === undefined ? fromResponse : Math.min(fromResponse, jwtExpiry);
 }
 
-/** The `org_id` claim out of an unverified JWT access token, or undefined if it's missing/unparseable. Decode-only — the server has already validated the signature. */
-function decodeJwtOrgClaim(accessToken: string): string | undefined {
+/** The unverified JWT payload of an access token, or undefined if it is missing or unparseable. Decode-only — the server has already validated the signature. */
+function decodeJwtPayload(accessToken: string): Record<string, unknown> | undefined {
   try {
-    const payload = JSON.parse(Buffer.from(accessToken.split('.')[1], 'base64').toString());
-    return typeof payload.org_id === 'string' ? payload.org_id : undefined;
+    const payload: unknown = JSON.parse(Buffer.from(accessToken.split('.')[1], 'base64').toString());
+    return typeof payload === 'object' && payload !== null ? payload as Record<string, unknown> : undefined;
   } catch {
     return undefined;
   }
+}
+
+/** The `org_id` claim out of an unverified JWT access token, or undefined if it's missing/unparseable. */
+function decodeJwtOrgClaim(accessToken: string): string | undefined {
+  const orgId = decodeJwtPayload(accessToken)?.org_id;
+  return typeof orgId === 'string' ? orgId : undefined;
+}
+
+/**
+ * The JWT's own `exp` in ms, or undefined when it is missing, not a number, or already past. A past `exp`
+ * (a client clock ahead of the server's) is ignored, so it can never make every request refresh.
+ */
+function decodeJwtExpiryMs(accessToken: string): number | undefined {
+  const exp = decodeJwtPayload(accessToken)?.exp;
+  const ms = typeof exp === 'number' ? exp * 1000 : NaN;
+  return Number.isFinite(ms) && ms > Date.now() ? ms : undefined;
 }
 
 /**
@@ -136,6 +154,78 @@ async function postJson<T>(url: string, body: Record<string, unknown>): Promise<
   return res.json() as Promise<T>;
 }
 
+/** The refresh endpoint's answer. */
+interface RefreshResponse {
+  access_token: string;
+  refresh_token: string;
+  expires_in: number;
+  user?: { id: string; email: string; first_name: string | null; last_name: string | null };
+  organization?: { id: string; workos_org_id: string; name: string };
+}
+
+/** The session file's lock, or null when it cannot be taken (the file does not exist yet, or the lock library refuses). */
+function tryLockSession(sessionPath: string): (() => void) | null {
+  try {
+    return lockSync(sessionPath, { retries: { retries: 3, minTimeout: 100 } }) || null;
+  } catch {
+    return null;
+  }
+}
+
+/** The v2 session stored for `userId`, or null when there is none. Throws if the file is unreadable. */
+function readSessionStore(userId: string | undefined): SessionStore | null {
+  const stored = readAuthSession(userId) as SessionStore | null;
+  return stored?.version === 2 ? stored : null;
+}
+
+/**
+ * Whether `session` holds, for `orgId`, an access token that is unexpired by our clock and is not `rejected`.
+ * `rejected` is the token the service just refused; with none given, any unexpired token counts.
+ */
+function holdsLiveTokenOtherThan(session: SessionStore, orgId: string, rejected: string | undefined): boolean {
+  const held = session.sessions[orgId];
+  return held !== undefined && held.expires_at > Date.now() && held.access_token !== rejected;
+}
+
+/** The org a refreshed JWT is scoped to: its own `org_id` claim when that names a known org, else the org asked for. */
+function resolveRefreshedOrgId(session: SessionStore, requestedOrgId: string, accessToken: string): string {
+  const claim = decodeJwtOrgClaim(accessToken);
+  const match = claim ? session.organizations.find(o => o.workos_org_id === claim) : undefined;
+  return match ? match.id : requestedOrgId;
+}
+
+/**
+ * `session` after a refresh answered with `data`: the new token and refresh token, the org added when the
+ * response introduces it (a freshly invited org), and the user's profile when the response carries it.
+ * Other orgs' tokens are kept — the KMS co-decrypt endpoint is the per-org gate, not the client.
+ */
+function withRefreshedSession(session: SessionStore, resolvedOrgId: string, data: RefreshResponse): SessionStore {
+  const incoming = data.organization;
+  const organizations = incoming && !session.organizations.some(o => o.id === resolvedOrgId)
+    ? [...session.organizations, { id: incoming.id, workos_org_id: incoming.workos_org_id, name: incoming.name }]
+    : session.organizations;
+  const profile = data.user
+    ? { user_id: data.user.id, user_email: data.user.email, user_first_name: data.user.first_name, user_last_name: data.user.last_name }
+    : {};
+  return {
+    ...session,
+    ...profile,
+    refresh_token: data.refresh_token,
+    organizations,
+    sessions: {
+      ...session.sessions,
+      [resolvedOrgId]: { access_token: data.access_token, expires_at: resolveExpiresAt(data.expires_in, data.access_token) },
+    },
+  };
+}
+
+/** A refresh started because the service rejected `rejected` for `orgId`; later 401s on the same token join it. */
+interface InFlightRefresh {
+  readonly orgId: string;
+  readonly rejected: string;
+  readonly promise: Promise<boolean>;
+}
+
 export class AuthService {
   private serviceApiUrl: string;
   private devMode: boolean;
@@ -143,6 +233,12 @@ export class AuthService {
   private session: SessionStore | null = null;
   private currentOrgId: string | null = null;
   private lastRefreshFailure: RefreshFailure | null = null;
+  /**
+   * The one refresh a 401 started and that is still running. Refresh tokens are single-use, so concurrent 401s in
+   * this process must share a single refresh instead of each spending the same refresh token. The holder is
+   * written only by `shareRefresh`.
+   */
+  private readonly rejectedTokenRefresh: { current: InFlightRefresh | null } = { current: null };
 
   constructor(serviceApiUrl?: string, devMode: boolean = false, sessionUserId?: string) {
     this.devMode = devMode;
@@ -375,9 +471,15 @@ export class AuthService {
       const resolvedOrgId = resolveSessionOrgId(token.access_token, organizations, organizationId);
 
       if (resolvedOrgId) {
-        this.session.sessions[resolvedOrgId] = {
-          access_token: token.access_token,
-          expires_at: resolveExpiresAt(token.expires_in),
+        this.session = {
+          ...this.session,
+          sessions: {
+            ...this.session.sessions,
+            [resolvedOrgId]: {
+              access_token: token.access_token,
+              expires_at: resolveExpiresAt(token.expires_in, token.access_token),
+            },
+          },
         };
         this.currentOrgId = resolvedOrgId;
       }
@@ -490,92 +592,45 @@ export class AuthService {
     return this.lastRefreshFailure;
   }
 
-  private async refreshForOrg(orgId: string): Promise<boolean> {
+  /**
+   * `rejectedAccessToken`: the token the service just refused for this org. A session another process stored is
+   * adopted only if its token differs from it — adopting the rejected token itself would change nothing.
+   */
+  private async refreshForOrg(orgId: string, rejectedAccessToken?: string): Promise<boolean> {
     if (!this.session?.refresh_token) return false;
     this.lastRefreshFailure = null;
 
     const userId = this.sessionUserId || this.session.user_id;
-    const sessionPath = getAuthSessionPath(userId);
-    let release: (() => void) | null = null;
+    // Acquire file lock to prevent concurrent refresh races. If locking fails
+    // (file doesn't exist yet, etc.), proceed without lock.
+    const release = tryLockSession(getAuthSessionPath(userId));
 
     try {
-      // Acquire file lock to prevent concurrent refresh races
-      try {
-        release = lockSync(sessionPath, { retries: { retries: 3, minTimeout: 100 } });
-      } catch {
-        // If locking fails (file doesn't exist yet, etc.), proceed without lock
-      }
-
       // Re-read session from disk in case another process updated it
-      if (release) {
-        const freshSession = readAuthSession(userId) as SessionStore | null;
-        if (freshSession?.version === 2) {
-          // Check if another process already refreshed this org
-          const existing = freshSession.sessions[orgId];
-          if (existing && existing.expires_at > Date.now()) {
-            this.session = freshSession;
-            this.currentOrgId = orgId;
-            return true;
-          }
-          // Use the latest refresh token
-          this.session.refresh_token = freshSession.refresh_token;
-        }
+      const freshSession = release ? readSessionStore(userId) : null;
+      if (freshSession && holdsLiveTokenOtherThan(freshSession, orgId, rejectedAccessToken)) {
+        // Another process already refreshed this org
+        this.session = freshSession;
+        this.currentOrgId = orgId;
+        return true;
       }
+      // Use the latest refresh token
+      const base: SessionStore = freshSession ? { ...this.session, refresh_token: freshSession.refresh_token } : this.session;
+      this.session = base;
 
-      const data = await postJson<{
-        access_token: string;
-        refresh_token: string;
-        expires_in: number;
-        user?: { id: string; email: string; first_name: string | null; last_name: string | null };
-        organization?: { id: string; workos_org_id: string; name: string };
-      }>(
+      const data = await postJson<RefreshResponse>(
         `${this.serviceApiUrl}/auth/refresh`,
         {
-          refresh_token: this.session.refresh_token,
+          refresh_token: base.refresh_token,
           organization_id: orgId,
         },
       );
 
       // Resolve the actual org from the JWT — the caller may have passed a
       // stale internal org ID but the token is scoped to the canonical one.
-      let resolvedOrgId = orgId;
-      try {
-        const payload = JSON.parse(
-          Buffer.from(data.access_token.split('.')[1], 'base64').toString()
-        );
-        if (payload.org_id) {
-          const match = this.session.organizations.find(o => o.workos_org_id === payload.org_id);
-          if (match) resolvedOrgId = match.id;
-        }
-      } catch {
-        // JWT decode failed — use the orgId as-is
-      }
+      const resolvedOrgId = resolveRefreshedOrgId(base, orgId, data.access_token);
 
-      // Add/update the session for this org. Other org sessions are preserved —
-      // the KMS co-decrypt endpoint is the security gate per-org, not the client.
-      this.session.sessions[resolvedOrgId] = {
-        access_token: data.access_token,
-        expires_at: resolveExpiresAt(data.expires_in),
-      };
-      this.session.refresh_token = data.refresh_token;
-
-      // If this org isn't in the organizations list yet (e.g. user was just
-      // invited and we refreshed into the new org), add it from the response.
-      if (!this.session.organizations.some(o => o.id === resolvedOrgId) && data.organization) {
-        this.session.organizations.push({
-          id: data.organization.id,
-          workos_org_id: data.organization.workos_org_id,
-          name: data.organization.name,
-        });
-      }
-
-      if (data.user) {
-        this.session.user_id = data.user.id;
-        this.session.user_email = data.user.email;
-        this.session.user_first_name = data.user.first_name;
-        this.session.user_last_name = data.user.last_name;
-      }
-
+      this.session = withRefreshedSession(base, resolvedOrgId, data);
       this.currentOrgId = resolvedOrgId;
       this.saveSession();
       return true;
@@ -594,9 +649,80 @@ export class AuthService {
     }
   }
 
+  /**
+   * After the service refused `rejected` for `orgId`: make this process hold a different, unexpired token for
+   * it. True when it does. Concurrent callers refused the same token share one refresh (see `shareRefresh`).
+   */
+  private refreshPastRejected(orgId: string, rejected: string): Promise<boolean> {
+    return this.shareRefresh(orgId, rejected, () => this.replaceRejectedToken(orgId, rejected));
+  }
+
+  /**
+   * The mutable corner of the forced refresh: `rejectedTokenRefresh` is read and written only here. A call for
+   * the token already being replaced joins that refresh. A call for another token waits for it to settle first,
+   * so two refreshes never spend the same single-use refresh token at once; `run` re-checks, so it is cheap
+   * once the token has been replaced.
+   */
+  private shareRefresh(orgId: string, rejected: string, run: () => Promise<boolean>): Promise<boolean> {
+    const holder = this.rejectedTokenRefresh;
+    const inFlight = holder.current;
+    if (inFlight && inFlight.orgId === orgId && inFlight.rejected === rejected) return inFlight.promise;
+
+    const turn = inFlight ? inFlight.promise.then(() => undefined, () => undefined) : Promise.resolve();
+    const promise: Promise<boolean> = turn.then(run).finally(() => {
+      if (holder.current?.promise === promise) holder.current = null;
+    });
+    holder.current = { orgId, rejected, promise };
+    return promise;
+  }
+
+  /**
+   * Replace `rejected` for `orgId`, cheapest way first: a different unexpired token already in memory (an
+   * earlier 401 replaced it), one another process stored on disk, then a real refresh. If the refresh fails,
+   * look at the disk once more: another process may have spent the refresh token first and stored its result.
+   */
+  private async replaceRejectedToken(orgId: string, rejected: string): Promise<boolean> {
+    if (this.session && holdsLiveTokenOtherThan(this.session, orgId, rejected)) return true;
+    if (this.adoptStoredSession(orgId, rejected)) return true;
+    if (await this.refreshForOrg(orgId, rejected)) return true;
+    return this.adoptStoredSession(orgId, rejected);
+  }
+
+  /** Adopt the session file's copy when it holds a different, unexpired token than `rejected` for `orgId`. */
+  private adoptStoredSession(orgId: string, rejected: string): boolean {
+    const stored = this.readStoredSession();
+    if (!stored || !holdsLiveTokenOtherThan(stored, orgId, rejected)) return false;
+    this.session = stored;
+    this.currentOrgId = orgId;
+    this.lastRefreshFailure = null;
+    return true;
+  }
+
+  private readStoredSession(): SessionStore | null {
+    try {
+      return readSessionStore(this.sessionUserId || this.session?.user_id);
+    } catch {
+      return null;
+    }
+  }
+
   isAuthenticated(): boolean {
     // Delegate to getToken() which validates the token's org claim
     return this.getToken() !== null && this.getToken()!.expires_at > Date.now();
+  }
+
+  /** Whether the JWT decodes and is not scoped to an org other than `workosOrgId`. */
+  private tokenMatchesOrg(accessToken: string, workosOrgId: string): boolean {
+    const payload = decodeJwtPayload(accessToken);
+    return payload !== undefined && !(payload.org_id && payload.org_id !== workosOrgId);
+  }
+
+  /** Forget the cached token for `orgId`, in memory and on disk. */
+  private dropOrgSession(orgId: string): void {
+    if (!this.session) return;
+    const { [orgId]: _dropped, ...remaining } = this.session.sessions;
+    this.session = { ...this.session, sessions: remaining };
+    this.saveSession();
   }
 
   getToken(): ServiceToken | null {
@@ -608,23 +734,10 @@ export class AuthService {
     // we're in. A mismatch means stale client state — the token grants
     // access to a different org than intended.
     const org = this.session.organizations.find(o => o.id === this.currentOrgId);
-    if (org) {
-      try {
-        const payload = JSON.parse(
-          Buffer.from(orgSession.access_token.split('.')[1], 'base64').toString()
-        );
-        if (payload.org_id && payload.org_id !== org.workos_org_id) {
-          // Token is for a different org — discard it.
-          delete this.session.sessions[this.currentOrgId];
-          this.saveSession();
-          return null;
-        }
-      } catch {
-        // Can't decode token — treat as invalid
-        delete this.session.sessions[this.currentOrgId];
-        this.saveSession();
-        return null;
-      }
+    if (org && !this.tokenMatchesOrg(orgSession.access_token, org.workos_org_id)) {
+      // Token is for a different org, or can't be decoded — discard it.
+      this.dropOrgSession(this.currentOrgId);
+      return null;
     }
 
     return {
@@ -646,13 +759,23 @@ export class AuthService {
    * `refreshForOrg` before returning. Used by ServiceClient on every
    * request so no stale cached token can escape the authService boundary.
    *
+   * `rejectedAccessToken` is the token the service just answered 401 for. Our
+   * local clock said it was fine, so the expiry check above cannot be trusted
+   * for it: the result is a token that is NOT that one (another process
+   * already refreshed, or a refresh made now), or null if there is none.
+   *
    * Returns null if there's no session, no current org, or refresh failed.
    * Callers typically surface that as "you need to re-authenticate".
    */
-  async getValidToken(): Promise<ServiceToken | null> {
+  async getValidToken(rejectedAccessToken?: string): Promise<ServiceToken | null> {
     if (!this.session || !this.currentOrgId) return null;
     const orgSession = this.session.sessions[this.currentOrgId];
     if (!orgSession) return null;
+
+    if (rejectedAccessToken !== undefined) {
+      const replaced = await this.refreshPastRejected(this.currentOrgId, rejectedAccessToken);
+      return replaced ? this.getToken() : null;
+    }
 
     if (orgSession.expires_at <= Date.now()) {
       const refreshed = await this.refreshForOrg(this.currentOrgId);
@@ -675,14 +798,52 @@ export class AuthService {
   }
 
   async createOrganization(name: string, refreshToken: string, userId: string): Promise<Organization> {
-    let data: Organization & {
-      access_token?: string;
-      refresh_token?: string;
-      expires_in?: number;
-      user?: { id: string; email: string; first_name: string | null; last_name: string | null };
-    };
+    const data = await this.requestCreateOrg(name, refreshToken);
+
+    const newOrg: Organization = { id: data.id, workos_org_id: data.workos_org_id, name: data.name };
+
+    const withOrg: SessionStore = this.session
+      ? {
+          ...this.session,
+          organizations: [...this.session.organizations, newOrg],
+          refresh_token: data.refresh_token || this.session.refresh_token,
+        }
+      : {
+          version: 2,
+          user_id: data.user?.id || userId,
+          user_email: data.user?.email,
+          user_first_name: data.user?.first_name,
+          user_last_name: data.user?.last_name,
+          refresh_token: data.refresh_token || refreshToken,
+          organizations: [newOrg],
+          sessions: {},
+        };
+
+    const accessToken = data.access_token;
+    this.session = accessToken
+      ? {
+          ...withOrg,
+          sessions: {
+            ...withOrg.sessions,
+            [data.id]: { access_token: accessToken, expires_at: resolveExpiresAt(data.expires_in || 86400, accessToken) },
+          },
+        }
+      : withOrg;
+    if (accessToken) this.currentOrgId = data.id;
+
+    this.saveSession();
+    return data;
+  }
+
+  /** The create-org call. A quota response becomes a CapyError so the quota screen can render it. */
+  private async requestCreateOrg(name: string, refreshToken: string): Promise<Organization & {
+    access_token?: string;
+    refresh_token?: string;
+    expires_in?: number;
+    user?: { id: string; email: string; first_name: string | null; last_name: string | null };
+  }> {
     try {
-      data = await postJson(
+      return await postJson(
         `${this.serviceApiUrl}/auth/create-org`,
         { name, refresh_token: refreshToken },
       );
@@ -699,37 +860,6 @@ export class AuthService {
       }
       throw err;
     }
-
-    const newOrg: Organization = { id: data.id, workos_org_id: data.workos_org_id, name: data.name };
-
-    if (!this.session) {
-      this.session = {
-        version: 2,
-        user_id: data.user?.id || userId,
-        user_email: data.user?.email,
-        user_first_name: data.user?.first_name,
-        user_last_name: data.user?.last_name,
-        refresh_token: data.refresh_token || refreshToken,
-        organizations: [newOrg],
-        sessions: {},
-      };
-    } else {
-      this.session.organizations = [...this.session.organizations, newOrg];
-      if (data.refresh_token) {
-        this.session.refresh_token = data.refresh_token;
-      }
-    }
-
-    if (data.access_token) {
-      this.session.sessions[data.id] = {
-        access_token: data.access_token,
-        expires_at: resolveExpiresAt(data.expires_in || 86400),
-      };
-      this.currentOrgId = data.id;
-    }
-
-    this.saveSession();
-    return data;
   }
 
   clearSession(): void {

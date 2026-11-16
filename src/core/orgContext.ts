@@ -91,7 +91,7 @@ export async function resolveOrgContext(
 
   const authService = new AuthService(apiUrl, devMode, projectState.userId);
   const serviceClient = new ServiceClient(apiUrl, devMode);
-  serviceClient.setTokenProvider(() => authService.getValidToken());
+  serviceClient.setTokenProvider((rejected) => authService.getValidToken(rejected));
 
   const folderOrgId = projectState.organizationId;
   const first = succeededOrExit(

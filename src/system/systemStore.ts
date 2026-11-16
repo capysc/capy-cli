@@ -275,7 +275,7 @@ async function openSystemStoreContext(opts: OpenSystemStoreOptions): Promise<Sys
     ? await (async () => {
         const authService = new AuthService(opts.apiUrl, devMode, userIdHint);
         const serviceClient = new ServiceClient(opts.apiUrl, devMode);
-        serviceClient.setTokenProvider(() => authService.getValidToken());
+        serviceClient.setTokenProvider((rejected) => authService.getValidToken(rejected));
         const userId = await authenticateOrThrow(authService, hinted);
         return { orgId: hinted, userId, serviceClient };
       })()

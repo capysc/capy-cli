@@ -99,7 +99,7 @@ export class InfoCommand {
     const branch = projectState.activeBranch;
 
     const serviceClient = new ServiceClient(this.apiUrl, this.devMode);
-    serviceClient.setTokenProvider(() => authService.getValidToken());
+    serviceClient.setTokenProvider((rejected) => authService.getValidToken(rejected));
     const { slug: roleSlug, label: roleLabel } = await roleIn(serviceClient, activeOrgId, authResult.user_id, !!authService.getToken());
     const projectId = projectState.projectId;
     const projectStatus: ProjectStateLabel | null = projectId ? await projectStateFor(serviceClient, projectId) : null;

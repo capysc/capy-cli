@@ -101,7 +101,7 @@ export async function resolveContext(
   const devMode = opts.devMode ?? false;
   const authService = new AuthService(opts.apiUrl, devMode, projectState.userId);
   const serviceClient = new ServiceClient(opts.apiUrl, devMode);
-  serviceClient.setTokenProvider(() => authService.getValidToken());
+  serviceClient.setTokenProvider((rejected) => authService.getValidToken(rejected));
 
   const authResult = await authenticateForOrg(authService, orgId, opts.interactive !== false);
   if (!authResult.success || !authResult.user_id) {

@@ -71,7 +71,7 @@ export class StatusCommand {
     this.authService = new AuthService(undefined, devMode);
     this.serviceClient = new ServiceClient(undefined, devMode);
 
-    this.serviceClient.setTokenProvider(() => this.authService.getValidToken());
+    this.serviceClient.setTokenProvider((rejected) => this.authService.getValidToken(rejected));
   }
 
   async execute(opts: { json?: boolean } = {}): Promise<void> {
