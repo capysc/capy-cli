@@ -195,7 +195,7 @@ async function failedSync(err: unknown, opts: GateOptions): Promise<never> {
   if (answersByProtocol(opts)) {
     console.error(`${coded.code}: ${coded.message}`);
     const restore = coded.code === ERROR_CODES.PROJECT_DELETED ? restoreCommandFor(opts.cwd ?? process.cwd()) : undefined;
-    if (restore !== undefined) console.error(`To restore it, an organization owner runs: ${restore}`); // COPY-FLAG
+    if (restore !== undefined) console.error(`To restore it, an organization owner or admin runs: ${restore}`); // COPY-FLAG
     return process.exit(1);
   }
   const { displayErrorAndExit } = await import('../ui/errorScreen');

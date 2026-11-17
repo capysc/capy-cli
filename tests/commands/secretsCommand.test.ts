@@ -251,6 +251,34 @@ describe('SecretsCommand', () => {
     expect(JSON.parse(autoJson.stdout).rows.map((r: FakeRow) => r.name)).toEqual(['IN_WEB']);
   });
 
+  it('--project-id keeps only rows with a location in that one project, even when another project has the same name', async () => {
+    getSecretIndexImpl.mockImplementation(async () => ({
+      org_id: 'org_1',
+      rows: [
+        row({ name: 'IN_WEB_1', locations: [loc({ project_id: 'p1', project_name: 'web' })] }),
+        row({ name: 'IN_WEB_2', locations: [loc({ project_id: 'p2', project_name: 'web' })] }),
+        row({ name: 'IN_BOTH', locations: [loc({ project_id: 'p2', project_name: 'web' }), loc({ project_id: 'p1', project_name: 'web' })] }),
+      ],
+      skipped: [],
+    }));
+
+    const byId = await capture(() => new SecretsCommand().execute({ json: true, projectId: 'p1' }));
+    expect(JSON.parse(byId.stdout).rows.map((r: FakeRow) => r.name)).toEqual(['IN_WEB_1', 'IN_BOTH']);
+
+    const autoJson = await capture(() => new SecretsCommand().execute({ projectId: 'p1' }));
+    expect(JSON.parse(autoJson.stdout).rows.map((r: FakeRow) => r.name)).toEqual(['IN_WEB_1', 'IN_BOTH']);
+
+    // `--project` is a name lookup: both same-named projects match, and every location says which project id it is.
+    const byName = await capture(() => new SecretsCommand().execute({ json: true, project: 'web' }));
+    const rows = JSON.parse(byName.stdout).rows as FakeRow[];
+    expect(rows.map((r) => r.name)).toEqual(['IN_WEB_1', 'IN_WEB_2', 'IN_BOTH']);
+    expect(rows.flatMap((r) => r.locations.map((l) => l.project_id))).toEqual(['p1', 'p2', 'p2', 'p1']);
+
+    // Combined with --branch, one location has to match both.
+    const none = await capture(() => new SecretsCommand().execute({ json: true, projectId: 'p1', branch: 'nope' }));
+    expect(JSON.parse(none.stdout).rows).toEqual([]);
+  });
+
   it('--branch filters to rows with a location on that branch', async () => {
     getSecretIndexImpl.mockImplementation(async () => ({
       org_id: 'org_1',

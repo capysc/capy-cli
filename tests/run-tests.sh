@@ -81,6 +81,7 @@ ISOLATED_FILES=(
   tests/commands/systemCommand.test.ts
   tests/commands/projectsCommand.test.ts
   tests/commands/projectsDeleted.test.ts
+  tests/commands/projectsInteractive.test.ts
   tests/commands/projectsSingleRequest.test.ts
   tests/commands/projectLifecycleCommand.test.ts
   tests/commands/projectCreateCommand.test.ts

@@ -25,6 +25,7 @@ afterAll(() => { mock.restore(); });
 
 import { createServer } from 'http';
 import { OAuthServer } from '../../src/auth/oauthServer';
+import { renderScreen } from '../../src/ui/screens/serve';
 import { CapyError, ERROR_CODES } from '../../src/types/index';
 import open from 'open';
 
@@ -286,11 +287,9 @@ describe('OAuthServer', () => {
         200,
         expect.objectContaining({ 'Content-Type': 'text/html; charset=utf-8' })
       );
-      expect(mockRes.end).toHaveBeenCalledWith(expect.stringContaining('Authentication Successful'));
-      // Auto-close now flows through the __CAPY_DATA__ contract of the embedded screen
-      expect(mockRes.end).toHaveBeenCalledWith(
-        expect.stringContaining('window.__CAPY_DATA__ = {"autoCloseSeconds":3}')
-      );
+      // The sign-in success screen, with auto-close passed through its __CAPY_DATA__ contract.
+      expect(mockRes.end).toHaveBeenCalledWith(renderScreen('auth-success', { autoCloseSeconds: 3 }));
+      expect(mockRes.end).toHaveBeenCalledWith(expect.stringMatching(/window\.__CAPY_DATA__\s*=\s*\{"autoCloseSeconds":3\}/));
     });
   });
 
@@ -308,7 +307,8 @@ describe('OAuthServer', () => {
         400,
         expect.objectContaining({ 'Content-Type': 'text/html; charset=utf-8' })
       );
-      expect(mockRes.end).toHaveBeenCalledWith(expect.stringContaining('Authentication Failed'));
+      // The sign-in error screen.
+      expect(mockRes.end).toHaveBeenCalledWith(renderScreen('auth-error', { message: errorMessage }));
       // Raw error string must NOT appear in HTML output (XSS prevention).
       // The message is JSON-inlined with `<` escaped, so markup can never
       // execute; the screen renders it as text.

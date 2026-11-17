@@ -517,7 +517,7 @@ Dry run: yes (`--dry-run`)
 
 ### `capy project delete`
 
-Delete a project (owners only; hidden, not destroyed; an owner can restore it)
+Delete a project (owners and admins only; hidden, not destroyed; an owner or admin can restore it)
 
 ```
 capy project delete <name-or-id> [options]
@@ -536,7 +536,7 @@ Dry run: yes (`--dry-run`)
 
 ### `capy project restore`
 
-Restore a deleted project (owners only)
+Restore a deleted project (owners and admins only)
 
 ```
 capy project restore <name-or-id> [options]
@@ -582,7 +582,7 @@ JSON support: yes (`--json`)
 
 ## `capy users`
 
-List organization members and their project access
+List organization users and their project access
 
 ```
 capy users [options]
@@ -604,7 +604,7 @@ capy projects [options]
 
 | Option | Description | Default |
 |---|---|---|
-| `--deleted` | also list deleted projects, marked as deleted, with the date (owners only) |  |
+| `--deleted` | also list deleted projects, marked as deleted, with the date (owners and admins only) |  |
 | `--json` | emit machine-readable JSON instead of the human UI |  |
 
 JSON support: yes (`--json`)
@@ -638,6 +638,7 @@ capy secrets [options]
 |---|---|---|
 | `--json` | emit machine-readable JSON instead of the human UI |  |
 | `--project <name>` | only rows with a location in this project |  |
+| `--project-id <id>` | only rows with a location in the project with this id |  |
 | `--branch <name>` | only rows with a location on this branch |  |
 | `--name <NAME>` | only rows with exactly this secret name |  |
 
@@ -693,7 +694,7 @@ Dry run: yes (`--dry-run`)
 
 ## `capy grant-branch`
 
-Grant a member wildcard access to a protected branch
+Grant a user wildcard access to a protected branch
 
 ```
 capy grant-branch <email> <project> <branch>
@@ -705,7 +706,7 @@ JSON support: no
 
 ## `capy revoke-branch`
 
-Revoke a member's wildcard access to a protected branch
+Revoke a user's wildcard access to a protected branch
 
 ```
 capy revoke-branch <email> <project> <branch>

@@ -757,7 +757,7 @@ projectCmd
 
 projectCmd
   .command('delete <name-or-id>')
-  .description('Delete a project (owners only; hidden, not destroyed; an owner can restore it)') // COPY-FLAG
+  .description('Delete a project (owners and admins only; hidden, not destroyed; an owner or admin can restore it)') // COPY-FLAG
   .option('--force', 'delete even if the project has live deploy tokens (those deploys stop on their next restart)') // COPY-FLAG
   .option('--yes', 'skip the confirmation question')
   .option('--non-tty', 'same as --json: never ask, and answer in JSON (agents/CI)') // COPY-FLAG
@@ -770,7 +770,7 @@ projectCmd
 
 projectCmd
   .command('restore <name-or-id>')
-  .description('Restore a deleted project (owners only)') // COPY-FLAG
+  .description('Restore a deleted project (owners and admins only)') // COPY-FLAG
   .option('--yes', 'skip the confirmation question')
   .option('--non-tty', 'same as --json: never ask, and answer in JSON (agents/CI)') // COPY-FLAG
   .option('--json', 'emit machine-readable JSON instead of the human UI')
@@ -802,7 +802,7 @@ program
 
 program
   .command('users')
-  .description('List organization members and their project access')
+  .description('List organization users and their project access')
   .option('--json', 'emit machine-readable JSON instead of the human UI')
   .action(async (options) => {
     const { UsersCommand } = await import('./commands/usersCommand');
@@ -813,12 +813,12 @@ program
 const projectsCmd = program
   .command('projects')
   .description('List projects in the active organization and their branches')
-  .option('--deleted', 'also list deleted projects, marked as deleted, with the date (owners only)') // COPY-FLAG
+  .option('--deleted', 'also list deleted projects, marked as deleted, with the date (owners and admins only)') // COPY-FLAG
   .option('--json', 'emit machine-readable JSON instead of the human UI')
-  .action(async (options) => {
+  .action(async (options, command) => {
     const { ProjectsCommand } = await import('./commands/projectsCommand');
     const cmd = new ProjectsCommand(process.env.CAPY_API_URL, true);
-    await cmd.execute({ json: options.json, deleted: options.deleted === true });
+    await cmd.execute({ json: options.json, deleted: options.deleted === true, dryRun: command.optsWithGlobals().dryRun === true });
   });
 
 projectsCmd
@@ -837,12 +837,13 @@ const secretsCmd = program
   .description('List every secret name across the active organization, grouped by value (read-only, never shows a value)')
   .option('--json', 'emit machine-readable JSON instead of the human UI')
   .option('--project <name>', 'only rows with a location in this project')
+  .option('--project-id <id>', 'only rows with a location in the project with this id') // COPY-FLAG
   .option('--branch <name>', 'only rows with a location on this branch')
   .option('--name <NAME>', 'only rows with exactly this secret name') // COPY-FLAG
   .action(async (options, command) => {
     const { SecretsCommand } = await import('./commands/secretsCommand');
     const cmd = new SecretsCommand(process.env.CAPY_API_URL, true);
-    await cmd.execute({ json: options.json, project: options.project, branch: options.branch, name: options.name, dryRun: command.optsWithGlobals().dryRun === true });
+    await cmd.execute({ json: options.json, project: options.project, projectId: options.projectId, branch: options.branch, name: options.name, dryRun: command.optsWithGlobals().dryRun === true });
   });
 
 secretsCmd
@@ -935,7 +936,7 @@ secretsCmd
 
 program
   .command('grant-branch <email> <project> <branch>')
-  .description('Grant a member wildcard access to a protected branch')
+  .description('Grant a user wildcard access to a protected branch')
   .action(async (email: string, project: string, branch: string) => {
     const { UsersCommand } = await import('./commands/usersCommand');
     const cmd = new UsersCommand(process.env.CAPY_API_URL, true);
@@ -944,7 +945,7 @@ program
 
 program
   .command('revoke-branch <email> <project> <branch>')
-  .description("Revoke a member's wildcard access to a protected branch")
+  .description("Revoke a user's wildcard access to a protected branch")
   .action(async (email: string, project: string, branch: string) => {
     const { UsersCommand } = await import('./commands/usersCommand');
     const cmd = new UsersCommand(process.env.CAPY_API_URL, true);

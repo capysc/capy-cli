@@ -419,7 +419,7 @@ export class InteractiveTable {
     const rule = '─'.repeat(totalWidth);
     const output: string[] = [];
     output.push('');
-    output.push(`${m}Organization Members (${members.length} user${members.length !== 1 ? 's' : ''})`);
+    output.push(`${m}Organization Users (${members.length} user${members.length !== 1 ? 's' : ''})`);
     output.push('');
 
     // Header
