@@ -266,9 +266,15 @@ export function lastUpdatedOf(index: ProjectsIndex | null, project: ProjectItem)
   return stamps.reduce((latest, t) => ((timeOf(t) ?? 0) > (timeOf(latest) ?? 0) ? t : latest));
 }
 
-/** What the list says a project last changed: the summary's `variables_updated_at` (the creation time when it has none) once the service sends it; else what the index says. */
-export function listUpdatedAt(data: Pick<ProjectsData, 'index' | 'lazy'>, project: ProjectItem): string | null {
+/**
+ * What the list says a project last changed. With the index supplied up front: what the index says. When the list
+ * says who administers what, a project the caller does not administer has no time (`null`); an administered one
+ * shows the summary's `variables_updated_at`, the creation time when it has none. When it does not say (an older
+ * service), the creation time.
+ */
+export function listUpdatedAt(data: ProjectsData, project: ProjectItem): string | null {
   if (data.lazy === undefined) return lastUpdatedOf(data.index, project);
+  if (administrationKnown(data) && !administered(data, project)) return null;
   const stamp = project.variablesUpdatedAt;
   return stamp !== undefined && stamp !== null && timeOf(stamp) !== null ? stamp : project.createdAt;
 }
@@ -517,8 +523,8 @@ export function initialProjectsScreenState(data: ProjectsData, dryRun: boolean =
   return { data, dryRun, query: '', cursor: 0, open: null, dialog: null, usersDialog: null, manage: null, notes: [], quit: false, exitText: null };
 }
 
-/** Most recently updated first; projects with no known time last; then by name. */
-export function sortProjects(data: Pick<ProjectsData, 'projects' | 'index' | 'lazy'>): readonly ProjectItem[] {
+/** Most recently updated first; projects with no known time last (including, when the list says who administers what, those the caller does not administer); then by name. */
+export function sortProjects(data: ProjectsData): readonly ProjectItem[] {
   const at = (p: ProjectItem): number => {
     const iso = listUpdatedAt(data, p);
     return iso === null ? -Infinity : timeOf(iso) ?? -Infinity;
@@ -740,6 +746,11 @@ function startMembersLoad(state: ProjectsScreenState): ProjectsReduceResult {
 /** The member list has not been read (or its last read failed). */
 function membersWanted(data: ProjectsData): boolean {
   return data.lazy !== undefined && (data.lazy.members === 'unloaded' || data.lazy.members === 'failed');
+}
+
+/** The member list is not in yet (not asked for, on its way, or its read failed): what needs it waits. A refusal is not pending: there is nothing more to wait for. */
+function membersPending(data: ProjectsData): boolean {
+  return data.lazy !== undefined && (data.lazy.members === 'unloaded' || data.lazy.members === 'loading' || data.lazy.members === 'failed');
 }
 
 /** The member list is in, or was supplied up front: the Users tab can act on it. */
@@ -1089,17 +1100,22 @@ export function listLastUpdatedCell(data: ProjectsData, project: ProjectItem, no
   return at === null ? '—' : formatRelativeTime(at, now);
 }
 
-/** The VARIABLES column needs a count to show: the summary the list carries, or an index supplied up front. An older service sends neither: it is hidden. */
+/** The VARIABLES column needs a count to show: some project's numeric count in the list, or an index supplied up front. Otherwise (an older service, a plain member) it is hidden. */
 function variablesColumnShown(data: ProjectsData): boolean {
-  return data.lazy === undefined ? data.index !== null : listHasSummary(data.projects);
+  return data.lazy === undefined ? data.index !== null : data.projects.some((p) => typeof p.variableCount === 'number');
+}
+
+/** The LAST UPDATED column: with the index supplied up front, when it was; with the list's own times, unless the list says the caller administers no project. */
+function updatedColumnShown(data: ProjectsData): boolean {
+  if (data.lazy === undefined) return data.index !== null;
+  return !administrationKnown(data) || data.projects.some((p) => administered(data, p));
 }
 
 function listColumns(data: ProjectsData, available: number): readonly ListColumn[] {
   const variables: readonly ListColumn[] = variablesColumnShown(data)
     ? [{ heading: 'VARIABLES', width: 10, cell: (p) => listVariablesCell(data, p) }] // COPY-FLAG
     : [];
-  // With the list's own times (a lazy load) the column always has something to show: the creation time at least.
-  const updated: readonly ListColumn[] = data.lazy === undefined && data.index === null
+  const updated: readonly ListColumn[] = !updatedColumnShown(data)
     ? []
     : [{ heading: 'LAST UPDATED', width: 14, cell: (p) => listLastUpdatedCell(data, p) }]; // COPY-FLAG
   const fixed = [...variables, ...updated].reduce((sum, c) => sum + c.width + MARGIN, 0);
@@ -1311,11 +1327,13 @@ function usersTabLines(
   return ['', `${m}${DIM}${padTo('EMAIL', emailW)}${gap}ROLE${RESET}`, '', ...shown]; // COPY-FLAG: EMAIL, ROLE
 }
 
-function projectFooter(tab: ProjectTab): string {
+/** `usersActive`: the Users tab's keys (change role, invite) work, because the member list is in. */
+function projectFooter(tab: ProjectTab, usersActive: boolean): string {
   const lead = ((): readonly string[] => {
     // The Settings tab has actions, not a table: Enter runs the one under the cursor.
     if (tab === 'settings') return [renderHint(null, '↑↓ navigate'), renderHint('enter', 'select')]; // COPY-FLAG
     if (tab === 'branches') return [renderHint(null, '↑↓ navigate'), renderHint('enter', 'actions')]; // COPY-FLAG
+    if (tab === 'users' && !usersActive) return [renderHint(null, '↑↓ navigate')]; // COPY-FLAG
     if (tab === 'users') return [renderHint(null, '↑↓ navigate'), renderHint('enter', 'change role'), renderHint('i', 'invite')]; // COPY-FLAG
     return [renderHint(null, '↑↓ scroll')]; // COPY-FLAG
   })();
@@ -1417,7 +1435,7 @@ function renderProject(state: ProjectsScreenState, view: ProjectView, termWidth:
 
   const m = ' '.repeat(MARGIN);
   const title = `${m}${BOLD}${project.name}${RESET}${dryRunTag(state.dryRun)}`;
-  const footer: readonly string[] = ['', ...noteLines(state.notes), m + projectFooter(view.tab)];
+  const footer: readonly string[] = ['', ...noteLines(state.notes), m + projectFooter(view.tab, membersReady(state.data))];
   const bodyHeight = Math.max(3, innerHeight(1) - footer.length);
   const available = Math.max(20, boxed ? innerWidth : innerWidth - MARGIN * 2);
   const body = tabBody(state, project, view, bodyHeight, available, width, boxed);
@@ -1438,7 +1456,8 @@ export function render(state: ProjectsScreenState, termWidth: number, termHeight
     const m = ' '.repeat(MARGIN);
     const project = projectById(state.data, state.open.projectId);
     const head = [`${m}${BOLD}capy projects${RESET}${dryRunTag(state.dryRun)} ${DIM}${project?.name ?? ''}${RESET}`, ''];
-    const body = state.manage.step === 'access' && !membersReady(state.data)
+    // A refused member list draws the dialog's empty list, as it did when there were no members to show.
+    const body = state.manage.step === 'access' && membersPending(state.data)
       ? [`${m}${DIM}${state.data.lazy?.members === 'failed' ? LOAD_FAILED_TEXT : LOADING_TEXT}${RESET}`]
       : renderManage(state.manage, width, m, state.data.members ?? []);
     return [...head, ...body]
