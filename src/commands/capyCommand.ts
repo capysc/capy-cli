@@ -131,7 +131,7 @@ export class CapyCommand {
     this.syncEngine = new SyncEngine();
     this.promptEngine = new PromptEngine();
 
-    this.serviceClient.setTokenProvider(() => this.authService.getValidToken());
+    this.serviceClient.setTokenProvider((rejected) => this.authService.getValidToken(rejected));
   }
 
   /**

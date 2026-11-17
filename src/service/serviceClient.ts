@@ -285,6 +285,43 @@ export interface ProjectRepoReportResponse {
   known_repos: KnownRepo[];
 }
 
+/** One branch of a project as `GET /projects` lists it. */
+export interface ListedBranch {
+  id: string;
+  name: string;
+  is_protected: boolean;
+}
+
+/** One repo link of a project as `GET /projects` lists it (the fields of `OrgRepoLink` without the project columns). */
+export interface ListedRepo {
+  host: string;
+  owner: string;
+  name: string;
+  path: string;
+  github_repo_id: number | null;
+}
+
+/**
+ * One project in `GET /projects`. The fields after `created_at` are sent by a
+ * newer service and are absent from an older one:
+ * - `branches`: the project's branches (none for a deleted project).
+ * - `repos`: its linked repos; absent when the caller may not read them.
+ * - `variable_count`, `variables_updated_at`, `index_status`: a summary of the
+ *   project's variables; `null` when unknown or when the caller may not see it.
+ */
+export interface ListedProject {
+  id: string;
+  name: string;
+  organization_id: string;
+  deleted_at?: string | null;
+  created_at?: string | null;
+  branches?: ListedBranch[];
+  repos?: ListedRepo[];
+  variable_count?: number | null;
+  variables_updated_at?: string | null;
+  index_status?: string | null;
+}
+
 export interface OrgRepoLink {
   project_id: string;
   project_name: string;
@@ -306,8 +343,13 @@ export interface OrgReposResponse {
  * needed. ServiceClient calls this before every request — no local token
  * cache — so token rotation (org switch, create-org, redeem, expiry) is
  * invisible to ServiceClient and callers.
+ *
+ * Called with no argument it returns the current token. Called with the
+ * access token the service just rejected (a 401), it must return a token that
+ * is NOT that one (another process already refreshed, or a refresh made now),
+ * or null when it cannot.
  */
-export type TokenProvider = () => Promise<ServiceToken | null>;
+export type TokenProvider = (rejectedAccessToken?: string) => Promise<ServiceToken | null>;
 
 /**
  * A 404 from the repo-links route means the service predates the route (decided
@@ -443,14 +485,18 @@ export class ServiceClient {
     }
   }
 
-  private async request<T>(method: string, path: string, body?: unknown, options?: { timeout?: number; _retried?: boolean; onRateLimit?: (rate: RateInfo) => void }): Promise<T> {
+  /** The token for a request: the one the retry already holds, else the provider's current one, else none. */
+  private async tokenFor(held: ServiceToken | undefined): Promise<ServiceToken | null> {
+    if (held) return held;
+    return this.tokenProvider ? this.tokenProvider() : null;
+  }
+
+  private async request<T>(method: string, path: string, body?: unknown, options?: { timeout?: number; _retried?: boolean; _token?: ServiceToken; onRateLimit?: (rate: RateInfo) => void }): Promise<T> {
+    const token = await this.tokenFor(options?._token);
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token.access_token}` } : {}),
     };
-    const token = this.tokenProvider ? await this.tokenProvider() : null;
-    if (token) {
-      headers['Authorization'] = `Bearer ${token.access_token}`;
-    }
 
     const timeoutMs = options?.timeout ?? 30000;
     const res = await this.fetchOnce(method, path, headers, body, timeoutMs);
@@ -461,12 +507,13 @@ export class ServiceClient {
       const data = await readJsonWithin(res, timeoutMs).catch(() => ({})) as Record<string, any>;
 
       if (res.status === 401) {
-        // The provider already refreshes proactively on expiry; a 401 here
-        // means either the server rejected the token for a non-expiry reason
-        // (e.g., membership revoked) or a race with the refresh cycle. Retry
-        // once — the next provider() call will fetch a fresh token.
-        if (!options?._retried && this.tokenProvider) {
-          return this.request<T>(method, path, body, { ...options, _retried: true });
+        // A 401 is decided by its STATUS alone. The token we sent was rejected, so re-sending
+        // it cannot help: ask the provider for a token other than that one (another process
+        // already refreshed it, or the provider refreshes now) and retry once with it. No
+        // different token, or a 401 on the retry: the failure below.
+        const retryToken = !options?._retried && this.tokenProvider ? await this.tokenProvider(token?.access_token) : null;
+        if (retryToken && retryToken.access_token !== token?.access_token) {
+          return this.request<T>(method, path, body, { ...options, _retried: true, _token: retryToken });
         }
         const detail = data.error || 'Unknown auth error';
         throw new CapyError(
@@ -767,14 +814,16 @@ export class ServiceClient {
   /**
    * List all projects in the caller's organization. Used by the client to
    * bootstrap when running in a directory with no local keep.lock.
+   *
+   * A newer service also puts each project's branches, repo links and a
+   * variable summary in this one response (see `ListedProject`); an older one
+   * sends none of them.
    */
-  async listProjects(options?: { includeDeleted?: boolean }): Promise<Array<{ id: string; name: string; organization_id: string; deleted_at?: string | null; created_at?: string | null }>> {
+  async listProjects(options?: { includeDeleted?: boolean }): Promise<ListedProject[]> {
     // CAP-729: only an org owner's or admin's `include_deleted=1` is honoured; for anyone else the service ignores it.
     // `created_at` is absent from services that predate it; callers treat it as unknown.
     const query = options?.includeDeleted === true ? '?include_deleted=1' : '';
-    const data = await this.request<{
-      projects: Array<{ id: string; name: string; organization_id: string; deleted_at?: string | null; created_at?: string | null }>;
-    }>('GET', `/projects${query}`);
+    const data = await this.request<{ projects: ListedProject[] }>('GET', `/projects${query}`);
     return data.projects;
   }
 

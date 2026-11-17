@@ -521,7 +521,7 @@ export class DeployCommand {
       // Authenticate
       const authService = new AuthService(this.apiUrl, this.devMode, projectState.userId);
       const serviceClient = new ServiceClient(this.apiUrl, this.devMode);
-      serviceClient.setTokenProvider(() => authService.getValidToken());
+      serviceClient.setTokenProvider((rejected) => authService.getValidToken(rejected));
       const authResult = await authenticateOrgFirst(authService, orgId);
       if (!authResult.success) {
         console.error('Authentication failed');
@@ -638,7 +638,7 @@ export class DeployRevokeCommand {
 
       const authService = new AuthService(this.apiUrl, this.devMode, projectState.userId);
       const serviceClient = new ServiceClient(this.apiUrl, this.devMode);
-      serviceClient.setTokenProvider(() => authService.getValidToken());
+      serviceClient.setTokenProvider((rejected) => authService.getValidToken(rejected));
       const authResult = await authenticateOrgFirst(authService, orgId);
       if (!authResult.success) {
         console.error('Authentication failed');
@@ -687,7 +687,7 @@ export class DeployListCommand {
 
       const authService = new AuthService(this.apiUrl, this.devMode, projectState.userId);
       const serviceClient = new ServiceClient(this.apiUrl, this.devMode);
-      serviceClient.setTokenProvider(() => authService.getValidToken());
+      serviceClient.setTokenProvider((rejected) => authService.getValidToken(rejected));
       const authResult = await authenticateOrgFirst(authService, orgId);
       if (!authResult.success) {
         console.error('Authentication failed');

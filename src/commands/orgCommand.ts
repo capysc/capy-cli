@@ -53,7 +53,7 @@ export class OrgCommand {
     this.authService = new AuthService(apiUrl, devMode);
     this.serviceClient = new ServiceClient(apiUrl, devMode);
 
-    this.serviceClient.setTokenProvider(() => this.authService.getValidToken());
+    this.serviceClient.setTokenProvider((rejected) => this.authService.getValidToken(rejected));
   }
 
   /** `gate`: how bare `capy` runs first (`--non-tty`, `--resolve`, `--conflict` as typed). */

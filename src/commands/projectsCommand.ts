@@ -1,4 +1,4 @@
-import { ServiceClient, type OrgRepoLink } from '../service/serviceClient';
+import { ServiceClient, type ListedBranch, type ListedProject, type ListedRepo, type OrgRepoLink } from '../service/serviceClient';
 import type { ProjectItem, ProjectsData, ProjectsIndex } from '../ui/projectsScreen';
 import { resolveOrgContext } from '../core/orgContext';
 import { excludeSystemProject } from '../system/reservedProjectName';
@@ -38,6 +38,16 @@ export interface ProjectSummary {
    * and project admins can) or the lookup failed; `[]` means "none linked".
    */
   repos?: ProjectRepoSummary[];
+  /**
+   * Variables in the project: distinct name and value pairs across all branches.
+   * Only when the service sends the summary; `null` when it cannot say (the index
+   * is not ready) or the caller may not see it. `null` never means zero.
+   */
+  variable_count?: number | null;
+  /** The newest change among the project's variables (ISO 8601), or `null`. Only when the service sends the summary. */
+  variables_updated_at?: string | null;
+  /** The status code of the project's secrets index, or `null`. Only when the service sends the summary. */
+  index_status?: string | null;
 }
 
 /** `owner/name`, plus `/path` when the keep.lock is not at the repo root. */
@@ -64,6 +74,34 @@ function withRepos(projects: readonly ProjectSummary[], links: readonly OrgRepoL
   }));
 }
 
+/** A newer service sends each project's branches in the list itself. */
+function carriesBranches(project: ListedProject): project is ListedProject & { branches: ListedBranch[] } {
+  return Array.isArray(project.branches);
+}
+
+/**
+ * True when the list already answers what the repo request would: some project
+ * carries `repos`, or every project carries `branches` (a service that sends
+ * branches sends repos wherever the caller may read them, so a caller who got
+ * none could not read them from the repo request either).
+ */
+function listCarriesRepoInfo(projects: readonly ListedProject[]): boolean {
+  return projects.some((p) => Array.isArray(p.repos)) || (projects.length > 0 && projects.every(carriesBranches));
+}
+
+function repoSummaryOf(repo: ListedRepo): ProjectRepoSummary {
+  return { host: repo.host, owner: repo.owner, name: repo.name, path: repo.path, github_repo_id: repo.github_repo_id ?? null };
+}
+
+/** The summary fields exactly as the service sent them (`null` kept), and nothing for a service that sends none. */
+function summaryFieldsOf(project: ListedProject): Pick<ProjectSummary, 'variable_count' | 'variables_updated_at' | 'index_status'> {
+  return {
+    ...(project.variable_count === undefined ? {} : { variable_count: project.variable_count }),
+    ...(project.variables_updated_at === undefined ? {} : { variables_updated_at: project.variables_updated_at }),
+    ...(project.index_status === undefined ? {} : { index_status: project.index_status }),
+  };
+}
+
 /** A read the caller may not be allowed: `null` when the service refuses it with 403 PERMISSION_DENIED (the screen then hides what it feeds). Anything else still fails. */
 async function readUnlessForbidden<T>(read: () => Promise<T>): Promise<T | null> {
   try {
@@ -83,6 +121,12 @@ async function loadAdminProjectIds(serviceClient: ServiceClient, orgId: string):
   }
 }
 
+/** A project's branches for the screen: from the list when the service sends them, else one request. */
+async function screenBranchesOf(serviceClient: ServiceClient, project: ListedProject): Promise<ProjectBranchSummary[]> {
+  if (carriesBranches(project)) return project.branches.map((b) => ({ id: b.id, name: b.name, protected: b.is_protected }));
+  return (await serviceClient.listBranches(project.id)).map((b) => ({ id: b.id, name: b.name, protected: b.is_protected }));
+}
+
 /**
  * Everything the interactive screen shows, each part read once. A part the
  * service does not return to the caller is `null`, and the screen hides it.
@@ -91,21 +135,22 @@ async function loadAdminProjectIds(serviceClient: ServiceClient, orgId: string):
  */
 export async function loadScreenData(serviceClient: ServiceClient, orgId: string): Promise<ProjectsData> {
   const listed = excludeSystemProject(await serviceClient.listProjects());
+  // A newer service puts branches and repos in the list: no per-project and no repo request then.
+  const reposInList = listCarriesRepoInfo(listed);
   const [withBranches, links, index, adminIds, members] = await Promise.all([
-    Promise.all(listed.map(async (p) => ({
-      p,
-      branches: (await serviceClient.listBranches(p.id)).map((b) => ({ id: b.id, name: b.name, protected: b.is_protected })),
-    }))),
-    loadOrgRepos(serviceClient, orgId),
+    Promise.all(listed.map(async (p) => ({ p, branches: await screenBranchesOf(serviceClient, p) }))),
+    reposInList ? Promise.resolve(null) : loadOrgRepos(serviceClient, orgId),
     readUnlessForbidden(() => serviceClient.getSecretIndex(orgId)),
     loadAdminProjectIds(serviceClient, orgId),
     readUnlessForbidden(async () => (await serviceClient.listMemberDetails(orgId)).members),
   ]);
-  const reposFor = (projectId: string): Pick<ProjectItem, 'repos'> => {
-    if (links === null || (adminIds !== null && !adminIds.includes(projectId))) return {};
+  const reposFor = (project: ListedProject): Pick<ProjectItem, 'repos'> => {
+    // The service sends `repos` only on projects the caller administers.
+    if (reposInList) return Array.isArray(project.repos) ? { repos: project.repos.map(repoSummaryOf) } : {};
+    if (links === null || (adminIds !== null && !adminIds.includes(project.id))) return {};
     return {
       repos: links
-        .filter((l) => l.project_id === projectId)
+        .filter((l) => l.project_id === project.id)
         .map((l) => ({ host: l.host, owner: l.owner, name: l.name, path: l.path, github_repo_id: l.github_repo_id ?? null })),
     };
   };
@@ -114,12 +159,13 @@ export async function loadScreenData(serviceClient: ServiceClient, orgId: string
     name: p.name,
     createdAt: p.created_at ?? null,
     branches,
-    ...reposFor(p.id),
+    ...reposFor(p),
   }));
   const screenIndex: ProjectsIndex | null = index === null
     ? null
     : { rows: index.rows, skipped: index.skipped, coveredProjectIds: adminIds };
-  return { projects, index: screenIndex, members, reposShown: links !== null };
+  const reposShown = reposInList ? listed.some((p) => Array.isArray(p.repos)) : links !== null;
+  return { projects, index: screenIndex, members, reposShown };
 }
 
 /**
@@ -159,8 +205,10 @@ export class ProjectsCommand {
       // The spinner starts once the org is known: resolving it may ask which org.
       const { orgId, serviceClient } = await resolveOrgContext(this.apiUrl, this.devMode);
       spinner?.start();
-      const summaries = await this.loadProjectSummaries(serviceClient, includeDeleted);
-      const projects = withRepos(summaries, await loadOrgRepos(serviceClient, orgId));
+      const listed = await this.listRawProjects(serviceClient, includeDeleted);
+      const summaries = await this.loadProjectSummaries(serviceClient, listed, includeDeleted);
+      // A newer service puts branches and repos in the list: no per-project and no repo request then.
+      const projects = listCarriesRepoInfo(listed) ? summaries : withRepos(summaries, await loadOrgRepos(serviceClient, orgId));
 
       spinner?.succeed(`${projects.length} project${projects.length !== 1 ? 's' : ''}`);
       this.render(projects, json);
@@ -202,26 +250,43 @@ export class ProjectsCommand {
     }
   }
 
-  private async loadProjectSummaries(serviceClient: ServiceClient, includeDeleted: boolean): Promise<ProjectSummary[]> {
+  private async listRawProjects(serviceClient: ServiceClient, includeDeleted: boolean): Promise<ListedProject[]> {
     // The argument is only passed for `--deleted`, so a plain listing sends exactly the request it always did.
     const listed = includeDeleted ? await serviceClient.listProjects({ includeDeleted: true }) : await serviceClient.listProjects();
-    const rawProjects = excludeSystemProject(listed);
-    // Concurrent per-project branch fetch — independent GETs, fine to fan out.
+    return excludeSystemProject(listed);
+  }
+
+  private async loadProjectSummaries(
+    serviceClient: ServiceClient,
+    rawProjects: readonly ListedProject[],
+    includeDeleted: boolean,
+  ): Promise<ProjectSummary[]> {
+    // Concurrent per-project branch fetch, only for a service that does not send branches in the list.
     return Promise.all(
       rawProjects.map(async (p) => {
         const deletedAt = includeDeleted ? (p.deleted_at ?? null) : undefined;
-        // A deleted project answers 410 PROJECT_DELETED to its branch list: it has none to show.
-        const branches = deletedAt === null || deletedAt === undefined
-          ? (await serviceClient.listBranches(p.id)).map((b) => ({ id: b.id, name: b.name, protected: b.is_protected }))
-          : [];
+        const branches = await this.branchesOf(serviceClient, p, deletedAt);
         return {
           id: p.id,
           name: p.name,
           branches,
           ...(includeDeleted ? { deleted_at: deletedAt } : {}),
+          ...(Array.isArray(p.repos) ? { repos: p.repos.map(repoSummaryOf) } : {}),
+          ...summaryFieldsOf(p),
         };
       }),
     );
+  }
+
+  private async branchesOf(
+    serviceClient: ServiceClient,
+    project: ListedProject,
+    deletedAt: string | null | undefined,
+  ): Promise<ProjectBranchSummary[]> {
+    if (carriesBranches(project)) return project.branches.map((b) => ({ id: b.id, name: b.name, protected: b.is_protected }));
+    // A deleted project answers 410 PROJECT_DELETED to its branch list: it has none to show.
+    if (deletedAt !== null && deletedAt !== undefined) return [];
+    return (await serviceClient.listBranches(project.id)).map((b) => ({ id: b.id, name: b.name, protected: b.is_protected }));
   }
 
   private render(projects: ProjectSummary[], json: boolean): void {
@@ -237,7 +302,7 @@ export class ProjectsCommand {
 
     console.log('');
     for (const project of projects) {
-      console.log(`  ${B(project.name)} ${DIM}·${RESET} ${this.formatBranchesOrDeleted(project)}${this.formatRepos(project.repos)}`);
+      console.log(`  ${B(project.name)} ${DIM}·${RESET} ${this.formatBranchesOrDeleted(project)}${this.formatRepos(project.repos)}${this.formatVariableCount(project.variable_count)}`);
     }
     console.log('');
   }
@@ -246,6 +311,12 @@ export class ProjectsCommand {
   private formatRepos(repos: ProjectRepoSummary[] | undefined): string {
     if (repos === undefined || repos.length === 0) return '';
     return ` ${DIM}·${RESET} ${repos.map(formatRepo).join(', ')}`;
+  }
+
+  /** ` · 7 variables`; nothing when the service did not send a count or cannot say (`null`). */
+  private formatVariableCount(count: number | null | undefined): string {
+    if (typeof count !== 'number') return '';
+    return ` ${DIM}·${RESET} ${count} ${count === 1 ? 'variable' : 'variables'}`; // COPY-FLAG
   }
 
   /** A deleted project reads `deleted <date>` where the branches would be. */

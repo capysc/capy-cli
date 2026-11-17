@@ -38,7 +38,7 @@ export class UsersCommand {
 
     const authService = new AuthService(this.apiUrl, this.devMode, projectState.userId);
     const serviceClient = new ServiceClient(this.apiUrl, this.devMode);
-    serviceClient.setTokenProvider(() => authService.getValidToken());
+    serviceClient.setTokenProvider((rejected) => authService.getValidToken(rejected));
     let authResult = await authService.authenticateSilent(orgId);
     if (!authResult.success) authResult = await authService.authenticateSilent();
     if (!authResult.success) authResult = await authService.authenticate(orgId);
@@ -149,7 +149,7 @@ export class UsersCommand {
     // when another org's session is still valid.
     const authService = new AuthService(this.apiUrl, this.devMode, projectState.userId);
     const serviceClient = new ServiceClient(this.apiUrl, this.devMode);
-    serviceClient.setTokenProvider(() => authService.getValidToken());
+    serviceClient.setTokenProvider((rejected) => authService.getValidToken(rejected));
     await this.authenticateForUsersOrExit(authService, orgId);
 
     // Fetch the users. In --json mode emit NO progress at all so stdout stays
