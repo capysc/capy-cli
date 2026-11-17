@@ -42,15 +42,17 @@ function fakeClient(opts: FakeOpts = {}): ServiceClient {
 }
 
 describe('loadScreenData', () => {
-  test('an owner gets everything: projects (no system store), branches, created_at, repos, index, members', async () => {
+  test('an owner gets the list: projects (no system store), branches, created_at, repos; the index and members are not read here', async () => {
     const data = await loadScreenData(fakeClient(), 'o');
     expect(data.projects.map((p) => p.id)).toEqual(['p1', 'p2']);
     expect(data.projects[0].createdAt).toBe('2026-01-01T00:00:00.000Z');
     expect(data.projects[1].createdAt).toBeNull();
     expect(data.projects[1].branches).toEqual([{ id: 'p2-b', name: 'development', protected: true }]);
     expect(data.projects[0].repos?.map((r) => r.name)).toEqual(['web']);
-    expect(data.index).toEqual({ rows: [], skipped: [], coveredProjectIds: ['p1', 'p2'] });
-    expect(data.members).toEqual([]);
+    // They load when a tab first needs them (tests/commands/projectsLazyLoad.test.ts).
+    expect(data.index).toBeNull();
+    expect(data.members).toBeNull();
+    expect(data.lazy?.members).toBe('unloaded');
     expect(data.reposShown).toBe(true);
   });
 
@@ -66,18 +68,19 @@ describe('loadScreenData', () => {
     const data = await loadScreenData(fakeClient({ me: () => ({ user_id: 'u', role: 'project-admin', admin_projects: [{ id: 'p1', name: 'web' }] }) }), 'o');
     expect(data.projects[0].repos).toBeDefined();
     expect(data.projects[1].repos).toBeUndefined();
-    expect(data.index?.coveredProjectIds).toEqual(['p1']);
+    expect(data.lazy?.adminProjectIds).toEqual(['p1']);
   });
 
-  test('a failure that is not a 403 still fails the screen', async () => {
+  test('a failure of the project list still fails the screen', async () => {
     const broken = (): never => {
       throw new CapyError('boom', ERROR_CODES.SERVICE_ERROR, { status: 500 });
     };
-    await expect(loadScreenData(fakeClient({ index: broken }), 'o')).rejects.toBeInstanceOf(CapyError);
+    const client = { ...fakeClient(), listProjects: async () => broken() } as unknown as ServiceClient;
+    await expect(loadScreenData(client, 'o')).rejects.toBeInstanceOf(CapyError);
   });
 
   test('coverage unknown when /me cannot be read', async () => {
     const data = await loadScreenData(fakeClient({ me: forbidden }), 'o');
-    expect(data.index?.coveredProjectIds).toBeNull();
+    expect(data.lazy?.adminProjectIds).toBeNull();
   });
 });
