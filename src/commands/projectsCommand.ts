@@ -1,5 +1,5 @@
 import { ServiceClient, type ListedBranch, type ListedProject, type ListedRepo, type OrgRepoLink } from '../service/serviceClient';
-import type { ProjectItem, ProjectsData, ProjectsIndex } from '../ui/projectsScreen';
+import type { ProjectItem, ProjectsData } from '../ui/projectsScreen';
 import { resolveOrgContext } from '../core/orgContext';
 import { excludeSystemProject } from '../system/reservedProjectName';
 import { Spinner } from '../ui/spinner';
@@ -102,16 +102,6 @@ function summaryFieldsOf(project: ListedProject): Pick<ProjectSummary, 'variable
   };
 }
 
-/** A read the caller may not be allowed: `null` when the service refuses it with 403 PERMISSION_DENIED (the screen then hides what it feeds). Anything else still fails. */
-async function readUnlessForbidden<T>(read: () => Promise<T>): Promise<T | null> {
-  try {
-    return await read();
-  } catch (err) {
-    if (err instanceof CapyError && err.code === ERROR_CODES.PERMISSION_DENIED) return null;
-    throw err;
-  }
-}
-
 /** The projects the caller administers (`admin_projects` of `GET /orgs/:id/me`), or `null` when that cannot be read. */
 async function loadAdminProjectIds(serviceClient: ServiceClient, orgId: string): Promise<readonly string[] | null> {
   try {
@@ -127,22 +117,37 @@ async function screenBranchesOf(serviceClient: ServiceClient, project: ListedPro
   return (await serviceClient.listBranches(project.id)).map((b) => ({ id: b.id, name: b.name, protected: b.is_protected }));
 }
 
+/** The variable summary the list carries, as the screen keeps it: exactly as sent (`null` kept), and nothing for a service that sends none. */
+function listSummaryOf(project: ListedProject): Pick<ProjectItem, 'variableCount' | 'variablesUpdatedAt' | 'indexStatus'> {
+  return {
+    ...(project.variable_count === undefined ? {} : { variableCount: project.variable_count }),
+    ...(project.variables_updated_at === undefined ? {} : { variablesUpdatedAt: project.variables_updated_at }),
+    ...(project.index_status === undefined ? {} : { indexStatus: project.index_status }),
+  };
+}
+
 /**
- * Everything the interactive screen shows, each part read once. A part the
- * service does not return to the caller is `null`, and the screen hides it.
- * Linked repos are attached only to projects the caller administers (only
- * those are returned), so a project with none attached hides its Git repos tab.
+ * What the interactive screen draws from: `GET /projects` and nothing else for a
+ * current service, which sends each project's branches, repos (only on projects
+ * the caller administers) and variable summary in that one response. The org's
+ * secrets index and member list are not read here: the screen reads them when a
+ * tab first needs them (`ProjectsData.lazy`).
+ *
+ * An older service sends less, and the existing fallbacks stay: one request for
+ * each project's branches, and one for the org's repo links (with the caller's
+ * administered projects, so a link is attached only to those). A part the
+ * service does not return to the caller is left out, and the screen hides it:
+ * a project with no repos attached hides its Git repos tab.
  */
 export async function loadScreenData(serviceClient: ServiceClient, orgId: string): Promise<ProjectsData> {
   const listed = excludeSystemProject(await serviceClient.listProjects());
-  // A newer service puts branches and repos in the list: no per-project and no repo request then.
+  // A newer service puts branches and repos in the list: no per-project and no repo request then. With no project there is nothing to attach them to.
   const reposInList = listCarriesRepoInfo(listed);
-  const [withBranches, links, index, adminIds, members] = await Promise.all([
+  const needsRepoRequests = !reposInList && listed.length > 0;
+  const [withBranches, links, adminIds] = await Promise.all([
     Promise.all(listed.map(async (p) => ({ p, branches: await screenBranchesOf(serviceClient, p) }))),
-    reposInList ? Promise.resolve(null) : loadOrgRepos(serviceClient, orgId),
-    readUnlessForbidden(() => serviceClient.getSecretIndex(orgId)),
-    loadAdminProjectIds(serviceClient, orgId),
-    readUnlessForbidden(async () => (await serviceClient.listMemberDetails(orgId)).members),
+    needsRepoRequests ? loadOrgRepos(serviceClient, orgId) : Promise.resolve(null),
+    needsRepoRequests ? loadAdminProjectIds(serviceClient, orgId) : Promise.resolve(null),
   ]);
   const reposFor = (project: ListedProject): Pick<ProjectItem, 'repos'> => {
     // The service sends `repos` only on projects the caller administers.
@@ -160,12 +165,10 @@ export async function loadScreenData(serviceClient: ServiceClient, orgId: string
     createdAt: p.created_at ?? null,
     branches,
     ...reposFor(p),
+    ...listSummaryOf(p),
   }));
-  const screenIndex: ProjectsIndex | null = index === null
-    ? null
-    : { rows: index.rows, skipped: index.skipped, coveredProjectIds: adminIds };
   const reposShown = reposInList ? listed.some((p) => Array.isArray(p.repos)) : links !== null;
-  return { projects, index: screenIndex, members, reposShown };
+  return { projects, index: null, members: null, reposShown, lazy: { indexes: {}, members: 'unloaded', adminProjectIds: adminIds } };
 }
 
 /**
@@ -232,6 +235,7 @@ export class ProjectsCommand {
       const { createProjectDeleteActions } = await import('./projectDeleteActions');
       const { createProjectUsersActions } = await import('./projectUsersActions');
       const { createProjectManageActions } = await import('./projectManageActions');
+      const { createProjectsLoadActions } = await import('./projectsLoadActions');
       const { runProjectsScreen } = await import('../ui/projectsScreenDriver');
       spinner.stop();
       await runProjectsScreen(
@@ -243,6 +247,7 @@ export class ProjectsCommand {
         createProjectDeleteActions(serviceClient, { id: orgId, name: orgName }),
         createProjectUsersActions(serviceClient, orgId, userId),
         createProjectManageActions(serviceClient, orgId),
+        createProjectsLoadActions(serviceClient, orgId),
       );
     } catch (err) {
       spinner.fail('Failed to load projects');

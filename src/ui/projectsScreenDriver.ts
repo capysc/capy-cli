@@ -11,6 +11,8 @@ import type { LocationDecryptor } from './secretsScreen';
 import {
   type DeleteFinished,
   type DeletePreviewLoaded,
+  type MembersLoaded,
+  type ProjectIndexLoaded,
   type ProjectRefLite,
   type ProjectsData,
   type ProjectsOwnEffect,
@@ -19,6 +21,8 @@ import {
   applyDeletePreview,
   applyIdCopied,
   applyManageDone,
+  applyMembersLoaded,
+  applyProjectIndexLoaded,
   applyTokensLoaded,
   applyUsersCopied,
   applyUsersDone,
@@ -37,6 +41,21 @@ export interface ProjectsManageActions {
   readonly deleteBranch: (project: ManageProjectRef, branch: BranchRef) => Promise<ManageFinished>;
   readonly setAccess: (project: ManageProjectRef, branch: BranchRef, user: AccessRow, grant: boolean) => Promise<ManageFinished>;
 }
+
+/**
+ * What a tab reads the first time it is shown (`commands/projectsLoadActions.ts`): one project's secrets index,
+ * and the org's member list. No function ever rejects: a refusal is `denied`, anything else `ok: false`.
+ */
+export interface ProjectsLoadActions {
+  readonly loadIndex: (projectId: string) => Promise<ProjectIndexLoaded>;
+  readonly loadMembers: () => Promise<MembersLoaded>;
+}
+
+/** Without load actions (tests that never show those tabs), a read fails rather than being sent. */
+const NO_LOAD_ACTIONS: ProjectsLoadActions = {
+  loadIndex: async () => ({ ok: false, denied: false }),
+  loadMembers: async () => ({ ok: false, denied: false }),
+};
 
 const UNAVAILABLE = { ok: false as const, refusal: { code: 'UNAVAILABLE', message: 'Not available here.' } };
 
@@ -117,6 +136,8 @@ const NO_USERS_ACTIONS: ProjectsUsersActions = {
 const OWN_EFFECT_TYPES: ReadonlySet<string> = new Set<ProjectsOwnEffect['type']>([
   'projectDeletePreview',
   'projectDelete',
+  'projectIndexLoad',
+  'projectMembersLoad',
   'projectUserInvite',
   'projectUserRole',
   'projectUserRemove',
@@ -156,6 +177,7 @@ export function projectsModel(
   usersActions: ProjectsUsersActions = NO_USERS_ACTIONS,
   copy: CopyText = copyToClipboard,
   manageActions: ProjectsManageActions = NO_MANAGE_ACTIONS,
+  loadActions: ProjectsLoadActions = NO_LOAD_ACTIONS,
 ): ScreenModel<ProjectsScreenState, ProjectsOwnEffect> {
   return {
     handleKey,
@@ -169,6 +191,15 @@ export function projectsModel(
     performOwn: (effect, done) => {
       if (MANAGE_EFFECT_TYPES.has(effect.type)) {
         performManage(effect as ManageEffect, manageActions, copy, done);
+        return;
+      }
+      if (effect.type === 'projectIndexLoad') {
+        const projectId = effect.projectId;
+        void loadActions.loadIndex(projectId).then((loaded) => done((state) => applyProjectIndexLoaded(state, projectId, loaded)));
+        return;
+      }
+      if (effect.type === 'projectMembersLoad') {
+        void loadActions.loadMembers().then((loaded) => done((state) => applyMembersLoaded(state, loaded)));
         return;
       }
       if (effect.type !== 'projectDeletePreview' && effect.type !== 'projectDelete') {
@@ -195,7 +226,8 @@ export async function runProjectsScreen(
   deleteActions: ProjectsDeleteActions,
   usersActions: ProjectsUsersActions,
   manageActions: ProjectsManageActions,
+  loadActions: ProjectsLoadActions,
   copy?: CopyText,
 ): Promise<void> {
-  await runScreen(projectsModel(deleteActions, usersActions, copy, manageActions), initialProjectsScreenState(data, dryRun), decryptAt, edit, deploy, copy);
+  await runScreen(projectsModel(deleteActions, usersActions, copy, manageActions, loadActions), initialProjectsScreenState(data, dryRun), decryptAt, edit, deploy, copy);
 }
