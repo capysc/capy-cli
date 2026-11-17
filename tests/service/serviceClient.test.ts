@@ -508,3 +508,23 @@ describe('pushSecrets base_keep_hash and SECRETS_STALE_BASE', () => {
     expect(err.code).toBe(ERROR_CODES.SERVICE_ERROR);
   });
 });
+
+describe('ServiceClient.getSecretIndex', () => {
+  const client = () => new ServiceClient('http://localhost:3002');
+  const urlOfLastCall = (): string => String(mockFetch.mock.calls[mockFetch.mock.calls.length - 1][0]);
+
+  test('without options it sends exactly the request it always did: no query', async () => {
+    mockFetch.mockResolvedValueOnce(mockFetchResponse({ org_id: 'org1', rows: [], skipped: [] }));
+    await client().getSecretIndex('org1');
+    expect(urlOfLastCall()).toBe('http://localhost:3002/orgs/org1/secrets');
+    mockFetch.mockResolvedValueOnce(mockFetchResponse({ org_id: 'org1', rows: [], skipped: [] }));
+    await client().getSecretIndex('org1', {});
+    expect(urlOfLastCall()).toBe('http://localhost:3002/orgs/org1/secrets');
+  });
+
+  test('with a project it sends that project id, encoded, as project_id', async () => {
+    mockFetch.mockResolvedValueOnce(mockFetchResponse({ org_id: 'org1', rows: [], skipped: [] }));
+    await client().getSecretIndex('org1', { projectId: 'p/1 &x' });
+    expect(urlOfLastCall()).toBe('http://localhost:3002/orgs/org1/secrets?project_id=p%2F1%20%26x');
+  });
+});
