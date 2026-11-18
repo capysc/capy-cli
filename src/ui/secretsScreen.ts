@@ -387,9 +387,9 @@ export function scopeRowKey(row: { readonly name: string; readonly value_hash: s
   return JSON.stringify([row.name, row.value_hash]);
 }
 
-/** "also in 2 other projects" — said of a row whose value is also used in other projects. */
+/** "(+2 projects)" — said of a row whose value is also used in other projects. Approved wording. */
 export function alsoInOtherProjectsText(count: number): string {
-  return `also in ${count} other project${count === 1 ? '' : 's'}`; // COPY-FLAG
+  return `(+${count} project${count === 1 ? '' : 's'})`;
 }
 
 /** The scope's count for `row`, 0 when it has none (or there is no scope). */
@@ -1072,13 +1072,13 @@ export function formatMiddleCell(row: SecretIndexRow, column: ColumnMode, width:
 /**
  * The middle cell. Embedded in one project (`SecretsScreenScope`), the PROJECT
  * column is always that project, so it also says when the row's value is used
- * in other projects: `web · also in 2 other projects`.
+ * in other projects: `web (+2 projects)`.
  */
 function scopedMiddleCell(state: SecretsScreenState, row: SecretIndexRow, width: number): string {
   const cell = formatMiddleCell(row, state.column, width);
   const others = otherProjectsOf(state, row);
   if (state.scope === undefined || state.column !== 'project' || others === 0) return cell;
-  return `${cell} ${DIM}· ${alsoInOtherProjectsText(others)}${RESET}`;
+  return `${cell} ${DIM}${alsoInOtherProjectsText(others)}${RESET}`;
 }
 
 /** The STATUS cell: the same coloured `● status` badge `capy edit` shows (CAP-702). */
