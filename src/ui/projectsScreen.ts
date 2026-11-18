@@ -69,6 +69,8 @@ import {
   settingsLabel,
   startBranch,
   startRepoRemove,
+  REMOTE_TAG,
+  repoRowKey,
   startSettings,
 } from './projectManage';
 import {
@@ -518,13 +520,18 @@ export interface ProjectsScreenState {
   readonly manage: ManageDialog | null;
   /** Short lines shown above the footer until the next key (what a delete did). */
   readonly notes: readonly string[];
+  /**
+   * By project id: the keys (`repoRowKey`) of the rows whose folder holds the project's keep.lock on the remote.
+   * A project absent here has not been checked; `[]` is "being checked" or "none".
+   */
+  readonly remoteRows: Readonly<Record<string, readonly string[]>>;
   readonly quit: boolean;
   /** Printed after the screen is left (the embedded edit and deploy confirmations). */
   readonly exitText: string | null;
 }
 
 export function initialProjectsScreenState(data: ProjectsData, dryRun: boolean = false): ProjectsScreenState {
-  return { data, dryRun, query: '', cursor: 0, open: null, dialog: null, usersDialog: null, manage: null, notes: [], quit: false, exitText: null };
+  return { data, dryRun, query: '', cursor: 0, open: null, dialog: null, usersDialog: null, manage: null, notes: [], remoteRows: {}, quit: false, exitText: null };
 }
 
 /** Most recently updated first; projects with no known time last (including, when the list says who administers what, those the caller does not administer); then by name. */
@@ -700,13 +707,40 @@ const noEffect = (state: ProjectsScreenState): ProjectsReduceResult => ({ state,
 
 /** Pure reducer: `(state, key) => { state, effect }`. */
 export function handleKey(state: ProjectsScreenState, key: string): ProjectsReduceResult {
+  return withRepoRowsCheck(reduceKey(state, key));
+}
+
+function reduceKey(state: ProjectsScreenState, key: string): ProjectsReduceResult {
   // The notes last until the next key.
-  if (state.notes.length > 0) return handleKey({ ...state, notes: [] }, key);
+  if (state.notes.length > 0) return reduceKey({ ...state, notes: [] }, key);
   if (state.dialog) return handleDialogKey(state, state.dialog, key);
   if (state.usersDialog && state.open) return handleUsersDialogKey(state, state.open, state.usersDialog, key);
   if (state.manage && state.open) return handleManageKey(state, state.manage, key);
   if (state.open) return handleProjectKey(state, state.open, key);
   return handleListKey(state, key);
+}
+
+const rowRefOf = (r: ProjectRepoSummary): RepoRowRef => ({ host: r.host, owner: r.owner, name: r.name, path: r.path });
+
+/**
+ * The first time a project's Git Repos tab is shown, its rows are checked against GitHub once (the `[remote]` tag).
+ * Only when the key started nothing else: the check then starts on the next key.
+ */
+function withRepoRowsCheck(result: ProjectsReduceResult): ProjectsReduceResult {
+  const { state, effect } = result;
+  if (effect !== null || state.open === null || state.open.tab !== 'repos' || state.quit) return result;
+  const project = projectById(state.data, state.open.projectId);
+  const rows = project?.repos ?? [];
+  if (project === undefined || rows.length === 0 || state.remoteRows[project.id] !== undefined) return result;
+  return {
+    state: { ...state, remoteRows: { ...state.remoteRows, [project.id]: [] } },
+    effect: { type: 'projectRepoRowsCheck', project: { id: project.id, name: project.name }, rows: rows.map(rowRefOf) },
+  };
+}
+
+/** The check came back: `remote` are the rows whose folder holds the project's keep.lock on the remote. */
+export function applyRepoRowsChecked(state: ProjectsScreenState, projectId: string, remote: readonly RepoRowRef[]): ProjectsScreenState {
+  return { ...state, remoteRows: { ...state.remoteRows, [projectId]: remote.map(repoRowKey) } };
 }
 
 /**
@@ -1327,7 +1361,7 @@ function tabBody(
   if (view.tab === 'secrets') return NO_SECRETS_YET_LINES.map((l) => `${m}${l}`);
   if (view.tab === 'settings') return settingsLines(project.id, view.settingsCursor, width, boxed);
   if (view.tab === 'branches') return branchLines(project, view.branchCursor, width, boxed);
-  if (view.tab === 'repos') return linkRepoLines(repoLines(project, view.repoCursor, width, boxed), project.repos ?? []);
+  if (view.tab === 'repos') return linkRepoLines(repoLines(project, state.remoteRows[project.id] ?? [], view.repoCursor, width, boxed), project.repos ?? []);
   if (view.tab === 'users') return usersTabLines(userRowsOf(state.data, project.id), view.userCursor, height, available, width, boxed);
   return tabTableLines(tabTable(state.data, project, view.tab), view.scroll, height, available);
 }
@@ -1414,10 +1448,14 @@ function branchLines(project: ProjectItem, cursor: number, width: number, boxed:
 }
 
 /** The Git Repos tab: each stored row (a repo, at the folder the project was seen in), with a cursor. */
-function repoLines(project: ProjectItem, cursor: number, width: number, boxed: boolean): readonly string[] {
+function repoLines(project: ProjectItem, remoteKeys: readonly string[], cursor: number, width: number, boxed: boolean): readonly string[] {
   const rows = project.repos ?? [];
   if (rows.length === 0) return ['', `${' '.repeat(MARGIN)}${DIM}(none)${RESET}`];
-  return ['', ...actionRows(rows.map((r) => repoUrl(r) ?? formatRepo(r)), cursor, width, boxed)];
+  const label = (r: ProjectRepoSummary): string => {
+    const text = repoUrl(r) ?? formatRepo(r);
+    return remoteKeys.includes(repoRowKey(rowRefOf(r))) ? `${text} ${REMOTE_TAG}` : text;
+  };
+  return ['', ...actionRows(rows.map(label), cursor, width, boxed)];
 }
 
 /** The notes (what a delete did), dim, above the footer. */
@@ -1437,7 +1475,7 @@ function renderDialog(state: ProjectsScreenState, dialog: DeleteDialog, termHeig
   const question = dialog.step === 'refused' ? [] : [`${m}${BOLD}${deleteQuestion(dialog.project.name)}${RESET}`];
   const keys = dialog.step === 'refused'
     ? [renderHint('esc', 'back')]
-    : [renderHint('y', 'yes'), renderHint('n', 'no'), renderHint('enter', 'no')]; // COPY-FLAG
+    : [renderHint('y', 'yes'), renderHint('n', 'no')]; // COPY-FLAG
   // The question and its keys stay at the bottom; the lines above them scroll when they do not fit.
   const room = Math.max(1, termHeight - head.length - question.length - 2);
   const overflows = body.length > room;

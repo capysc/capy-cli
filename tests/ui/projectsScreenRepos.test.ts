@@ -3,6 +3,7 @@ import {
   type ProjectsData,
   type ProjectsScreenState,
   applyManageDone,
+  applyRepoRowsChecked,
   handleKey,
   initialProjectsScreenState,
   render,
@@ -120,5 +121,80 @@ describe('the action', () => {
   test('a failure comes back as a refusal, never a throw', async () => {
     const client = { deleteProjectRepoRow: mock(async () => { throw new Error('nope'); }) };
     expect(await createProjectManageActions(client as never, 'o').removeRepoRow({ id: 'p1', name: 'backend' }, TEMP_ROW)).toMatchObject({ ok: false });
+  });
+});
+
+describe('the [remote] tag', () => {
+  const REAL_ROW = { host: 'github.com', owner: 'Acme', name: 'mono', path: 'backend' };
+
+  test('the first time the tab is shown, the rows are checked against GitHub once', () => {
+    const first = press(initialProjectsScreenState(dataWith([REAL, TEMP]), false), ENTER);
+    const onTab = first.open?.tab === 'repos' ? { state: first, effect: null } : handleKey(first, RIGHT);
+    const again = handleKey(onTab.state, DOWN);
+
+    expect(onTab.state.open?.tab).toBe('repos');
+    expect(first.open?.tab === 'repos' ? handleKey(initialProjectsScreenState(dataWith([REAL, TEMP]), false), ENTER).effect : onTab.effect).toEqual({
+      type: 'projectRepoRowsCheck',
+      project: { id: 'p1', name: 'backend' },
+      rows: [REAL_ROW, TEMP_ROW],
+    });
+    expect(again.effect).toBeNull();
+  });
+
+  test('a row that holds the project\'s keep.lock on the remote is tagged; the other is not', () => {
+    const state = applyRepoRowsChecked(atRepos([REAL, TEMP]), 'p1', [{ ...REAL_ROW, owner: 'acme', name: 'MONO' }]);
+    const lines = strip(render(state, 120, 20)).split('\n');
+
+    expect(lines.find((l) => l.includes('/tree/HEAD/backend'))).toContain('[remote]');
+    expect(lines.find((l) => l.includes('capy-temp'))).not.toContain('[remote]');
+  });
+
+  test('before the check comes back, and when nothing could be read, no row is tagged', () => {
+    expect(strip(render(atRepos([REAL, TEMP]), 120, 20))).not.toContain('[remote]');
+    expect(strip(render(applyRepoRowsChecked(atRepos([REAL, TEMP]), 'p1', []), 120, 20))).not.toContain('[remote]');
+  });
+
+  describe('the check', () => {
+    const client = {} as never;
+    const githubWith = (files: Readonly<Record<string, string>>, base: string | null = 'main') => ({
+      getDefaultBranches: mock(async (repos: readonly unknown[]) => ({ ok: true as const, value: repos.map(() => base) })),
+      getFile: mock(async (_repo: unknown, path: string) => ({ ok: true as const, value: files[path] ?? null })),
+    });
+    const check = (github: ReturnType<typeof githubWith> | undefined) =>
+      createProjectManageActions(client, 'o', async () => github as never).remoteRepoRows({ id: 'p1', name: 'backend' }, [REAL_ROW, TEMP_ROW]);
+
+    test('a row is remote when its folder holds this project\'s keep.lock on the default branch', async () => {
+      const github = githubWith({ 'backend/keep.lock': '{"project_id":"p1"}' });
+
+      expect(await check(github)).toEqual([REAL_ROW]);
+      expect(github.getDefaultBranches.mock.calls).toHaveLength(1);
+      expect(github.getFile.mock.calls.map((c) => `${c[1]}@${c[2]}`)).toEqual(['backend/keep.lock@main', '.claude/capy-temp/keep.lock@main']);
+    });
+
+    test('another project\'s keep.lock, no keep.lock, no default branch, or no gh: not remote', async () => {
+      expect(await check(githubWith({ 'backend/keep.lock': '{"project_id":"other"}' }))).toEqual([]);
+      expect(await check(githubWith({}))).toEqual([]);
+      expect(await check(githubWith({ 'backend/keep.lock': '{"project_id":"p1"}' }, null))).toEqual([]);
+      expect(await check(undefined)).toEqual([]);
+    });
+
+    test('a read that throws is never a failure of the screen', async () => {
+      const github = githubWith({});
+      github.getFile.mockImplementation(async () => {
+        throw new Error('boom');
+      });
+
+      expect(await check(github)).toEqual([]);
+    });
+  });
+});
+
+describe('the confirm hint', () => {
+  test('lists y and n only', () => {
+    const frame = strip(render(press(atRepos([REAL, TEMP]), DOWN, 'd'), 120, 20));
+
+    expect(frame).toMatch(/y yes/);
+    expect(frame).toMatch(/n no/);
+    expect(frame).not.toMatch(/enter no/);
   });
 });

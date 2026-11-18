@@ -23,6 +23,7 @@ import {
   applyManageDone,
   applyMembersLoaded,
   applyProjectIndexLoaded,
+  applyRepoRowsChecked,
   applyTokensLoaded,
   applyUsersCopied,
   applyUsersDone,
@@ -41,6 +42,8 @@ export interface ProjectsManageActions {
   readonly deleteBranch: (project: ManageProjectRef, branch: BranchRef) => Promise<ManageFinished>;
   readonly setAccess: (project: ManageProjectRef, branch: BranchRef, user: AccessRow, grant: boolean) => Promise<ManageFinished>;
   readonly removeRepoRow: (project: ManageProjectRef, row: RepoRowRef) => Promise<ManageFinished>;
+  /** The rows whose folder holds the project's keep.lock on the remote. Never rejects: unreadable is "not known", so not listed. */
+  readonly remoteRepoRows: (project: ManageProjectRef, rows: readonly RepoRowRef[]) => Promise<readonly RepoRowRef[]>;
 }
 
 /**
@@ -68,6 +71,7 @@ const NO_MANAGE_ACTIONS: ProjectsManageActions = {
   deleteBranch: async () => UNAVAILABLE,
   setAccess: async () => UNAVAILABLE,
   removeRepoRow: async () => UNAVAILABLE,
+  remoteRepoRows: async () => [],
 };
 
 /** Starts one Settings or Capy Branches effect; its result comes back through `done`. */
@@ -101,6 +105,14 @@ function performManage(
     void actions.deleteBranch(effect.project, effect.branch).then(finish);
     return;
   }
+  if (effect.type === 'projectRepoRowsCheck') {
+    const projectId = effect.project.id;
+    void actions.remoteRepoRows(effect.project, effect.rows).then(
+      (remote) => done((state) => ({ state: applyRepoRowsChecked(state, projectId, remote), effect: null })),
+      () => done((state) => ({ state: applyRepoRowsChecked(state, projectId, []), effect: null })),
+    );
+    return;
+  }
   if (effect.type === 'projectRepoRemove') {
     void actions.removeRepoRow(effect.project, effect.row).then(finish);
     return;
@@ -116,6 +128,7 @@ const MANAGE_EFFECT_LIST: readonly ManageEffect['type'][] = [
   'projectBranchDelete',
   'projectBranchAccess',
   'projectRepoRemove',
+  'projectRepoRowsCheck',
 ];
 const MANAGE_EFFECT_TYPES: ReadonlySet<string> = new Set<string>(MANAGE_EFFECT_LIST);
 

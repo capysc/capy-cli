@@ -49,6 +49,12 @@ export interface RepoRowRef {
   readonly path: string;
 }
 
+/** A row's identity: owner and name compare case-insensitively (as on GitHub and the service), the folder exactly. */
+export const repoRowKey = (row: RepoRowRef): string => `${row.host.toLowerCase()}/${row.owner.toLowerCase()}/${row.name.toLowerCase()}\u0000${row.path}`;
+
+/** The tag of a row whose folder holds the project's keep.lock on the remote. */
+export const REMOTE_TAG = '[remote]';
+
 /** `owner/name`, plus `/folder` when the row is not at the repo root. */
 function repoRowLabel(row: RepoRowRef): string {
   return row.path === '.' ? `${row.owner}/${row.name}` : `${row.owner}/${row.name}/${row.path}`;
@@ -121,6 +127,8 @@ export type ManageEffect =
   | { readonly type: 'projectBranchProtect'; readonly project: ManageProjectRef; readonly branch: BranchRef; readonly protect: boolean }
   | { readonly type: 'projectBranchDelete'; readonly project: ManageProjectRef; readonly branch: BranchRef }
   | { readonly type: 'projectRepoRemove'; readonly project: ManageProjectRef; readonly row: RepoRowRef }
+  /** Read from GitHub which of the project's rows hold its keep.lock on the remote (the `[remote]` tag). */
+  | { readonly type: 'projectRepoRowsCheck'; readonly project: ManageProjectRef; readonly rows: readonly RepoRowRef[] }
   | { readonly type: 'projectBranchAccess'; readonly project: ManageProjectRef; readonly branch: BranchRef; readonly user: AccessRow; readonly grant: boolean };
 
 /** What a change came back with: lines to show, and whatever was read again. */
@@ -330,7 +338,7 @@ export function renderManage(dialog: ManageDialog, width: number, margin: string
       `${m}${BOLD}Revoke deploy token ${dialog.token.deployId.slice(0, 12)}...?${RESET}`, // COPY-FLAG
       `${m}${DIM}Deploys using it stop getting secrets.${RESET}`, // COPY-FLAG
       '',
-      m + hints(hint('y', 'yes'), hint('n', 'no'), hint('enter', 'no')),
+      m + hints(hint('y', 'yes'), hint('n', 'no')),
     ];
   }
   if (dialog.step === 'branchMenu') {
@@ -346,14 +354,14 @@ export function renderManage(dialog: ManageDialog, width: number, margin: string
     return [
       `${m}${BOLD}Delete branch "${dialog.branch.name}"? This will remove all its secrets.${RESET}`, // reused from `capy branch -D`
       '',
-      m + hints(hint('y', 'yes'), hint('n', 'no'), hint('enter', 'no')),
+      m + hints(hint('y', 'yes'), hint('n', 'no')),
     ];
   }
   if (dialog.step === 'confirmRemoveRepo') {
     return [
       `${m}${BOLD}Remove ${repoRowLabel(dialog.row)} from ${dialog.project.name}?${RESET}`, // COPY-FLAG
       '',
-      m + hints(hint('y', 'yes'), hint('n', 'no'), hint('enter', 'no')),
+      m + hints(hint('y', 'yes'), hint('n', 'no')),
     ];
   }
   const rows = accessRows(members, dialog.project.id, dialog.branch.id);
