@@ -894,6 +894,8 @@ export const ERROR_CODES = {
   KEEP_LOCK_REPO_MISMATCH: 'KEEP_LOCK_REPO_MISMATCH',
   /** `capy secrets set NAME`: NAME matches more than one row (distinct values) and neither `--row` nor `--all-rows` was given. Exit 3. */
   SECRET_AMBIGUOUS: 'SECRET_AMBIGUOUS',
+  /** A project of the run is linked to more than one repo row and no `--pr-repo` chose one. Exit 3, with an elicitation. Nothing was changed. */
+  PR_REPO_AMBIGUOUS: 'PR_REPO_AMBIGUOUS',
   /** `capy secrets set --confirm <plan_id>`: the plan recomputed now is not the plan that was confirmed. Nothing was changed. */
   PLAN_CHANGED: 'PLAN_CHANGED',
   /** `PUT /orgs/:orgId/projects/:projectId/repos` refused a project that is not a repo project (e.g. the system store). */

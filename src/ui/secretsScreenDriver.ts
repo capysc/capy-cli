@@ -82,7 +82,7 @@ export interface SecretsEditActions {
  */
 export interface SecretsDeployActions {
   /** The Dokploy targets of this row, from GitHub (reads only: nothing is unlocked or written). Never rejects. */
-  readonly loadPlan: (row: SecretIndexRow) => Promise<DeployPlanLoaded>;
+  readonly loadPlan: (row: SecretIndexRow, choices?: Extract<DeployEffect, { type: 'loadDeployPlan' }>['choices']) => Promise<DeployPlanLoaded>;
   /** Pushes the values, records the deliveries and opens the PRs, reporting progress as items complete. Never rejects. */
   readonly run: (
     plan: BatchPlan,
@@ -295,7 +295,7 @@ function performSecrets(
     return;
   }
   if (effect.type === 'loadDeployPlan') {
-    const loaded = deploy ? deploy.loadPlan(effect.row) : Promise.resolve<DeployPlanLoaded>({ ok: false, code: 'UNAVAILABLE' });
+    const loaded = deploy ? deploy.loadPlan(effect.row, effect.choices) : Promise.resolve<DeployPlanLoaded>({ ok: false, code: 'UNAVAILABLE' });
     void loaded.then((result) => bus.emit('action', { kind: 'deployPlan', loaded: result }));
     return;
   }

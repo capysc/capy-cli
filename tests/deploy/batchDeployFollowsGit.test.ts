@@ -311,11 +311,13 @@ describe('capy secrets deploy: the plan after a move', () => {
       (thrown: unknown) => ({ returned: undefined, thrown }),
     );
     const stdout = logSpy.mock.calls.map((a) => a.map(String).join(' ')).join('\n');
+    const exits = exitSpy.mock.calls;
+    const exitCode = exits.length > 0 ? (exits[exits.length - 1][0] as number | undefined) : undefined;
     logSpy.mockRestore();
     errSpy.mockRestore();
     exitSpy.mockRestore();
     if (outcome.thrown !== null && !(outcome.thrown instanceof ExitSignal)) throw outcome.thrown;
-    return { returned: outcome.returned, stdout };
+    return { returned: outcome.returned, stdout, exitCode };
   }
 
   function rig(repos: readonly RepoFixture[], links: readonly OrgRepoLink[]) {
@@ -332,21 +334,39 @@ describe('capy secrets deploy: the plan after a move', () => {
   }
   const run = (io: SecretsDeployIo, opts: SecretsDeployOpts) => capture(() => runSecretsDeploy([NAME], { json: true, ...opts }, io));
 
-  test('the dry-run plan does not list the other stored folder, and is the very plan a project with only the new row gets', async () => {
-    const moved = JSON.parse((await run(rig(AFTER_MOVE, STORED), { dryRun: true })).stdout);
-    const never = JSON.parse((await run(rig(AFTER_MOVE, LINKS), { dryRun: true })).stdout);
+  // A project with two stored rows: nothing guesses which one is deployed from. The person says, with --pr-repo.
+  const PICK_NEW = [`pA=Acme/mono/${NEW}`];
 
-    expect(moved.targets.map((t: { path: string }) => t.path)).not.toContain(OLD);
-    expect(moved.plan_id).toBe(never.plan_id);
-    expect(moved).toEqual(never);
+  test('with no --pr-repo the command stops and asks: PR_REPO_AMBIGUOUS, exit 3, the rows, and the elicitation for the human', async () => {
+    const out = await run(rig(AFTER_MOVE, STORED), { dryRun: true });
+    const body = JSON.parse(out.stdout);
+
+    expect(out.exitCode).toBe(3);
+    expect(body.code).toBe(ERROR_CODES.PR_REPO_AMBIGUOUS);
+    expect(body.unanswered[0].flag).toBe('--pr-repo');
+    expect(body.unanswered[0].candidates.map((c: { project_id: string; repos: readonly string[] }) => [c.project_id, c.repos])).toEqual([
+      ['pA', [`Acme/mono/${OLD}`, `Acme/mono/${NEW}`]],
+    ]);
+    expect(body.elicitation.kind).toBe('form');
+    expect(body.elicitation.fields[0].options.map((o: { value: string }) => o.value)).toEqual([`Acme/mono/${OLD}`, `Acme/mono/${NEW}`]);
+    expect(body.elicitation.answer.rerun).toBe(`capy secrets deploy ${NAME} --dry-run --json --pr-repo pA=<repo_1>`);
   });
 
-  test('a real run after the move deploys the new folder, run after run, with every row still stored', async () => {
-    const io = rig(AFTER_MOVE, STORED);
-    const planId = JSON.parse((await run(io, { dryRun: true })).stdout).plan_id as string;
+  test('with the row picked, the dry-run plan does not list the other stored folder, and is the very plan a project with only that row gets', async () => {
+    const picked = JSON.parse((await run(rig(AFTER_MOVE, STORED), { dryRun: true, prRepo: PICK_NEW })).stdout);
+    const never = JSON.parse((await run(rig(AFTER_MOVE, LINKS), { dryRun: true })).stdout);
 
-    const first = await run(io, { confirm: planId });
-    const second = await run(io, { confirm: planId });
+    expect(picked.targets.map((t: { path: string }) => t.path)).not.toContain(OLD);
+    expect(picked.plan_id).toBe(never.plan_id);
+    expect(picked).toEqual(never);
+  });
+
+  test('a real run with the row picked deploys that folder, run after run, with every row still stored', async () => {
+    const io = rig(AFTER_MOVE, STORED);
+    const planId = JSON.parse((await run(io, { dryRun: true, prRepo: PICK_NEW })).stdout).plan_id as string;
+
+    const first = await run(io, { confirm: planId, prRepo: PICK_NEW });
+    const second = await run(io, { confirm: planId, prRepo: PICK_NEW });
 
     expect([first.returned, second.returned]).toEqual([0, 0]);
     expect(second.stdout).toBe(first.stdout);

@@ -28,6 +28,7 @@ import {
   type TargetConflict,
 } from '../sync/conflicts';
 import { CapyError, ERROR_CODES } from '../types/index';
+import { chooseRepoRows } from './prRepoChoice';
 
 const codeOf = (err: unknown): string => (err instanceof CapyError ? err.code : ERROR_CODES.SERVICE_ERROR);
 
@@ -81,14 +82,13 @@ export function createDeployActionsWith(
     }
   };
   return {
-    loadPlan: async (row: SecretIndexRow) => {
+    loadPlan: async (row: SecretIndexRow, choices = []) => {
       try {
-        const plan = await planBatchDeploy(
-          env.github(),
-          { names: [row.name], locations: deployLocationsOf(row) },
-          await linksOf(),
-          begin('planning'),
-        );
+        const locations = deployLocationsOf(row);
+        // A project linked to more than one repo row: the person picks (the flow's `repos` step), nothing here guesses.
+        const chosen = chooseRepoRows(await linksOf(), locations.map((l) => l.project_id), choices);
+        if (chosen.unanswered.length > 0) return { ok: false, code: ERROR_CODES.PR_REPO_AMBIGUOUS, ambiguous: chosen.unanswered };
+        const plan = await planBatchDeploy(env.github(), { names: [row.name], locations }, chosen.links, begin('planning'));
         return { ok: true, plan };
       } catch (err) {
         return { ok: false, code: codeOf(err) };

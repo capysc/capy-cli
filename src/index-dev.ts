@@ -857,6 +857,7 @@ secretsCmd
   .option('--exclude <project:branch>', 'leave this location out (repeatable)', collectRepeatable, [])
   .addOption(new Option('--no-pr-for <owner/name>', 'do not open a PR in this repo (repeatable)').argParser(collectRepeatable).default([]))
   .option('--no-pr', 'do not open any PR')
+  .option('--pr-repo <project_id=owner/name[/folder]>', 'the repo a project\'s PR goes to, when the project is linked to more than one (repeatable)', collectRepeatable, [])
   .option('--confirm <plan_id>', 'run the plan that --dry-run printed (required for a real run)')
   .addHelpText(
     'after',
@@ -885,6 +886,7 @@ secretsCmd
         exclude: options.exclude,
         noPrFor: options.prFor,
         noPr: options.pr === false,
+        prRepo: options.prRepo,
         conflictFlags: rawConflictFlagsOf(command),
       },
       true,
@@ -901,6 +903,7 @@ secretsCmd
   .option('--row <row_id>', 'deploy this row of a name (repeatable; ids from `capy secrets --name NAME --json`)', collectRepeatable, [])
   .option('--all-rows', 'deploy every row of those names')
   .option('--exclude <project:branch>', 'leave this location out (repeatable)', collectRepeatable, [])
+  .option('--pr-repo <project_id=owner/name[/folder]>', 'the repo a project is deployed from and its PR goes to, when the project is linked to more than one (repeatable)', collectRepeatable, [])
   .option('--confirm <plan_id>', 'run the plan that --dry-run printed (required for a real run)')
   .addHelpText(
     'after',
@@ -927,6 +930,7 @@ secretsCmd
         row: options.row,
         allRows: options.allRows === true,
         exclude: options.exclude,
+        prRepo: options.prRepo,
         conflictFlags: rawConflictFlagsOf(command),
       },
       true,

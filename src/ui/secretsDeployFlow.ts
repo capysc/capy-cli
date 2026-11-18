@@ -8,9 +8,12 @@
 // row's value, only to show it (masked, `r` reveals) on that one screen. It is dropped when the
 // run starts or the flow ends, and it is never in the exit text, a note, a log or any JSON.
 //
-// Steps:  planning -> plan -> running -> (conflicts -> running) -> done
+// Steps:  planning -> (repos -> planning) -> plan -> running -> (conflicts -> running) -> done
 //   planning  reads the repos' deploy.json from GitHub (no key is opened, nothing is written).
 //             Esc cancels.
+//   repos     only when a project is linked to more than one repo row: the rows, none ticked.
+//             Space ticks; Enter reads the plan from the ticked rows once every such project has
+//             one; Esc cancels. Nothing is read from GitHub to choose for the person.
 //   plan      the row's value (masked), then a checkbox list of the targets (location, target,
 //             provider, vars), all ticked at first, and the skipped locations greyed below it
 //             (with their reason). Space ticks, `a` ticks all / none, `r` shows or hides the
@@ -47,6 +50,7 @@ import { TableColumn, clipLine, pickerTableLines } from './pickerTable';
 import { CheckboxState, initialCheckboxState, stepCheckboxKey } from './searchableCheckbox';
 import { toCheckboxKey } from './secretsEditFlow';
 import { ValueState, renderValueLine } from './valueDisplay';
+import type { AmbiguousProject, PrRepoChoice } from '../commands/prRepoChoice';
 import { COPY_HINT_PAIR, CopyEffect, CopyOutcome, copiedLine, copyEffectFor, isCopyKey, uniqueUrls } from './copyPrLinks';
 
 const ESC = '\x1b';
@@ -63,6 +67,14 @@ const KEY_CTRL_C = '\x03';
 
 export type DeployFlow =
   | { readonly step: 'planning'; readonly row: SecretIndexRow }
+  | {
+      readonly step: 'repos';
+      readonly row: SecretIndexRow;
+      /** The projects linked to more than one repo row. */
+      readonly ambiguous: readonly AmbiguousProject[];
+      /** Which rows (indices into `repoRowsOf(ambiguous)`) are ticked. None at first. */
+      readonly box: CheckboxState;
+    }
   | {
       readonly step: 'plan';
       readonly row: SecretIndexRow;
@@ -106,7 +118,8 @@ export type DeployFlow =
 export type DeployEffect =
   /** Copy the PR links (newline-joined) to the clipboard; the driver reports back with `applyDeployCopied`. */
   | CopyEffect
-  | { readonly type: 'loadDeployPlan'; readonly row: SecretIndexRow }
+  /** `choices`: the repo rows the person picked for the projects linked to more than one. */
+  | { readonly type: 'loadDeployPlan'; readonly row: SecretIndexRow; readonly choices?: readonly PrRepoChoice[] }
   /** Stop: `planning` kills the GitHub reads; `pushing` / `prs` start nothing new and wait for every item in flight. */
   | { readonly type: 'cancelDeploy'; readonly phase: 'planning' | BatchPhase }
   | { readonly type: 'runDeploy'; readonly plan: BatchPlan; readonly decisions?: SeenResolutions };
@@ -139,6 +152,37 @@ export function dryRunDeployText(plan: BatchPlan): string {
     `Would deploy to ${plan.targets.length} target${plan.targets.length === 1 ? '' : 's'}.`, // COPY-FLAG
     ...plan.targets.map((t) => `  ${t.repo.owner}/${t.repo.name} (${t.base}) · ${t.config.name}`), // COPY-FLAG
   ].join('\n');
+}
+
+// ── A project linked to more than one repo row ──────────────────────────────
+
+/** Every row to choose between, in order: one line of the list each. */
+export const repoRowsOf = (ambiguous: readonly AmbiguousProject[]): readonly PrRepoChoice[] =>
+  ambiguous.flatMap((p) => p.rows.map((row) => ({ project_id: p.project_id, row })));
+
+/** The ticked rows. */
+export const pickedRows = (flow: Extract<DeployFlow, { step: 'repos' }>): readonly PrRepoChoice[] => {
+  const rows = repoRowsOf(flow.ambiguous);
+  return flow.box.checked.map((i) => rows[i]);
+};
+
+/** Whether every project has at least one row ticked. */
+export const allPicked = (flow: Extract<DeployFlow, { step: 'repos' }>): boolean => {
+  const picked = new Set(pickedRows(flow).map((c) => c.project_id));
+  return flow.ambiguous.every((p) => picked.has(p.project_id));
+};
+
+function stepRepos(flow: Extract<DeployFlow, { step: 'repos' }>, key: string): DeployStep {
+  if (isEsc(key)) return { flow: null, effect: null, note: CANCELLED_NOTHING };
+  if (key === '\r') {
+    if (!allPicked(flow)) return stay(flow);
+    const choices = pickedRows(flow);
+    return { flow: { step: 'planning', row: flow.row }, effect: { type: 'loadDeployPlan', row: flow.row, choices } };
+  }
+  const ckey = toCheckboxKey(key, false);
+  if (ckey === null || (ckey.name !== 'up' && ckey.name !== 'down' && ckey.name !== 'space')) return stay(flow);
+  const step = stepCheckboxKey(flow.box, repoRowsOf(flow.ambiguous).map((c) => `${c.project_id} ${c.row}`), ckey);
+  return stay(step.kind === 'state' ? { ...flow, box: step.state } : flow);
 }
 
 /** The plan restricted to the ticked targets: what Enter deploys. */
@@ -214,6 +258,7 @@ export function stepDeploy(flow: DeployFlow, key: string, dryRun: boolean = fals
   if (flow.step === 'planning') {
     return isEsc(key) ? { flow: null, effect: { type: 'cancelDeploy', phase: 'planning' }, note: CANCELLED_NOTHING } : stay(flow);
   }
+  if (flow.step === 'repos') return stepRepos(flow, key);
   if (flow.step === 'plan') return stepPlan(flow, key, dryRun);
   if (flow.step === 'running') return stepRunning(flow, key);
   if (flow.step === 'conflicts') return stepConflicts(flow, key);
@@ -231,11 +276,15 @@ function stepDone(flow: Extract<DeployFlow, { step: 'done' }>, key: string): Dep
 
 export type DeployPlanLoaded =
   | { readonly ok: true; readonly plan: BatchPlan }
-  | { readonly ok: false; readonly code: string };
+  /** `ambiguous`: no plan was read, because these projects are linked to more than one repo row and the person has not picked one. */
+  | { readonly ok: false; readonly code: string; readonly ambiguous?: readonly AmbiguousProject[] };
 
 /** The plan arrived. Dropped (the flow is returned unchanged) unless the flow is still waiting for it. */
 export function applyDeployPlanLoaded(flow: DeployFlow | null, loaded: DeployPlanLoaded): DeployFlow | null {
   if (flow === null || flow.step !== 'planning') return flow;
+  if (!loaded.ok && loaded.ambiguous !== undefined && loaded.ambiguous.length > 0) {
+    return { step: 'repos', row: flow.row, ambiguous: loaded.ambiguous, box: initialCheckboxState(repoRowsOf(loaded.ambiguous).map(() => ({ checked: false }))) };
+  }
   return loaded.ok
     ? {
         step: 'plan',
@@ -376,6 +425,30 @@ function renderPlan(
   };
 }
 
+const REPO_COLUMNS: readonly TableColumn[] = [{ heading: 'PROJECT', shrink: true }, { heading: 'REPO', shrink: true }]; // COPY-FLAG
+
+/** The repos step: each project linked to more than one repo row, and its rows to tick. */
+function renderRepos(flow: Extract<DeployFlow, { step: 'repos' }>, width: number, height: number): { readonly lines: readonly string[]; readonly footer: string } {
+  const maxWidth = Math.max(20, width - 3);
+  const nameOf = (projectId: string): string => flow.ambiguous.find((p) => p.project_id === projectId)?.project_name ?? projectId;
+  const rows = repoRowsOf(flow.ambiguous);
+  return {
+    lines: [
+      `${BOLD}${clipLine('Which repo gets the pull request?', maxWidth)}${RESET}`, // COPY-FLAG
+      '',
+      ...pickerTableLines({
+        columns: REPO_COLUMNS,
+        rows: rows.map((c) => [nameOf(c.project_id), c.row]),
+        labels: rows.map((c) => `${c.project_id} ${c.row}`),
+        box: flow.box,
+        size: Math.max(3, height - 7),
+        maxWidth,
+      }),
+    ],
+    footer: hint(['space', 'select'], ...(allPicked(flow) ? ([['enter', 'continue']] as const) : []), ['esc', 'cancel']), // COPY-FLAG
+  };
+}
+
 /** The conflicts step: which variable on which target, and the decision so far. Names only, never a value. */
 function renderConflicts(flow: Extract<DeployFlow, { step: 'conflicts' }>, width: number): { readonly lines: readonly string[]; readonly footer: string } {
   const maxWidth = Math.max(20, width - 3);
@@ -400,6 +473,7 @@ export function renderDeploy(
   if (flow.step === 'planning') {
     return { lines: [`${DIM}Reading deploy targets…${RESET}`], footer: hint(['esc', 'cancel']) }; // COPY-FLAG
   }
+  if (flow.step === 'repos') return renderRepos(flow, width, height);
   if (flow.step === 'plan') return renderPlan(flow, width, height);
   if (flow.step === 'conflicts') return renderConflicts(flow, width);
   if (flow.step === 'running') {

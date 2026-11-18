@@ -251,6 +251,52 @@ const projectsCell = (target: RepoTarget, chosen: readonly SetLocation[]): strin
 export const repoChoiceLabel = (t: RepoTarget, chosen: readonly SetLocation[] = []): string =>
   `${repoLabel(t)} ${projectsOf(t, chosen).join(' ')}`;
 
+// ── A project linked to more than one repo row ──────────────────────────────
+//
+// Nothing guesses which row a project's PR goes to: the person picks. In the repo list, a project with several rows
+// gets one entry per row (`owner/name/folder`), not ticked; every other project stays in its repo's one ticked entry.
+
+/** How many rows (a repo and a folder) each project has across `targets`. */
+const rowCounts = (targets: readonly RepoTarget[]): ReadonlyMap<string, number> => {
+  const ids = targets.flatMap((t) => t.files.map((f) => f.project_id));
+  return new Map([...new Set(ids)].map((id) => [id, ids.filter((other) => other === id).length]));
+};
+
+/** Whether `entry` is one row of a project that has several: the person must pick it for that project to get a PR. */
+export const isRowEntry = (entry: RepoTarget, all: readonly RepoTarget[]): boolean =>
+  entry.files.length === 1 && (rowCounts(all).get(entry.files[0].project_id) ?? 0) > 1;
+
+/** The list's entries: per repo, one entry for the projects with a single row, then one per row of each project with several. */
+export function repoEntries(targets: readonly RepoTarget[]): readonly RepoTarget[] {
+  const counts = rowCounts(targets);
+  const several = (projectId: string): boolean => (counts.get(projectId) ?? 0) > 1;
+  return targets.flatMap((t) => {
+    const single = t.files.filter((f) => !several(f.project_id));
+    const rows = t.files.filter((f) => several(f.project_id));
+    return [...(single.length > 0 ? [{ ...t, files: single }] : []), ...rows.map((f) => ({ ...t, files: [f] }))];
+  });
+}
+
+/** The ticked entries as the repos a run opens a PR in: the entries of one repo are one repo again. */
+export function reposOfEntries(entries: readonly RepoTarget[]): readonly RepoTarget[] {
+  const keys = [...new Set(entries.map(repoKey))];
+  return keys.map((key) => {
+    const group = entries.filter((e) => repoKey(e) === key);
+    return { ...group[0], files: group.flatMap((e) => e.files) };
+  });
+}
+
+/** `owner/name`, or `owner/name/folder` for one row of a project that has several. */
+const entryLabel = (entry: RepoTarget, all: readonly RepoTarget[]): string =>
+  isRowEntry(entry, all) && entry.files[0].path !== '.' ? `${repoLabel(entry)}/${entry.files[0].path}` : repoLabel(entry);
+
+/** The projects with several rows and none of them ticked: they get no PR. */
+export function unpickedProjects(flow: { readonly targets: readonly RepoTarget[]; readonly box: CheckboxState }): readonly string[] {
+  const rowEntries = flow.targets.map((t, i) => ({ t, i })).filter((e) => isRowEntry(e.t, flow.targets));
+  const picked = new Set(rowEntries.filter((e) => flow.box.checked.includes(e.i)).map((e) => e.t.files[0].project_id));
+  return [...new Set(rowEntries.filter((e) => !picked.has(e.t.files[0].project_id)).map((e) => e.t.files[0].project_name))];
+}
+
 /** Every choice ticked: the default for both lists. */
 const allChecked = (count: number): CheckboxState =>
   initialCheckboxState(Array.from({ length: count }, () => ({ checked: true })));
@@ -324,7 +370,8 @@ function stepLoading(flow: Extract<EditFlow, { step: 'loading' }>, key: string):
     : stay(flow);
 }
 
-const targetNames = (flow: Extract<EditFlow, { step: 'repos' }>): readonly string[] => flow.targets.map((t) => repoChoiceLabel(t, flow.chosen));
+const targetNames = (flow: Extract<EditFlow, { step: 'repos' }>): readonly string[] =>
+  flow.targets.map((t) => (isRowEntry(t, flow.targets) ? `${entryLabel(t, flow.targets)} ${repoChoiceLabel(t, flow.chosen)}` : repoChoiceLabel(t, flow.chosen)));
 
 function stepRepos(flow: Extract<EditFlow, { step: 'repos' }>, key: string): EditStep {
   if (isEsc(key) && !flow.box.searching) {
@@ -342,7 +389,7 @@ function stepRepos(flow: Extract<EditFlow, { step: 'repos' }>, key: string): Edi
     name: flow.name,
     value: flow.value,
     locations: flow.chosen,
-    repos: flow.box.checked.map((i) => flow.targets[i]),
+    repos: reposOfEntries(flow.box.checked.map((i) => flow.targets[i])),
     seen: flow.rowHash,
     ...(flow.unavailable === undefined ? {} : { reposUnavailable: flow.unavailable }),
   };
@@ -356,7 +403,7 @@ function stepRepos(flow: Extract<EditFlow, { step: 'repos' }>, key: string): Edi
 /** The effect that reads the BASE column, once the repo table is up and its bases are not known yet. */
 export function basesEffectFor(flow: EditFlow | null): EditEffect | null {
   return flow !== null && flow.step === 'repos' && flow.bases === undefined && flow.targets.length > 0
-    ? { type: 'loadBases', targets: flow.targets }
+    ? { type: 'loadBases', targets: reposOfEntries(flow.targets) }
     : null;
 }
 
@@ -484,6 +531,7 @@ export type ReposLoaded =
 export function applyReposLoaded(flow: EditFlow | null, result: ReposLoaded): EditFlow | null {
   if (flow === null || flow.step !== 'loading') return flow;
   const planning = result.ok ? planRepos(flow.chosen, result.links) : { targets: [], notLinked: [] };
+  const entries = repoEntries(planning.targets);
   return {
     step: 'repos',
     name: flow.name,
@@ -492,12 +540,13 @@ export function applyReposLoaded(flow: EditFlow | null, result: ReposLoaded): Ed
     ...oldOf(flow),
     locationsBox: flow.box,
     chosen: flow.chosen,
-    targets: planning.targets,
+    targets: entries,
     notLinked: planning.notLinked,
     unavailable: result.ok ? undefined : result.code,
     // Nothing to read when there is no repo (or the list could not be read): then there is nothing to wait for.
     bases: result.ok && planning.targets.length > 0 ? result.bases : {},
-    box: allChecked(planning.targets.length),
+    // A row of a project that has several starts unticked: the person picks which one gets the PR.
+    box: initialCheckboxState(entries.map((e) => ({ checked: !isRowEntry(e, entries) }))),
   };
 }
 
@@ -665,7 +714,7 @@ export function renderEdit(
           ? [`${DIM}${flow.unavailable === undefined ? 'No linked repos.' : `Repos unavailable (${flow.unavailable}).`}${RESET}`] // COPY-FLAG
           : pickerTableLines({
               columns: REPO_COLUMNS,
-              rows: flow.targets.map((t) => [repoLabel(t), projectsCell(t, flow.chosen), flow.bases === undefined ? '…' : (flow.bases[repoKey(t)] ?? '—')]), // COPY-FLAG
+              rows: flow.targets.map((t) => [entryLabel(t, flow.targets), projectsCell(t, flow.chosen), flow.bases === undefined ? '…' : (flow.bases[repoKey(t)] ?? '—')]), // COPY-FLAG
               labels: targetNames(flow),
               box: flow.box,
               size,
@@ -673,6 +722,9 @@ export function renderEdit(
             })),
         ...(flow.notLinked.length > 0
           ? ['', `${DIM}No linked repo, so no PR: ${flow.notLinked.join(', ')}${RESET}`] // COPY-FLAG
+          : []),
+        ...(unpickedProjects(flow).length > 0
+          ? ['', `${DIM}More than one repo and none picked, so no PR: ${unpickedProjects(flow).join(', ')}${RESET}`] // COPY-FLAG
           : []),
       ],
       footer: pickerHint(flow.box.searching, 'run'),
