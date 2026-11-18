@@ -42,6 +42,7 @@ export interface ProjectsManageActions {
   readonly deleteBranch: (project: ManageProjectRef, branch: BranchRef) => Promise<ManageFinished>;
   readonly setAccess: (project: ManageProjectRef, branch: BranchRef, user: AccessRow, grant: boolean) => Promise<ManageFinished>;
   readonly removeRepoRow: (project: ManageProjectRef, row: RepoRowRef) => Promise<ManageFinished>;
+  readonly renameProject: (project: ManageProjectRef, name: string) => Promise<ManageFinished>;
   /** The rows whose folder holds the project's keep.lock on the remote. Never rejects: unreadable is "not known", so not listed. */
   readonly remoteRepoRows: (project: ManageProjectRef, rows: readonly RepoRowRef[]) => Promise<readonly RepoRowRef[]>;
 }
@@ -71,6 +72,7 @@ const NO_MANAGE_ACTIONS: ProjectsManageActions = {
   deleteBranch: async () => UNAVAILABLE,
   setAccess: async () => UNAVAILABLE,
   removeRepoRow: async () => UNAVAILABLE,
+  renameProject: async () => UNAVAILABLE,
   remoteRepoRows: async () => [],
 };
 
@@ -113,6 +115,10 @@ function performManage(
     );
     return;
   }
+  if (effect.type === 'projectRename') {
+    void actions.renameProject(effect.project, effect.name).then(finish);
+    return;
+  }
   if (effect.type === 'projectRepoRemove') {
     void actions.removeRepoRow(effect.project, effect.row).then(finish);
     return;
@@ -128,6 +134,7 @@ const MANAGE_EFFECT_LIST: readonly ManageEffect['type'][] = [
   'projectBranchDelete',
   'projectBranchAccess',
   'projectRepoRemove',
+  'projectRename',
   'projectRepoRowsCheck',
 ];
 const MANAGE_EFFECT_TYPES: ReadonlySet<string> = new Set<string>(MANAGE_EFFECT_LIST);
