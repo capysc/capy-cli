@@ -1475,7 +1475,7 @@ function renderDialog(state: ProjectsScreenState, dialog: DeleteDialog, termHeig
   const question = dialog.step === 'refused' ? [] : [`${m}${BOLD}${deleteQuestion(dialog.project.name)}${RESET}`];
   const keys = dialog.step === 'refused'
     ? [renderHint('esc', 'back')]
-    : [renderHint('y', 'yes'), renderHint('n', 'no')]; // COPY-FLAG
+    : [renderHint('y', 'yes'), renderHint('esc', 'no')]; // COPY-FLAG
   // The question and its keys stay at the bottom; the lines above them scroll when they do not fit.
   const room = Math.max(1, termHeight - head.length - question.length - 2);
   const overflows = body.length > room;

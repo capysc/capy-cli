@@ -338,7 +338,7 @@ export function renderManage(dialog: ManageDialog, width: number, margin: string
       `${m}${BOLD}Revoke deploy token ${dialog.token.deployId.slice(0, 12)}...?${RESET}`, // COPY-FLAG
       `${m}${DIM}Deploys using it stop getting secrets.${RESET}`, // COPY-FLAG
       '',
-      m + hints(hint('y', 'yes'), hint('n', 'no')),
+      m + hints(hint('y', 'yes'), hint('esc', 'no')),
     ];
   }
   if (dialog.step === 'branchMenu') {
@@ -354,14 +354,14 @@ export function renderManage(dialog: ManageDialog, width: number, margin: string
     return [
       `${m}${BOLD}Delete branch "${dialog.branch.name}"? This will remove all its secrets.${RESET}`, // reused from `capy branch -D`
       '',
-      m + hints(hint('y', 'yes'), hint('n', 'no')),
+      m + hints(hint('y', 'yes'), hint('esc', 'no')),
     ];
   }
   if (dialog.step === 'confirmRemoveRepo') {
     return [
       `${m}${BOLD}Remove ${repoRowLabel(dialog.row)} from ${dialog.project.name}?${RESET}`, // COPY-FLAG
       '',
-      m + hints(hint('y', 'yes'), hint('n', 'no')),
+      m + hints(hint('y', 'yes'), hint('esc', 'no')),
     ];
   }
   const rows = accessRows(members, dialog.project.id, dialog.branch.id);

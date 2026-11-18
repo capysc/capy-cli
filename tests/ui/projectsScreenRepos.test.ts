@@ -190,11 +190,20 @@ describe('the [remote] tag', () => {
 });
 
 describe('the confirm hint', () => {
-  test('lists y and n only', () => {
+  test('a yes or no question lists one key for each: y yes, esc no', () => {
     const frame = strip(render(press(atRepos([REAL, TEMP]), DOWN, 'd'), 120, 20));
 
     expect(frame).toMatch(/y yes/);
-    expect(frame).toMatch(/n no/);
+    expect(frame).toMatch(/esc no/);
     expect(frame).not.toMatch(/enter no/);
+    expect(frame).not.toMatch(/\bn no/);
+  });
+
+  test('esc answers no: nothing is sent', () => {
+    const answered = handleKey(press(atRepos([REAL, TEMP]), DOWN, 'd'), '\x1b');
+
+    expect(answered.effect).toBeNull();
+    expect(answered.state.manage).toBeNull();
+    expect(answered.state.notes).toEqual([MANAGE_CANCELLED_TEXT]);
   });
 });
