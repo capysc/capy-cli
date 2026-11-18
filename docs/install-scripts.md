@@ -39,6 +39,15 @@ This repo is now the single source. Every GitHub release publishes `install.sh` 
 - No npm fallback. A checksum failure, a missing hash tool or an unsupported system
   stops the install and nothing is installed.
 - With `CAPY_INSTALL_DIR` set, that folder is used.
+- With `CAPY_PREFIX` set (and `CAPY_INSTALL_DIR` not), `$CAPY_PREFIX/bin` is used, ahead of the
+  existing-capy lookup and the defaults. It is the older name from the previous bash
+  installer, still accepted because it is in public docs and Dockerfiles. The loader
+  passes it through unchanged.
+- `CAPY_NO_NPM_FALLBACK` is accepted and ignored. `CAPY_FORCE_NPM=1` stops with nothing
+  installed and prints the npm command; the loader checks it before downloading, and the
+  generated script checks it too.
+- Notice files (`LICENSE`, `THIRD-PARTY-NOTICES.md`) are copied only when the archive holds
+  them. Older archives (for example v0.9.1) have none.
 - Otherwise an existing `capy` found with `command -v` decides:
   - a regular file: it is replaced in its own folder; if the folder is not writable,
     the installer stops;
@@ -65,6 +74,22 @@ This repo is now the single source. Every GitHub release publishes `install.sh` 
 
 Until step 3 the website keeps serving its current pinned scripts.
 
+## Older releases
+
+Releases made before this change have archives and `checksums-<version>.txt` but no
+`install.sh` asset, so `CAPY_VERSION=<old version>` through the loader would fail to
+download. `scripts/install/backfill-release-scripts.ts` generates scripts for them:
+
+```sh
+bun scripts/install/backfill-release-scripts.ts --out <dir> v0.9.7 v0.9.8
+```
+
+For each tag it downloads that release's checksums file, resolves the tag's commit with
+`git rev-list -n 1 <tag>`, runs the generator and writes `<dir>/<tag>/install.sh` and
+`install.ps1`. It prints the files written, or a coded reason a tag was skipped (no
+checksums file, a missing archive checksum, unknown tag). It only writes local files; it
+never uploads. Attaching the output to a release is a separate, manual step.
+
 ## What is tested
 
 - `tests/scripts/installScripts.test.ts` (`bun test`): the generator, with a good
@@ -76,9 +101,13 @@ Until step 3 the website keeps serving its current pinned scripts.
   script by the generator, so the real verification runs. Cases: fresh install,
   `CAPY_INSTALL_DIR`, checksum mismatch, update in place, a folder that cannot be
   written, Homebrew link, npm link, other link, no hash tool, wrong binary version, and
-  the loader's URLs, version validation and failed download. Run it with
+  the loader's URLs, version validation and failed download, and `CAPY_PREFIX`,
+  `CAPY_NO_NPM_FALLBACK` and `CAPY_FORCE_NPM` (including `CAPY_PREFIX` passing through the
+  loader to the release installer). Run it with
   `bun run test:install`, or under another shell with
   `CAPY_TEST_SHELL=/bin/dash bun run test:install`. It also runs in `bun run test`.
-- `bun run typecheck:install` type-checks the generator.
+- `tests/scripts/backfillReleaseScripts.test.ts`: the backfill logic with fake downloads
+  and commits.
+- `bun run typecheck:install` type-checks the generator and the backfill script.
 - The release workflow smoke-tests the published script in `alpine:3`.
 - The Windows workflow installs, reinstalls, updates in place and stops for an npm shim.
