@@ -619,6 +619,7 @@ capy projects rename [new-name] [options]
 
 | Option | Description | Default |
 |---|---|---|
+| `--project <name-or-id>` | rename this project instead of the one this folder belongs to |  |
 | `--non-tty` | same as --json: never ask, and answer in JSON (agents/CI) |  |
 | `--json` | emit machine-readable JSON instead of the human UI |  |
 
