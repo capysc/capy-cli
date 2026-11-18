@@ -10,7 +10,7 @@
 // The service enforces every rule again; a refusal is shown in its words.
 
 import type { MemberDetail } from '../service/serviceClient';
-import { INVITE_ROLE_DESCRIPTIONS, INVITE_ROLE_LABELS, INVITE_ROLE_SEPARATOR, type InviteRole } from '../core/inviteRoles';
+import { INVITE_ROLE_LABELS, inviteRoleAbout, type InviteRole } from '../core/inviteRoles';
 
 const ESC = '\x1b';
 const INVERSE = `${ESC}[7m`;
@@ -289,7 +289,7 @@ function choiceLines(choices: readonly RoleChoice[], selected: number, current: 
 /** The invite's roles as inquirer's select draws them, each with what it can access beside it. */
 function inviteChoiceLines(choices: readonly InviteRole[], selected: number, margin: string): readonly string[] {
   return choices.map((role, i) => {
-    const about = `${DIM}${INVITE_ROLE_SEPARATOR}${INVITE_ROLE_DESCRIPTIONS[role]}${RESET}`;
+    const about = inviteRoleAbout(role);
     return i === selected ? `${margin}${CYAN}❯ ${INVITE_ROLE_LABELS[role]}${RESET}${about}` : `${margin}  ${INVITE_ROLE_LABELS[role]}${about}`;
   });
 }

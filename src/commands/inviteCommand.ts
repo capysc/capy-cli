@@ -167,8 +167,9 @@ type InvitableRole = typeof ROLES[number]['value'];
  * The role picker's choices for a caller who may grant `invitable`, in the picker's order. Each says what the role
  * can access; the value picked is still the role's own.
  */
-export function inviteRoleChoices(invitable: ReadonlyArray<InvitableRole>): ReadonlyArray<{ readonly name: string; readonly value: InvitableRole }> {
-  return ROLES.filter((r) => invitable.includes(r.value)).map((r) => ({ name: inviteRoleChoiceText(r.value), value: r.value }));
+export function inviteRoleChoices(invitable: ReadonlyArray<InvitableRole>): ReadonlyArray<{ readonly name: string; readonly value: InvitableRole; readonly short: string }> {
+  // `short` is what the prompt shows once a role is picked: the role's name alone.
+  return ROLES.filter((r) => invitable.includes(r.value)).map((r) => ({ name: inviteRoleChoiceText(r.value), value: r.value, short: r.name }));
 }
 
 /** The roles a caller with org role `callerRole` may grant; none for a role that cannot invite. */
