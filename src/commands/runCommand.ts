@@ -42,6 +42,17 @@ interface ChildExit {
 }
 
 /**
+ * Tells the command `capy run` starts that it is running under `capy run`.
+ * Returns a new object, so neither the caller's map nor `process.env` is
+ * touched; spread last so a `CAPY_RUN` of the user's own cannot beat it.
+ * Only ever part of the child's environment: never written to a file, never
+ * treated as a secret.
+ */
+export function withRunMarker(env: Record<string, string | undefined>): Record<string, string | undefined> {
+  return { ...env, CAPY_RUN: '1' };
+}
+
+/**
  * Spawns the child process with the provided environment, forwards signals,
  * and resolves with how it ended. `spawnChildDetailed` is the one place a child
  * is started; `spawnChild` is its exit-code-only face for the callers that
@@ -57,7 +68,7 @@ function spawnChildDetailed(
   // ENOENT. shell:true delegates to cmd.exe so PATHEXT resolution kicks in.
   // `pipe` is written to the child's fd OVERRIDE_FD (composeForward.ts).
   const child: ChildProcess = spawn(args[0], args.slice(1), {
-    env: env as Record<string, string>,
+    env: withRunMarker(env) as Record<string, string>,
     stdio: pipe === undefined ? 'inherit' : ['inherit', 'inherit', 'inherit', 'pipe'],
     shell: process.platform === 'win32',
   });
