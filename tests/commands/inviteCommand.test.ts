@@ -395,10 +395,12 @@ describe('InviteCommand', () => {
 describe('the role picker says what each role can access', () => {
   test('an owner and an admin are offered all three roles, each with its description', async () => {
     const { inviteRoleChoices, invitableRolesFor } = await import('../../src/commands/inviteCommand');
+    // The name is in the default colour; the dash and the description are grey.
+    const grey = (text: string): string => `\x1b[90m${text}\x1b[0m`;
     const all = [
-      { name: 'Member - can access chosen projects, except protected branches', value: 'member' },
-      { name: 'Project Admin - can access chosen projects, and invite to them', value: 'project-admin' },
-      { name: 'Admin - can access all projects', value: 'admin' },
+      { name: `Member${grey(' - no access to protected branches')}`, value: 'member', short: 'Member' },
+      { name: `Project Admin${grey(' - access to all branches, invite users to project')}`, value: 'project-admin', short: 'Project Admin' },
+      { name: `Admin${grey(' - access to all projects')}`, value: 'admin', short: 'Admin' },
     ];
     expect(inviteRoleChoices(invitableRolesFor('owner'))).toEqual(all);
     expect(inviteRoleChoices(invitableRolesFor('admin'))).toEqual(all);

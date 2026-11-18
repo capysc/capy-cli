@@ -16,19 +16,27 @@ export const INVITE_ROLE_LABELS: Readonly<Record<InviteRole, string>> = {
   admin: 'Admin',
 };
 
-/** What each role can access, in a few words. */
+/** What each role can access, in a few words (approved wording). */
 export const INVITE_ROLE_DESCRIPTIONS: Readonly<Record<InviteRole, string>> = {
-  member: 'can access chosen projects, except protected branches', // COPY-FLAG
-  'project-admin': 'can access chosen projects, and invite to them', // COPY-FLAG
-  admin: 'can access all projects',
+  member: 'no access to protected branches',
+  'project-admin': 'access to all branches, invite users to project',
+  admin: 'access to all projects',
 };
 
 /** What sits between a role's name and its description. */
 export const INVITE_ROLE_SEPARATOR = ' - ';
 
-/** A picker line for `role`: its name, then its description. */
+const GREY = '\x1b[90m';
+const RESET = '\x1b[0m';
+
+/** What goes beside a role's name: the separator and the description, in grey. */
+export function inviteRoleAbout(role: InviteRole): string {
+  return `${GREY}${INVITE_ROLE_SEPARATOR}${INVITE_ROLE_DESCRIPTIONS[role]}${RESET}`;
+}
+
+/** A picker line for `role`: its name, then its description in grey. */
 export function inviteRoleChoiceText(role: InviteRole): string {
-  return `${INVITE_ROLE_LABELS[role]}${INVITE_ROLE_SEPARATOR}${INVITE_ROLE_DESCRIPTIONS[role]}`;
+  return `${INVITE_ROLE_LABELS[role]}${inviteRoleAbout(role)}`;
 }
 
 /** Org roles that may grant `admin` (the service's own role values). */

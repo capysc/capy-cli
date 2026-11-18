@@ -57,7 +57,7 @@ describe('who is offered Admin', () => {
 
   test('a project admin is offered Member and Project Admin only', () => {
     expect(roleStep('u_pa').usersDialog).toMatchObject({ step: 'inviteRole', choices: ['member', 'project-admin'] });
-    expect(shown(roleStep('u_pa'))).not.toContain('can access all projects');
+    expect(shown(roleStep('u_pa'))).not.toContain('access to all projects');
   });
 
   test('an unknown caller is not offered Admin', () => {
@@ -73,9 +73,15 @@ describe('who is offered Admin', () => {
 describe('what the role step shows', () => {
   test('each role has what it can access beside it', () => {
     const text = shown(roleStep('u_owner'));
-    expect(text).toContain('Member - can access chosen projects, except protected branches');
-    expect(text).toContain('Project Admin - can access chosen projects, and invite to them');
-    expect(text).toContain('Admin - can access all projects');
+    expect(text).toContain('Member - no access to protected branches');
+    expect(text).toContain('Project Admin - access to all branches, invite users to project');
+    expect(text).toContain('Admin - access to all projects');
+  });
+  test('the description is grey, on the selected row and on the others', () => {
+    const raw = render(roleStep('u_owner'), 120, 40);
+    expect(raw).toContain('Member\x1b[0m\x1b[90m - no access to protected branches\x1b[0m');
+    expect(raw).toContain('  Project Admin\x1b[90m - access to all branches, invite users to project\x1b[0m');
+    expect(raw).toContain('  Admin\x1b[90m - access to all projects\x1b[0m');
   });
 });
 
