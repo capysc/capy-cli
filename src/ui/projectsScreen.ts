@@ -1087,6 +1087,16 @@ function isRepoRow(link: ProjectRepoSummary, row: RepoRowRef): boolean {
   return link.host === row.host && link.owner.toLowerCase() === row.owner.toLowerCase() && link.name.toLowerCase() === row.name.toLowerCase() && link.path === row.path;
 }
 
+/** `data` with `projectId` under its new name, in the list and in every index location of it. */
+function withProjectName(data: ProjectsData, projectId: string, name: string): ProjectsData {
+  // Every index: the one supplied up front and each project's index loaded since (the lazy screen).
+  const renamed = mapIndexes(data, (index) => ({
+    ...index,
+    rows: index.rows.map((r) => ({ ...r, locations: r.locations.map((l) => (l.project_id === projectId ? { ...l, project_name: name } : l)) })),
+  }));
+  return { ...renamed, projects: renamed.projects.map((p) => (p.id === projectId ? { ...p, name } : p)) };
+}
+
 /** `data` with `row` gone from `projectId`'s repo links. */
 function withoutRepoRow(data: ProjectsData, projectId: string, row: RepoRowRef): ProjectsData {
   return {
@@ -1101,10 +1111,14 @@ export function applyManageDone(state: ProjectsScreenState, finished: ManageFini
   const stepped = manageDone(state.manage, finished);
   const membersIn = finished.ok && finished.members !== undefined ? withMembers(state.data, finished.members) : state.data;
   const withNewBranches = finished.ok && finished.branches !== undefined ? withBranches(membersIn, state.open.projectId, finished.branches) : membersIn;
-  const data = finished.ok && finished.removedRepoRow !== undefined ? withoutRepoRow(withNewBranches, state.open.projectId, finished.removedRepoRow) : withNewBranches;
+  const withoutRow = finished.ok && finished.removedRepoRow !== undefined ? withoutRepoRow(withNewBranches, state.open.projectId, finished.removedRepoRow) : withNewBranches;
+  const data = finished.ok && finished.renamed !== undefined ? withProjectName(withoutRow, finished.renamed.id, finished.renamed.name) : withoutRow;
   const project = projectById(data, state.open.projectId);
+  // A renamed project's embedded secrets screen is made again, so its title and rows carry the new name.
+  const renamedSecrets = finished.ok && finished.renamed !== undefined && project !== undefined ? openProject({ ...state, data }, project).open?.secrets : undefined;
   const open = {
     ...state.open,
+    ...(renamedSecrets === undefined ? {} : { secrets: renamedSecrets }),
     branchCursor: clampIndex(state.open.branchCursor, project?.branches.length ?? 0),
     repoCursor: clampIndex(state.open.repoCursor, project?.repos?.length ?? 0),
   };

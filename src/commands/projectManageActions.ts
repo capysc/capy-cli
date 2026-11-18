@@ -25,6 +25,7 @@ export interface ProjectManageActions {
   readonly deleteBranch: (project: ManageProjectRef, branch: BranchRef) => Promise<ManageFinished>;
   readonly setAccess: (project: ManageProjectRef, branch: BranchRef, user: AccessRow, grant: boolean) => Promise<ManageFinished>;
   readonly removeRepoRow: (project: ManageProjectRef, row: RepoRowRef) => Promise<ManageFinished>;
+  readonly renameProject: (project: ManageProjectRef, name: string) => Promise<ManageFinished>;
   readonly remoteRepoRows: (project: ManageProjectRef, rows: readonly RepoRowRef[]) => Promise<readonly RepoRowRef[]>;
 }
 
@@ -74,6 +75,7 @@ type ManageServiceClient = Pick<
   | 'getLatestSecrets'
   | 'pushSecrets'
   | 'deleteProjectRepoRow'
+  | 'renameProject'
 >;
 
 /** A failure as the screen shows it: its code (never parsed) and its message (shown, never parsed). */
@@ -179,6 +181,16 @@ export function createProjectManageActions(
         return [];
       }
     },
+    renameProject: (project, name) =>
+      settle(async () => {
+        // The same rule `capy projects rename` applies, before anything is sent.
+        const { renameNameProblem } = await import('../core/projectRenameRule');
+        const problem = renameNameProblem(name);
+        if (problem !== null) return { ok: false, refusal: { code: problem.code, message: problem.message } };
+        const answer = await serviceClient.renameProject(orgId, project.id, name);
+        const renamed = { id: project.id, name: answer.project.name };
+        return { ok: true, lines: [`Renamed ${project.name} to ${renamed.name}.`], renamed }; // COPY-FLAG
+      }),
     removeRepoRow: (project, row) =>
       settle(async () => {
         await serviceClient.deleteProjectRepoRow(orgId, project.id, row);

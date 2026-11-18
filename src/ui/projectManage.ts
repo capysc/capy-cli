@@ -27,6 +27,8 @@ const KEY_ESC = ESC;
 const KEY_ESC_ESC = `${ESC}${ESC}`;
 const KEY_CTRL_C = '\x03';
 const KEY_ENTER = '\r';
+const KEY_BACKSPACE = '\x7f';
+const KEY_BACKSPACE2 = '\b';
 
 // ── Shared shapes ─────────────────────────────────────────────────────────────
 
@@ -96,12 +98,14 @@ export function accessRows(members: readonly MemberDetail[], projectId: string, 
 
 // ── Settings rows ─────────────────────────────────────────────────────────────
 
-export type SettingsRow = 'projectId' | 'tokens' | 'delete';
-export const SETTINGS_ROWS: readonly SettingsRow[] = ['projectId', 'tokens', 'delete'];
+export type SettingsRow = 'projectId' | 'tokens' | 'rename' | 'delete';
+// Rename is last so the rows that were there keep their place.
+export const SETTINGS_ROWS: readonly SettingsRow[] = ['projectId', 'tokens', 'delete', 'rename'];
 
 export function settingsLabel(row: SettingsRow, projectId: string): string {
   if (row === 'projectId') return `Project ID  ${projectId}`; // COPY-FLAG
   if (row === 'tokens') return 'Deploy tokens'; // COPY-FLAG
+  if (row === 'rename') return 'Rename project'; // COPY-FLAG
   return 'Delete project'; // COPY-FLAG
 }
 
@@ -117,6 +121,8 @@ export type ManageDialog =
   | { readonly step: 'confirmDeleteBranch'; readonly project: ManageProjectRef; readonly branch: BranchRef }
   | { readonly step: 'access'; readonly project: ManageProjectRef; readonly branch: BranchRef; readonly cursor: number }
   | { readonly step: 'confirmRemoveRepo'; readonly project: ManageProjectRef; readonly row: RepoRowRef }
+  /** The new name being typed (it starts as the current one). `error`: why the last name was refused, in the refuser's words. */
+  | { readonly step: 'rename'; readonly project: ManageProjectRef; readonly name: string; readonly error: string | null }
   | { readonly step: 'working'; readonly project: ManageProjectRef; readonly label: string; readonly back: ManageDialog | null }
   | { readonly step: 'refused'; readonly project: ManageProjectRef; readonly refusal: ManageRefusal };
 
@@ -127,6 +133,7 @@ export type ManageEffect =
   | { readonly type: 'projectBranchProtect'; readonly project: ManageProjectRef; readonly branch: BranchRef; readonly protect: boolean }
   | { readonly type: 'projectBranchDelete'; readonly project: ManageProjectRef; readonly branch: BranchRef }
   | { readonly type: 'projectRepoRemove'; readonly project: ManageProjectRef; readonly row: RepoRowRef }
+  | { readonly type: 'projectRename'; readonly project: ManageProjectRef; readonly name: string }
   /** Read from GitHub which of the project's rows hold its keep.lock on the remote (the `[remote]` tag). */
   | { readonly type: 'projectRepoRowsCheck'; readonly project: ManageProjectRef; readonly rows: readonly RepoRowRef[] }
   | { readonly type: 'projectBranchAccess'; readonly project: ManageProjectRef; readonly branch: BranchRef; readonly user: AccessRow; readonly grant: boolean };
@@ -142,6 +149,8 @@ export type ManageFinished =
       readonly branches?: readonly BranchRef[];
       /** The org's users, read again (access). */
       readonly members?: readonly MemberDetail[];
+      /** The project under its new name (a rename). */
+      readonly renamed?: { readonly id: string; readonly name: string };
       /** The repo link row that is gone from the project (a row removal). */
       readonly removedRepoRow?: RepoRowRef;
     }
@@ -156,6 +165,7 @@ export interface ManageStep {
 export const MANAGE_CANCELLED_TEXT = 'Cancelled.'; // reused from `capy project delete`
 export const MANAGE_DRY_RUN_TEXT = 'Dry run: nothing was changed.'; // COPY-FLAG (same as the Users tab)
 export const NO_TOKENS_TEXT = 'No live deploy tokens.'; // reused from `capy project delete`
+export const RENAME_EMPTY_TEXT = 'Enter a name.'; // COPY-FLAG
 export const LAST_REPO_LOCK_TEXT = 'The last repo of a project cannot be removed.'; // COPY-FLAG
 export const DEFAULT_BRANCH_LOCK_TEXT = 'The default branch (development) cannot be protected or deleted.'; // COPY-FLAG
 
@@ -187,6 +197,7 @@ function send(project: ManageProjectRef, label: string, effect: ManageEffect, ba
 /** Enter on a Settings row (Delete project is the screen's own: it never reaches here). */
 export function startSettings(project: ManageProjectRef, row: Exclude<SettingsRow, 'delete'>): ManageStep {
   if (row === 'projectId') return { dialog: null, effect: { type: 'projectIdCopy', text: project.id }, notes: [] };
+  if (row === 'rename') return stay({ step: 'rename', project, name: project.name, error: null });
   return { dialog: { step: 'tokensLoading', project }, effect: { type: 'projectTokensLoad', project }, notes: [] };
 }
 
@@ -200,6 +211,24 @@ export function startBranch(project: ManageProjectRef, branch: BranchRef): Manag
 export function startRepoRemove(project: ManageProjectRef, row: RepoRowRef, rowCount: number): ManageStep {
   if (rowCount <= 1) return stay(null, [LAST_REPO_LOCK_TEXT]);
   return stay({ step: 'confirmRemoveRepo', project, row });
+}
+
+/** The rename field: typing edits the name, Enter sends it (the name's rule and the service decide), Esc cancels. */
+function renameKey(dialog: Extract<ManageDialog, { step: 'rename' }>, key: string, dryRun: boolean): ManageStep {
+  if (isEsc(key)) return stay(null, [MANAGE_CANCELLED_TEXT]);
+  if (key === KEY_ENTER) {
+    const name = dialog.name.trim();
+    if (name === '') return stay({ ...dialog, error: RENAME_EMPTY_TEXT });
+    // The same name: nothing to do.
+    if (name === dialog.project.name) return stay(null);
+    if (dryRun) return stay(null, [MANAGE_DRY_RUN_TEXT]);
+    const label = `Renaming ${dialog.project.name}...`; // COPY-FLAG
+    return { dialog: { step: 'working', project: dialog.project, label, back: { ...dialog, name, error: null } }, effect: { type: 'projectRename', project: dialog.project, name }, notes: [] };
+  }
+  if (key === KEY_BACKSPACE || key === KEY_BACKSPACE2) return stay({ ...dialog, name: dialog.name.slice(0, -1), error: null });
+  // Printable characters only (a paste arrives as one string of them).
+  const printable = Array.from(key).every((c) => c.charCodeAt(0) >= 0x20 && c.charCodeAt(0) !== 0x7f);
+  return printable ? stay({ ...dialog, name: dialog.name + key, error: null }) : stay(dialog);
 }
 
 /** A protected branch can have its access managed; any other branch is offered protection and deletion only. */
@@ -223,6 +252,7 @@ export function manageKey(
     return dialog.step === 'tokensLoading' && isEsc(key) ? stay(null) : stay(dialog);
   }
   if (dialog.step === 'refused') return stay(null);
+  if (dialog.step === 'rename') return renameKey(dialog, key, ctx.dryRun);
 
   if (dialog.step === 'tokens') {
     if (isEsc(key)) return stay(null);
@@ -293,8 +323,10 @@ export function manageTokensLoaded(dialog: ManageDialog | null, loaded: { readon
 /** A change came back: back to where it was started (with what was read again), or the refusal. */
 export function manageDone(dialog: ManageDialog | null, finished: ManageFinished): ManageStep {
   if (dialog === null || dialog.step !== 'working') return stay(dialog);
-  if (!finished.ok) return stay({ step: 'refused', project: dialog.project, refusal: finished.refusal });
   const back = dialog.back;
+  // A refused rename goes back to the field, with the typed name kept and the refusal shown; a rename that went through closes it.
+  if (back !== null && back.step === 'rename') return finished.ok ? stay(null, finished.lines) : stay({ ...back, error: finished.refusal.message });
+  if (!finished.ok) return stay({ step: 'refused', project: dialog.project, refusal: finished.refusal });
   if (back !== null && back.step === 'tokens' && finished.tokens !== undefined) {
     return stay({ ...back, tokens: finished.tokens, cursor: Math.min(back.cursor, Math.max(0, finished.tokens.length - 1)) }, finished.lines);
   }
@@ -355,6 +387,16 @@ export function renderManage(dialog: ManageDialog, width: number, margin: string
       `${m}${BOLD}Delete branch "${dialog.branch.name}"? This will remove all its secrets.${RESET}`, // reused from `capy branch -D`
       '',
       m + hints(hint('y', 'yes'), hint('esc', 'no')),
+    ];
+  }
+  if (dialog.step === 'rename') {
+    return [
+      `${m}${BOLD}Rename ${dialog.project.name}${RESET}`, // COPY-FLAG
+      '',
+      `${m}${DIM}Name:${RESET} ${dialog.name}${INVERSE} ${RESET}`, // COPY-FLAG
+      ...(dialog.error === null ? [] : ['', `${m}${dialog.error}`]),
+      '',
+      m + hints(hint('enter', 'rename'), hint('esc', 'cancel')), // COPY-FLAG
     ];
   }
   if (dialog.step === 'confirmRemoveRepo') {
