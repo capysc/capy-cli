@@ -22,6 +22,9 @@ jobs:
       - name: Typecheck
         run: bun run typecheck
 
+      - name: Typecheck install script generator
+        run: bun run typecheck:install
+
       # `capy run` tests spawn `node dist/index.js` as a subprocess — build
       # the dist artifact before the test step so those 14 tests can find it.
       - name: Build

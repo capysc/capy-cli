@@ -1,0 +1,160 @@
+#!/bin/sh
+# Capy @@VERSION@@, @@COMMIT@@
+# Source: https://github.com/capysc/capy-cli/tree/v@@VERSION@@
+set -eu
+
+on_path() {
+  case ":${PATH:-}:" in
+    *":$1:"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Follows a chain of symbolic links one hop at a time with plain readlink and
+# stops at the first hop whose path has a Homebrew Cellar or node_modules
+# segment. Prints brew, npm or other. Only filesystem facts are used.
+# Cellar wins over node_modules: a Homebrew formula can keep its own
+# node_modules under the Cellar.
+classify_link() {
+  link_path=$1
+  hops=0
+  while [ -L "$link_path" ] && [ "$hops" -lt 40 ]; do
+    link_target=$(readlink "$link_path") || { printf '%s\n' other; return; }
+    case "$link_target" in
+      /*) link_path=$link_target ;;
+      *) link_path="$(dirname "$link_path")/$link_target" ;;
+    esac
+    case "$link_path" in
+      */Cellar/*) printf '%s\n' brew; return ;;
+    esac
+    case "$link_path" in
+      */node_modules/*) printf '%s\n' npm; return ;;
+    esac
+    hops=$((hops + 1))
+  done
+  printf '%s\n' other
+}
+
+# Prints the directory of an existing capy to update in place, nothing when
+# there is none, and exits non-zero (nothing installed) when it must not be
+# replaced.
+existing_capy_dir() {
+  existing=$(command -v capy 2>/dev/null || true)
+  [ -n "$existing" ] || return 0
+  case "$existing" in
+    /*) ;;
+    *) existing="$PWD/$existing" ;;
+  esac
+  if [ -L "$existing" ]; then
+    case "$(classify_link "$existing")" in
+      brew)
+        printf '%s\n' 'Capy was installed with Homebrew. Nothing was installed. Update it with: brew upgrade capy' >&2 # COPY-FLAG
+        return 1
+        ;;
+      npm)
+        printf '%s\n' 'Capy was installed with npm. Nothing was installed. Update it with: npm install -g @capysc/cli' >&2 # COPY-FLAG
+        return 1
+        ;;
+      *)
+        printf 'Found capy at %s, a link this installer does not manage. Nothing was installed.\n' "$existing" >&2 # COPY-FLAG
+        return 1
+        ;;
+    esac
+  fi
+  if [ ! -f "$existing" ]; then
+    printf 'Found capy at %s, which is not a regular file. Nothing was installed.\n' "$existing" >&2 # COPY-FLAG
+    return 1
+  fi
+  existing_dir=$(dirname "$existing")
+  if [ ! -w "$existing_dir" ]; then
+    printf 'Cannot write to %s, where capy is installed. Nothing was installed.\n' "$existing_dir" >&2 # COPY-FLAG
+    return 1
+  fi
+  printf '%s\n' "$existing_dir"
+}
+
+choose_install_dir() {
+  if [ -n "${CAPY_INSTALL_DIR:-}" ]; then
+    printf '%s\n' "$CAPY_INSTALL_DIR"
+    return
+  fi
+  current_dir=$(existing_capy_dir) || return 1
+  if [ -n "$current_dir" ]; then
+    printf '%s\n' "$current_dir"
+    return
+  fi
+  if on_path /usr/local/bin && [ -d /usr/local/bin ] && [ -w /usr/local/bin ]; then
+    printf '%s\n' /usr/local/bin
+    return
+  fi
+  printf '%s\n' "$HOME/.local/bin"
+}
+
+main() {
+  version=@@VERSION@@
+  base_url=https://github.com/capysc/capy-cli/releases/download/v@@VERSION@@
+  install_dir=$(choose_install_dir) || exit 1
+  case "$(uname -s)" in
+    Darwin) os=darwin ;;
+    Linux) os=linux ;;
+    *) printf '%s\n' 'Supported systems: macOS and Linux.' >&2; exit 1 ;;
+  esac
+  case "$(uname -m)" in
+    arm64|aarch64) arch=arm64 ;;
+    x86_64|amd64) arch=x64 ;;
+    *) printf '%s\n' 'Supported processors: arm64 and x64.' >&2; exit 1 ;;
+  esac
+  case "$os-$arch" in
+    darwin-arm64) expected=@@SHA256_DARWIN_ARM64@@ ;;
+    darwin-x64) expected=@@SHA256_DARWIN_X64@@ ;;
+    linux-x64) expected=@@SHA256_LINUX_X64@@ ;;
+    linux-arm64) expected=@@SHA256_LINUX_ARM64@@ ;;
+  esac
+  for tool in tar mktemp; do
+    command -v "$tool" >/dev/null 2>&1 || { printf 'Required tool missing: %s\n' "$tool" >&2; exit 1; }
+  done
+  tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/capy-install.XXXXXXXX")
+  trap 'rm -rf "$tmp_dir"' EXIT
+  trap 'exit 1' HUP INT TERM
+  archive="capy-$os-$arch-$version.tar.gz"
+  printf 'Downloading Capy %s for %s/%s...\n' "$version" "$os" "$arch"
+  if command -v curl >/dev/null 2>&1; then
+    curl --fail --location --silent --show-error --proto '=https' --tlsv1.2 --retry 2 --connect-timeout 20 --max-time 300 "$base_url/$archive" -o "$tmp_dir/archive.tar.gz"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -q -T 300 -O "$tmp_dir/archive.tar.gz" "$base_url/$archive"
+  else
+    printf '%s\n' 'Install curl or wget and try again.' >&2; exit 1
+  fi
+  if command -v sha256sum >/dev/null 2>&1; then
+    actual=$(sha256sum "$tmp_dir/archive.tar.gz")
+  elif command -v shasum >/dev/null 2>&1; then
+    actual=$(shasum -a 256 "$tmp_dir/archive.tar.gz")
+  else
+    printf '%s\n' 'Install sha256sum or shasum to verify this download.' >&2; exit 1
+  fi
+  actual=${actual%% *}
+  if [ "$actual" != "$expected" ]; then
+    printf '%s\n' 'Checksum verification failed; nothing was installed.' >&2; exit 1
+  fi
+  tar -xzf "$tmp_dir/archive.tar.gz" -C "$tmp_dir"
+  chmod 755 "$tmp_dir/capy"
+  installed_version=$("$tmp_dir/capy" --version)
+  if [ "$installed_version" != "$version" ]; then
+    printf 'Unexpected binary version: %s\n' "$installed_version" >&2; exit 1
+  fi
+  mkdir -p "$install_dir"
+  staged=$(mktemp "$install_dir/.capy-install.XXXXXXXX")
+  cp "$tmp_dir/capy" "$staged"
+  chmod 755 "$staged"
+  mv -f "$staged" "$install_dir/capy"
+  notices_dir="$install_dir/../share/capy"
+  mkdir -p "$notices_dir"
+  cp "$tmp_dir/LICENSE" "$tmp_dir/THIRD-PARTY-NOTICES.md" "$notices_dir/"
+  printf 'Installed Capy %s to %s/capy\n' "$version" "$install_dir"
+  if on_path "$install_dir"; then
+    printf '%s\n' 'Run capy --help to get started.'
+  else
+    printf 'Add this directory to your PATH: %s\n' "$install_dir"
+  fi
+}
+main "$@"
