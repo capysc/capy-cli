@@ -63,6 +63,32 @@ function flagValues(globals: readonly string[], names: readonly string[]): strin
   });
 }
 
+/** Why the compose files could not be worked out. */
+export type ComposeFilesGap = 'project-directory' | 'no-compose-file';
+
+export type ComposeFilesResult =
+  | { readonly ok: true; readonly files: string[] }
+  | { readonly ok: false; readonly gap: ComposeFilesGap };
+
+/** As {@link resolveComposeFiles}, but says why it gave up. */
+export function resolveComposeFilesDetailed(
+  globals: readonly string[],
+  cwd: string,
+  env: NodeJS.ProcessEnv,
+  exists: (p: string) => boolean = existsSync,
+): ComposeFilesResult {
+  const explicit = flagValues(globals, ['-f', '--file']);
+  if (explicit.length > 0) return { ok: true, files: explicit };
+  if (env.COMPOSE_FILE) {
+    return { ok: true, files: env.COMPOSE_FILE.split(env.COMPOSE_PATH_SEPARATOR || delimiter).filter(Boolean) };
+  }
+  if (flagValues(globals, ['--project-directory']).length > 0) return { ok: false, gap: 'project-directory' };
+  const main = DEFAULT_FILES.find((f) => exists(join(cwd, f)));
+  if (!main) return { ok: false, gap: 'no-compose-file' };
+  const override = main.replace(/\.(ya?ml)$/, '.override.$1');
+  return { ok: true, files: exists(join(cwd, override)) ? [main, override] : [main] };
+}
+
 /**
  * The files compose would load without our extra `-f` — because once any `-f`
  * is passed, compose stops discovering defaults (including the override file).
@@ -74,14 +100,8 @@ export function resolveComposeFiles(
   env: NodeJS.ProcessEnv,
   exists: (p: string) => boolean = existsSync,
 ): string[] | undefined {
-  const explicit = flagValues(globals, ['-f', '--file']);
-  if (explicit.length > 0) return explicit;
-  if (env.COMPOSE_FILE) return env.COMPOSE_FILE.split(env.COMPOSE_PATH_SEPARATOR || delimiter).filter(Boolean);
-  if (flagValues(globals, ['--project-directory']).length > 0) return undefined;
-  const main = DEFAULT_FILES.find((f) => exists(join(cwd, f)));
-  if (!main) return undefined;
-  const override = main.replace(/\.(ya?ml)$/, '.override.$1');
-  return exists(join(cwd, override)) ? [main, override] : [main];
+  const result = resolveComposeFilesDetailed(globals, cwd, env, exists);
+  return result.ok ? result.files : undefined;
 }
 
 /** Service name → its `env_file` entries, from `docker compose config --no-interpolate`. */
@@ -139,23 +159,60 @@ export interface ComposeDeps {
 }
 
 /**
- * Rewrites `docker compose …` so services reading `envPath` get the decrypted
- * `keys` forwarded from capy's environment. Undefined = run argv unchanged.
+ * Compose subcommands that never read the project's files, so there is nothing
+ * to forward and nothing to warn about.
  */
-export function planComposeForward(
+const PROJECT_FREE_SUBCOMMANDS = new Set(['version', 'ls', 'help']);
+
+/** Why a compose command is run unchanged although capy could not work out its setup. */
+export type ComposeForwardGap = ComposeFilesGap | 'config-failed';
+
+/**
+ * What the forwarding code decided for one argv. Every "run unchanged" outcome
+ * is one of three kinds:
+ *  - `not-compose`: the command is not a compose command at all.
+ *  - `nothing-to-forward`: a compose command, but no service reads the Capy
+ *    `.env` (or the command never reads the project). Legitimate; stays silent.
+ *  - `undetermined`: a compose command whose setup capy could not determine.
+ */
+export type ComposeForwardResult =
+  | { readonly kind: 'forward'; readonly plan: ComposePlan }
+  | { readonly kind: 'not-compose' }
+  | { readonly kind: 'nothing-to-forward' }
+  | { readonly kind: 'undetermined'; readonly gap: ComposeForwardGap };
+
+/**
+ * "Could not tell" for a command that reads the project; "nothing to forward"
+ * for one that never does (`version`, `ls`, `help`, or no subcommand), where
+ * there is no setup to work out. Applied only where forwarding gives up, so a
+ * command that would have been forwarded still is.
+ */
+function undetermined(inv: ComposeInvocation, gap: ComposeForwardGap): ComposeForwardResult {
+  const sub = inv.rest[0];
+  return sub === undefined || PROJECT_FREE_SUBCOMMANDS.has(sub)
+    ? { kind: 'nothing-to-forward' }
+    : { kind: 'undetermined', gap };
+}
+
+/**
+ * As {@link planComposeForward}, but says why argv is left unchanged, so the
+ * caller can tell "nothing to forward" from "could not tell".
+ */
+export function planComposeForwardDetailed(
   args: readonly string[],
   envPath: string,
   keys: readonly string[],
   deps: ComposeDeps,
-): ComposePlan | undefined {
+): ComposeForwardResult {
   const inv = parseComposeArgs(args);
-  if (!inv) return undefined;
-  const files = resolveComposeFiles(inv.globals, deps.cwd, deps.env, deps.exists);
-  if (!files) return undefined;
+  if (!inv) return { kind: 'not-compose' };
+  const resolved = resolveComposeFilesDetailed(inv.globals, deps.cwd, deps.env, deps.exists);
+  if (!resolved.ok) return undetermined(inv, resolved.gap);
+  const files = resolved.files;
   const envFiles = (deps.readEnvFiles ?? readComposeEnvFiles)(inv.head, inv.globals, deps.cwd);
-  if (!envFiles) return undefined;
+  if (!envFiles) return undetermined(inv, 'config-failed');
   const body = buildOverride(envFiles, envPath, keys, deps.cwd);
-  if (!body) return undefined;
+  if (!body) return { kind: 'nothing-to-forward' };
 
   // Our -f goes last so it merges over the user's files; the user's own -f
   // flags (if any) stay where they were, otherwise we name the defaults.
@@ -165,10 +222,24 @@ export function planComposeForward(
   ];
 
   if (deps.platform !== 'win32') {
-    return { args: build(`/dev/fd/${OVERRIDE_FD}`), pipe: body, cleanup: () => undefined };
+    return { kind: 'forward', plan: { args: build(`/dev/fd/${OVERRIDE_FD}`), pipe: body, cleanup: () => undefined } };
   }
   const dir = mkdtempSync(join(tmpdir(), 'capy-compose-'));
   const file = join(dir, 'override.json');
   writeFileSync(file, body, { mode: 0o600 });
-  return { args: build(file), cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+  return { kind: 'forward', plan: { args: build(file), cleanup: () => rmSync(dir, { recursive: true, force: true }) } };
+}
+
+/**
+ * Rewrites `docker compose …` so services reading `envPath` get the decrypted
+ * `keys` forwarded from capy's environment. Undefined = run argv unchanged.
+ */
+export function planComposeForward(
+  args: readonly string[],
+  envPath: string,
+  keys: readonly string[],
+  deps: ComposeDeps,
+): ComposePlan | undefined {
+  const result = planComposeForwardDetailed(args, envPath, keys, deps);
+  return result.kind === 'forward' ? result.plan : undefined;
 }
