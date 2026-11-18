@@ -117,8 +117,20 @@ const KEY_CTRL_C = '\x03';
 const KEY_CTRL_E = '\x05';
 /** Ctrl+D: deploy the selected row's Dokploy targets, from the list while no filter is typed. The plain `d` is only a hotkey in the details view. */
 const KEY_CTRL_D = '\x04';
-/** Ctrl+S: cycle the list's sort. Ignored while the details view (or an edit/deploy screen) is open. */
-const KEY_CTRL_S = '\x13';
+// Shift+Tab (KEY_SHIFT_TAB above) opens the sort menu. Every other candidate is
+// taken or unreachable, which is worth recording so this doesn't get moved back:
+//   - Ctrl+S (`\x13`) is XOFF, the tty's `stop` character — swallowed by any
+//     layer still carrying `ixon`, and bound by terminal apps.
+//   - Ctrl+G (`\x07`) is BEL, and Rex intercepts it (observed 2026-11-17).
+//   - Every printable character types into the always-live search bar, so no
+//     bare letter or punctuation is available.
+//   - Ctrl+Tab has no encoding at all: terminals send plain `\t` unless both
+//     sides negotiate `modifyOtherKeys`/CSI-u, which this screen does not.
+//     Alt+Tab and Cmd+Tab never reach the pty, and `readEscapeToken` splits
+//     `ESC`+key into two tokens on purpose, so Alt+anything reads as Esc first.
+// Shift+Tab is the one modifier+Tab with a legacy sequence (CSI Z, "backtab"),
+// which every terminal sends. It cost the list its reverse column cycle, so
+// ←/→ now move the column instead (see handleListKey).
 const KEY_BACKSPACE = '\x7f';
 const KEY_BACKSPACE2 = '\b';
 
@@ -229,7 +241,7 @@ function nextColumn(column: ColumnMode, dir: 1 | -1): ColumnMode {
 
 // ── Sorting (CAP-731) ────────────────────────────────────────────────────────
 //
-// Ctrl+S opens a sort menu listing SORT_ORDER; Enter applies the chosen sort and
+// Shift+Tab opens a sort menu listing SORT_ORDER; Enter applies the chosen sort and
 // goes back to the top of the list. Search still decides
 // WHICH rows show; the sort only orders them. Every comparison keys off a
 // machine value (the name string, the status `kind`, a timestamp), never the
@@ -800,13 +812,16 @@ function handleListKey(state: SecretsScreenState, key: string): ReduceResult {
   if (key === KEY_CTRL_D && state.search.query === '') return openDeployOnCursor(state);
 
   // Works with or without a typed filter: the sort only orders the rows the search shows.
-  if (key === KEY_CTRL_S) return noEffect({ ...state, sortMenu: { cursor: Math.max(0, SORT_ORDER.indexOf(state.sort)) } });
+  if (key === KEY_SHIFT_TAB) return noEffect({ ...state, sortMenu: { cursor: Math.max(0, SORT_ORDER.indexOf(state.sort)) } });
 
   if (key === KEY_TAB) {
     return noEffect({ ...state, column: nextColumn(state.column, 1) });
   }
-  if (key === KEY_SHIFT_TAB) {
-    return noEffect({ ...state, column: nextColumn(state.column, -1) });
+  // Shift+Tab used to step the column backwards; it opens the sort menu now, so
+  // ←/→ carry the reverse cycle through the seven columns. Embedded
+  // (`SecretsScreenScope`) they belong to the host screen, so only Tab moves there.
+  if (state.scope === undefined && (key === KEY_LEFT || key === KEY_RIGHT)) {
+    return noEffect({ ...state, column: nextColumn(state.column, key === KEY_RIGHT ? 1 : -1) });
   }
 
   if (key === KEY_UP) {
@@ -1563,11 +1578,12 @@ function footerLine(state: SecretsScreenState, width: number): string {
   const hints: readonly FooterHint[] = [
     { id: 'navigate', key: null, label: '↑↓ navigate' }, // COPY-FLAG
     { id: 'column', key: 'tab', label: 'column' }, // COPY-FLAG
+    // Sort sits next to column: both reorder what the list shows, so they read as a pair.
+    { id: 'sort', key: 'shift+tab', label: `sort: ${SORT_LABELS[state.sort]}` }, // COPY-FLAG
     { id: 'inspect', key: 'enter', label: 'inspect' }, // COPY-FLAG
     ...editHints,
     ...scopeHints,
     { id: 'esc', key: 'esc', label: scope === undefined ? 'clear/quit' : 'clear/back' }, // COPY-FLAG
-    { id: 'sort', key: 'ctrl+s', label: `sort: ${SORT_LABELS[state.sort]}` }, // COPY-FLAG
   ];
   return joinHints(fitHints(hints, width));
 }
