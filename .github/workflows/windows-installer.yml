@@ -1,0 +1,137 @@
+name: Windows installer
+
+# Runs the generated install.ps1 on Windows runners, in Windows PowerShell 5.1
+# and PowerShell 7. The script is generated from the template with the latest
+# published release's version and checksums, then installs that release.
+on:
+  push:
+    paths:
+      - scripts/install/install.ps1.tmpl
+      - scripts/install/render.ts
+      - scripts/install/build-install-scripts.ts
+      - .github/workflows/windows-installer.yml
+  pull_request:
+    paths:
+      - scripts/install/install.ps1.tmpl
+      - scripts/install/render.ts
+      - scripts/install/build-install-scripts.ts
+      - .github/workflows/windows-installer.yml
+
+permissions:
+  contents: read
+
+jobs:
+  install:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        shell: [powershell, pwsh]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Generate install.ps1 from the latest release checksums
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG=$(gh release view --repo "${{ github.repository }}" --json tagName --jq .tagName)
+          VERSION="${TAG#v}"
+          mkdir -p "$RUNNER_TEMP/release"
+          gh release download "$TAG" --repo "${{ github.repository }}" --pattern "checksums-${VERSION}.txt" --dir "$RUNNER_TEMP/release"
+          bun scripts/install/build-install-scripts.ts \
+            --version "$VERSION" \
+            --commit "$(git rev-parse HEAD)" \
+            --checksums "$RUNNER_TEMP/release/checksums-${VERSION}.txt" \
+            --out "$RUNNER_TEMP/generated"
+          echo "CAPY_EXPECTED_VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      - name: Install, run, and reinstall the official Windows release
+        shell: ${{ matrix.shell }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $script = Join-Path $env:RUNNER_TEMP 'generated\install.ps1'
+          $expectedVersion = $env:CAPY_EXPECTED_VERSION
+          $env:LOCALAPPDATA = Join-Path $env:RUNNER_TEMP 'Capy Profile'
+          $installDirectory = if ($PSVersionTable.PSVersion.Major -eq 5) {
+            Remove-Item Env:CAPY_INSTALL_DIR -ErrorAction SilentlyContinue
+            Join-Path $env:LOCALAPPDATA 'Programs\Capy\bin'
+          } else {
+            $env:CAPY_INSTALL_DIR = Join-Path $env:RUNNER_TEMP 'Capy Install Test\bin'
+            $env:CAPY_INSTALL_DIR
+          }
+          $originalPath = $env:Path
+          $originalUserPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+          try {
+            Invoke-Expression (Get-Content -LiteralPath $script -Raw)
+            $installed = Join-Path $installDirectory 'capy.exe'
+            if ((& $installed --version) -ne $expectedVersion -or $LASTEXITCODE -ne 0) { throw 'Installed binary version mismatch' }
+            if ((Get-Command capy).Source -ine $installed) { throw 'Capy is not available on the current PATH' }
+            $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+            if (@($userPath -split ';' | Where-Object { $_ -ieq $installDirectory }).Count -ne 1) { throw 'User PATH missing Capy or contains duplicates' }
+            Invoke-Expression (Get-Content -LiteralPath $script -Raw)
+            if ([Environment]::GetEnvironmentVariable('Path', 'User') -cne $userPath) { throw 'Reinstall changed the user PATH' }
+            if ((capy --version) -ne $expectedVersion -or $LASTEXITCODE -ne 0) { throw 'Reinstalled binary failed' }
+            if (-not (Test-Path (Join-Path $installDirectory 'capy-LICENSE'))) { throw 'Missing license' }
+          } finally {
+            [Environment]::SetEnvironmentVariable('Path', $originalUserPath, 'User')
+            $env:Path = $originalPath
+            Remove-Item Env:CAPY_INSTALL_DIR -ErrorAction SilentlyContinue
+          }
+
+      - name: Update an existing standalone capy in place
+        shell: ${{ matrix.shell }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $script = Join-Path $env:RUNNER_TEMP 'generated\install.ps1'
+          $expectedVersion = $env:CAPY_EXPECTED_VERSION
+          $env:LOCALAPPDATA = Join-Path $env:RUNNER_TEMP 'Capy Profile In Place'
+          $existingFolder = Join-Path $env:RUNNER_TEMP 'Existing Capy\bin'
+          $originalPath = $env:Path
+          $originalUserPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+          try {
+            Remove-Item Env:CAPY_INSTALL_DIR -ErrorAction SilentlyContinue
+            New-Item -ItemType Directory -Path $existingFolder -Force | Out-Null
+            $env:CAPY_INSTALL_DIR = $existingFolder
+            Invoke-Expression (Get-Content -LiteralPath $script -Raw)
+            Remove-Item Env:CAPY_INSTALL_DIR
+            $env:Path = "$existingFolder;$originalPath"
+            $before = [Environment]::GetEnvironmentVariable('Path', 'User')
+            Invoke-Expression (Get-Content -LiteralPath $script -Raw)
+            if ((& (Join-Path $existingFolder 'capy.exe') --version) -ne $expectedVersion -or $LASTEXITCODE -ne 0) { throw 'Existing capy was not updated' }
+            if (Test-Path (Join-Path $env:LOCALAPPDATA 'Programs\Capy\bin\capy.exe')) { throw 'Installed to the default folder instead of updating in place' }
+            if ([Environment]::GetEnvironmentVariable('Path', 'User') -cne $before) { throw 'In-place update changed the user PATH' }
+          } finally {
+            [Environment]::SetEnvironmentVariable('Path', $originalUserPath, 'User')
+            $env:Path = $originalPath
+            Remove-Item Env:CAPY_INSTALL_DIR -ErrorAction SilentlyContinue
+          }
+
+      - name: Stop when capy came from npm
+        shell: ${{ matrix.shell }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $script = Join-Path $env:RUNNER_TEMP 'generated\install.ps1'
+          $env:LOCALAPPDATA = Join-Path $env:RUNNER_TEMP 'Capy Profile Npm'
+          $npmPrefix = Join-Path $env:RUNNER_TEMP 'npm prefix'
+          $originalPath = $env:Path
+          try {
+            Remove-Item Env:CAPY_INSTALL_DIR -ErrorAction SilentlyContinue
+            New-Item -ItemType Directory -Path (Join-Path $npmPrefix 'node_modules\@capysc\cli') -Force | Out-Null
+            Set-Content -LiteralPath (Join-Path $npmPrefix 'capy.cmd') -Value '@echo off'
+            $env:Path = "$npmPrefix;$originalPath"
+            $stopped = $false
+            try {
+              Invoke-Expression (Get-Content -LiteralPath $script -Raw)
+            } catch {
+              $stopped = $true
+            }
+            if (-not $stopped) { throw 'The installer did not stop for an npm install' }
+            if (Test-Path (Join-Path $env:LOCALAPPDATA 'Programs\Capy\bin\capy.exe')) { throw 'Something was installed' }
+          } finally {
+            $env:Path = $originalPath
+          }
