@@ -40,6 +40,8 @@
     "release:login": "node scripts/npm-remote.mjs login",
     "release:publish": "node scripts/npm-remote.mjs publish",
     "typecheck": "tsc --noEmit",
+    "typecheck:install": "tsc -p scripts/install/tsconfig.json",
+    "test:install": "bun test tests/scripts/installScripts.test.ts tests/scripts/installShell.test.ts",
     "test:e2e": "bun test tests/e2e/",
     "test:plugins": "bash tests/plugins/run-plugin-tests.sh",
     "test:plugins:cloudflare-workers": "bash tests/plugins/run-plugin-tests.sh cloudflare-workers",
