@@ -261,27 +261,93 @@ const planOf = async (r: ReturnType<typeof rig>) => json(await run(r, { dryRun: 
 const monoPaths = (plan: { prs: ReadonlyArray<{ repo: string; keep_lock_paths: readonly string[] }> }) => plan.prs.find((p) => p.repo === 'Acme/mono')?.keep_lock_paths;
 const treePaths = (r: ReturnType<typeof rig>): readonly string[] => r.github.createTree.mock.calls.flatMap((c) => pathsOfTreeCall(c[1] as Parameters<typeof pathsOfTreeCall>[0]));
 
-describe('capy secrets set after a move', () => {
-  test('the plan lists only the folder git has: the other stored folder is not a target', async () => {
-    const plan = await planOf(rig({ repos: AFTER_MOVE, links: STORED }));
+// A project with two stored rows: nothing guesses which one a PR goes to. The person says, with --pr-repo.
+const PICK_NEW = [`pA=Acme/mono/${NEW}`];
+const PICK_OLD = [`pA=Acme/mono/${OLD}`];
+const PICK_BOTH = [...PICK_OLD, ...PICK_NEW];
+
+describe('capy secrets set with a project linked to two rows', () => {
+  test('with no --pr-repo the command stops and asks: PR_REPO_AMBIGUOUS, exit 3, the rows, and the elicitation for the human', async () => {
+    const r = rig({ repos: AFTER_MOVE, links: STORED });
+    const out = await run(r, { dryRun: true });
+    const body = json(out);
+
+    expect(out.exitCode).toBe(3);
+    expect(body.ok).toBe(false);
+    expect(body.code).toBe(ERROR_CODES.PR_REPO_AMBIGUOUS);
+    expect(body.unanswered).toEqual([
+      { id: 'pr_repo', flag: '--pr-repo', candidates: [{ project_id: 'pA', project: PROJECT_NAMES.pA, repos: [`Acme/mono/${OLD}`, `Acme/mono/${NEW}`] }] },
+    ]);
+    expect(body.elicitation.kind).toBe('form');
+    expect(body.elicitation.fields).toHaveLength(1);
+    expect(body.elicitation.fields[0].options.map((o: { value: string }) => o.value)).toEqual([`Acme/mono/${OLD}`, `Acme/mono/${NEW}`]);
+    expect(body.elicitation.answer.rerun).toBe(`<cmd> | capy secrets set ${NAME} --dry-run --json --pr-repo pA=<repo_1>`);
+    expect(body.elicitation.display).toContain(`Acme/mono/${NEW}`);
+  });
+
+  test('the question is asked before anything is read from GitHub or written', async () => {
+    const r = rig({ repos: AFTER_MOVE, links: STORED });
+    await run(r, { dryRun: true });
+    await run(r, { confirm: 'anything' });
+
+    expect(r.github.getFile.mock.calls).toHaveLength(0);
+    expect(r.github.createTree.mock.calls).toHaveLength(0);
+  });
+
+  test('a person at a terminal is shown the rows and the flag that picks each', async () => {
+    const r = rig({ repos: AFTER_MOVE, links: STORED });
+    const out = await capture(() => runSecretsSet(NAME, { dryRun: true }, r.io));
+
+    expect(out.exitCode).toBe(3);
+    expect(out.stderr).toContain(`--pr-repo pA=Acme/mono/${NEW}`);
+    expect(out.stderr).toContain(`--pr-repo pA=Acme/mono/${OLD}`);
+  });
+
+  test('--no-pr needs no answer: no PR is planned at all', async () => {
+    const out = await run(rig({ repos: AFTER_MOVE, links: STORED }), { dryRun: true, noPr: true });
+
+    expect(json(out).ok).toBe(true);
+    expect(json(out).prs).toEqual([]);
+  });
+
+  test('with the row picked, the plan lists only that folder', async () => {
+    const plan = json(await run(rig({ repos: AFTER_MOVE, links: STORED }), { dryRun: true, prRepo: PICK_NEW }));
 
     expect(monoPaths(plan)).toEqual([`${NEW}/keep.lock`, 'frontend/keep.lock']);
   });
 
-  test('the plan is the very plan a project with only the new folder gets', async () => {
-    const moved = await planOf(rig({ repos: AFTER_MOVE, links: STORED }));
+  test('the plan is the very plan a project with only that row gets', async () => {
+    const picked = json(await run(rig({ repos: AFTER_MOVE, links: STORED }), { dryRun: true, prRepo: PICK_NEW }));
     const never = await planOf(rig({ repos: AFTER_MOVE, links: [NEW_LINK, FRONTEND_LINK, SOLO_LINK] }));
 
-    expect(moved.plan_id).toBe(never.plan_id);
+    expect(picked.plan_id).toBe(never.plan_id);
   });
 
-  test('the move has landed on the default branch and both rows are still stored: one path, no scaffold, run after run', async () => {
+  test('owner and name of the answer compare case-insensitively; the folder exactly', async () => {
+    const plan = json(await run(rig({ repos: AFTER_MOVE, links: STORED }), { dryRun: true, prRepo: [`pA=acme/MONO/${NEW}`] }));
+    expect(monoPaths(plan)).toEqual([`${NEW}/keep.lock`, 'frontend/keep.lock']);
+
+    const wrongFolder = await run(rig({ repos: AFTER_MOVE, links: STORED }), { dryRun: true, prRepo: [`pA=Acme/mono/${NEW.toUpperCase()}`] });
+    expect(json(wrongFolder).code).toBe(ERROR_CODES.INVALID_FORMAT);
+  });
+
+  test('an answer that names no row of a project in the run, or is not project=repo, is refused', async () => {
+    const noSuchRow = await run(rig({ repos: AFTER_MOVE, links: STORED }), { dryRun: true, prRepo: ['pA=Acme/elsewhere'] });
+    const noSuchProject = await run(rig({ repos: AFTER_MOVE, links: STORED }), { dryRun: true, prRepo: [...PICK_NEW, 'pZ=Acme/mono'] });
+    const malformed = await run(rig({ repos: AFTER_MOVE, links: STORED }), { dryRun: true, prRepo: ['Acme/mono'] });
+
+    expect(json(noSuchRow).code).toBe(ERROR_CODES.INVALID_FORMAT);
+    expect(json(noSuchProject).code).toBe(ERROR_CODES.INVALID_FORMAT);
+    expect(json(malformed).code).toBe(ERROR_CODES.INVALID_FORMAT);
+  });
+
+  test('a real run with the row picked writes that folder only, with no scaffold, run after run', async () => {
     const r = rig({ repos: AFTER_MOVE, links: STORED });
 
-    const first = await planOf(r);
-    const one = await run(r, { confirm: first.plan_id });
-    const second = await planOf(r);
-    const two = await run(r, { confirm: second.plan_id });
+    const first = json(await run(r, { dryRun: true, prRepo: PICK_NEW }));
+    const one = await run(r, { confirm: first.plan_id, prRepo: PICK_NEW });
+    const second = json(await run(r, { dryRun: true, prRepo: PICK_NEW }));
+    const two = await run(r, { confirm: second.plan_id, prRepo: PICK_NEW });
 
     expect(one.returned).toBe(0);
     expect(two.returned).toBe(0);
@@ -292,35 +358,34 @@ describe('capy secrets set after a move', () => {
     expect(json(one).prs.find((p: { repo: string }) => p.repo === 'Acme/mono').keep_lock_paths).toEqual([`${NEW}/keep.lock`, 'frontend/keep.lock']);
   });
 
-  test('a real run on a branch where the move has not landed writes the old folder only', async () => {
+  test('picking the old row on a branch where the move has not landed writes the old folder only', async () => {
     const r = rig({ repos: BEFORE_MOVE, links: STORED });
-    const planId = (await planOf(r)).plan_id as string;
-    await run(r, { confirm: planId });
+    const planId = json(await run(r, { dryRun: true, prRepo: PICK_OLD })).plan_id as string;
+    await run(r, { confirm: planId, prRepo: PICK_OLD });
 
     expect(treePaths(r)).toContain(`${OLD}/keep.lock`);
     expect(treePaths(r).some((p) => p === `${NEW}/keep.lock`)).toBe(false);
   });
 
-  test('neither folder has a keep.lock: the plan and the writes are exactly as before', async () => {
+  test('both rows picked and neither folder has a keep.lock: both are planned and written', async () => {
     const r = rig({ repos: NO_FILE_YET, links: STORED });
-    const plan = await planOf(r);
+    const plan = json(await run(r, { dryRun: true, prRepo: PICK_BOTH }));
 
     expect(monoPaths(plan)).toEqual([`${OLD}/keep.lock`, `${NEW}/keep.lock`, 'frontend/keep.lock'].toSorted());
-    await run(r, { confirm: plan.plan_id });
+    await run(r, { confirm: plan.plan_id, prRepo: PICK_BOTH });
     expect(treePaths(r)).toEqual(expect.arrayContaining([`${OLD}/keep.lock`, `${NEW}/keep.lock`]));
   });
 
-  test('both folders have a keep.lock: both are written', async () => {
-    const r = rig({ repos: BOTH, links: STORED });
-    const plan = await planOf(r);
+  test('both rows picked and both folders have a keep.lock: both are written', async () => {
+    const plan = json(await run(rig({ repos: BOTH, links: STORED }), { dryRun: true, prRepo: PICK_BOTH }));
 
     expect(monoPaths(plan)).toEqual([`${OLD}/keep.lock`, `${NEW}/keep.lock`, 'frontend/keep.lock'].toSorted());
   });
 
-  test('a folder holding another project\'s keep.lock is never written into', async () => {
+  test('a picked folder that holds another project\'s keep.lock is still never written into', async () => {
     const r = rig({ repos: NEW_IS_ANOTHERS, links: STORED });
-    const plan = await planOf(r);
-    await run(r, { confirm: plan.plan_id });
+    const plan = json(await run(r, { dryRun: true, prRepo: PICK_BOTH }));
+    await run(r, { confirm: plan.plan_id, prRepo: PICK_BOTH });
 
     expect(monoPaths(plan)).toEqual([`${NEW}/keep.lock`, 'frontend/keep.lock']);
     expect(treePaths(r).some((p) => p.startsWith(`${OLD}/`))).toBe(false);
@@ -360,8 +425,9 @@ describe('another project\'s keep.lock at a project\'s only stored path', () => 
   });
 
   test('a project that has its own folder next to the foreign one reports nothing', async () => {
-    const plan = await planOf(rig({ repos: NEW_IS_ANOTHERS, links: STORED }));
+    const plan = json(await run(rig({ repos: NEW_IS_ANOTHERS, links: STORED }), { dryRun: true, prRepo: PICK_BOTH }));
 
+    expect(plan.ok).toBe(true);
     expect(plan.failed).toBeUndefined();
   });
 });

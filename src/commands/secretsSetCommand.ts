@@ -79,6 +79,7 @@ import { bindAnswer, shownValueUnavailable, type BoundAnswer } from '../sync/noF
 import { renderSecretSetConfirmation, stoppingAfter, TERMINAL_STYLE } from './secretsSetText';
 import { PoolItem, runPool } from '../utils/pool';
 import { followGitTargets } from './repoLinksFollowGit';
+import { PR_REPO_AMBIGUOUS_MESSAGE, PR_REPO_FLAG, chooseRepoRows, parsePrRepoFlags, prRepoLines, prRepoRefusalExtra } from './prRepoChoice';
 
 export interface SecretsSetOpts {
   readonly json?: boolean;
@@ -96,6 +97,8 @@ export interface SecretsSetOpts {
   readonly noPrFor?: readonly string[];
   /** `--no-pr` */
   readonly noPr?: boolean;
+  /** `--pr-repo <project_id>=<owner/name[/folder]>` (repeatable): the repo row a project's PR goes to, when it is linked to several. */
+  readonly prRepo?: readonly string[];
   /** `--resolve` / `--conflict` as typed (CAP-717): they decide a location someone else changed since its row was listed. */
   readonly conflictFlags?: RawConflictFlags;
 }
@@ -150,6 +153,7 @@ export interface SetPlan extends SetPlanBody {
 const CODE_EXIT: Readonly<Record<string, number>> = {
   [ERROR_CODES.SECRET_AMBIGUOUS]: EXIT_NEEDS_INPUT,
   [ERROR_CODES.PLAN_CONFIRM_REQUIRED]: EXIT_NEEDS_INPUT,
+  [ERROR_CODES.PR_REPO_AMBIGUOUS]: EXIT_NEEDS_INPUT,
 };
 
 /** Refuses and exits: pure JSON on stdout under `--json`, the sentence on stderr otherwise. Never carries a value. */
@@ -437,6 +441,49 @@ export async function loadLinks(io: Pick<SecretsSetIo, 'orgId' | 'client'>, json
   }
 }
 
+/**
+ * The links a run plans from, once every project that is linked to more than one repo row has a chosen row (`--pr-repo`).
+ * A project with several rows and no answer ends the command: `PR_REPO_AMBIGUOUS`, exit 3, with the rows to choose between
+ * and the elicitation for the human. Nothing is read from GitHub to decide it. `rerunBase`: this same command, as a dry run.
+ */
+export function repoRowsOrExit(
+  links: readonly OrgRepoLink[],
+  projectIds: readonly string[],
+  tokens: readonly string[],
+  json: boolean,
+  rerunBase: string,
+): readonly OrgRepoLink[] {
+  const parsed = parsePrRepoFlags(tokens);
+  if (!parsed.ok) {
+    return refuse(json, ERROR_CODES.INVALID_FORMAT, `${PR_REPO_FLAG} takes <project_id>=<owner/name[/folder]>: ${parsed.token}`); // COPY-FLAG
+  }
+  const outcome = chooseRepoRows(links, projectIds, parsed.choices);
+  if (outcome.unmatched.length > 0) {
+    return refuse(json, ERROR_CODES.INVALID_FORMAT, `${PR_REPO_FLAG} names no repo of a project in this run: ${outcome.unmatched.join(', ')}`); // COPY-FLAG
+  }
+  if (outcome.unanswered.length > 0) {
+    // A person at a terminal reads the choices on stderr; under --json they are in `unanswered` and the elicitation.
+    const sentence = json ? PR_REPO_AMBIGUOUS_MESSAGE : [PR_REPO_AMBIGUOUS_MESSAGE, ...prRepoLines(outcome.unanswered)].join('\n');
+    return refuse(json, ERROR_CODES.PR_REPO_AMBIGUOUS, sentence, prRepoRefusalExtra(outcome.unanswered, rerunBase));
+  }
+  return outcome.links;
+}
+
+/** `opts` as the flags of a dry run of the same command: what an answered `--pr-repo` is added to. */
+function setRerunBase(name: string, opts: SecretsSetOpts): string {
+  return [
+    '<cmd> | capy secrets set',
+    name,
+    ...(opts.row ?? []).map((id) => `--row ${id}`),
+    ...(opts.allRows === true ? ['--all-rows'] : []),
+    ...(opts.exclude ?? []).map((e) => `--exclude ${e}`),
+    ...(opts.noPrFor ?? []).map((r) => `--no-pr-for ${r}`),
+    ...(opts.prRepo ?? []).map((r) => `${PR_REPO_FLAG} ${r}`),
+    '--dry-run',
+    '--json',
+  ].join(' ');
+}
+
 export async function readSecretIndex(io: Pick<SecretsSetIo, 'orgId' | 'client'>, json: boolean): Promise<readonly SecretIndexRow[]> {
   try {
     return (await io.client.getSecretIndex(io.orgId)).rows;
@@ -505,7 +552,9 @@ export async function runSecretsSet(name: string, opts: SecretsSetOpts, io: Secr
 
   const noPr = opts.noPr === true;
   const loaded: LoadedLinks = noPr ? { links: [] } : await loadLinks(io, json);
-  const planning = noPr ? { targets: [], notLinked: [] } : planRepos(located, loaded.links);
+  // A project linked to more than one repo row: the person says which (`--pr-repo`), nothing here guesses.
+  const links = noPr ? [] : repoRowsOrExit(loaded.links, located.map((l) => l.project_id), opts.prRepo ?? [], json, setRerunBase(name, opts));
+  const planning = noPr ? { targets: [], notLinked: [] } : planRepos(located, links);
   const narrowed = narrowRepos(planning.targets, opts.noPrFor ?? [], noPr, json);
   const bases = await resolveBases(narrowed.length > 0 ? io.env.github() : undefined, narrowed, io.control?.planning);
   // A project lives where the repo's default branch has its keep.lock: a folder that branch does not carry, while another does, is left out of the plan (the rows stay).

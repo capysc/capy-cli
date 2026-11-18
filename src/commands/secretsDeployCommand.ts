@@ -55,6 +55,7 @@ import {
   excludeLocations,
   exitWithConflicts,
   loadLinks,
+  repoRowsOrExit,
   readSecretIndex,
   refuse,
   silentContext,
@@ -75,6 +76,8 @@ export interface SecretsDeployOpts {
   readonly allRows?: boolean;
   /** `--exclude <project>:<branch>` (repeatable) */
   readonly exclude?: readonly string[];
+  /** `--pr-repo <project_id>=<owner/name[/folder]>` (repeatable): the repo row a project is read from and its PR goes to, when it is linked to several. */
+  readonly prRepo?: readonly string[];
   /** `--resolve` / `--conflict` as typed (CAP-717): they decide a Dokploy value changed outside Capy since Capy last delivered it. */
   readonly conflictFlags?: RawConflictFlags;
 }
@@ -188,6 +191,20 @@ async function readPlan(sel: Selection, io: SecretsDeployIo, links: readonly Org
 
 // ── The command ─────────────────────────────────────────────────────────────
 
+/** `opts` as the flags of a dry run of the same command: what an answered `--pr-repo` is added to. */
+function deployRerunBase(names: readonly string[], opts: SecretsDeployOpts): string {
+  return [
+    'capy secrets deploy',
+    ...names,
+    ...(opts.row ?? []).map((id) => `--row ${id}`),
+    ...(opts.allRows === true ? ['--all-rows'] : []),
+    ...(opts.exclude ?? []).map((e) => `--exclude ${e}`),
+    ...(opts.prRepo ?? []).map((r) => `--pr-repo ${r}`),
+    '--dry-run',
+    '--json',
+  ].join(' ');
+}
+
 /**
  * Runs `capy secrets deploy NAME...`. Returns the exit code (0 when nothing failed, 1 on a
  * partial failure); a refusal exits the process itself.
@@ -204,7 +221,9 @@ export async function runSecretsDeploy(names: readonly string[], opts: SecretsDe
   }
   const loaded = await loadLinks(io, json);
   const sel: Selection = { names, located };
-  const plan = await readPlan(sel, io, loaded.links);
+  // A project linked to more than one repo row: the person says which (`--pr-repo`), nothing here guesses.
+  const links = repoRowsOrExit(loaded.links, located.map((l) => l.project_id), opts.prRepo ?? [], json, deployRerunBase(names, opts));
+  const plan = await readPlan(sel, io, links);
   const planId = planIdFor(sel, plan);
   const planBody = { names, ...planJsonOf(plan), ...(loaded.unavailable === undefined ? {} : { repos_unavailable: loaded.unavailable }) };
 

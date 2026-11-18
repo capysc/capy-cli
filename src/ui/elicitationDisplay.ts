@@ -122,3 +122,8 @@ export function renameProjectDisplay(input: {
     ['New name', input.suggestion ?? TO_CHOOSE], // COPY-FLAG
   ]);
 }
+
+/** The table for a project linked to more than one repo: one row per (project, repo) to choose between. */
+export function chooseRepoDisplay(rows: ReadonlyArray<readonly [string, string]>): string {
+  return table(['Project', 'Repo'], rows); // COPY-FLAG
+}
