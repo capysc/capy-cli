@@ -1,12 +1,9 @@
-import { AuthService } from '../auth/authService';
 import { ServiceClient, MemberDetail } from '../service/serviceClient';
-import { ProjectManager } from '../core/projectManager';
+import { resolveOrgContext, type OrgContext } from '../core/orgContext';
+import { CapyError, ERROR_CODES } from '../types/index';
 import { InteractiveTable } from '../ui/interactiveTable';
 import { Spinner } from '../ui/spinner';
 import { excludeSystemProject } from '../system/reservedProjectName';
-import { AuthResult } from '../types/index';
-
-const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
 export class UsersCommand {
   private apiUrl?: string;
@@ -18,35 +15,15 @@ export class UsersCommand {
   }
 
   /**
-   * Non-interactive helper: resolve org, authenticate, and invoke the same
-   * service-client methods the interactive TUI dispatches to. Used by the
-   * `capy grant-branch` / `capy revoke-branch` subcommands so CI and the E2E
-   * harness can exercise the protected-branch grant flow without a TTY.
+   * The org and a signed-in client for `capy grant-branch` / `capy revoke-branch`: the folder's own org when it
+   * has a keep.lock, otherwise the only org or the one picked (`resolveOrgContext`). No project folder is needed:
+   * the project and the branch are arguments.
    */
   private async resolveContext(): Promise<{
     orgId: string;
     serviceClient: ServiceClient;
   }> {
-    const pm = new ProjectManager();
-    const projectState = await pm.detectProjectState();
-
-    if (!projectState.initialized || !projectState.organizationId) {
-      console.error(`No keep.lock file found. Run ${B('capy')} first to initialize.`);
-      process.exit(1);
-    }
-    const orgId = projectState.organizationId;
-
-    const authService = new AuthService(this.apiUrl, this.devMode, projectState.userId);
-    const serviceClient = new ServiceClient(this.apiUrl, this.devMode);
-    serviceClient.setTokenProvider((rejected) => authService.getValidToken(rejected));
-    let authResult = await authService.authenticateSilent(orgId);
-    if (!authResult.success) authResult = await authService.authenticateSilent();
-    if (!authResult.success) authResult = await authService.authenticate(orgId);
-    if (!authResult.success) {
-      console.error('Authentication failed');
-      process.exit(1);
-    }
-
+    const { orgId, serviceClient } = await resolveOrgContext(this.apiUrl, this.devMode);
     return { orgId, serviceClient };
   }
 
@@ -97,16 +74,18 @@ export class UsersCommand {
     return { projectId: project.id, branchId: (branch as any).id, userId: member.userId };
   }
 
-  /** Silent (this org, then any cached session) before falling back to interactive OAuth. Exits on failure. */
-  private async authenticateForUsersOrExit(authService: AuthService, orgId: string): Promise<AuthResult> {
-    const forThisOrg = await authService.authenticateSilent(orgId);
-    if (forThisOrg.success) return forThisOrg;
-    const anyCached = await authService.authenticateSilent();
-    if (anyCached.success) return anyCached;
-    const interactive = await authService.authenticate(orgId);
-    if (interactive.success) return interactive;
-    console.error('Authentication failed');
-    process.exit(1);
+  /**
+   * The org for `capy users`. With `--json` nothing is ever asked: when this folder names no org and the person
+   * belongs to several, the refusal is JSON on stdout with the code and the orgs, and the exit code is 1.
+   */
+  private async orgContextOrExit(json: boolean): Promise<OrgContext> {
+    try {
+      return await resolveOrgContext(this.apiUrl, this.devMode, { promptForOrg: !json });
+    } catch (err) {
+      if (!json || !(err instanceof CapyError) || err.code !== ERROR_CODES.ORG_SELECTION_REQUIRED) throw err;
+      console.log(JSON.stringify({ ok: false, code: err.code, message: err.message, orgs: err.details?.orgs ?? [] }, null, 2));
+      return process.exit(1);
+    }
   }
 
   /**
@@ -133,24 +112,9 @@ export class UsersCommand {
   }
 
   async execute(opts: { json?: boolean } = {}): Promise<void> {
-    const pm = new ProjectManager();
-    const projectState = await pm.detectProjectState();
-
-    if (!projectState.initialized || !projectState.organizationId) {
-      console.error(`No keep.lock file found. Run ${B('capy')} first to initialize.`);
-      process.exit(1);
-    }
-
-    const orgId = projectState.organizationId;
-
-    // Authenticate — silent first (cached / refresh for this org, then any
-    // cached session) before falling back to interactive OAuth. Mirrors the
-    // pattern in capyCommand so a stale per-org token doesn't trigger a relog
-    // when another org's session is still valid.
-    const authService = new AuthService(this.apiUrl, this.devMode, projectState.userId);
-    const serviceClient = new ServiceClient(this.apiUrl, this.devMode);
-    serviceClient.setTokenProvider((rejected) => authService.getValidToken(rejected));
-    await this.authenticateForUsersOrExit(authService, orgId);
+    // The users are the organization's, not a project's: the folder's own org when it has a keep.lock, otherwise
+    // the only org or the one picked. No project folder is needed.
+    const { orgId, serviceClient } = await this.orgContextOrExit(opts.json === true);
 
     // Fetch the users. In --json mode emit NO progress at all so stdout stays
     // pure JSON even on a TTY (the Spinner already routes to stderr when piped; this
