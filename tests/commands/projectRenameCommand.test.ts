@@ -622,7 +622,7 @@ describe('capy projects rename', () => {
     });
   });
 
-  describe('--project names the project, from any folder', () => {
+  describe('--project-id names the project, from any folder', () => {
     /** A service that also renames `proj_api`, and lists `projects`. */
     function serviceFor(projects: readonly object[] = LISTING) {
       respond.mockImplementation((method, path, body) => {
@@ -639,11 +639,11 @@ describe('capy projects rename', () => {
       });
     }
 
-    it('by name, in a folder with no keep.lock: renames through the service and writes no file', async () => {
+    it('in a folder with no keep.lock: renames through the service and writes no file', async () => {
       serviceFor();
       const dir = enterFolder(null);
 
-      const out = await capture(() => renameProjectCommand('new-api', { json: true, project: 'Api' }));
+      const out = await capture(() => renameProjectCommand('new-api', { json: true, projectId: 'proj_api' }));
 
       expect(out.exitCode).toBeUndefined();
       expect(renames()).toEqual([{ method: 'PATCH', path: '/orgs/org_1/projects/proj_api', body: JSON.stringify({ name: 'new-api' }) }]);
@@ -659,23 +659,12 @@ describe('capy projects rename', () => {
       expect(fakePrompt).not.toHaveBeenCalled();
     });
 
-    it('by id', async () => {
-      serviceFor();
-      enterFolder(null);
-
-      const out = await capture(() => renameProjectCommand('new-api', { json: true, project: 'proj_api' }));
-
-      expect(out.exitCode).toBeUndefined();
-      expect(renames().map((r) => r.path)).toEqual(['/orgs/org_1/projects/proj_api']);
-      expect(JSON.parse(out.stdout).project).toEqual({ id: 'proj_api', name: 'new-api' });
-    });
-
     it('in a folder of another project: that folder\'s keep.lock is byte-identical', async () => {
       serviceFor();
       const dir = enterFolder();
       const before = lockOf(dir);
 
-      const out = await capture(() => renameProjectCommand('new-api', { json: true, project: 'Api' }));
+      const out = await capture(() => renameProjectCommand('new-api', { json: true, projectId: 'proj_api' }));
 
       expect(out.exitCode).toBeUndefined();
       expect(renames().map((r) => r.path)).toEqual(['/orgs/org_1/projects/proj_api']);
@@ -687,47 +676,40 @@ describe('capy projects rename', () => {
       serviceFor();
       const dir = enterFolder();
 
-      const out = await capture(() => renameProjectCommand('new-name', { json: true, project: 'proj_web' }));
+      const out = await capture(() => renameProjectCommand('new-name', { json: true, projectId: 'proj_web' }));
 
       expect(out.exitCode).toBeUndefined();
       expect(lockOf(dir)).toBe(renamedLock('new-name'));
       expect(JSON.parse(out.stdout).keep_lock).toEqual({ updated: ['keep.lock'] });
     });
 
-    it('a name no project of this organization has is PROJECT_NOT_FOUND, and nothing is sent', async () => {
+    it('an id this organization does not have is PROJECT_NOT_FOUND, and nothing is sent', async () => {
       serviceFor();
       enterFolder(null);
 
-      const out = await capture(() => renameProjectCommand('new-name', { json: true, project: 'elsewhere' }));
+      const out = await capture(() => renameProjectCommand('new-name', { json: true, projectId: 'proj_other_org' }));
 
       expect(out.exitCode).toBe(1);
       expect(JSON.parse(out.stdout)).toMatchObject({ ok: false, code: 'PROJECT_NOT_FOUND' });
       expect(renames()).toEqual([]);
     });
 
-    it('several projects with that name is PROJECT_AMBIGUOUS (exit 3) with a pick-one elicitation, and nothing is sent', async () => {
-      serviceFor([
-        { id: 'proj_api', name: 'Api', organization_id: 'org_1' },
-        { id: 'proj_api_2', name: 'Api', organization_id: 'org_1' },
-      ]);
+    it('a project name is not an id: PROJECT_NOT_FOUND, and nothing is sent', async () => {
+      serviceFor();
       enterFolder(null);
 
-      const out = await capture(() => renameProjectCommand('new-api', { json: true, project: 'Api' }));
+      const out = await capture(() => renameProjectCommand('new-name', { json: true, projectId: 'Api' }));
 
-      expect(out.exitCode).toBe(3);
-      const body = JSON.parse(out.stdout);
-      expect(body).toMatchObject({ ok: false, code: 'PROJECT_AMBIGUOUS' });
-      expect(body.elicitation.answer.rerun).toBe('capy projects rename new-api --project <project> --json');
-      expect(body.elicitation.fields[0].options.map((o: { value: string }) => o.value).sort()).toEqual(['proj_api', 'proj_api_2']);
+      expect(out.exitCode).toBe(1);
+      expect(JSON.parse(out.stdout)).toMatchObject({ ok: false, code: 'PROJECT_NOT_FOUND' });
       expect(renames()).toEqual([]);
-      expect(fakePrompt).not.toHaveBeenCalled();
     });
 
     it('--dry-run says what would change and sends no rename', async () => {
       serviceFor();
       enterFolder(null);
 
-      const out = await capture(() => renameProjectCommand('new-api', { json: true, dryRun: true, project: 'Api' }));
+      const out = await capture(() => renameProjectCommand('new-api', { json: true, dryRun: true, projectId: 'proj_api' }));
 
       expect(out.exitCode).toBeUndefined();
       expect(JSON.parse(out.stdout)).toEqual({
@@ -746,12 +728,12 @@ describe('capy projects rename', () => {
       serviceFor();
       enterRepo('git@github.com:slidespeak/slidespeak-monorepo.git', 'backend');
 
-      const out = await capture(() => renameProjectCommand(undefined, { json: true, project: 'Api' }));
+      const out = await capture(() => renameProjectCommand(undefined, { json: true, projectId: 'proj_api' }));
 
       expect(out.exitCode).toBe(3);
       const body = JSON.parse(out.stdout);
       expect(body).toMatchObject({ ok: false, code: 'PROJECT_NAME_REQUIRED', project: { id: 'proj_api', name: 'Api' } });
-      expect(body.elicitation.answer.rerun).toBe('capy projects rename <name> --project proj_api --json');
+      expect(body.elicitation.answer.rerun).toBe('capy projects rename <name> --project-id proj_api --json');
       expect(body.elicitation.fields[0].default).toBeUndefined();
       expect(renames()).toEqual([]);
     });
@@ -760,14 +742,14 @@ describe('capy projects rename', () => {
       serviceFor();
       enterFolder(null);
 
-      const out = await capture(() => renameProjectCommand('bad name!', { json: true, project: 'Api' }));
+      const out = await capture(() => renameProjectCommand('bad name!', { json: true, projectId: 'proj_api' }));
 
       expect(out.exitCode).toBe(1);
       expect(requests()).toEqual([]);
     });
 
     it('the option is read from the merged view', () => {
-      expect(renameProjectOptsFrom({ optsWithGlobals: () => ({ project: 'Api' }) }).project).toBe('Api');
+      expect(renameProjectOptsFrom({ optsWithGlobals: () => ({ projectId: 'proj_api' }) }).projectId).toBe('proj_api');
     });
   });
 

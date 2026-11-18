@@ -191,7 +191,7 @@ function matchProjects(projects: readonly ProjectRef[], ref: string, preferDelet
 /** A project id as the service mints them. */
 const PROJECT_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-export type Resolved =
+type Resolved =
   | { readonly kind: 'one'; readonly project: ProjectRef }
   | { readonly kind: 'many'; readonly matches: readonly ProjectRef[] };
 
@@ -202,7 +202,7 @@ export type Resolved =
  * matches nothing still goes to the service, which answers for it: not found, or the owner-only refusal for a non-owner
  * (whose listing hides deleted projects).
  */
-export function resolveRef(projects: readonly ProjectRef[], ref: string, preferDeleted: boolean): Resolved {
+function resolveRef(projects: readonly ProjectRef[], ref: string, preferDeleted: boolean): Resolved {
   const matches = matchProjects(projects, ref, preferDeleted);
   if (matches.length === 1) return { kind: 'one', project: matches[0] };
   if (matches.length > 1) return { kind: 'many', matches };
@@ -266,11 +266,11 @@ function chooseElicitation(org: OrgRef, ref: string, candidates: readonly Candid
   };
 }
 
-export type Picked =
+type Picked =
   | { readonly kind: 'picked'; readonly project: ProjectRef }
   | { readonly kind: 'needs-choice'; readonly elicitation: ElicitationForm; readonly lines: readonly string[] };
 
-export interface PickContext {
+interface PickContext {
   readonly json: boolean;
   readonly agentMode: boolean;
   readonly org: OrgRef;
@@ -284,7 +284,7 @@ export interface PickContext {
  * The one project to act on. Several with the same name: in a terminal, an arrow-key list; with nobody to ask, the
  * pick-one elicitation. Never a guess, and `--yes` never chooses.
  */
-export async function pickProject(resolved: Resolved, ctx: PickContext): Promise<Picked> {
+async function pickProject(resolved: Resolved, ctx: PickContext): Promise<Picked> {
   if (resolved.kind === 'one') return { kind: 'picked', project: resolved.project };
   const candidates = await candidatesOf(ctx.client, resolved.matches);
   if (ctx.agentMode) {
@@ -304,7 +304,7 @@ export async function pickProject(resolved: Resolved, ctx: PickContext): Promise
 }
 
 /** The refusal that hands the choice to the agent: PROJECT_AMBIGUOUS, exit 3, with the elicitation. */
-export function choiceRefusal(picked: Extract<Picked, { kind: 'needs-choice' }>, ref: string): Refusal {
+function choiceRefusal(picked: Extract<Picked, { kind: 'needs-choice' }>, ref: string): Refusal {
   return {
     code: ERROR_CODES.PROJECT_AMBIGUOUS,
     message: `More than one project is named ${ref}.`, // COPY-FLAG
@@ -332,7 +332,7 @@ type KeepRead =
   | { readonly kind: 'unavailable' };
 
 /** The slice of the service client `readDeleteDetails` uses. */
-export interface DeleteDetailsClient {
+interface DeleteDetailsClient {
   listBranches(projectId: string): Promise<ReadonlyArray<{ readonly name: string }>>;
   getLatestSecrets(projectId: string, branch: string): Promise<{ readonly keep_hash: string; readonly keep_file?: string } | null>;
 }

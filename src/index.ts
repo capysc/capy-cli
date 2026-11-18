@@ -870,7 +870,7 @@ const projectsCmd = program
 projectsCmd
   .command('rename [new-name]')
   .description('Rename the project of this folder, and update its keep.lock (owners only)') // COPY-FLAG
-  .option('--project <name-or-id>', 'rename this project instead of the one this folder belongs to') // COPY-FLAG
+  .option('--project-id <id>', 'rename the project with this id instead of the one this folder belongs to') // COPY-FLAG
   .option('--non-tty', 'same as --json: never ask, and answer in JSON (agents/CI)') // COPY-FLAG
   .option('--json', 'emit machine-readable JSON instead of the human UI')
   .action(async (name: string | undefined, _options: any, command: any) => {
