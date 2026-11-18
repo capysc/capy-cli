@@ -311,7 +311,7 @@ export function renderUsersDialog(dialog: UsersDialog, width: number, margin: st
       `${m}${BOLD}Remove ${dialog.target.email} from ${dialog.project.name}?${RESET}`, // COPY-FLAG
       `${m}${DIM}They stay in the organization.${RESET}`, // COPY-FLAG
       '',
-      m + hints(hint('y', 'yes'), hint('n', 'no')),
+      m + hints(hint('y', 'yes'), hint('esc', 'no')),
     ];
   }
   if (dialog.step === 'working') return [`${m}${DIM}${dialog.label}${RESET}`];
