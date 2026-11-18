@@ -15,11 +15,13 @@ import { hasOrgKey } from '../config/globalConfig';
 import { CapyError, ERROR_CODES } from '../types/index';
 import type { MemberDetail, ServiceClient } from '../service/serviceClient';
 import { PROJECT_ROLE_LABELS, type ProjectRole, type UserTarget, type UsersFinished, type UsersProjectRef } from '../ui/projectUsers';
+import { INVITE_ROLE_LABELS, type InviteRole } from '../core/inviteRoles';
 import { defaultInviteNotAfter, unwrapInviterKey, wrapAndCreateInvite } from './inviteCommand';
 
 /** What the Users tab needs. No function ever rejects: a failure comes back as a coded refusal. */
 export interface ProjectUsersActions {
-  readonly invite: (project: UsersProjectRef, email: string, role: ProjectRole) => Promise<UsersFinished>;
+  /** `role` 'admin' is org-wide: the invite then names no project. */
+  readonly invite: (project: UsersProjectRef, email: string, role: InviteRole) => Promise<UsersFinished>;
   readonly changeRole: (project: UsersProjectRef, target: UserTarget, role: ProjectRole) => Promise<UsersFinished>;
   readonly remove: (project: UsersProjectRef, target: UserTarget) => Promise<UsersFinished>;
 }
@@ -55,17 +57,17 @@ export function createProjectUsersActions(serviceClient: UsersServiceClient, org
     }
   };
 
-  /** Someone new: `capy invite`'s invite, scoped to this project. */
-  const inviteNewPerson = async (project: UsersProjectRef, email: string, role: ProjectRole): Promise<{ lines: readonly string[]; redeemCommand: string }> => {
+  /** `capy invite`'s invite: scoped to `projectId`, or org-wide when there is none (an org admin). */
+  const createInviteFor = async (projectId: string | undefined, email: string, role: InviteRole): Promise<{ lines: readonly string[]; redeemCommand: string }> => {
     if (!hasOrgKey(orgId, userId)) {
       throw new CapyError('No master key found for this organization. Only the org owner can invite.', ERROR_CODES.PERMISSION_DENIED); // reused from `capy invite`
     }
     const masterKey = await unwrapInviterKey(orgId, userId, serviceClient);
     const notAfter = defaultInviteNotAfter();
-    const { redeemCode } = await wrapAndCreateInvite({ orgId, email, role, projectId: project.id, masterKey, notAfter, serviceClient });
+    const { redeemCode } = await wrapAndCreateInvite({ orgId, email, role, projectId, masterKey, notAfter, serviceClient });
     return {
       lines: [
-        `Invite created for ${email} as ${PROJECT_ROLE_LABELS[role]}`, // reused from `capy invite`
+        `Invite created for ${email} as ${INVITE_ROLE_LABELS[role]}`, // reused from `capy invite`
         `Expires ${new Date(notAfter).toISOString()}.`, // reused from `capy invite`
       ],
       redeemCommand: `capy redeem ${redeemCode}`,
@@ -75,9 +77,11 @@ export function createProjectUsersActions(serviceClient: UsersServiceClient, org
   return {
     invite: (project, email, role) =>
       settle(async () => {
+        // An org admin reaches every project: the same org invite `capy invite --role admin` sends, whoever it is for.
+        if (role === 'admin') return createInviteFor(undefined, email, role);
         const { members } = await serviceClient.listMemberDetails(orgId);
         const existing = members.find((m) => m.email.toLowerCase() === email.toLowerCase());
-        if (existing === undefined) return inviteNewPerson(project, email, role);
+        if (existing === undefined) return createInviteFor(project.id, email, role);
         await serviceClient.inviteToProject(orgId, project.id, email, role);
         return { lines: [`Added ${email} to ${project.name} as ${PROJECT_ROLE_LABELS[role]}.`] }; // COPY-FLAG
       }),

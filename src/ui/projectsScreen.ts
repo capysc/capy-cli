@@ -40,6 +40,7 @@ import { oscHyperlink } from './osc8';
 import { clipLine, truncateCell } from './pickerTable';
 import { BEHIND_LABEL, DEPLOYED_LABEL, TARGET_STATUS_HEADING } from '../core/deployStatus';
 import { DELETE_CANCELLED_TEXT, DELETE_DRY_RUN_TEXT, deleteQuestion } from '../commands/projectLifecycleCommand';
+import { mayInviteAdmin } from '../core/inviteRoles';
 import {
   type SecretsScreenEffect,
   type SecretsScreenState,
@@ -971,8 +972,14 @@ function handleUsersTabKey(state: ProjectsScreenState, view: ProjectView, projec
   return noEffect(state);
 }
 
+/** Whether the caller's own org role may invite an org admin; no when the caller or the users are unknown. */
+function callerMayInviteAdmin(data: ProjectsData): boolean {
+  const self = (data.members ?? []).find((m) => m.userId === data.selfUserId);
+  return mayInviteAdmin(self?.role);
+}
+
 function handleUsersDialogKey(state: ProjectsScreenState, view: ProjectView, dialog: UsersDialog, key: string): ProjectsReduceResult {
-  const stepped = usersDialogKey(dialog, key, { dryRun: state.dryRun, rows: userRowsOf(state.data, view.projectId) });
+  const stepped = usersDialogKey(dialog, key, { dryRun: state.dryRun, rows: userRowsOf(state.data, view.projectId), canInviteAdmin: callerMayInviteAdmin(state.data) });
   return { state: { ...state, usersDialog: stepped.dialog, notes: stepped.notes }, effect: stepped.effect };
 }
 
