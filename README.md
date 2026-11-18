@@ -62,6 +62,8 @@ curl -fsSL https://capy.sc/install.sh | sh
 
 The installer downloads the binary for your system from GitHub Releases and checks its SHA-256 before installing. If Capy is already installed as a standalone file, it is replaced in place. If Capy came from Homebrew or npm, the installer stops and nothing is changed: update with `brew upgrade capy` or `npm install -g @capysc/cli`. <!-- COPY-FLAG -->
 For a new install it uses `/usr/local/bin` when that folder is on your `PATH` and writable, otherwise `~/.local/bin`. `CAPY_INSTALL_DIR` sets the folder. <!-- COPY-FLAG -->
+`CAPY_PREFIX` is the older name and still works: the binary goes to `$CAPY_PREFIX/bin`. If both are set, `CAPY_INSTALL_DIR` wins. <!-- COPY-FLAG -->
+`CAPY_NO_NPM_FALLBACK` is accepted and ignored, because there is no npm fallback. `CAPY_FORCE_NPM=1` stops and prints the npm command. <!-- COPY-FLAG -->
 
 ### Windows PowerShell
 
