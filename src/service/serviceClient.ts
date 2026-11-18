@@ -1123,6 +1123,19 @@ export class ServiceClient {
     return this.request('PUT', `/orgs/${orgId}/projects/${projectId}/repos`, link, { timeout: timeoutMs });
   }
 
+  /**
+   * Removes one repo link row from a project: that repo at that folder. Org owners/admins and the project's
+   * admins only. The project's only row is refused (a coded 409). `repos`: the project's links now.
+   */
+  async deleteProjectRepoRow(
+    orgId: string,
+    projectId: string,
+    row: { readonly host: string; readonly owner: string; readonly name: string; readonly path: string },
+  ): Promise<{ ok: boolean; removed: number; repos: KnownRepo[] }> {
+    const part = (value: string): string => encodeURIComponent(value);
+    return this.request('DELETE', `/orgs/${orgId}/projects/${projectId}/repos/${part(row.host)}/${part(row.owner)}/${part(row.name)}?path=${part(row.path)}`);
+  }
+
   /** CAP-697: every project → repo link the caller can see (owners, admins and project admins only; a plain member gets a 403). */
   async getOrgRepos(orgId: string): Promise<OrgReposResponse> {
     try {

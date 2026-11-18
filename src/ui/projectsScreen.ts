@@ -55,6 +55,7 @@ import {
 } from './secretsScreen';
 import {
   type BranchRef,
+  type RepoRowRef,
   type ManageDialog,
   type ManageEffect,
   type ManageFinished,
@@ -67,6 +68,7 @@ import {
   renderManage,
   settingsLabel,
   startBranch,
+  startRepoRemove,
   startSettings,
 } from './projectManage';
 import {
@@ -494,6 +496,8 @@ export interface ProjectView {
   readonly settingsCursor: number;
   /** The Capy Branches tab's selected branch. */
   readonly branchCursor: number;
+  /** The Git Repos tab's selected row. */
+  readonly repoCursor: number;
 }
 
 export interface ProjectsScreenState {
@@ -726,7 +730,7 @@ function secretsStateFor(data: ProjectsData, project: ProjectItem, dryRun: boole
 /** Opens `project`: its secrets screen, scoped to its rows. */
 function openProject(state: ProjectsScreenState, project: ProjectItem): ProjectsScreenState {
   const tab = visibleTabs(state.data, project)[0] ?? 'branches';
-  return { ...state, open: { projectId: project.id, tab, secrets: secretsStateFor(state.data, project, state.dryRun), scroll: 0, userCursor: 0, settingsCursor: 0, branchCursor: 0 } };
+  return { ...state, open: { projectId: project.id, tab, secrets: secretsStateFor(state.data, project, state.dryRun), scroll: 0, userCursor: 0, settingsCursor: 0, branchCursor: 0, repoCursor: 0 } };
 }
 
 /** `state` with the lazy loads changed (only when the data has any). */
@@ -896,6 +900,7 @@ function handleProjectKey(state: ProjectsScreenState, view: ProjectView, key: st
   if (view.tab === 'users') return handleUsersTabKey(state, view, project, key);
   if (view.tab === 'settings') return handleSettingsTabKey(state, view, project, key);
   if (view.tab === 'branches') return handleBranchesTabKey(state, view, project, key);
+  if (view.tab === 'repos') return handleReposTabKey(state, view, project, key);
   const lastLine = Math.max(0, tabTable(state.data, project, view.tab).rows.length - 1);
   const scrollBy = (delta: number): ProjectsReduceResult =>
     noEffect({ ...state, open: { ...view, scroll: Math.max(0, Math.min(lastLine, view.scroll + delta)) } });
@@ -989,6 +994,20 @@ function handleBranchesTabKey(state: ProjectsScreenState, view: ProjectView, pro
   return noEffect({ ...state, manage: started.dialog, notes: started.notes });
 }
 
+/** On the Git Repos tab: the arrows move the cursor; d asks to remove the row (the project's only row stays). */
+function handleReposTabKey(state: ProjectsScreenState, view: ProjectView, project: ProjectItem, key: string): ProjectsReduceResult {
+  const rows = project.repos ?? [];
+  const moveTo = (cursor: number): ProjectsReduceResult => noEffect({ ...state, open: { ...view, repoCursor: clampIndex(cursor, rows.length) } });
+  if (key === KEY_UP) return moveTo(view.repoCursor - 1);
+  if (key === KEY_DOWN) return moveTo(view.repoCursor + 1);
+  if (key === KEY_PGUP) return moveTo(view.repoCursor - PAGE_SIZE);
+  if (key === KEY_PGDN) return moveTo(view.repoCursor + PAGE_SIZE);
+  const row = rows[clampIndex(view.repoCursor, rows.length)];
+  if ((key !== 'd' && key !== 'D') || row === undefined) return noEffect(state);
+  const started = startRepoRemove({ id: project.id, name: project.name }, { host: row.host, owner: row.owner, name: row.name, path: row.path }, rows.length);
+  return noEffect({ ...state, manage: started.dialog, notes: started.notes });
+}
+
 function handleManageKey(state: ProjectsScreenState, dialog: ManageDialog, key: string): ProjectsReduceResult {
   const stepped = manageKey(dialog, key, { dryRun: state.dryRun, members: state.data.members ?? [] });
   const next = { ...state, manage: stepped.dialog, notes: stepped.notes };
@@ -1029,14 +1048,32 @@ function withBranches(data: ProjectsData, projectId: string, branches: readonly 
   return { ...pruned, projects: pruned.projects.map((p) => (p.id === projectId ? withNewBranches(p, branches) : p)) };
 }
 
+/** Whether a stored link is `row`: same host, owner and name (owner and name compare case-insensitively, as on the service) and the same folder. */
+function isRepoRow(link: ProjectRepoSummary, row: RepoRowRef): boolean {
+  return link.host === row.host && link.owner.toLowerCase() === row.owner.toLowerCase() && link.name.toLowerCase() === row.name.toLowerCase() && link.path === row.path;
+}
+
+/** `data` with `row` gone from `projectId`'s repo links. */
+function withoutRepoRow(data: ProjectsData, projectId: string, row: RepoRowRef): ProjectsData {
+  return {
+    ...data,
+    projects: data.projects.map((p) => (p.id === projectId && p.repos !== undefined ? { ...p, repos: p.repos.filter((r) => !isRepoRow(r, row)) } : p)),
+  };
+}
+
 /** A token revoke or branch change came back: what was read again replaces the old, and the dialog moves on. */
 export function applyManageDone(state: ProjectsScreenState, finished: ManageFinished): ProjectsScreenState {
   if (state.manage === null || state.manage.step !== 'working' || state.open === null) return state;
   const stepped = manageDone(state.manage, finished);
   const membersIn = finished.ok && finished.members !== undefined ? withMembers(state.data, finished.members) : state.data;
-  const data = finished.ok && finished.branches !== undefined ? withBranches(membersIn, state.open.projectId, finished.branches) : membersIn;
+  const withNewBranches = finished.ok && finished.branches !== undefined ? withBranches(membersIn, state.open.projectId, finished.branches) : membersIn;
+  const data = finished.ok && finished.removedRepoRow !== undefined ? withoutRepoRow(withNewBranches, state.open.projectId, finished.removedRepoRow) : withNewBranches;
   const project = projectById(data, state.open.projectId);
-  const open = { ...state.open, branchCursor: clampIndex(state.open.branchCursor, project?.branches.length ?? 0) };
+  const open = {
+    ...state.open,
+    branchCursor: clampIndex(state.open.branchCursor, project?.branches.length ?? 0),
+    repoCursor: clampIndex(state.open.repoCursor, project?.repos?.length ?? 0),
+  };
   return { ...state, data, open, manage: stepped.dialog, notes: stepped.notes };
 }
 
@@ -1290,7 +1327,7 @@ function tabBody(
   if (view.tab === 'secrets') return NO_SECRETS_YET_LINES.map((l) => `${m}${l}`);
   if (view.tab === 'settings') return settingsLines(project.id, view.settingsCursor, width, boxed);
   if (view.tab === 'branches') return branchLines(project, view.branchCursor, width, boxed);
-  if (view.tab === 'repos') return linkRepoLines(tabTableLines(tabTable(state.data, project, view.tab), view.scroll, height, available), project.repos ?? []);
+  if (view.tab === 'repos') return linkRepoLines(repoLines(project, view.repoCursor, width, boxed), project.repos ?? []);
   if (view.tab === 'users') return usersTabLines(userRowsOf(state.data, project.id), view.userCursor, height, available, width, boxed);
   return tabTableLines(tabTable(state.data, project, view.tab), view.scroll, height, available);
 }
@@ -1328,13 +1365,15 @@ function usersTabLines(
 }
 
 /** `usersActive`: the Users tab's keys (change role, invite) work, because the member list is in. */
-function projectFooter(tab: ProjectTab, usersActive: boolean): string {
+function projectFooter(tab: ProjectTab, usersActive: boolean, repoRowCount: number): string {
   const lead = ((): readonly string[] => {
     // The Settings tab has actions, not a table: Enter runs the one under the cursor.
     if (tab === 'settings') return [renderHint(null, '↑↓ navigate'), renderHint('enter', 'select')]; // COPY-FLAG
     if (tab === 'branches') return [renderHint(null, '↑↓ navigate'), renderHint('enter', 'actions')]; // COPY-FLAG
     if (tab === 'users' && !usersActive) return [renderHint(null, '↑↓ navigate')]; // COPY-FLAG
     if (tab === 'users') return [renderHint(null, '↑↓ navigate'), renderHint('enter', 'change role'), renderHint('i', 'invite')]; // COPY-FLAG
+    // The project's only row stays: d is offered only when there is another.
+    if (tab === 'repos') return repoRowCount > 1 ? [renderHint(null, '↑↓ navigate'), renderHint('d', 'remove')] : [renderHint(null, '↑↓ navigate')]; // COPY-FLAG
     return [renderHint(null, '↑↓ scroll')]; // COPY-FLAG
   })();
   return joinHints([
@@ -1372,6 +1411,13 @@ function actionRows(labels: readonly string[], cursor: number, width: number, bo
 function branchLines(project: ProjectItem, cursor: number, width: number, boxed: boolean): readonly string[] {
   if (project.branches.length === 0) return ['', `${' '.repeat(MARGIN)}${DIM}(none)${RESET}`];
   return ['', ...actionRows(project.branches.map((b) => (b.protected ? `${b.name} (protected)` : b.name)), cursor, width, boxed)];
+}
+
+/** The Git Repos tab: each stored row (a repo, at the folder the project was seen in), with a cursor. */
+function repoLines(project: ProjectItem, cursor: number, width: number, boxed: boolean): readonly string[] {
+  const rows = project.repos ?? [];
+  if (rows.length === 0) return ['', `${' '.repeat(MARGIN)}${DIM}(none)${RESET}`];
+  return ['', ...actionRows(rows.map((r) => repoUrl(r) ?? formatRepo(r)), cursor, width, boxed)];
 }
 
 /** The notes (what a delete did), dim, above the footer. */
@@ -1435,7 +1481,7 @@ function renderProject(state: ProjectsScreenState, view: ProjectView, termWidth:
 
   const m = ' '.repeat(MARGIN);
   const title = `${m}${BOLD}${project.name}${RESET}${dryRunTag(state.dryRun)}`;
-  const footer: readonly string[] = ['', ...noteLines(state.notes), m + projectFooter(view.tab, membersReady(state.data))];
+  const footer: readonly string[] = ['', ...noteLines(state.notes), m + projectFooter(view.tab, membersReady(state.data), project.repos?.length ?? 0)];
   const bodyHeight = Math.max(3, innerHeight(1) - footer.length);
   const available = Math.max(20, boxed ? innerWidth : innerWidth - MARGIN * 2);
   const body = tabBody(state, project, view, bodyHeight, available, width, boxed);

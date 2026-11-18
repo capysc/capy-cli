@@ -13,7 +13,7 @@ import { CapyError, ERROR_CODES } from '../types/index';
 import type { MemberDetail, ServiceClient } from '../service/serviceClient';
 import { uploadKeepOnly } from '../sync/commit';
 import { stripTargetsForDeployId } from '../deploy/targetsGate';
-import type { BranchRef, ManageFinished, ManageProjectRef, ManageRefusal, TokenRow, AccessRow } from '../ui/projectManage';
+import type { BranchRef, ManageFinished, ManageProjectRef, ManageRefusal, RepoRowRef, TokenRow, AccessRow } from '../ui/projectManage';
 
 /** What the two tabs need. No function ever rejects: a failure comes back as a coded refusal. */
 export interface ProjectManageActions {
@@ -22,6 +22,7 @@ export interface ProjectManageActions {
   readonly setProtected: (project: ManageProjectRef, branch: BranchRef, protect: boolean) => Promise<ManageFinished>;
   readonly deleteBranch: (project: ManageProjectRef, branch: BranchRef) => Promise<ManageFinished>;
   readonly setAccess: (project: ManageProjectRef, branch: BranchRef, user: AccessRow, grant: boolean) => Promise<ManageFinished>;
+  readonly removeRepoRow: (project: ManageProjectRef, row: RepoRowRef) => Promise<ManageFinished>;
 }
 
 type ManageServiceClient = Pick<
@@ -36,6 +37,7 @@ type ManageServiceClient = Pick<
   | 'revokeProtectedBranch'
   | 'getLatestSecrets'
   | 'pushSecrets'
+  | 'deleteProjectRepoRow'
 >;
 
 /** A failure as the screen shows it: its code (never parsed) and its message (shown, never parsed). */
@@ -129,6 +131,12 @@ export function createProjectManageActions(serviceClient: ManageServiceClient, o
       settle(async () => {
         await serviceClient.deleteBranch(project.id, branch.id);
         return { ok: true, lines: [`Deleted branch "${branch.name}"`], branches: await branchesOf(project.id) }; // reused from `capy branch -D`
+      }),
+    removeRepoRow: (project, row) =>
+      settle(async () => {
+        await serviceClient.deleteProjectRepoRow(orgId, project.id, row);
+        const label = row.path === '.' ? `${row.owner}/${row.name}` : `${row.owner}/${row.name}/${row.path}`;
+        return { ok: true, lines: [`Removed ${label}.`], removedRepoRow: row }; // COPY-FLAG
       }),
     setAccess: (project, branch, user, grant) =>
       settle(async () => {

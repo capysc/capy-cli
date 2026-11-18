@@ -31,7 +31,7 @@ import {
   render,
 } from './projectsScreen';
 import type { ProjectRole, UserTarget, UsersEffect, UsersFinished, UsersProjectRef } from './projectUsers';
-import type { AccessRow, BranchRef, ManageEffect, ManageFinished, ManageProjectRef, ManageRefusal, TokenRow } from './projectManage';
+import type { AccessRow, BranchRef, ManageEffect, ManageFinished, ManageProjectRef, ManageRefusal, RepoRowRef, TokenRow } from './projectManage';
 
 /** What the Settings and Capy Branches tabs need (`commands/projectManageActions.ts`). No function ever rejects. */
 export interface ProjectsManageActions {
@@ -40,6 +40,7 @@ export interface ProjectsManageActions {
   readonly setProtected: (project: ManageProjectRef, branch: BranchRef, protect: boolean) => Promise<ManageFinished>;
   readonly deleteBranch: (project: ManageProjectRef, branch: BranchRef) => Promise<ManageFinished>;
   readonly setAccess: (project: ManageProjectRef, branch: BranchRef, user: AccessRow, grant: boolean) => Promise<ManageFinished>;
+  readonly removeRepoRow: (project: ManageProjectRef, row: RepoRowRef) => Promise<ManageFinished>;
 }
 
 /**
@@ -66,6 +67,7 @@ const NO_MANAGE_ACTIONS: ProjectsManageActions = {
   setProtected: async () => UNAVAILABLE,
   deleteBranch: async () => UNAVAILABLE,
   setAccess: async () => UNAVAILABLE,
+  removeRepoRow: async () => UNAVAILABLE,
 };
 
 /** Starts one Settings or Capy Branches effect; its result comes back through `done`. */
@@ -99,6 +101,10 @@ function performManage(
     void actions.deleteBranch(effect.project, effect.branch).then(finish);
     return;
   }
+  if (effect.type === 'projectRepoRemove') {
+    void actions.removeRepoRow(effect.project, effect.row).then(finish);
+    return;
+  }
   void actions.setAccess(effect.project, effect.branch, effect.user, effect.grant).then(finish);
 }
 
@@ -109,6 +115,7 @@ const MANAGE_EFFECT_LIST: readonly ManageEffect['type'][] = [
   'projectBranchProtect',
   'projectBranchDelete',
   'projectBranchAccess',
+  'projectRepoRemove',
 ];
 const MANAGE_EFFECT_TYPES: ReadonlySet<string> = new Set<string>(MANAGE_EFFECT_LIST);
 

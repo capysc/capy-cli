@@ -41,6 +41,19 @@ export interface BranchRef {
   readonly protected: boolean;
 }
 
+/** One repo link row of a project: a repo and the folder the project was seen in (`.`: the repo root). */
+export interface RepoRowRef {
+  readonly host: string;
+  readonly owner: string;
+  readonly name: string;
+  readonly path: string;
+}
+
+/** `owner/name`, plus `/folder` when the row is not at the repo root. */
+function repoRowLabel(row: RepoRowRef): string {
+  return row.path === '.' ? `${row.owner}/${row.name}` : `${row.owner}/${row.name}/${row.path}`;
+}
+
 /** The branch every project has, which the service never protects or deletes. */
 export const DEFAULT_BRANCH = 'development';
 
@@ -97,6 +110,7 @@ export type ManageDialog =
   | { readonly step: 'branchMenu'; readonly project: ManageProjectRef; readonly branch: BranchRef; readonly choice: number }
   | { readonly step: 'confirmDeleteBranch'; readonly project: ManageProjectRef; readonly branch: BranchRef }
   | { readonly step: 'access'; readonly project: ManageProjectRef; readonly branch: BranchRef; readonly cursor: number }
+  | { readonly step: 'confirmRemoveRepo'; readonly project: ManageProjectRef; readonly row: RepoRowRef }
   | { readonly step: 'working'; readonly project: ManageProjectRef; readonly label: string; readonly back: ManageDialog | null }
   | { readonly step: 'refused'; readonly project: ManageProjectRef; readonly refusal: ManageRefusal };
 
@@ -106,6 +120,7 @@ export type ManageEffect =
   | { readonly type: 'projectTokenRevoke'; readonly project: ManageProjectRef; readonly token: TokenRow }
   | { readonly type: 'projectBranchProtect'; readonly project: ManageProjectRef; readonly branch: BranchRef; readonly protect: boolean }
   | { readonly type: 'projectBranchDelete'; readonly project: ManageProjectRef; readonly branch: BranchRef }
+  | { readonly type: 'projectRepoRemove'; readonly project: ManageProjectRef; readonly row: RepoRowRef }
   | { readonly type: 'projectBranchAccess'; readonly project: ManageProjectRef; readonly branch: BranchRef; readonly user: AccessRow; readonly grant: boolean };
 
 /** What a change came back with: lines to show, and whatever was read again. */
@@ -119,6 +134,8 @@ export type ManageFinished =
       readonly branches?: readonly BranchRef[];
       /** The org's users, read again (access). */
       readonly members?: readonly MemberDetail[];
+      /** The repo link row that is gone from the project (a row removal). */
+      readonly removedRepoRow?: RepoRowRef;
     }
   | { readonly ok: false; readonly refusal: ManageRefusal };
 
@@ -131,6 +148,7 @@ export interface ManageStep {
 export const MANAGE_CANCELLED_TEXT = 'Cancelled.'; // reused from `capy project delete`
 export const MANAGE_DRY_RUN_TEXT = 'Dry run: nothing was changed.'; // COPY-FLAG (same as the Users tab)
 export const NO_TOKENS_TEXT = 'No live deploy tokens.'; // reused from `capy project delete`
+export const LAST_REPO_LOCK_TEXT = 'The last repo of a project cannot be removed.'; // COPY-FLAG
 export const DEFAULT_BRANCH_LOCK_TEXT = 'The default branch (development) cannot be protected or deleted.'; // COPY-FLAG
 
 const stay = (dialog: ManageDialog | null, notes: readonly string[] = []): ManageStep => ({ dialog, effect: null, notes });
@@ -168,6 +186,12 @@ export function startSettings(project: ManageProjectRef, row: Exclude<SettingsRo
 export function startBranch(project: ManageProjectRef, branch: BranchRef): ManageStep {
   if (branch.name === DEFAULT_BRANCH) return stay(null, [DEFAULT_BRANCH_LOCK_TEXT]);
   return stay({ step: 'branchMenu', project, branch, choice: 0 });
+}
+
+/** d on a repo row: the question, or why the project's only row stays. `rowCount`: the project's rows now. */
+export function startRepoRemove(project: ManageProjectRef, row: RepoRowRef, rowCount: number): ManageStep {
+  if (rowCount <= 1) return stay(null, [LAST_REPO_LOCK_TEXT]);
+  return stay({ step: 'confirmRemoveRepo', project, row });
 }
 
 /** A protected branch can have its access managed; any other branch is offered protection and deletion only. */
@@ -225,6 +249,15 @@ export function manageKey(
     if (key === 'y' || key === 'Y') {
       const label = `Deleting branch ${dialog.branch.name}...`; // COPY-FLAG
       return send(dialog.project, label, { type: 'projectBranchDelete', project: dialog.project, branch: dialog.branch }, null, ctx.dryRun);
+    }
+    if (key === 'n' || key === 'N' || key === KEY_ENTER || isEsc(key)) return stay(null, [MANAGE_CANCELLED_TEXT]);
+    return stay(dialog);
+  }
+
+  if (dialog.step === 'confirmRemoveRepo') {
+    if (key === 'y' || key === 'Y') {
+      const label = `Removing ${repoRowLabel(dialog.row)}...`; // COPY-FLAG
+      return send(dialog.project, label, { type: 'projectRepoRemove', project: dialog.project, row: dialog.row }, null, ctx.dryRun);
     }
     if (key === 'n' || key === 'N' || key === KEY_ENTER || isEsc(key)) return stay(null, [MANAGE_CANCELLED_TEXT]);
     return stay(dialog);
@@ -312,6 +345,13 @@ export function renderManage(dialog: ManageDialog, width: number, margin: string
   if (dialog.step === 'confirmDeleteBranch') {
     return [
       `${m}${BOLD}Delete branch "${dialog.branch.name}"? This will remove all its secrets.${RESET}`, // reused from `capy branch -D`
+      '',
+      m + hints(hint('y', 'yes'), hint('n', 'no'), hint('enter', 'no')),
+    ];
+  }
+  if (dialog.step === 'confirmRemoveRepo') {
+    return [
+      `${m}${BOLD}Remove ${repoRowLabel(dialog.row)} from ${dialog.project.name}?${RESET}`, // COPY-FLAG
       '',
       m + hints(hint('y', 'yes'), hint('n', 'no'), hint('enter', 'no')),
     ];
