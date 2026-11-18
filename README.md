@@ -52,11 +52,52 @@ Or with Bun:
 bun add -g @capysc/cli
 ```
 
-Or with Homebrew:
+### Standalone installer (macOS and Linux) <!-- COPY-FLAG -->
+
+No Node or npm needed. <!-- COPY-FLAG -->
 
 ```bash
-brew install capysc/tap/capy
+curl -fsSL https://capy.sc/install.sh | sh
 ```
+
+The installer downloads the binary for your system from GitHub Releases and checks its SHA-256 before installing. If Capy is already installed as a standalone file, it is replaced in place. If Capy came from Homebrew or npm, the installer stops and nothing is changed: update with `brew upgrade capy` or `npm install -g @capysc/cli`. <!-- COPY-FLAG -->
+For a new install it uses `/usr/local/bin` when that folder is on your `PATH` and writable, otherwise `~/.local/bin`. `CAPY_INSTALL_DIR` sets the folder. <!-- COPY-FLAG -->
+
+### Windows PowerShell
+
+Use the native PowerShell installer, not `install.sh`:
+
+```powershell
+irm https://capy.sc/install.ps1 | iex
+capy --version
+```
+
+Or download and run it using Windows' `curl.exe`:
+
+```powershell
+$installer = curl.exe -fsSL https://capy.sc/install.ps1 | Out-String
+if ($LASTEXITCODE -ne 0) { throw 'Installer download failed' }
+Invoke-Expression $installer
+capy --version
+```
+
+### Install a specific version <!-- COPY-FLAG -->
+
+Each release publishes its own `install.sh` and `install.ps1` with that version's checksums. To pin a version, run the installer with `CAPY_VERSION`: <!-- COPY-FLAG -->
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/capysc/capy-cli/main/install.sh | CAPY_VERSION=<version> sh
+```
+
+Or use the versioned release URL directly: <!-- COPY-FLAG -->
+
+```bash
+curl -fsSL https://github.com/capysc/capy-cli/releases/download/v<version>/install.sh | sh
+```
+
+### Remove the standalone binary <!-- COPY-FLAG -->
+
+Delete the `capy` file from the folder the installer printed. The `~/.capy` folder holds your keys: do not delete it to reinstall. <!-- COPY-FLAG -->
 
 ## Quickstart
 
