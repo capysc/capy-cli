@@ -32,6 +32,7 @@ import {
   render,
 } from './projectsScreen';
 import type { ProjectRole, UserTarget, UsersEffect, UsersFinished, UsersProjectRef } from './projectUsers';
+import type { InviteRole } from '../core/inviteRoles';
 import type { AccessRow, BranchRef, ManageEffect, ManageFinished, ManageProjectRef, ManageRefusal, RepoRowRef, TokenRow } from './projectManage';
 
 /** What the Settings and Capy Branches tabs need (`commands/projectManageActions.ts`). No function ever rejects. */
@@ -147,7 +148,7 @@ export interface ProjectsDeleteActions {
 
 /** What the Users tab needs (`commands/projectUsersActions.ts`). No function ever rejects. */
 export interface ProjectsUsersActions {
-  readonly invite: (project: UsersProjectRef, email: string, role: ProjectRole) => Promise<UsersFinished>;
+  readonly invite: (project: UsersProjectRef, email: string, role: InviteRole) => Promise<UsersFinished>;
   readonly changeRole: (project: UsersProjectRef, target: UserTarget, role: ProjectRole) => Promise<UsersFinished>;
   readonly remove: (project: UsersProjectRef, target: UserTarget) => Promise<UsersFinished>;
 }

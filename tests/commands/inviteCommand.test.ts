@@ -391,3 +391,53 @@ describe('InviteCommand', () => {
     });
   });
 });
+
+describe('the role picker says what each role can access', () => {
+  test('an owner and an admin are offered all three roles, each with its description', async () => {
+    const { inviteRoleChoices, invitableRolesFor } = await import('../../src/commands/inviteCommand');
+    const all = [
+      { name: 'Member - can access chosen projects, except protected branches', value: 'member' },
+      { name: 'Project Admin - can access chosen projects, and invite to them', value: 'project-admin' },
+      { name: 'Admin - can access all projects', value: 'admin' },
+    ];
+    expect(inviteRoleChoices(invitableRolesFor('owner'))).toEqual(all);
+    expect(inviteRoleChoices(invitableRolesFor('admin'))).toEqual(all);
+  });
+
+  test('a project admin is not offered Admin; a member is offered nothing', async () => {
+    const { inviteRoleChoices, invitableRolesFor } = await import('../../src/commands/inviteCommand');
+    expect(inviteRoleChoices(invitableRolesFor('project-admin')).map((c) => c.value)).toEqual(['member', 'project-admin']);
+    expect(inviteRoleChoices(invitableRolesFor('member'))).toEqual([]);
+  });
+});
+
+describe('the Users tab invite of an org admin', () => {
+  const client = () => ({
+    listMemberDetails: jest.fn(async () => ({ members: [] })),
+    inviteToProject: jest.fn(async () => ({})),
+    changeRole: jest.fn(async () => ({})),
+    kickFromProject: jest.fn(async () => undefined),
+    createInvite: jest.fn(async () => ({ email_sent: false })),
+    wrapOuterLayer: jest.fn(async () => ({ ciphertext: 'b3V0ZXI=' })),
+    coDecrypt: jest.fn(async () => ({ plaintext: '' })),
+  });
+
+  test('Admin sends the org invite `capy invite --role admin` sends: role admin, no project', async () => {
+    const { createProjectUsersActions } = await import('../../src/commands/projectUsersActions');
+    const c = client();
+    const finished = await createProjectUsersActions(c as never, 'org-123', 'user-1').invite({ id: 'p1', name: 'web' }, 'new@x.co', 'admin');
+    expect(c.createInvite.mock.calls).toEqual([['org-123', 'new@x.co', 'admin', undefined]]);
+    expect(c.inviteToProject).not.toHaveBeenCalled();
+    expect(finished).toMatchObject({ ok: true });
+    const done = finished as { lines: readonly string[]; redeemCommand?: string };
+    expect(done.lines[0]).toBe('Invite created for new@x.co as Admin');
+    expect(done.redeemCommand?.startsWith('capy redeem ')).toBe(true);
+  });
+
+  test('a project role for someone new is still scoped to the project', async () => {
+    const { createProjectUsersActions } = await import('../../src/commands/projectUsersActions');
+    const c = client();
+    await createProjectUsersActions(c as never, 'org-123', 'user-1').invite({ id: 'p1', name: 'web' }, 'new@x.co', 'member');
+    expect(c.createInvite.mock.calls).toEqual([['org-123', 'new@x.co', 'member', 'p1']]);
+  });
+});

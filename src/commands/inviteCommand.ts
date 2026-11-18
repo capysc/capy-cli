@@ -20,6 +20,7 @@ import {
   type SettledAnswer,
 } from '../core/invitePlan';
 import type { InviteTeammateStop } from '../ui/screens/contract';
+import { inviteRoleChoiceText } from '../core/inviteRoles';
 
 const ROLES = [
   { name: 'Member', value: 'member' },
@@ -159,6 +160,19 @@ export async function unwrapInviterKey(orgId: string, userId: string, serviceCli
   };
   return unwrapMasterKey(orgId, userId, keyOps);
 }
+
+type InvitableRole = typeof ROLES[number]['value'];
+
+/**
+ * The role picker's choices for a caller who may grant `invitable`, in the picker's order. Each says what the role
+ * can access; the value picked is still the role's own.
+ */
+export function inviteRoleChoices(invitable: ReadonlyArray<InvitableRole>): ReadonlyArray<{ readonly name: string; readonly value: InvitableRole }> {
+  return ROLES.filter((r) => invitable.includes(r.value)).map((r) => ({ name: inviteRoleChoiceText(r.value), value: r.value }));
+}
+
+/** The roles a caller with org role `callerRole` may grant; none for a role that cannot invite. */
+export const invitableRolesFor = (callerRole: string): ReadonlyArray<InvitableRole> => INVITABLE_BY_ROLE[callerRole] ?? [];
 
 /**
  * The invite itself, shared by `capy invite` and the Users tab of `capy projects`:
@@ -493,7 +507,7 @@ export class InviteCommand {
       // (same default the interactive picker uses). Override with --role.
       return { role: 'member', roleSource: 'non-interactive default' };
     }
-    const allowedChoices = ROLES.filter(r => invitable.includes(r.value));
+    const allowedChoices = inviteRoleChoices(invitable);
     const answer = await inquirer.prompt([{
       type: 'list',
       name: 'role',
