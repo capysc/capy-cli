@@ -295,6 +295,68 @@ describe('generated install.sh', () => {
     });
   });
 
+  test('CAPY_PREFIX still works: the binary goes to $CAPY_PREFIX/bin, ahead of an existing capy', () => {
+    withSandbox((dir) => {
+      const { home, installer, toolBin } = prepare(dir);
+      const existingBin = join(dir, 'existing', 'bin');
+      writeExecutable(join(existingBin, 'capy'), '#!/bin/sh\necho old\n');
+      const prefix = join(dir, 'opt', 'capy');
+      const result = runInstaller(installer, home, [existingBin, toolBin], { CAPY_PREFIX: prefix });
+      expect(result.status).toBe(0);
+      expect(spawnSync(join(prefix, 'bin', 'capy'), ['--version'], { encoding: 'utf8' }).stdout.trim()).toBe(version);
+      expect(spawnSync(join(existingBin, 'capy'), ['--version'], { encoding: 'utf8' }).stdout.trim()).toBe('old');
+      expect(existsSync(join(home, '.local'))).toBe(false);
+    });
+  });
+
+  test('CAPY_PREFIX also wins over an existing Homebrew capy', () => {
+    withSandbox((dir) => {
+      const { home, installer, toolBin } = prepare(dir);
+      writeExecutable(join(dir, 'opt', 'homebrew', 'Cellar', 'capy', '1.0', 'bin', 'capy'), '#!/bin/sh\necho old\n');
+      mkdirSync(join(dir, 'opt', 'homebrew', 'bin'), { recursive: true });
+      symlinkSync('../Cellar/capy/1.0/bin/capy', join(dir, 'opt', 'homebrew', 'bin', 'capy'));
+      const prefix = join(dir, 'prefix');
+      const result = runInstaller(installer, home, [join(dir, 'opt', 'homebrew', 'bin'), toolBin], { CAPY_PREFIX: prefix });
+      expect(result.status).toBe(0);
+      expect(existsSync(join(prefix, 'bin', 'capy'))).toBe(true);
+    });
+  });
+
+  test('CAPY_INSTALL_DIR wins when CAPY_PREFIX is also set, and an empty CAPY_PREFIX is ignored', () => {
+    withSandbox((dir) => {
+      const { home, installer, toolBin } = prepare(dir);
+      const target = join(dir, 'custom', 'bin');
+      const prefix = join(dir, 'prefix');
+      const both = runInstaller(installer, home, [toolBin], { CAPY_INSTALL_DIR: target, CAPY_PREFIX: prefix });
+      expect(both.status).toBe(0);
+      expect(existsSync(join(target, 'capy'))).toBe(true);
+      expect(existsSync(join(prefix, 'bin'))).toBe(false);
+      const empty = runInstaller(installer, home, [toolBin], { CAPY_PREFIX: '' });
+      expect(empty.status).toBe(0);
+      expect(existsSync(join(home, '.local', 'bin', 'capy'))).toBe(true);
+    });
+  });
+
+  test('CAPY_NO_NPM_FALLBACK is accepted and ignored', () => {
+    withSandbox((dir) => {
+      const { home, installer, toolBin } = prepare(dir);
+      const result = runInstaller(installer, home, [toolBin], { CAPY_NO_NPM_FALLBACK: '1' });
+      expect(result.status).toBe(0);
+      expect(existsSync(join(home, '.local', 'bin', 'capy'))).toBe(true);
+    });
+  });
+
+  test('CAPY_FORCE_NPM=1 stops before downloading and names the npm command', () => {
+    withSandbox((dir) => {
+      const { home, installer, toolBin } = prepare(dir);
+      const result = runInstaller(installer, home, [toolBin], { CAPY_FORCE_NPM: '1' });
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain('npm install -g @capysc/cli');
+      expect(existsSync(join(dir, 'curl-urls.log'))).toBe(false);
+      expect(existsSync(join(home, '.local'))).toBe(false);
+    });
+  });
+
   test('without sha256sum or shasum it stops and installs nothing', () => {
     withSandbox((dir) => {
       const { home, installer, toolBin } = prepare(dir, 'none');
@@ -396,6 +458,69 @@ describe('install.sh loader at the repo root', () => {
         expect(result.status).not.toBe(0);
         expect(existsSync(join(dir, 'loader-urls.log'))).toBe(false);
       });
+    });
+  });
+
+  test('CAPY_FORCE_NPM=1 stops before any download', () => {
+    withSandbox((dir) => {
+      const { home, bin } = prepareLoader(dir, 0);
+      const result = runInstaller(loader, home, [bin], { CAPY_FORCE_NPM: '1' });
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain('npm install -g @capysc/cli');
+      expect(existsSync(join(dir, 'loader-urls.log'))).toBe(false);
+    });
+  });
+
+  test('the old options pass through the loader to the release installer', () => {
+    withSandbox((dir) => {
+      const { home, installer, toolBin } = prepare(dir);
+      // One fake curl for both downloads: the installer script, then the archive.
+      const bin = join(dir, 'combinedbin');
+      mkdirSync(bin, { recursive: true });
+      ['mktemp', 'rm', 'sh'].forEach((name) => {
+        const path = hostTool(name);
+        if (path !== undefined) symlinkSync(path, join(bin, name));
+      });
+      readdirSync(toolBin)
+        .filter((name) => name !== 'curl')
+        .forEach((name) => {
+          if (!existsSync(join(bin, name))) symlinkSync(join(toolBin, name), join(bin, name));
+        });
+      writeExecutable(
+        join(bin, 'curl'),
+        [
+          '#!/bin/sh',
+          'out=""',
+          'url=""',
+          'while [ "$#" -gt 0 ]; do',
+          '  case "$1" in',
+          '    -o) out=$2; shift ;;',
+          '    -*) ;;',
+          '    *) url=$1 ;;',
+          '  esac',
+          '  shift',
+          'done',
+          `printf '%s\\n' "$url" >> "${join(dir, 'combined-urls.log')}"`,
+          'case "$url" in',
+          `  */install.sh) cp "${installer}" "$out" ;;`,
+          `  *) cp "${join(dir, 'good.tar.gz')}" "$out" ;;`,
+          'esac',
+          '',
+        ].join('\n'),
+      );
+      const prefix = join(dir, 'opt', 'capy');
+      const result = runInstaller(loader, home, [bin], {
+        CAPY_VERSION: version,
+        CAPY_PREFIX: prefix,
+        CAPY_NO_NPM_FALLBACK: '1',
+      });
+      expect(result.status).toBe(0);
+      expect(spawnSync(join(prefix, 'bin', 'capy'), ['--version'], { encoding: 'utf8' }).stdout.trim()).toBe(version);
+      expect(readFileSync(join(dir, 'combined-urls.log'), 'utf8').trim().split('\n')).toEqual([
+        `https://github.com/capysc/capy-cli/releases/download/v${version}/install.sh`,
+        archiveUrl,
+      ]);
+      expect(existsSync(join(home, '.local'))).toBe(false);
     });
   });
 

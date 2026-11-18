@@ -78,6 +78,11 @@ choose_install_dir() {
     printf '%s\n' "$CAPY_INSTALL_DIR"
     return
   fi
+  # CAPY_PREFIX is the older name, still accepted: the binary goes to $CAPY_PREFIX/bin.
+  if [ -n "${CAPY_PREFIX:-}" ]; then
+    printf '%s\n' "$CAPY_PREFIX/bin"
+    return
+  fi
   current_dir=$(existing_capy_dir) || return 1
   if [ -n "$current_dir" ]; then
     printf '%s\n' "$current_dir"
@@ -91,6 +96,11 @@ choose_install_dir() {
 }
 
 main() {
+  # CAPY_NO_NPM_FALLBACK is accepted and ignored: there is no npm fallback.
+  if [ "${CAPY_FORCE_NPM:-}" = "1" ]; then
+    printf '%s\n' 'This installer does not use npm. Nothing was installed. To install with npm, run: npm install -g @capysc/cli' >&2 # COPY-FLAG
+    exit 1
+  fi
   version=@@VERSION@@
   base_url=https://github.com/capysc/capy-cli/releases/download/v@@VERSION@@
   install_dir=$(choose_install_dir) || exit 1
@@ -149,7 +159,10 @@ main() {
   mv -f "$staged" "$install_dir/capy"
   notices_dir="$install_dir/../share/capy"
   mkdir -p "$notices_dir"
-  cp "$tmp_dir/LICENSE" "$tmp_dir/THIRD-PARTY-NOTICES.md" "$notices_dir/"
+  # Older archives may not hold both notice files; copy only the ones present.
+  for notice in LICENSE THIRD-PARTY-NOTICES.md; do
+    if [ -f "$tmp_dir/$notice" ]; then cp "$tmp_dir/$notice" "$notices_dir/"; fi
+  done
   printf 'Installed Capy %s to %s/capy\n' "$version" "$install_dir"
   if on_path "$install_dir"; then
     printf '%s\n' 'Run capy --help to get started.'

@@ -8,7 +8,15 @@
 #
 # Env:
 #   CAPY_VERSION  version to install, with or without a leading v (default: latest release)
+#
+# Other CAPY_* variables are passed through to the release's installer.
+# CAPY_NO_NPM_FALLBACK is accepted and ignored.
 set -eu
+
+if [ "${CAPY_FORCE_NPM:-}" = "1" ]; then
+  printf '%s\n' 'This installer does not use npm. Nothing was installed. To install with npm, run: npm install -g @capysc/cli' >&2 # COPY-FLAG
+  exit 1
+fi
 
 releases=https://github.com/capysc/capy-cli/releases
 
