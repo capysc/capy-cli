@@ -26,21 +26,13 @@ import { isFullScreenQrEligible, startFullScreenQrView, printMaskedLinkFooter } 
 import { CapyError, ERROR_CODES } from '../types/index';
 import { refuseError } from './pairingRefusal';
 import type { PairingEntry } from '../crypto/pairingPayload';
+import { createPairingHandoff, removePairingHandoff } from '../ui/pairingPresentation';
 
 export interface PairOptions {
   readonly json?: boolean;
   readonly force?: boolean;
   readonly apiUrl?: string;
   readonly devMode?: boolean;
-}
-
-/** Prose/QR/progress output. Always sent to stderr under `--json` so stdout stays pure JSON; stdout in human mode otherwise. */
-function announce(json: boolean, line: string): void {
-  if (json) {
-    console.error(line);
-  } else {
-    console.log(line);
-  }
 }
 
 interface PairedOrg {
@@ -74,7 +66,7 @@ const PAIR_LINK_LABEL = 'Approve on your other device:'; // COPY-FLAG
  * Prints the non-`--json` (human) link block: QR (always the full,
  * unmasked `deviceLink` — a phone scanning it needs the real `code` query
  * param) then the masked link, interactive on a real TTY. `--json`'s own
- * progress output (to stderr, unmasked, unchanged) is a separate branch in
+ * structured presentation event (on stderr) is a separate branch in
  * `pairCommand` below — this function is never called under `--json`.
  *
  * Full-screen centered QR (CAP-692 follow-up, shared with `capy transport`
@@ -144,7 +136,7 @@ export async function finishPairing(
   }
 
   const serviceClient = new ServiceClient(options.apiUrl, devMode);
-  serviceClient.setTokenProvider(() => authService.getValidToken());
+  serviceClient.setTokenProvider((rejected) => authService.getValidToken(rejected));
 
   const { sealed } = await serviceClient.pickupDevicePairing(deviceCode);
   const envelope = parsePairEnvelope(sealed);
@@ -174,26 +166,23 @@ export async function pairCommand(options: PairOptions = {}): Promise<void> {
     const apiUrl = options.apiUrl || resolveActiveUrl(devMode);
 
     const keyPair = generatePairKeyPair();
+    const requestedAtMs = Date.now();
     const authorize = await authorizeDevice(apiUrl, keyPair.publicKey);
 
     // The QR always encodes the FULL deviceLink (fragment/query and all) —
     // only the TEXT link below is ever masked.
     const deviceLink = `${resolveKeepOrigin()}/device?code=${encodeURIComponent(authorize.user_code)}`;
-    const qr = renderTerminalQr(deviceLink);
+    const qr = json ? null : renderTerminalQr(deviceLink);
 
-    // `--json`'s progress output (stderr, unmasked) is unchanged below;
-    // this is the new masked/interactive block, printed only in human mode.
+    // JSON callers receive a self-contained handoff before polling begins.
     const prompt = json ? null : printHumanPairBlock(deviceLink, qr, authorize.user_code);
-    if (json) {
-      announce(true, '');
-      if (qr) {
-        announce(true, qr.text);
-        if (qr.hint) announce(true, qr.hint);
-      }
-      announce(true, `  Approve on your other device: ${deviceLink}`); // COPY-FLAG
-      announce(true, `  Code: ${authorize.user_code}`); // COPY-FLAG
-      announce(true, '');
-    }
+    const handoff = json ? await createPairingHandoff({
+      approvalUrl: deviceLink,
+      userCode: authorize.user_code,
+      expiresInSeconds: authorize.expires_in,
+      requestedAtMs,
+    }) : null;
+    if (handoff) console.error(JSON.stringify(handoff));
 
     // The poll and the masked-link key listener (`c`/`r`/`q`) run
     // CONCURRENTLY — the listener is event-driven (stdin 'data'), never a
@@ -208,6 +197,7 @@ export async function pairCommand(options: PairOptions = {}): Promise<void> {
         });
       } finally {
         prompt?.stop();
+        if (handoff) await removePairingHandoff(handoff);
       }
     })();
 

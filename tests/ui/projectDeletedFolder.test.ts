@@ -10,7 +10,7 @@ import { tmpdir } from 'os';
  * secrets and gets the 410 / 404 the service sends. What comes out is judged
  * as a person or an agent would see it:
  *   - the "Project deleted" screen: the name, the id, the restore command, and
- *     that only an owner can restore it;
+ *     that only an owner or admin can restore it;
  *   - NO "recreate" advice, which belongs to PROJECT_NOT_FOUND only (the control
  *     test below proves the check can see that advice);
  *   - the folder untouched: keep.lock is byte-identical and no file appeared;

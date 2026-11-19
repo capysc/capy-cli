@@ -140,7 +140,7 @@ export class CheckoutCommand {
     this.authService = new AuthService(undefined, devMode);
     this.serviceClient = new ServiceClient(undefined, devMode);
 
-    this.serviceClient.setTokenProvider(() => this.authService.getValidToken());
+    this.serviceClient.setTokenProvider((rejected) => this.authService.getValidToken(rejected));
   }
 
   async execute(branchName: string, options: CheckoutOptions = {}): Promise<void> {
@@ -153,7 +153,7 @@ export class CheckoutCommand {
     if (!options.create) {
       conflictFlagsOrExit(options.conflictFlags ?? {}, options.json === true);
       if (!isRecoveryActive()) {
-        const gate: GateOptions = { devMode: this.devMode, json: options.json, nonTty: options.nonTty, conflictFlags: options.conflictFlags };
+        const gate: GateOptions = { devMode: this.devMode, json: options.json, nonTty: options.nonTty, conflictFlags: options.conflictFlags, branchHint: branchName };
         await gateFirst(gate);
       }
     }

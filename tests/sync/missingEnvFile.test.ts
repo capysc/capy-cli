@@ -18,7 +18,7 @@
  * `mock.module()` is process-wide: this file runs on its own: `bun test tests/sync/missingEnvFile.test.ts`.
  */
 import { describe, test, expect, beforeAll, afterAll, afterEach, mock, spyOn } from 'bun:test';
-import { copyFileSync, existsSync, readFileSync, rmSync } from 'fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { getGlobalCapyDir } from '../../src/config/globalConfig';
 import { FIXED_PROJECT_KEY } from '../helpers/deployServer';
@@ -47,11 +47,15 @@ const pickBranch = mock((): string => DEV);
 const blobGone = mock((): boolean => false);
 /** true: fetching the pinned snapshot fails (the service cannot be reached). */
 const blobFails = mock((): boolean => false);
+/** Branches registered on Capy that hold no variable yet (so no keep.lock entry names them). */
+const emptyBranches = mock((): readonly string[] => []);
+/** The branch Capy answers 403 for when its snapshot is read (a protected branch this member cannot read). */
+const forbiddenBranch = mock((): string | undefined => undefined);
 
-/** The branches the fake server knows (the names in its keep). */
+/** The branches the fake server knows (the names in its keep, and the registered empty ones). */
 const branchesOnServer = (): readonly string[] => {
   const keep = serverOf()?.state().keep;
-  return [...new Set(Object.values(keep?.variables ?? {}).flatMap((entries) => entries.map((e) => e.branch)))];
+  return [...new Set([...Object.values(keep?.variables ?? {}).flatMap((entries) => entries.map((e) => e.branch)), ...emptyBranches()])];
 };
 
 mock.module('../../src/auth/authService', () => ({
@@ -79,6 +83,7 @@ mock.module('../../src/service/serviceClient', () => ({
   ServiceClient: class {
     setTokenProvider() {}
     getDecryptData(...args: unknown[]) {
+      if (args[1] === forbiddenBranch()) throw new CapyError('no access', ERROR_CODES.PERMISSION_DENIED, { status: 403 });
       return serverOf()!.getDecryptData(...(args as [string, string]));
     }
     pushSecrets(...args: unknown[]) {
@@ -158,6 +163,10 @@ afterEach(() => {
   blobGone.mockImplementation(() => false);
   blobFails.mockReset();
   blobFails.mockImplementation(() => false);
+  emptyBranches.mockReset();
+  emptyBranches.mockImplementation(() => []);
+  forbiddenBranch.mockReset();
+  forbiddenBranch.mockImplementation(() => undefined);
 });
 
 // ── The worlds ──────────────────────────────────────────────────────────────
@@ -602,12 +611,13 @@ describe('B. a fresh clone (keep.lock is there; no `.env`, and no `.capy/branch`
     noWrites(w);
   });
 
-  test('[BAD for an agent] and `capy checkout development --non-tty` in that fresh clone is refused the same way (the first step needs a branch): exit 1, no `.env`', async () => {
+  test('[OK for an agent] `capy checkout development --non-tty` in that fresh clone names the branch itself: no exit, `.env` written for development, `.capy/branch` names it, nothing sent', async () => {
     const w = fresh();
     const r = await run(() => new CheckoutCommand().execute(DEV, { nonTty: true }));
-    expect(r.exit).toBe(1);
-    expect(r.stderr).toContain(ERROR_CODES.NO_ACTIVE_BRANCH);
-    expect(existsSync(envPath(w.folder))).toBe(false);
+    expect(r.exit).toBeUndefined();
+    expect(w.folder.env()).toEqual(VALUES);
+    expect(w.folder.fileManager.readEnvMeta().branch).toBe(DEV);
+    expect(w.folder.pm.readActiveBranch()).toBe(DEV);
     noWrites(w);
   });
 
@@ -825,5 +835,229 @@ describe('G. off a terminal, `.env` missing and the pinned snapshot cannot be fe
     await run(() => new CapyCommand().runSync(), { terminal: true });
     expect(existsSync(envPath(w.folder))).toBe(true);
     expect(w.folder.env()).toEqual({});
+  });
+});
+
+// ── H. `capy checkout <existing branch>` in a fresh clone names the branch itself ───────────────────────────────
+
+describe('H. `capy checkout <existing branch>` in a fresh clone (keep.lock only; two branches on Capy): the named branch answers "which branch"', () => {
+  const fresh = (): World => world({ env: 'missing', branchFile: false });
+  const asksWhichBranch = (): boolean => asked.mock.calls.some(([q]) => ((Array.isArray(q) ? q[0] : q) as { name?: string }).name === 'selected');
+  const syncedBranches = (w: World): readonly string[] => {
+    const hashes = w.folder.pm.readSyncState()?.keep_hash;
+    return hashes === undefined || typeof hashes === 'string' ? [] : Object.keys(hashes);
+  };
+
+  /** The property: the folder is exactly what a successful checkout of `branch` leaves, with the branch's own values and nothing sent. */
+  function expectCheckedOut(w: World, branch: string, values: Record<string, string>, keepBefore: readonly (string | null)[]): void {
+    expect(w.folder.pm.readActiveBranch()).toBe(branch);
+    expect(w.folder.fileManager.readEnvMeta().branch).toBe(branch);
+    expect(w.folder.env()).toEqual(values);
+    expect(syncedBranches(w)).toContain(branch);
+    expect(asksWhichBranch()).toBe(false);
+    expect(w.server.pushSecrets.mock.calls).toHaveLength(0);
+    expect(w.server.state()).toEqual(w.seed);
+    expect(keepBytes(w.folder)).toEqual(keepBefore);
+  }
+
+  test('`--non-tty`: succeeds without a prompt; `.capy/branch`, the `.env` header and the decrypted values are the named branch\'s', async () => {
+    const w = fresh();
+    const keepBefore = keepBytes(w.folder);
+    const r = await run(() => new CheckoutCommand().execute(STAGING, { nonTty: true }));
+    expect(r.exit).toBeUndefined();
+    expect(r.error).toBeUndefined();
+    expectCheckedOut(w, STAGING, STAGING_VALUES, keepBefore);
+  });
+
+  test('`--json`: the same', async () => {
+    const w = fresh();
+    const keepBefore = keepBytes(w.folder);
+    const r = await run(() => new CheckoutCommand().execute(DEV, { json: true }));
+    expect(r.exit).toBeUndefined();
+    expect(r.error).toBeUndefined();
+    expectCheckedOut(w, DEV, VALUES, keepBefore);
+  });
+
+  test('no terminal and no flags (an agent): the same', async () => {
+    const w = fresh();
+    const keepBefore = keepBytes(w.folder);
+    const r = await run(() => new CheckoutCommand().execute(STAGING, {}));
+    expect(r.exit).toBeUndefined();
+    expectCheckedOut(w, STAGING, STAGING_VALUES, keepBefore);
+  });
+
+  test('a second run changes nothing: the folder is on the branch and in sync', async () => {
+    const w = fresh();
+    const keepBefore = keepBytes(w.folder);
+    await run(() => new CheckoutCommand().execute(STAGING, { nonTty: true }));
+    const again = await run(() => new CheckoutCommand().execute(STAGING, { nonTty: true }));
+    expect(again.exit).toBeUndefined();
+    expect(w.folder.env()).toEqual(STAGING_VALUES);
+    expect(keepBytes(w.folder)).toEqual(keepBefore);
+    expect(w.server.pushSecrets.mock.calls).toHaveLength(0);
+  });
+
+  test('a branch Capy does not have: today\'s refusal (exit 1, NO_ACTIVE_BRANCH), and nothing is written', async () => {
+    const w = fresh();
+    const r = await run(() => new CheckoutCommand().execute('no-such-branch', { nonTty: true }));
+    expect(r.exit).toBe(1);
+    expect(r.stderr).toContain(ERROR_CODES.NO_ACTIVE_BRANCH);
+    expect(existsSync(envPath(w.folder))).toBe(false);
+    expect(existsSync(branchFilePath(w.folder))).toBe(false);
+    expect(syncedBranches(w)).toEqual([]);
+    noWrites(w);
+  });
+
+  test('a folder with an `.env` file of any kind keeps today\'s behaviour: a header-less `.env` still ends with NO_ACTIVE_BRANCH, and the file is left byte for byte', async () => {
+    const w = fresh();
+    writeFileSync(envPath(w.folder), 'SOME_KEY=some-value\n');
+    const before = readFileSync(envPath(w.folder), 'utf-8');
+    const r = await run(() => new CheckoutCommand().execute(STAGING, { nonTty: true }));
+    expect(r.exit).toBe(1);
+    expect(r.stderr).toContain(ERROR_CODES.NO_ACTIVE_BRANCH);
+    expect(readFileSync(envPath(w.folder), 'utf-8')).toBe(before);
+    expect(existsSync(branchFilePath(w.folder))).toBe(false);
+    noWrites(w);
+  });
+
+  test('a folder with `.capy/branch` keeps today\'s behaviour: the first step runs on THAT branch (here development), then the switch works', async () => {
+    const w = world({ env: 'missing' });
+    const keepBefore = keepBytes(w.folder);
+    const r = await run(() => new CheckoutCommand().execute(STAGING, { nonTty: true }));
+    expect(r.exit).toBeUndefined();
+    expect(w.folder.pm.readActiveBranch()).toBe(STAGING);
+    expect(w.folder.env()).toEqual(STAGING_VALUES);
+    expect(keepBytes(w.folder)).toEqual(keepBefore);
+    noWrites(w);
+  });
+
+  test('inferred signals do not block the named branch: keep.lock pins ONE branch (development) while Capy has two (staging holds no variable yet); `checkout staging` and `checkout development` both succeed with that branch\'s values', async () => {
+    emptyBranches.mockImplementation(() => [STAGING]);
+    const onePinned = (): World => world({ env: 'missing', branchFile: false, branches: { [DEV]: VALUES } });
+    const staging = onePinned();
+    expect(staging.folder.pm.deriveActiveBranch()).toBe(DEV);
+    const other = await run(() => new CheckoutCommand().execute(STAGING, { nonTty: true }));
+    expect(other.exit).toBeUndefined();
+    expect(other.stderr).not.toContain(ERROR_CODES.NO_ACTIVE_BRANCH);
+    expect(asksWhichBranch()).toBe(false);
+    expect(staging.folder.pm.readActiveBranch()).toBe(STAGING);
+    expect(staging.folder.fileManager.readEnvMeta().branch).toBe(STAGING);
+    expect(staging.folder.env()).toEqual({});
+    expect(staging.server.pushSecrets.mock.calls).toHaveLength(0);
+    const pinned = onePinned();
+    const same = await run(() => new CheckoutCommand().execute(DEV, { nonTty: true }));
+    expect(same.exit).toBeUndefined();
+    expect(same.stderr).not.toContain(ERROR_CODES.NO_ACTIVE_BRANCH);
+    expect(pinned.folder.pm.readActiveBranch()).toBe(DEV);
+    expect(pinned.folder.fileManager.readEnvMeta().branch).toBe(DEV);
+    expect(pinned.folder.env()).toEqual(VALUES);
+    expect(pinned.server.pushSecrets.mock.calls).toHaveLength(0);
+  });
+
+  test('sync-state present (one synced branch) but no `.env` and no `.capy/branch`: the named branch still wins', async () => {
+    const w = fresh();
+    const synced = { last_sync: '', synced_variables: [], user_id: 'user-b', keep_hash: { [DEV]: SyncEngine.computeKeepHash(w.folder.keep(), DEV) } };
+    mkdirSync(join(w.folder.dir, '.capy'), { recursive: true });
+    writeFileSync(join(w.folder.dir, '.capy', 'sync-state'), JSON.stringify(synced));
+    expect(w.folder.pm.deriveActiveBranch()).toBe(DEV);
+    const r = await run(() => new CheckoutCommand().execute(STAGING, { nonTty: true }));
+    expect(r.exit).toBeUndefined();
+    expect(r.stderr).not.toContain(ERROR_CODES.NO_ACTIVE_BRANCH);
+    expect(asksWhichBranch()).toBe(false);
+    expect(w.folder.pm.readActiveBranch()).toBe(STAGING);
+    expect(w.folder.fileManager.readEnvMeta().branch).toBe(STAGING);
+    expect(w.folder.env()).toEqual(STAGING_VALUES);
+    expect(w.server.pushSecrets.mock.calls).toHaveLength(0);
+    // The property that differs from picking the synced branch: Capy was never asked for `development`'s snapshot.
+    const snapshotBranches = w.server.getDecryptData.mock.calls.map(([, branch]) => branch);
+    expect(snapshotBranches.length).toBeGreaterThan(0);
+    expect(snapshotBranches.every((branch) => branch === STAGING)).toBe(true);
+  });
+
+  test('a hinted checkout that fails before `.env` exists leaves the folder as found: the snapshot cannot be fetched (NETWORK_ERROR, exit 1) and no `.capy/branch` is left', async () => {
+    const w = fresh();
+    blobFails.mockImplementation(() => true);
+    const r = await run(() => new CheckoutCommand().execute(STAGING, { nonTty: true }));
+    expect(r.exit).toBe(1);
+    expect(r.stderr).toContain(ERROR_CODES.NETWORK_ERROR);
+    expect(existsSync(branchFilePath(w.folder))).toBe(false);
+    expect(existsSync(envPath(w.folder))).toBe(false);
+    noWrites(w);
+  });
+
+  test('a hinted checkout of a branch this member cannot read (403) leaves no `.capy/branch`, and a following checkout of a readable branch succeeds', async () => {
+    const w = fresh();
+    forbiddenBranch.mockImplementation(() => STAGING);
+    const denied = await run(() => new CheckoutCommand().execute(STAGING, { nonTty: true }));
+    expect(denied.exit).toBe(1);
+    expect(denied.stderr).toContain(ERROR_CODES.PERMISSION_DENIED);
+    expect(existsSync(branchFilePath(w.folder))).toBe(false);
+    expect(existsSync(envPath(w.folder))).toBe(false);
+    noWrites(w);
+    const next = await run(() => new CheckoutCommand().execute(DEV, { nonTty: true }));
+    expect(next.exit).toBeUndefined();
+    expect(w.folder.pm.readActiveBranch()).toBe(DEV);
+    expect(w.folder.fileManager.readEnvMeta().branch).toBe(DEV);
+    expect(w.folder.env()).toEqual(VALUES);
+    noWrites(w);
+  });
+
+  test('a folder that already had `.capy/branch` is not touched by a failed checkout: the record stays', async () => {
+    const w = world({ env: 'missing' });
+    forbiddenBranch.mockImplementation(() => STAGING);
+    const r = await run(() => new CheckoutCommand().execute(STAGING, { nonTty: true }));
+    expect(r.exit).toBe(1);
+    expect(w.folder.pm.readActiveBranch()).toBe(DEV);
+  });
+
+  test('the protocol stop for a decision keeps today\'s behaviour: exit 3 (SECRETS_CONFLICT) with a conflict id, and the recorded branch stays for the rerun', async () => {
+    const OLD = { A: 'a-old', B: 'b-old' } as const;
+    const NEWER = { A: 'a-NEW', B: 'b-old', Z: 'z-new' } as const;
+    const w = world({ env: 'missing', branchFile: false, branches: { [DEV]: NEWER, [STAGING]: STAGING_VALUES }, pinned: { [DEV]: OLD, [STAGING]: STAGING_VALUES } });
+    const r = await run(() => new CheckoutCommand().execute(DEV, { nonTty: true }));
+    expect(r.exit).toBe(3);
+    expect(jsonOf(r.stdout)).toMatchObject({ ok: false, code: ERROR_CODES.SECRETS_CONFLICT });
+    expect(jsonOf(r.stdout).conflict_id).toMatch(/^c_[0-9a-f]{12}$/);
+    expect(w.folder.pm.readActiveBranch()).toBe(DEV);
+    expect(w.server.pushSecrets.mock.calls).toHaveLength(0);
+  });
+
+  test('[terminal] choosing "Continue working" at the first step\'s menu keeps today\'s behaviour: exit 0, the named branch stays recorded, no `.env`', async () => {
+    const w = fresh();
+    const r = await run(() => new CheckoutCommand().execute(STAGING, {}), { terminal: true });
+    expect(r.exit).toBe(0);
+    expect(menuChoices()).toEqual(['retrieve_pinned', 'skip']);
+    expect(w.folder.pm.readActiveBranch()).toBe(STAGING);
+    expect(existsSync(envPath(w.folder))).toBe(false);
+    noWrites(w);
+  });
+
+  test('a folder whose `.env` header names a branch keeps today\'s behaviour: its uncommitted edit still stops the switch', async () => {
+    const edited = { A: 'a-EDITED-HERE', B: VALUES.B, C: VALUES.C };
+    const w = world({ env: 'present', branchFile: false, local: edited });
+    const r = await run(() => new CheckoutCommand().execute(STAGING, { nonTty: true }));
+    expect(r.exit).toBe(3);
+    expect(w.folder.env()).toEqual(edited);
+    expect(w.folder.fileManager.readEnvMeta().branch).toBe(DEV);
+    noWrites(w);
+  });
+
+  test('[terminal] the same rule: no "which branch" question; the first step\'s retrieve-only menu comes next, and retrieving ends on the named branch', async () => {
+    const w = fresh();
+    answer.mockImplementation(() => ({ action: 'retrieve_pinned' }));
+    const r = await run(() => new CheckoutCommand().execute(STAGING, {}), { terminal: true });
+    expect(r.exit).toBeUndefined();
+    expect(asksWhichBranch()).toBe(false);
+    expect(menuChoices()).toEqual(['retrieve_pinned', 'skip']);
+    expect(w.folder.pm.readActiveBranch()).toBe(STAGING);
+    expect(w.folder.env()).toEqual(STAGING_VALUES);
+  });
+
+  test('bare `capy` (no branch named) in the same folder is unchanged: still NO_ACTIVE_BRANCH off a terminal', async () => {
+    const w = fresh();
+    const r = await run(() => new CapyCommand({ protocol: true }).runSync());
+    expect(r.error?.code).toBe(ERROR_CODES.NO_ACTIVE_BRANCH);
+    expect(existsSync(branchFilePath(w.folder))).toBe(false);
+    noWrites(w);
   });
 });

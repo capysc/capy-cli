@@ -159,3 +159,16 @@ export function setupDisplay(input: SetupDisplayInput): string {
   ];
   return `${table(['', ''], rows)}\n\n${input.branchDescription}`;
 }
+
+/** The table for `capy projects rename` asking for the new name: where the project is, what it is called now, and the name suggested for this folder. */
+export function renameProjectDisplay(input: {
+  readonly org: { readonly id: string; readonly name: string };
+  readonly project: { readonly id: string; readonly name: string };
+  readonly suggestion?: string;
+}): string {
+  return table(['', ''], [
+    ['Org', input.org.name],
+    ['Project', `${input.project.name} (${input.project.id})`],
+    ['New name', input.suggestion ?? TO_CHOOSE], // COPY-FLAG
+  ]);
+}

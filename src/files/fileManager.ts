@@ -88,6 +88,38 @@ function serializeEntries(entries: KeepFile['variables'][string]): readonly Reco
   }));
 }
 
+/** One keep.lock copy and the bytes it is to hold. */
+export interface KeepRewrite {
+  readonly path: string;
+  readonly content: string;
+}
+
+/** What the keep.lock at `path` would contain with `project_name` set to `projectName`. Throws INVALID_FORMAT when it cannot be read as a keep. */
+function renamedKeepContent(path: string, projectName: string): string {
+  const parsed: unknown = parseKeepJson(path);
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new CapyError('Invalid keep.lock file format', ERROR_CODES.INVALID_FORMAT, { path });
+  }
+  return serializeRenamedKeep(path, { ...(parsed as KeepFile), project_name: projectName });
+}
+
+/** `serializeKeep` of a keep it cannot serialize (no `variables`, say) is an INVALID_FORMAT for that file, never a bare TypeError. */
+function serializeRenamedKeep(path: string, keep: KeepFile): string {
+  try {
+    return serializeKeep(keep);
+  } catch (error) {
+    throw new CapyError('Invalid keep.lock file format', ERROR_CODES.INVALID_FORMAT, { path, error });
+  }
+}
+
+function parseKeepJson(path: string): unknown {
+  try {
+    return JSON.parse(readFileSync(path, 'utf-8'));
+  } catch (error) {
+    throw new CapyError('Invalid keep.lock file format', ERROR_CODES.INVALID_FORMAT, { path, error });
+  }
+}
+
 /** The comment lines a branch's placeholders get in `.env`, and the stale ones to remove. */
 function placeholderNotes(
   variables: Readonly<Record<string, string>>,
@@ -289,6 +321,27 @@ export class FileManager {
     // Best-effort and never throws: lets a later `git merge` of this keep.lock
     // run capy's merge driver instead of conflicting on neighbouring lines.
     installKeepLockMergeDriver(this.projectRoot);
+  }
+
+  /** The keep.lock copies that exist here: the tracked file at the project root, then the working copy under `.capy/`. */
+  keepLockPaths(): readonly string[] {
+    return [join(this.projectRoot, 'keep.lock'), join(this.projectRoot, '.capy', 'keep.lock')].filter((p) => existsSync(p));
+  }
+
+  /**
+   * The plan for setting `project_name` in every keep.lock copy that exists (see `keepLockPaths`): the new bytes per
+   * path, through `serializeKeep`, so a lockfile already in canonical form changes on that one line and nowhere else.
+   * Every copy is read, parsed and serialized here and nothing is written: a copy that cannot be rewritten (not
+   * JSON, not an object, no `variables`) throws INVALID_FORMAT, so the caller finds out before it renames anything.
+   */
+  planKeepProjectName(projectName: string): readonly KeepRewrite[] {
+    return this.keepLockPaths().map((path) => ({ path, content: renamedKeepContent(path, projectName) }));
+  }
+
+  /** Writes a plan from `planKeepProjectName`. Returns the paths written. */
+  writeKeepRewrites(rewrites: readonly KeepRewrite[]): readonly string[] {
+    rewrites.forEach(({ path, content }) => this.writeKeepContentTo(path, content));
+    return rewrites.map(({ path }) => path);
   }
 
   /**

@@ -93,13 +93,14 @@ describe('secrets screen redraws (CAP-719)', () => {
     });
   });
 
-  test('a shorter frame clears line tails and all rows below it', async () => {
+  test('a filtered frame (fewer rows) stays full height and clears every line tail', async () => {
     await withScreen(async ({ frames }) => {
       press('SECRET_239');
       await settle();
       const shorter = frames()[1];
       expect(shorter).toBe(frame(afterKeys(...'SECRET_239')));
-      expect(shorter.split('\n').length).toBeLessThan(frames()[0].split('\n').length);
+      // The screen is always full height: fewer rows leave blank lines, not a shorter frame.
+      expect(shorter.split('\n').length).toBe(frames()[0].split('\n').length);
       expect(shorter.slice(BEGIN_FRAME.length, -END_FRAME.length).split('\n').every((line) => line.endsWith(`${ESC}[K`))).toBe(true);
       expect(shorter).toEndWith(END_FRAME);
     });

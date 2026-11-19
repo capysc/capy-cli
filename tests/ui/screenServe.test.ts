@@ -26,7 +26,7 @@ function request(
 describe('renderScreen', () => {
   test('inlines the payload into the __CAPY_DATA__ placeholder', () => {
     const html = renderScreen('auth-error', { message: 'nope' });
-    expect(html).toContain('window.__CAPY_DATA__ = {"message":"nope"}');
+    expect(html).toMatch(/window\.__CAPY_DATA__\s*=\s*\{"message":"nope"\}/);
     expect(html).not.toContain('/*__CAPY_DATA__*/ null');
   });
 
@@ -75,7 +75,7 @@ describe('ScreenServer', () => {
     expect(first.status).toBe(200);
     expect(first.headers['content-security-policy']).toBe(SCREEN_CSP);
     expect(first.headers['cache-control']).toBe('no-store');
-    expect(first.body).toContain('window.__CAPY_DATA__ = {"autoCloseSeconds":0}');
+    expect(first.body).toMatch(/window\.__CAPY_DATA__\s*=\s*\{"autoCloseSeconds":0\}/);
 
     // One-time token: same URL is dead after first use.
     const second = await request(url);

@@ -2,7 +2,7 @@
 
 # capy CLI reference
 
-Version `0.9.16`. Generated from `capy help --json`.
+Version `0.9.17`. Generated from `capy help --json`.
 
 ## Bare `capy`
 
@@ -87,7 +87,9 @@ capy branch [options]
 | Option | Description | Default |
 |---|---|---|
 | `-D <name>` | Delete a branch |  |
+| `--yes` | skip the confirmation prompt |  |
 | `--json` | emit machine-readable JSON instead of the human UI |  |
+| `--non-tty` | treat stdin as not a terminal; never prompt (agents/CI) |  |
 
 JSON support: yes (`--json`)
 
@@ -543,7 +545,7 @@ Dry run: yes (`--dry-run`)
 
 ### `capy project delete`
 
-Delete a project (owners only; hidden, not destroyed; an owner can restore it)
+Delete a project (owners and admins only; hidden, not destroyed; an owner or admin can restore it)
 
 ```
 capy project delete <name-or-id> [options]
@@ -562,7 +564,7 @@ Dry run: yes (`--dry-run`)
 
 ### `capy project restore`
 
-Restore a deleted project (owners only)
+Restore a deleted project (owners and admins only)
 
 ```
 capy project restore <name-or-id> [options]
@@ -608,7 +610,7 @@ JSON support: yes (`--json`)
 
 ## `capy users`
 
-List organization members and their project access
+List organization users and their project access
 
 ```
 capy users [options]
@@ -630,10 +632,27 @@ capy projects [options]
 
 | Option | Description | Default |
 |---|---|---|
-| `--deleted` | also list deleted projects, marked as deleted, with the date (owners only) |  |
+| `--deleted` | also list deleted projects, marked as deleted, with the date (owners and admins only) |  |
 | `--json` | emit machine-readable JSON instead of the human UI |  |
 
 JSON support: yes (`--json`)
+
+### `capy projects rename`
+
+Rename the project of this folder, and update its keep.lock (owners only)
+
+```
+capy projects rename [new-name] [options]
+```
+
+| Option | Description | Default |
+|---|---|---|
+| `--non-tty` | same as --json: never ask, and answer in JSON (agents/CI) |  |
+| `--json` | emit machine-readable JSON instead of the human UI |  |
+
+JSON support: yes (`--json`)
+
+Dry run: yes (`--dry-run`)
 
 ## `capy secrets`
 
@@ -647,6 +666,7 @@ capy secrets [options]
 |---|---|---|
 | `--json` | emit machine-readable JSON instead of the human UI |  |
 | `--project <name>` | only rows with a location in this project |  |
+| `--project-id <id>` | only rows with a location in the project with this id |  |
 | `--branch <name>` | only rows with a location on this branch |  |
 | `--name <NAME>` | only rows with exactly this secret name |  |
 
@@ -702,7 +722,7 @@ Dry run: yes (`--dry-run`)
 
 ## `capy grant-branch`
 
-Grant a member wildcard access to a protected branch
+Grant a user wildcard access to a protected branch
 
 ```
 capy grant-branch <email> <project> <branch>
@@ -714,7 +734,7 @@ JSON support: no
 
 ## `capy revoke-branch`
 
-Revoke a member's wildcard access to a protected branch
+Revoke a user's wildcard access to a protected branch
 
 ```
 capy revoke-branch <email> <project> <branch>
@@ -835,6 +855,7 @@ capy connect [provider] [options]
 | `-y, --yes` | dokploy import/discover: skip the confirmation prompt (import: --overwrite's clear/replace/import ask) — discover never prompts and needs --yes to write |  |
 | `--overwrite` | dokploy import: set the branch's vars to EXACTLY Dokploy's set — clear names not in Dokploy, replace differing values, import new ones |  |
 | `--environment <names>` | dokploy/vercel discover: restrict the plan to these environment names, comma-separated (e.g. staging,preview); vercel import: which Vercel environment to read (default: the current branch's name) |  |
+| `--import-environment <environment[=branch]>` | vercel discover: import only this environment, on a branch of the same name or on <branch> (repeatable; e.g. preview=staging) | `[]` |
 | `--resolve <NAME=pinned|local|remote|delete>` | answer a difference from Capy: pinned, local, remote or delete; NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict) | `[]` |
 | `--conflict <conflict_id>` | the conflict_id a conflict returned: binds --resolve to what was seen |  |
 
@@ -1029,6 +1050,7 @@ Every refusal carries a stable `code` — branch on it, never on message text.
 - `QUOTA_EXCEEDED`
 - `PROJECT_NOT_FOUND`
 - `BRANCH_NOT_FOUND`
+- `CANNOT_DELETE_CURRENT_BRANCH`
 - `NO_ACTIVE_BRANCH`
 - `BRANCH_STATE_INCONSISTENT`
 - `SNAPSHOT_NOT_FOUND`
@@ -1101,6 +1123,8 @@ Every refusal carries a stable `code` — branch on it, never on message text.
 - `KEEP_PR_COMMIT_FAILED`
 - `KEEP_PR_BRANCH_FAILED`
 - `KEEP_PR_CREATE_FAILED`
+- `KEEP_LOCK_PROJECT_MISMATCH`
+- `KEEP_LOCK_NOT_ON_BASE`
 - `CI_DEPLOY_TARGETS_RECORD_FAILED`
 - `DEPLOY_STALE_KEEP`
 - `DEPLOY_TOKEN_UNTRACKED`
@@ -1117,6 +1141,9 @@ Every refusal carries a stable `code` — branch on it, never on message text.
 - `VERCEL_ENVIRONMENT_NOT_FOUND`
 - `VERCEL_CONFIRMATION_REQUIRED`
 - `VERCEL_MAPPING_COLLISION`
+- `VERCEL_ENVIRONMENT_DUPLICATE`
+- `VERCEL_BRANCH_DUPLICATE`
+- `VERCEL_IMPORT_ENVIRONMENT_NOT_APPLICABLE`
 - `VERCEL_TARGET_KEY_MISSING`
 - `VERCEL_TOKEN_REJECTED`
 - `VERCEL_NO_ACCESS`
@@ -1130,6 +1157,7 @@ Every refusal carries a stable `code` — branch on it, never on message text.
 - `VERCEL_ENV_LIST_TRUNCATED`
 - `VERCEL_PREVIEW_DEPLOYMENTS_UNAVAILABLE`
 - `CAPY_VALUE_KEPT`
+- `CONNECTOR_OPTION_NOT_APPLICABLE`
 - `CONNECTOR_PUSH_FAILED`
 - `CONNECTOR_FOLDER_NOT_INITIALIZED`
 - `CONNECTOR_PROJECT_LOOKUP_FAILED`
@@ -1178,6 +1206,7 @@ Every refusal carries a stable `code` — branch on it, never on message text.
 - `BRANCH_CREATE_FAILED`
 - `BRANCH_PROTECTION_REQUIRED`
 - `BRANCH_PROTECTION_INVALID`
+- `KEEP_LOCK_UPDATE_FAILED`
 - `ORG_SELECTION_REQUIRED`
 - `REPO_LINKS_UNSUPPORTED`
 - `DRY_RUN_UNSUPPORTED`

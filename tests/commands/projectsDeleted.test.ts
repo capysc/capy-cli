@@ -80,6 +80,18 @@ const GONE: FakeProject = { id: 'proj_old', name: 'old', organization_id: 'org_1
 // After the mocks above.
 const { ProjectsCommand } = await import('../../src/commands/projectsCommand');
 
+// These tests check the plain (non-terminal) output. `capy projects` opens its
+// interactive screen when stdout and stdin are both terminals, so pin both to
+// "not a terminal" here, whatever the shell running the suite is.
+const ORIGINAL_STDOUT_TTY = process.stdout.isTTY;
+const ORIGINAL_STDIN_TTY = process.stdin.isTTY;
+const setTty = (stdoutIsTty: boolean | undefined, stdinIsTty: boolean | undefined): void => {
+  Object.defineProperty(process.stdout, 'isTTY', { value: stdoutIsTty, configurable: true, writable: true });
+  Object.defineProperty(process.stdin, 'isTTY', { value: stdinIsTty, configurable: true, writable: true });
+};
+beforeEach(() => setTty(false, false));
+afterAll(() => setTty(ORIGINAL_STDOUT_TTY, ORIGINAL_STDIN_TTY));
+
 describe('ProjectsCommand --deleted', () => {
   beforeEach(() => {
     listProjectsImpl.mockReset();

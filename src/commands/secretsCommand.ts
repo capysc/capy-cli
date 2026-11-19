@@ -20,12 +20,36 @@ export interface SecretsOpts {
   json?: boolean;
   /** Keep only rows with at least one location in this project — exact, case-sensitive match on `project_name`. */
   project?: string;
+  /** Keep only rows with at least one location in this one project — exact match on `project_id`. Combines with the other filters. */
+  projectId?: string;
   /** Keep only rows with at least one location on this branch — exact, case-sensitive match. */
   branch?: string;
   /** Keep only rows with exactly this NAME (case-sensitive). */
   name?: string;
   /** The global `--dry-run`: the screen's edit flow only plans, and says so. Has no effect on `--json`. */
   dryRun?: boolean;
+}
+
+/**
+ * The rows `--name`, `--project`, `--project-id` and `--branch` keep. A row stays
+ * when ONE of its locations matches every location filter given. `--project`
+ * matches `project_name` (several projects can share a name: every location
+ * carries its `project_id`); `--project-id` matches `project_id` exactly.
+ */
+export function filterSecretRows(rows: readonly SecretIndexRow[], opts: Pick<SecretsOpts, 'project' | 'projectId' | 'branch' | 'name'>): SecretIndexRow[] {
+  const projectFilter = opts.project;
+  const projectIdFilter = opts.projectId;
+  const branchFilter = opts.branch;
+  const named = opts.name === undefined ? [...rows] : rows.filter((row) => row.name === opts.name);
+  if (!projectFilter && !projectIdFilter && !branchFilter) return named;
+  return named.filter((row) =>
+    row.locations.some(
+      (loc) =>
+        (!projectFilter || loc.project_name === projectFilter) &&
+        (!projectIdFilter || loc.project_id === projectIdFilter) &&
+        (!branchFilter || loc.branch === branchFilter),
+    ),
+  );
 }
 
 /**
@@ -53,7 +77,7 @@ export interface SecretsOpts {
  *   that isn't a real terminal can never get raw ANSI on stdout or block
  *   on a prompt it cannot answer.
  *
- * `--project`/`--branch` filter identically in every mode.
+ * `--project`/`--project-id`/`--branch` filter identically in every mode.
  *
  * Two rows can share the same NAME with a DIFFERENT value_hash — that's a
  * real divergence (the same-named var holds different values in different
@@ -112,17 +136,7 @@ export class SecretsCommand {
   }
 
   private filterRows(rows: readonly SecretIndexRow[], opts: SecretsOpts): SecretIndexRow[] {
-    const projectFilter = opts.project;
-    const branchFilter = opts.branch;
-    const named = opts.name === undefined ? [...rows] : rows.filter((row) => row.name === opts.name);
-    if (!projectFilter && !branchFilter) return named;
-    return named.filter((row) =>
-      row.locations.some(
-        (loc) =>
-          (!projectFilter || loc.project_name === projectFilter) &&
-          (!branchFilter || loc.branch === branchFilter),
-      ),
-    );
+    return filterSecretRows(rows, opts);
   }
 
   private emitJsonOutput(rows: readonly SecretIndexRow[], skipped: readonly SecretIndexSkipped[], orgId: string): void {

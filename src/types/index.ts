@@ -473,6 +473,13 @@ export interface CliOptions {
    * state ends only that folder's sync.
    */
   onBranchMismatch?: 'follow-env-header' | 'throw';
+  /**
+   * The branch the command that runs this first is about to switch to (`capy checkout <branch>`). Only a folder with no
+   * explicit record of a branch (no `.env` file, no `.capy/branch`) uses it, and only when that branch exists on the
+   * server: it answers "which branch" before auto-selection and the picker. What is merely inferred (a sole pinned or
+   * synced branch) does not count. Any other folder resolves its branch as before.
+   */
+  branchHint?: string;
 }
 
 export interface ProjectInitResult {
@@ -529,6 +536,8 @@ export const ERROR_CODES = {
   // not-found family — replaces server-prose string matching in serviceClient
   PROJECT_NOT_FOUND: 'PROJECT_NOT_FOUND',
   BRANCH_NOT_FOUND: 'BRANCH_NOT_FOUND',
+  /** `capy branch -D` named the branch the folder is on. Exit 1. */
+  CANNOT_DELETE_CURRENT_BRANCH: 'CANNOT_DELETE_CURRENT_BRANCH',
   // No .env header, no .capy/branch, and no unambiguous local fallback.
   NO_ACTIVE_BRANCH: 'NO_ACTIVE_BRANCH',
   // .capy/branch and the .env header name different, real branches (an interrupted checkout) and the run cannot follow either.
@@ -778,6 +787,10 @@ export const ERROR_CODES = {
   KEEP_PR_BRANCH_FAILED: 'KEEP_PR_BRANCH_FAILED',
   /** keep.lock PR step: opening the pull request on GitHub failed. */
   KEEP_PR_CREATE_FAILED: 'KEEP_PR_CREATE_FAILED',
+  /** A keep.lock PR step: the file at the path on the PR base belongs to another project, so nothing is written for it. */
+  KEEP_LOCK_PROJECT_MISMATCH: 'KEEP_LOCK_PROJECT_MISMATCH',
+  /** A keep.lock write: the base branch keeps this project's keep.lock in another stored folder, so none is created at this one. */
+  KEEP_LOCK_NOT_ON_BASE: 'KEEP_LOCK_NOT_ON_BASE',
   // --- CI-mode target recording (CAP-687) ---
   /**
    * A CI-mode deploy delivered successfully (its PR's keep.lock already
@@ -833,6 +846,12 @@ export const ERROR_CODES = {
   VERCEL_CONFIRMATION_REQUIRED: 'VERCEL_CONFIRMATION_REQUIRED',
   /** Several Vercel projects map to the same repo, folder and branch, and this run cannot ask which wins. */
   VERCEL_MAPPING_COLLISION: 'VERCEL_MAPPING_COLLISION',
+  /** `capy connect vercel --discover --import-environment`: the same environment is named more than once. Nothing was changed. */
+  VERCEL_ENVIRONMENT_DUPLICATE: 'VERCEL_ENVIRONMENT_DUPLICATE',
+  /** `capy connect vercel --discover --import-environment`: two environments are mapped to the same Capy branch. Nothing was changed. */
+  VERCEL_BRANCH_DUPLICATE: 'VERCEL_BRANCH_DUPLICATE',
+  /** `--import-environment` was used without `--discover`, or together with `--environment`. Nothing was changed. */
+  VERCEL_IMPORT_ENVIRONMENT_NOT_APPLICABLE: 'VERCEL_IMPORT_ENVIRONMENT_NOT_APPLICABLE',
   // CAP-696 Vercel target (codes not already above)
   /** `_TARGET_VERCEL_TOKEN` is absent but `_CONNECTOR_VERCEL_TOKEN` holds one, and there is no TTY to choose. */
   VERCEL_TARGET_KEY_MISSING: 'VERCEL_TARGET_KEY_MISSING',
@@ -868,6 +887,8 @@ export const ERROR_CODES = {
   // --- Connector discovery, any provider (`capy connect <provider> --discover`) ---
   // One per step a folder's run can stop on. Every provider but Dokploy reports these;
   // Dokploy keeps its own `DOKPLOY_*` spellings of the same steps.
+  /** An option was given to a connector that does not take it (for example `--import-environment` with a provider that cannot choose environments). Nothing was changed. */
+  CONNECTOR_OPTION_NOT_APPLICABLE: 'CONNECTOR_OPTION_NOT_APPLICABLE',
   /** The folder's upload failed for a reason other than a stale base. That folder's run stopped; the other folders still ran. */
   CONNECTOR_PUSH_FAILED: 'CONNECTOR_PUSH_FAILED',
   /** Non-interactive run without `--yes`: the folder has no keep.lock, and a person has to initialize it. */
@@ -972,6 +993,8 @@ export const ERROR_CODES = {
   BRANCH_PROTECTION_REQUIRED: 'BRANCH_PROTECTION_REQUIRED',
   /** `capy project create --protected` with something other than yes or no. Nothing is created. Exit 1. */
   BRANCH_PROTECTION_INVALID: 'BRANCH_PROTECTION_INVALID',
+  /** `capy projects rename`: the service renamed the project but this folder's keep.lock could not be rewritten. The refusal carries the renamed project. Exit 1. */
+  KEEP_LOCK_UPDATE_FAILED: 'KEEP_LOCK_UPDATE_FAILED',
   /** A command that acts on "the active organization" has none (no keep.lock here) and the person belongs to several, with nobody to ask. Exit 3. */
   ORG_SELECTION_REQUIRED: 'ORG_SELECTION_REQUIRED',
   /** `GET /orgs/:orgId/repos` answered 404: the service predates project -> repo links. Never a failure of the command that asked. */

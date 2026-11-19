@@ -131,8 +131,16 @@ program
   .command('branch')
   .description('List secret branches')
   .option('-D <name>', 'Delete a branch')
+  .option('--yes', 'skip the confirmation prompt')
   .option('--json', 'emit machine-readable JSON instead of the human UI')
+  .option('--non-tty', 'treat stdin as not a terminal; never prompt (agents/CI)')
   .action(async (options, command) => {
+    const deleteOpts = { yes: options.yes, json: options.json, nonTty: options.nonTty };
+    if (options.D) {
+      // Nobody to ask and no --yes: refused here, before any prompt, sign-in or request.
+      const { needsConfirmation, refuseNeedsConfirmation } = await import('./commands/branchDeleteCommand');
+      if (needsConfirmation(deleteOpts)) refuseNeedsConfirmation(options.json === true);
+    }
     const { AuthService } = await import('./auth/authService');
     const { ServiceClient } = await import('./service/serviceClient');
     const { ProjectManager } = await import('./core/projectManager');
@@ -146,7 +154,7 @@ program
 
     const authService = new AuthService(undefined, true, projectState.userId);
     const serviceClient = new ServiceClient(undefined, true);
-    serviceClient.setTokenProvider(() => authService.getValidToken());
+    serviceClient.setTokenProvider((rejected) => authService.getValidToken(rejected));
     const authResult = await authService.authenticate(projectState.organizationId);
     if (!authResult.success) {
       console.error('Authentication failed');
@@ -157,36 +165,21 @@ program
 
     // Delete branch
     if (options.D) {
-      const deleteName = options.D;
-      const branches = await serviceClient.listBranches(projectState.projectId!);
-      const branch = branches.find(b => b.name === deleteName);
-
-      if (!branch) {
-        console.log(`Branch "${deleteName}" not found`);
-        process.exit(1);
-      }
-
-      if (branch.name === projectState.activeBranch) {
-        console.log(`Cannot delete the current branch. Switch first with: ${B('capy-dev checkout <other-branch>')}`);
-        process.exit(1);
-      }
-
-      const inquirer = (await import('inquirer')).default;
-      const { confirm } = await inquirer.prompt([{
-        type: 'confirm',
-        name: 'confirm',
-        message: `Delete branch "${deleteName}"? This will remove all its secrets.`,
-        default: false,
-      }]);
-
-      if (!confirm) return;
-
-      await serviceClient.deleteBranch(projectState.projectId!, branch.id);
-
-      // v4: branches no longer stored in keep.lock, no cleanup needed
-      const keep = pm.readKeepFile();
-
-      console.log(`Deleted branch "${deleteName}"`);
+      // v4: branches no longer stored in keep.lock, no cleanup needed after a delete.
+      const { runBranchDelete, promptConfirm } = await import('./commands/branchDeleteCommand');
+      await runBranchDelete(
+        {
+          projectId: projectState.projectId!,
+          activeBranch: projectState.activeBranch,
+          checkoutHint: 'capy-dev',
+          emphasize: B,
+          listBranches: (projectId) => serviceClient.listBranches(projectId),
+          deleteBranch: (projectId, branchId) => serviceClient.deleteBranch(projectId, branchId),
+          confirm: promptConfirm,
+        },
+        options.D,
+        deleteOpts,
+      );
       return;
     }
 
@@ -621,7 +614,7 @@ program
       const syncState = pm.readSyncState();
       const authService = new AuthService(undefined, true, syncState?.user_id);
       const serviceClient = new ServiceClient(undefined, true);
-      serviceClient.setTokenProvider(() => authService.getValidToken());
+      serviceClient.setTokenProvider((rejected) => authService.getValidToken(rejected));
       const authResult = await authService.authenticateSilent(keep.org_id);
       if (!authResult.success) {
         throw new Error(`${authResult.error || 'Not authenticated'} — run ${B('capy-dev')} first`);
@@ -776,7 +769,7 @@ projectCmd
 
 projectCmd
   .command('delete <name-or-id>')
-  .description('Delete a project (owners only; hidden, not destroyed; an owner can restore it)') // COPY-FLAG
+  .description('Delete a project (owners and admins only; hidden, not destroyed; an owner or admin can restore it)') // COPY-FLAG
   .option('--force', 'delete even if the project has live deploy tokens (those deploys stop on their next restart)') // COPY-FLAG
   .option('--yes', 'skip the confirmation question')
   .option('--non-tty', 'same as --json: never ask, and answer in JSON (agents/CI)') // COPY-FLAG
@@ -789,7 +782,7 @@ projectCmd
 
 projectCmd
   .command('restore <name-or-id>')
-  .description('Restore a deleted project (owners only)') // COPY-FLAG
+  .description('Restore a deleted project (owners and admins only)') // COPY-FLAG
   .option('--yes', 'skip the confirmation question')
   .option('--non-tty', 'same as --json: never ask, and answer in JSON (agents/CI)') // COPY-FLAG
   .option('--json', 'emit machine-readable JSON instead of the human UI')
@@ -821,7 +814,7 @@ program
 
 program
   .command('users')
-  .description('List organization members and their project access')
+  .description('List organization users and their project access')
   .option('--json', 'emit machine-readable JSON instead of the human UI')
   .action(async (options) => {
     const { UsersCommand } = await import('./commands/usersCommand');
@@ -829,15 +822,26 @@ program
     await cmd.execute({ json: options.json });
   });
 
-program
+const projectsCmd = program
   .command('projects')
   .description('List projects in the active organization and their branches')
-  .option('--deleted', 'also list deleted projects, marked as deleted, with the date (owners only)') // COPY-FLAG
+  .option('--deleted', 'also list deleted projects, marked as deleted, with the date (owners and admins only)') // COPY-FLAG
   .option('--json', 'emit machine-readable JSON instead of the human UI')
-  .action(async (options) => {
+  .action(async (options, command) => {
     const { ProjectsCommand } = await import('./commands/projectsCommand');
     const cmd = new ProjectsCommand(process.env.CAPY_API_URL, true);
-    await cmd.execute({ json: options.json, deleted: options.deleted === true });
+    await cmd.execute({ json: options.json, deleted: options.deleted === true, dryRun: command.optsWithGlobals().dryRun === true });
+  });
+
+projectsCmd
+  .command('rename [new-name]')
+  .description('Rename the project of this folder, and update its keep.lock (owners only)') // COPY-FLAG
+  .option('--non-tty', 'same as --json: never ask, and answer in JSON (agents/CI)') // COPY-FLAG
+  .option('--json', 'emit machine-readable JSON instead of the human UI')
+  .action(async (name: string | undefined, _options: any, command: any) => {
+    const { renameProjectCommand, renameProjectOptsFrom } = await import('./commands/projectRenameCommand');
+    // Read from the merged view: the parent `projects` takes `--json`, and the program takes `--dry-run`.
+    await renameProjectCommand(name, { ...renameProjectOptsFrom(command), apiUrl: process.env.CAPY_API_URL, devMode: true });
   });
 
 const secretsCmd = program
@@ -845,12 +849,13 @@ const secretsCmd = program
   .description('List every secret name across the active organization, grouped by value (read-only, never shows a value)')
   .option('--json', 'emit machine-readable JSON instead of the human UI')
   .option('--project <name>', 'only rows with a location in this project')
+  .option('--project-id <id>', 'only rows with a location in the project with this id') // COPY-FLAG
   .option('--branch <name>', 'only rows with a location on this branch')
   .option('--name <NAME>', 'only rows with exactly this secret name') // COPY-FLAG
   .action(async (options, command) => {
     const { SecretsCommand } = await import('./commands/secretsCommand');
     const cmd = new SecretsCommand(process.env.CAPY_API_URL, true);
-    await cmd.execute({ json: options.json, project: options.project, branch: options.branch, name: options.name, dryRun: command.optsWithGlobals().dryRun === true });
+    await cmd.execute({ json: options.json, project: options.project, projectId: options.projectId, branch: options.branch, name: options.name, dryRun: command.optsWithGlobals().dryRun === true });
   });
 
 secretsCmd
@@ -943,7 +948,7 @@ secretsCmd
 
 program
   .command('grant-branch <email> <project> <branch>')
-  .description('Grant a member wildcard access to a protected branch')
+  .description('Grant a user wildcard access to a protected branch')
   .action(async (email: string, project: string, branch: string) => {
     const { UsersCommand } = await import('./commands/usersCommand');
     const cmd = new UsersCommand(process.env.CAPY_API_URL, true);
@@ -952,7 +957,7 @@ program
 
 program
   .command('revoke-branch <email> <project> <branch>')
-  .description("Revoke a member's wildcard access to a protected branch")
+  .description("Revoke a user's wildcard access to a protected branch")
   .action(async (email: string, project: string, branch: string) => {
     const { UsersCommand } = await import('./commands/usersCommand');
     const cmd = new UsersCommand(process.env.CAPY_API_URL, true);

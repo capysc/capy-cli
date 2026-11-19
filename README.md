@@ -82,7 +82,7 @@ https://github.com/user-attachments/assets/60800e68-6101-4f1a-9176-6b2d58a6fd61
 ## Why Use Capy
 
 - **We hold ciphertext. You hold keys. A subpoena gets us nothing.** Our service stores membership records and ciphertext. We don't hold your master key, your project keys, or any plaintext. Compromise of our service OR your local values yields nothing useful.
-- **Revocation is cryptographic, not a database flag.** `capy kick` makes the kicked user's local `key.enc` cryptographically inert. Remaining members keep using the same keys; no rotation cascade.
+- **Revocation is cryptographic, not a database flag.** `capy kick` makes the kicked user's local `key.enc` cryptographically inert. Remaining users keep using the same keys; no rotation cascade.
 - **Your code stays vanilla `process.env`.** No SDK to import, no daemon to run, no dashboard to maintain. `capy run` injects decrypted values into Node, Python, Go, Ruby, or any process that reads env vars.
 - **Branches that match git.** Capy runs alongside git with its own branches and a committed `keep.lock` manifest. Each git branch pins to a Capy branch, so secrets travel with your code.
 - **Source-available CLI.** AGPL-3.0. Code is auditable on GitHub. ([What AGPL means for your team in practice.](https://docs.capy.sc/using/license))
@@ -154,7 +154,7 @@ Good when you want to see drift across the whole branch, edit one variable witho
 | [`capy redeem <code>`](https://docs.capy.sc/cli/redeem) | Redeem an invite code. |
 | [`capy transport`](https://docs.capy.sc/cli/transport) | Move your account to another machine. |
 | [`capy kick <email>`](https://docs.capy.sc/cli/kick) | Remove a teammate. |
-| [`capy users`](https://docs.capy.sc/cli/users) | Interactive member management. |
+| [`capy users`](https://docs.capy.sc/cli/users) | Interactive user management. |
 | [`capy projects`](https://docs.capy.sc/cli/projects) | List projects in the org and their branches. |
 | [`capy project create\|delete\|restore`](https://docs.capy.sc/cli/project) | Create, delete or restore a project in the org. |
 | [`capy secrets`](https://docs.capy.sc/cli/secrets) | List every secret name in the org, grouped by value (never shows a value). |
@@ -173,6 +173,25 @@ Good when you want to see drift across the whole branch, edit one variable witho
 | [`capy agents`](https://docs.capy.sc/cli/agents) | Tell AI coding agents in this repo how to use Capy (writes AGENTS.md / CLAUDE.md). |
 | [`capy logout`](https://docs.capy.sc/cli/logout) | Clear local session. |
 | [`capy cleanup`](https://docs.capy.sc/cli/cleanup) | Remove git hooks and local state. |
+
+### Pairing from an agent
+
+Run `capy pair --json` in an interactive terminal so the returned account can
+be confirmed after browser approval. Before polling, Capy emits a versioned
+`pairing_required` JSON event on **stderr**. It includes a PNG file and data URI,
+the complete approval URL, exact pairing code, expiry in UTC, purpose, requesting
+runtime, and `display.markdown` with the response the agent must show.
+
+Always render that QR image inline with the link and metadata. If the CLI runs
+inside another runtime, copy the PNG to the display environment or decode its
+data URI there. Never use an external QR service. A client that cannot display
+images must say so explicitly and still show the link and complete metadata.
+Keep the command running; show the returned email and obtain the human's explicit
+approval before confirming the account. The temporary PNG is removed when polling
+ends, including expiry or denial. Final success/refusal remains a single JSON
+object on **stdout**. `capy help --json` publishes the same presentation contract.
+Terminal account-confirmation prompts can follow the initial event on stderr;
+the event itself is one complete JSON line emitted before polling begins.
 
 ## Syncing
 
@@ -213,7 +232,7 @@ The `capy secrets` edit screens and `capy secrets set` do the same check against
 
 Capy is a version control system for secrets that runs alongside git. You commit code, you sync secrets. Both have branches, both have a committed manifest (`.git/`, `keep.lock`), both pull and push to a remote. The difference: git's remote sees your code, Capy's remote only sees ciphertext.
 
-A **Capy branch** is to your secrets what a git branch is to your code: a parallel state with its own values and its own access list. Switching branches changes which values `capy run` injects. As an example setup, you might keep a `development` branch open to every member while gating a `production` branch to only admins.
+A **Capy branch** is to your secrets what a git branch is to your code: a parallel state with its own values and its own access list. Switching branches changes which values `capy run` injects. As an example setup, you might keep a `development` branch open to every user while gating a `production` branch to only admins.
 
 Because Capy branches are independent of git branches, each git branch pins to a Capy branch via the committed `keep.lock` file. Branch names are yours to choose, just like in git: a common pattern is sharing one shared dev branch across feature work and pinning `release-*` git branches to a separate staging or production branch.
 
@@ -248,7 +267,7 @@ The first sync needs network for authentication and key co-decrypt, but after th
 <details>
 <summary><strong>How fast does `capy kick` propagate?</strong></summary>
 
-Immediately. On the kicked user's next request, the service refuses to strip the outer wrap; their `key.enc` becomes cryptographically inert on disk. The master key never rotates because remaining members can keep using it.
+Immediately. On the kicked user's next request, the service refuses to strip the outer wrap; their `key.enc` becomes cryptographically inert on disk. The master key never rotates because remaining users can keep using it.
 </details>
 
 <details>
@@ -260,7 +279,7 @@ SOC 2 audit is in progress. GDPR-compliant. Trust posture and ongoing reports at
 <details>
 <summary><strong>What does Capy cost?</strong></summary>
 
-Free for individuals and small teams. Paid plans for orgs that need higher quotas, more projects, or more members.
+Free for individuals and small teams. Paid plans for orgs that need higher quotas, more projects, or more users.
 </details>
 
 <details>
