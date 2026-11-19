@@ -14,6 +14,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The keep.lock merge driver tests compare the driver's result with git's
+      # own text merge, byte for byte. That needs the conflict label
+      # placeholders (%S %X %Y), which git expands from 2.44 on. A runner image
+      # with an older git gets the current one from the git maintainers' PPA.
+      - name: Git 2.44 or newer
+        run: |
+          need=2.44.0
+          have() { git version | awk '{print $3}'; }
+          new_enough() { [ "$(printf '%s\n' "$need" "$(have)" | sort -V | head -n1)" = "$need" ]; }
+          if ! new_enough; then
+            sudo add-apt-repository -y ppa:git-core/ppa
+            sudo apt-get update -q
+            sudo apt-get install -y -q git
+          fi
+          git version
+          new_enough
+
       - uses: oven-sh/setup-bun@v2
 
       - name: Install dependencies
