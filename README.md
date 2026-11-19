@@ -176,22 +176,31 @@ Good when you want to see drift across the whole branch, edit one variable witho
 
 ### Pairing from an agent
 
-Run `capy pair --json` in an interactive terminal so the returned account can
-be confirmed after browser approval. Before polling, Capy emits a versioned
-`pairing_required` JSON event on **stderr**. It includes a PNG file and data URI,
-the complete approval URL, exact pairing code, expiry in UTC, purpose, requesting
-runtime, and `display.markdown` with the response the agent must show.
+Ask the human which email will approve. Never fill it in yourself. Run
+`capy pair --email <email> --json`: it asks for the pairing, saves it, and exits
+**3** at once with `PAIR_APPROVAL_PENDING` and an elicitation of kind `link`
+(`url`, `code`, `purpose`, `expires_at`, `answer.wait`, and a `qr`).
 
-Always render that QR image inline with the link and metadata. If the CLI runs
-inside another runtime, copy the PNG to the display environment or decode its
-data URI there. Never use an external QR service. A client that cannot display
-images must say so explicitly and still show the link and complete metadata.
-Keep the command running; show the returned email and obtain the human's explicit
-approval before confirming the account. The temporary PNG is removed when polling
-ends, including expiry or denial. Final success/refusal remains a single JSON
-object on **stdout**. `capy help --json` publishes the same presentation contract.
-Terminal account-confirmation prompts can follow the initial event on stderr;
-the event itself is one complete JSON line emitted before polling begins.
+Always show the human the link, the code and the expiry. Show the QR in this
+order:
+
+1. If your client can show images, show the PNG: attach or send `qr.image.file`
+   (a temporary 0600 file), or decode `qr.image.data_uri`.
+2. Show `qr.text` only if your client is a real terminal with a monospace grid
+   and no extra line spacing.
+3. Otherwise say plainly that the QR cannot be shown here.
+
+Never use an external QR service. If the CLI runs inside another runtime, copy
+the PNG to the display environment or decode its data URI there.
+
+Then run `answer.wait` (`capy pair --wait`) at once in the foreground, and run it
+again whenever it exits 3 with `PAIR_STILL_WAITING`. That answer repeats the link
+and only the PNG's file path, not `qr.text` or `qr.image.data_uri`. When the
+human approves, the account that approved is compared with the email you gave: a
+different account returns `PAIR_ACCOUNT_MISMATCH` and nothing is installed.
+The PNG is removed when the pairing ends (approval, expiry, denial,
+`capy pair --cancel`, or a new `capy pair --email`). stdout is only ever one JSON
+object. `capy help --json` publishes the same instructions (`conventions.pairing`).
 
 ## Syncing
 

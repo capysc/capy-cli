@@ -88,7 +88,7 @@ export interface CliHelpDoc {
     conflicts?: string;
     /** What an `elicitation` in a refusal is and what to do with it (CAP-748). */
     elicitation?: string;
-    /** Pending pairing is a stderr event; stdout remains the final result. */
+    /** How an agent runs `capy pair` and shows its link step (the one agent pairing flow). */
     readonly pairing: typeof PAIRING_PRESENTATION;
   };
 }

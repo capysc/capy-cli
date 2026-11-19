@@ -1,6 +1,6 @@
 /**
- * The `capy pair` entry point: sends agent mode to `pairAgentCommand.ts` and everything else to the terminal flow in
- * `pairCommand.ts`, which it leaves exactly as it was.
+ * The `capy pair` entry point: sends agent mode to `pairAgentCommand.ts`, the only agent flow (email, link with QR,
+ * wait), and everything else to the terminal flow in `pairCommand.ts`, which it leaves exactly as it was.
  *
  * Agent mode is `--json` or no terminal (`isInteractive`), plus the flags that only exist for it (`--email`,
  * `--wait`, `--cancel`).

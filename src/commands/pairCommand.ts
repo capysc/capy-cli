@@ -26,7 +26,6 @@ import { isFullScreenQrEligible, startFullScreenQrView, printMaskedLinkFooter } 
 import { CapyError, ERROR_CODES } from '../types/index';
 import { refuseError } from './pairingRefusal';
 import type { PairingEntry } from '../crypto/pairingPayload';
-import { createPairingHandoff, removePairingHandoff } from '../ui/pairingPresentation';
 
 export interface PairOptions {
   readonly json?: boolean;
@@ -65,9 +64,9 @@ const PAIR_LINK_LABEL = 'Approve on your other device:'; // COPY-FLAG
 /**
  * Prints the non-`--json` (human) link block: QR (always the full,
  * unmasked `deviceLink` — a phone scanning it needs the real `code` query
- * param) then the masked link, interactive on a real TTY. `--json`'s own
- * structured presentation event (on stderr) is a separate branch in
- * `pairCommand` below — this function is never called under `--json`.
+ * param) then the masked link, interactive on a real TTY. Agents do not come
+ * through here: `capy pair --json` is `pairAgentCommand.ts`, and this function
+ * is never called under `--json`.
  *
  * Full-screen centered QR (CAP-692 follow-up, shared with `capy transport`
  * via `fullScreenQr.ts`) only in a real interactive TTY, never under
@@ -166,7 +165,6 @@ export async function pairCommand(options: PairOptions = {}): Promise<void> {
     const apiUrl = options.apiUrl || resolveActiveUrl(devMode);
 
     const keyPair = generatePairKeyPair();
-    const requestedAtMs = Date.now();
     const authorize = await authorizeDevice(apiUrl, keyPair.publicKey);
 
     // The QR always encodes the FULL deviceLink (fragment/query and all) —
@@ -174,15 +172,7 @@ export async function pairCommand(options: PairOptions = {}): Promise<void> {
     const deviceLink = `${resolveKeepOrigin()}/device?code=${encodeURIComponent(authorize.user_code)}`;
     const qr = json ? null : renderTerminalQr(deviceLink);
 
-    // JSON callers receive a self-contained handoff before polling begins.
     const prompt = json ? null : printHumanPairBlock(deviceLink, qr, authorize.user_code);
-    const handoff = json ? await createPairingHandoff({
-      approvalUrl: deviceLink,
-      userCode: authorize.user_code,
-      expiresInSeconds: authorize.expires_in,
-      requestedAtMs,
-    }) : null;
-    if (handoff) console.error(JSON.stringify(handoff));
 
     // The poll and the masked-link key listener (`c`/`r`/`q`) run
     // CONCURRENTLY — the listener is event-driven (stdin 'data'), never a
@@ -197,7 +187,6 @@ export async function pairCommand(options: PairOptions = {}): Promise<void> {
         });
       } finally {
         prompt?.stop();
-        if (handoff) await removePairingHandoff(handoff);
       }
     })();
 

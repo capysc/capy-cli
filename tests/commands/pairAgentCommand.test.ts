@@ -9,6 +9,8 @@
 import { mock, jest, describe, test, expect, beforeEach, afterEach, afterAll, spyOn } from 'bun:test';
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync } from 'fs';
 import { join } from 'path';
+import jsQR from 'jsqr';
+import { PNG } from 'pngjs';
 import { webcrypto } from 'crypto';
 import { CapyError, ERROR_CODES } from '../../src/types/index';
 import { PAIR_AAD, type PairEnvelope } from '../../src/crypto/pairCrypto';
@@ -48,6 +50,8 @@ const { pairAgentCommand, accountMatches, normalizeEmail, PAIR_WAIT_CEILING_MS }
 const { getPairPendingPath, getGlobalCapyDir, getAuthSessionPath, getLocalRootPath, getOrgKeyPath, readLocalRoot, saveAuthSession, savePairPendingRaw } = await import('../../src/config/globalConfig');
 const { PAIR_DEFAULT_PURPOSE } = await import('../../src/commands/pairCommand');
 const { exportPairKeyPair, generatePairKeyPair, importPairKeyPair } = await import('../../src/crypto/pairCrypto');
+const { buildTerminalQr } = await import('../../src/ui/terminalQr');
+const { removePendingPairGrant } = await import('../../src/auth/pairing/pendingGrant');
 
 /** Thrown by the `process.exit` spy, so a refusal's exit code is a field, never message text. */
 class ExitSignal extends Error {
@@ -174,6 +178,8 @@ describe('capy pair, agent mode', () => {
 
   afterEach(() => {
     globalThis.fetch = originalFetch;
+    // Whatever grant a test left pending keeps a PNG in the system temp dir: take it out with the grant.
+    removePendingPairGrant();
   });
 
   afterAll(() => {
@@ -212,7 +218,7 @@ describe('capy pair, agent mode', () => {
       expect(ran.json.ok).toBe(false);
       expect(ran.json.code).toBe(ERROR_CODES.PAIR_APPROVAL_PENDING);
       const { elicitation } = ran.json;
-      expect(Object.keys(elicitation).toSorted()).toEqual(['answer', 'code', 'expires_at', 'kind', 'purpose', 'url']);
+      expect(Object.keys(elicitation).toSorted()).toEqual(['answer', 'code', 'expires_at', 'kind', 'purpose', 'qr', 'url']);
       expect(elicitation.kind).toBe('link');
       expect(elicitation.code).toBe('ABCD-EFGH');
       expect(elicitation.url).toContain('/device?code=ABCD-EFGH');
@@ -351,7 +357,11 @@ describe('capy pair, agent mode', () => {
       expect(ran.exit).toBe(3);
       expect(ran.json.ok).toBe(false);
       expect(ran.json.code).toBe(ERROR_CODES.PAIR_STILL_WAITING);
-      expect(ran.json.elicitation).toEqual(started.json.elicitation);
+      // The same link, but its QR is cut down to the PNG's file path.
+      expect(ran.json.elicitation).toEqual({
+        ...started.json.elicitation,
+        qr: { image: { mime_type: 'image/png', file: started.json.elicitation.qr.image.file } },
+      });
       expect(ran.json.elicitation.answer).toEqual({ wait: `${BIN} pair --wait` });
       expect(pendingExists()).toBe(true);
       // Polls at 0,5,...,25 seconds, then one more interval so the next run never polls early: 30 seconds in all.
@@ -654,6 +664,176 @@ describe('capy pair, agent mode', () => {
       stubFetch([PENDING], { ...AUTHORIZE_BODY, expires_at: at });
       const ran = await run({ email: 'mike@example.com' });
       expect(ran.json.elicitation.expires_at).toBe(at);
+    });
+  });
+
+  describe('QR on the link step', () => {
+    const URL_OF_GRANT = (): string => JSON.parse(pendingRaw()).device_link as string;
+    const pngFileInPending = (): string => JSON.parse(pendingRaw()).qr_file as string;
+    const gone = (file: string): boolean => !existsSync(file) && !existsSync(join(file, '..'));
+
+    /** The start run's QR image file, with the start's own response. */
+    async function started(email = 'mike@example.com', authorize: Record<string, unknown> = AUTHORIZE_BODY) {
+      const fetchMock = stubFetch([PENDING], authorize);
+      const ran = await run({ email });
+      return { ran, file: ran.json.elicitation.qr.image.file as string, publicKey: sentPublicKey(fetchMock) };
+    }
+
+    test('the start run carries qr.text and a qr.image whose file is 0600 and whose data URI is the same PNG bytes', async () => {
+      const { ran, file } = await started();
+      const { qr, url } = ran.json.elicitation;
+      expect(Object.keys(qr).toSorted()).toEqual(['image', 'text']);
+      expect(qr.text.length).toBeGreaterThan(0);
+      expect(qr.text).toBe(buildTerminalQr(url).text);
+      expect(Object.keys(qr.image).toSorted()).toEqual(['data_uri', 'file', 'mime_type']);
+      expect(qr.image.mime_type).toBe('image/png');
+      expect(existsSync(file)).toBe(true);
+      expect(statSync(file).mode & 0o777).toBe(0o600);
+      const bytes = readFileSync(file);
+      expect(qr.image.data_uri).toBe(`data:image/png;base64,${bytes.toString('base64')}`);
+      expect(Buffer.from(qr.image.data_uri.slice('data:image/png;base64,'.length), 'base64').equals(bytes)).toBe(true);
+      const png = PNG.sync.read(bytes);
+      expect(jsQR(new Uint8ClampedArray(png.data), png.width, png.height)?.data).toBe(url);
+      expect(pngFileInPending()).toBe(file);
+    });
+
+    test('the text QR renders off a TTY with NO_COLOR set', () => {
+      const script = `
+        import { buildTerminalQr } from ${JSON.stringify(join(import.meta.dir, '../../src/ui/terminalQr.ts'))};
+        console.log(JSON.stringify(buildTerminalQr('https://keep.capy.sc/device?code=ABCD-EFGH').text.length));`;
+      const result = Bun.spawnSync(['bun', '-e', script], { env: { ...process.env, NO_COLOR: '1' }, stdin: 'ignore' });
+      expect(Number(result.stdout.toString().trim())).toBeGreaterThan(0);
+    });
+
+    test('a start run response holds no device code, private key or token', async () => {
+      const { ran } = await started();
+      const file = JSON.parse(pendingRaw());
+      [file.device_code, file.pair_private_key, 'jwt-secret', 'rt-secret'].forEach((secret) => expect(ran.stdout).not.toContain(secret));
+    });
+
+    test('still-waiting carries only the PNG file path: no data URI, no text, no device code or key', async () => {
+      const { ran: start, file } = await started();
+      stubFetch([PENDING]);
+      const ran = await run({ wait: true });
+      expect(ran.json.code).toBe(ERROR_CODES.PAIR_STILL_WAITING);
+      expect(ran.json.elicitation.qr).toEqual({ image: { mime_type: 'image/png', file } });
+      expect(ran.stdout).not.toContain('data_uri');
+      expect(ran.stdout).not.toContain('data:image');
+      expect(ran.stdout).not.toContain(start.json.elicitation.qr.text);
+      const pending = JSON.parse(pendingRaw());
+      [pending.device_code, pending.pair_private_key].forEach((secret) => expect(ran.stdout).not.toContain(secret));
+      expect(existsSync(file)).toBe(true);
+    });
+
+    test('still-waiting leaves qr out when the file is gone', async () => {
+      const { file } = await started();
+      rmSync(file, { force: true });
+      stubFetch([PENDING]);
+      const ran = await run({ wait: true });
+      expect(ran.json.code).toBe(ERROR_CODES.PAIR_STILL_WAITING);
+      expect(ran.json.elicitation).not.toHaveProperty('qr');
+    });
+
+    test('a pending file written without qr_file still works: waiting has no qr, approval completes', async () => {
+      const { ran: start, publicKey } = await started();
+      const { qr_file: qrFile, ...older } = JSON.parse(pendingRaw());
+      savePairPendingRaw(JSON.stringify(older));
+      rmSync(qrFile, { force: true });
+      stubFetch([PENDING]);
+      const waiting = await run({ wait: true });
+      expect(waiting.json.code).toBe(ERROR_CODES.PAIR_STILL_WAITING);
+      expect(waiting.json.elicitation).not.toHaveProperty('qr');
+      expect(waiting.json.elicitation.url).toBe(start.json.elicitation.url);
+      mockPickupDevicePairing.mockImplementation(async () => ({ sealed: await sealAsBrowser(PAYLOAD, publicKey) }));
+      stubFetch([APPROVED]);
+      // The first wait run took its 30 seconds in real life; the fake one did not.
+      const approved = await run({ wait: true }, fakeClock(Date.now() + 40_000));
+      expect(approved.exit).toBe(0);
+      expect(approved.json.ok).toBe(true);
+    });
+
+    test('the PNG is gone after approval by the expected account', async () => {
+      const { file, publicKey } = await started();
+      mockPickupDevicePairing.mockImplementation(async () => ({ sealed: await sealAsBrowser(PAYLOAD, publicKey) }));
+      stubFetch([APPROVED]);
+      const ran = await run({ wait: true });
+      expect(ran.exit).toBe(0);
+      expect(gone(file)).toBe(true);
+    });
+
+    test('the PNG is gone after approval by another account', async () => {
+      const { file } = await started('someone.else@example.com');
+      stubFetch([APPROVED]);
+      const ran = await run({ wait: true });
+      expect(ran.json.code).toBe(ERROR_CODES.PAIR_ACCOUNT_MISMATCH);
+      expect(gone(file)).toBe(true);
+    });
+
+    test.each([
+      ['an expiry the service reports', EXPIRED, ERROR_CODES.PAIR_EXPIRED],
+      ['a denial', DENIED, ERROR_CODES.PAIR_DENIED],
+    ])('the PNG is gone after %s', async (_name, wire, code) => {
+      const { file } = await started();
+      stubFetch([wire]);
+      const ran = await run({ wait: true });
+      expect(ran.json.code).toBe(code);
+      expect(gone(file)).toBe(true);
+    });
+
+    test('the PNG is gone after the grant\'s own expiry passes', async () => {
+      const { file } = await started();
+      stubFetch([APPROVED]);
+      const ran = await run({ wait: true }, fakeClock(Date.now() + 10_000_000));
+      expect(ran.json.code).toBe(ERROR_CODES.PAIR_EXPIRED);
+      expect(gone(file)).toBe(true);
+    });
+
+    test('the PNG is gone after --cancel', async () => {
+      const { file } = await started();
+      const ran = await run({ cancel: true });
+      expect(ran.json).toEqual({ ok: true, status: 'cancelled' });
+      expect(gone(file)).toBe(true);
+    });
+
+    test('the PNG is gone when a later run sweeps the expired grant', async () => {
+      const { file } = await started();
+      savePairPendingRaw(JSON.stringify({ ...JSON.parse(pendingRaw()), expires_at: new Date(Date.now() - 1000).toISOString() }));
+      await run({});
+      expect(pendingExists()).toBe(false);
+      expect(gone(file)).toBe(true);
+    });
+
+    test('the PNG is gone when the pending file cannot be read, as far as it names one', async () => {
+      const { file } = await started();
+      savePairPendingRaw(JSON.stringify({ v: 1, qr_file: file }));
+      const ran = await run({ wait: true });
+      expect(ran.json.code).toBe(ERROR_CODES.PAIR_NOT_PENDING);
+      expect(gone(file)).toBe(true);
+    });
+
+    test('a new start run replaces the grant and the old PNG goes, the new one stays', async () => {
+      const first = await started('mike@example.com', { ...AUTHORIZE_BODY, device_code: 'device-first' });
+      const second = await started('mike@example.com', { ...AUTHORIZE_BODY, device_code: 'device-second' });
+      expect(second.file).not.toBe(first.file);
+      expect(gone(first.file)).toBe(true);
+      expect(existsSync(second.file)).toBe(true);
+      expect(pngFileInPending()).toBe(second.file);
+    });
+
+    test('a start run that fails keeps the pending grant and its PNG', async () => {
+      const { file } = await started();
+      globalThis.fetch = (async () => ({ ok: false, status: 500, json: async () => ({ error: 'down', code: 'AUTH_FAILED' }) }) as Response) as typeof fetch;
+      const ran = await run({ email: 'mike@example.com' });
+      expect(ran.exit).toBe(1);
+      expect(existsSync(file)).toBe(true);
+      expect(pngFileInPending()).toBe(file);
+    });
+
+    test('the QR encodes the same URL the elicitation shows, and that URL holds the short code only', async () => {
+      const { ran } = await started();
+      expect(URL_OF_GRANT()).toBe(ran.json.elicitation.url);
+      expect(ran.json.elicitation.url).toContain('code=ABCD-EFGH');
+      expect(ran.json.elicitation.url).not.toContain('device-1');
     });
   });
 

@@ -33,7 +33,7 @@ describe('AGENTS_BLOCK', () => {
         '- Run `capy help --json` for every command, its options, and its error codes.',
         '- Always pass `--json` and branch on the `code` field, never on message text.',
         '- To pair this machine, ask the human which email will approve, then run `capy pair --email <email>`. Never fill in the email yourself. Pairing is refused unless that account approves.',
-        '- If an elicitation has `kind` `"link"`, show the human its `url` and `code`, then run its `answer.wait` command at once in the foreground, and run it again whenever it exits 3 with `PAIR_STILL_WAITING`. Never fill in the email question yourself: ask the human.',
+        '- If an elicitation has `kind` `"link"`, show the human its `url`, `code` and `expires_at`, and its QR: the PNG (`qr.image`) if your client can show images, else `qr.text` only in a real terminal with a monospace grid and no extra line spacing, else say plainly that the QR cannot be shown here. Never use an external QR service. Then run its `answer.wait` command at once in the foreground, and run it again whenever it exits 3 with `PAIR_STILL_WAITING`. Never fill in the email question yourself: ask the human.',
         '- Before a command that writes, run `capy info --json` and check its `org`, `project` and `branch`. If they are not the ones the human means, stop and ask.',
         '- If a command starts a browser sign-in, this folder belongs to an organization this machine is not signed in to. Stop and tell the human. Never complete the sign-in yourself.',
         '- To find where a secret lives, run `capy secrets --json --name NAME`. It lists locations in the signed-in organization only, and never shows a value.',

@@ -3,10 +3,13 @@
  *
  * 1. Start run, `capy pair --email <email>`: asks for the grant, saves the pending grant
  *    (`auth/pairing/pendingGrant.ts`), prints ONE refusal with a `link` elicitation and exits 3 at once. No polling.
+ *    The link carries a QR of the approval URL (text, and a PNG file with the same bytes as a data URI). The PNG is a
+ *    temp file recorded in the pending grant and removed wherever the grant is removed.
  * 2. Wait run, `capy pair --wait`: polls the pending grant for at most `PAIR_WAIT_CEILING_MS`. Approved: the
  *    approving account is compared with the expected one (the anti-phishing check: a stranger who approves the
  *    link with their own account is refused by code, and nothing is installed); then the same post-approval path
- *    the terminal flow runs (`finishPairing`). Still pending: exit 3 again with the same `link`.
+ *    the terminal flow runs (`finishPairing`). Still pending: exit 3 again with the same `link`, its QR cut down to the
+ *    PNG's file path (no text, no data URI) so the answer stays small.
  * 3. No expected account known (no `--email`): exit 3 with a `form` asking for the email,
  *    before any request is made. The agent never fills that in itself.
  * 4. `capy pair --cancel` removes the pending grant.
@@ -14,6 +17,7 @@
  * stdout is JSON only, and every stop carries a code. Terminal behaviour is untouched: `pairEntry.ts` sends only
  * agent mode here (`json`, no terminal, or one of the new flags).
  */
+import { existsSync } from 'fs';
 import { authorizeDevice, pollDeviceTokenOnce, type DeviceAuthorizeResult, type DeviceTokenExchange, type DeviceTokenPoll } from '../auth/deviceGrant';
 import {
   readPendingPairGrant,
@@ -26,9 +30,11 @@ import { resolveKeepOrigin } from '../config/keepOrigin';
 import { resolveActiveUrl } from '../config/profileConfig';
 import { generatePairKeyPair } from '../crypto/pairCrypto';
 import { CapyError, ERROR_CODES } from '../types/index';
-import type { ElicitationForm, ElicitationLink } from '../ui/elicitation';
+import type { ElicitationForm, ElicitationLink, ElicitationLinkQr } from '../ui/elicitation';
 import { pairEmailDisplay } from '../ui/elicitationDisplay';
 import { EXIT_NEEDS_INPUT } from '../ui/interactive';
+import { createPairingQrImage, removePairingQrImage, type PairingQrImage } from '../ui/pairingPresentation';
+import { buildTerminalQr } from '../ui/terminalQr';
 import { PAIR_DEFAULT_PURPOSE, finishPairing, type PairOptions } from './pairCommand';
 import { refuseError } from './pairingRefusal';
 import { refuse, settle, type Refusal } from './refusal';
@@ -104,19 +110,64 @@ function emailForm(bin: string): ElicitationForm {
   };
 }
 
-function linkElicitation(grant: PendingPairGrant, bin: string): ElicitationLink {
+function linkElicitation(grant: PendingPairGrant, bin: string, qr: ElicitationLinkQr | null): ElicitationLink {
   return {
     kind: 'link',
     url: grant.deviceLink,
     code: grant.userCode,
     purpose: grant.purpose,
     expires_at: grant.expiresAt,
+    ...(qr ? { qr } : {}),
     answer: { wait: `${bin} pair --wait` },
   };
 }
 
-function linkRefusal(code: string, message: string, grant: PendingPairGrant, bin: string): Refusal {
-  return { code, message, exitCode: EXIT_NEEDS_INPUT, extra: { elicitation: linkElicitation(grant, bin) } };
+function linkRefusal(code: string, message: string, grant: PendingPairGrant, bin: string, qr: ElicitationLinkQr | null): Refusal {
+  return { code, message, exitCode: EXIT_NEEDS_INPUT, extra: { elicitation: linkElicitation(grant, bin, qr) } };
+}
+
+/**
+ * The QR is an accelerant, never the only path: the link and code are always in the elicitation. A QR that cannot be
+ * made is left out and the pairing goes on. `buildTerminalQr` renders off a TTY and with NO_COLOR set (it has no
+ * terminal checks), unlike `renderTerminalQr`, which the terminal flow uses and which stays as it was.
+ */
+async function tryQrImage(approvalUrl: string): Promise<PairingQrImage | null> {
+  try {
+    return await createPairingQrImage(approvalUrl);
+  } catch {
+    return null;
+  }
+}
+
+function tryQrText(approvalUrl: string): string | null {
+  try {
+    return buildTerminalQr(approvalUrl).text;
+  } catch {
+    return null;
+  }
+}
+
+/** The QR of a start run: text, and the PNG with its data URI. `null` when neither could be made. */
+function startQr(approvalUrl: string, image: PairingQrImage | null): ElicitationLinkQr | null {
+  const text = tryQrText(approvalUrl);
+  if (text === null && image === null) return null;
+  return { ...(text !== null ? { text } : {}), ...(image ? { image } : {}) };
+}
+
+/** The QR of a still-waiting answer: only the PNG's file path, and only while that file exists. No text, no data URI. */
+function waitQr(grant: PendingPairGrant): ElicitationLinkQr | null {
+  if (grant.qrFile === undefined || !existsSync(grant.qrFile)) return null;
+  return { image: { mime_type: 'image/png', file: grant.qrFile } };
+}
+
+/** Saves the grant; when that fails its QR file is removed too, so nothing is left behind. */
+function saveOrDiscardQr(grant: PendingPairGrant): void {
+  try {
+    savePendingPairGrant(grant);
+  } catch (error) {
+    if (grant.qrFile !== undefined) removePairingQrImage(grant.qrFile);
+    throw error;
+  }
 }
 
 type Outcome =
@@ -167,22 +218,28 @@ async function startRun(options: PairAgentOptions, deps: PairAgentDeps): Promise
     || !isPositiveNumber(authorize.interval)) {
     throw malformedAuthorize();
   }
+  const deviceLink = `${resolveKeepOrigin()}/device?code=${encodeURIComponent(authorize.user_code)}`;
+  const previous = readPendingPairGrant();
+  const image = await tryQrImage(deviceLink);
   const grant: PendingPairGrant = {
     deviceCode: authorize.device_code,
     keyPair,
     userCode: authorize.user_code,
-    deviceLink: `${resolveKeepOrigin()}/device?code=${encodeURIComponent(authorize.user_code)}`,
+    deviceLink,
     expectedEmail: expected,
     force: options.force === true,
     apiUrl,
     purpose: PAIR_DEFAULT_PURPOSE,
     expiresAt: expiryOf(authorize, now()),
     intervalSeconds: authorize.interval,
+    ...(image ? { qrFile: image.file } : {}),
   };
-  savePendingPairGrant(grant);
+  saveOrDiscardQr(grant);
+  // The new grant replaced the old one: the old one's QR file goes with it.
+  if (previous?.qrFile !== undefined) removePairingQrImage(previous.qrFile);
   return {
     kind: 'refusal',
-    refusal: linkRefusal(ERROR_CODES.PAIR_APPROVAL_PENDING, 'Waiting for approval.', grant, bin), // COPY-FLAG
+    refusal: linkRefusal(ERROR_CODES.PAIR_APPROVAL_PENDING, 'Waiting for approval.', grant, bin, startQr(deviceLink, image)), // COPY-FLAG
   };
 }
 
@@ -292,7 +349,7 @@ async function waitRun(options: PairAgentOptions, deps: PairAgentDeps): Promise<
       savePendingPairGrant(kept);
       return {
         kind: 'refusal',
-        refusal: linkRefusal(ERROR_CODES.PAIR_STILL_WAITING, 'Still waiting for approval.', kept, binName(options.devMode === true)), // COPY-FLAG
+        refusal: linkRefusal(ERROR_CODES.PAIR_STILL_WAITING, 'Still waiting for approval.', kept, binName(options.devMode === true), waitQr(kept)), // COPY-FLAG
       };
     }
   }
