@@ -76,19 +76,9 @@ Until step 3 the website keeps serving its current pinned scripts.
 
 ## Older releases
 
-Releases made before this change have archives and `checksums-<version>.txt` but no
-`install.sh` asset, so `CAPY_VERSION=<old version>` through the loader would fail to
-download. `scripts/install/backfill-release-scripts.ts` generates scripts for them:
-
-```sh
-bun scripts/install/backfill-release-scripts.ts --out <dir> v0.9.7 v0.9.8
-```
-
-For each tag it downloads that release's checksums file, resolves the tag's commit with
-`git rev-list -n 1 <tag>`, runs the generator and writes `<dir>/<tag>/install.sh` and
-`install.ps1`. It prints the files written, or a coded reason a tag was skipped (no
-checksums file, a missing archive checksum, unknown tag). It only writes local files; it
-never uploads. Attaching the output to a release is a separate, manual step.
+Releases made before this change have no `install.sh` asset. `CAPY_VERSION=<old version>`
+through the loader stops with a download error. Pinning works from the first release
+that publishes the scripts.
 
 ## What is tested
 
@@ -106,8 +96,6 @@ never uploads. Attaching the output to a release is a separate, manual step.
   loader to the release installer). Run it with
   `bun run test:install`, or under another shell with
   `CAPY_TEST_SHELL=/bin/dash bun run test:install`. It also runs in `bun run test`.
-- `tests/scripts/backfillReleaseScripts.test.ts`: the backfill logic with fake downloads
-  and commits.
-- `bun run typecheck:install` type-checks the generator and the backfill script.
+- `bun run typecheck:install` type-checks the generator.
 - The release workflow smoke-tests the published script in `alpine:3`.
 - The Windows workflow installs, reinstalls, updates in place and stops for an npm shim.
