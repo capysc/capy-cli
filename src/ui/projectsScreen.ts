@@ -821,7 +821,8 @@ function settleTab(state: ProjectsScreenState): ProjectsReduceResult {
   if (view === null || project === undefined) return noEffect(state);
   const tabs = visibleTabs(state.data, project);
   if (tabs.includes(view.tab)) return noEffect(state);
-  return loadsFor({ ...state, open: { ...view, tab: tabs[0] ?? 'branches', scroll: 0 } });
+  // A load's answer can land the tab on Git Repos with no key pressed: its first-show check starts here too.
+  return withRepoRowsCheck(loadsFor({ ...state, open: { ...view, tab: tabs[0] ?? 'branches', scroll: 0 } }));
 }
 
 /** The load's result for one project: its index, or what the failure was. */
@@ -1419,7 +1420,7 @@ function usersTabLines(
   return ['', `${m}${DIM}${padTo('EMAIL', emailW)}${gap}ROLE${RESET}`, '', ...shown]; // COPY-FLAG: EMAIL, ROLE
 }
 
-/** `usersActive`: the Users tab's keys (change role, invite) work, because the member list is in. */
+/** `usersActive`: the Users tab's keys (change role, invite) work, because the member list is in. `repoRowCount`: the Git Repos tab offers d only with more than one row. */
 function projectFooter(tab: ProjectTab, usersActive: boolean, repoRowCount: number): string {
   const lead = ((): readonly string[] => {
     // The Settings tab has actions, not a table: Enter runs the one under the cursor.
