@@ -287,8 +287,9 @@ describe('a project\'s index is read when its Secrets tab is shown', () => {
     // The "also in other projects" note is shown only when the response holds those locations.
     expect(openedFiltered.open?.secrets.scope?.otherProjects).toEqual({});
     expect(Object.values(openedWhole.open?.secrets.scope?.otherProjects ?? {})).toEqual([1]);
-    expect(strip(render(openedFiltered, 140, 24))).not.toContain('other project');
-    expect(strip(render(openedWhole, 140, 24))).toContain('also in 1 other project');
+    // The note's wording is `alsoInOtherProjectsText` (`(+N project[s])`).
+    expect(strip(render(openedFiltered, 140, 24))).not.toContain('(+');
+    expect(strip(render(openedWhole, 140, 24))).toContain('(+1 project)');
   });
 
   test('a refusal (PERMISSION_DENIED) hides the index tabs, decided by the code', async () => {

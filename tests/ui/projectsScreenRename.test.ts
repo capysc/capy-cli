@@ -95,6 +95,23 @@ describe('Rename project on the Settings tab', () => {
     expect(strip(render(press(done, ESC), 100, 24))).not.toContain('frontend');
   });
 
+  test('renamed on the lazy screen: the project index loaded for it carries the new name too', () => {
+    const lazyData: ProjectsData = {
+      ...data,
+      index: null,
+      lazy: { indexes: { p1: { status: 'loaded', index: { ...data.index!, coveredProjectIds: ['p1'] } } }, members: 'unloaded', adminProjectIds: null },
+    };
+    const open = press(initialProjectsScreenState(lazyData), ENTER, LEFT, ...downs, ENTER, ...clear, ...'web'.split(''));
+    const working = handleKey(open, ENTER).state;
+    const done = applyManageDone(working, { ok: true, lines: ['Renamed frontend to web.'], renamed: { id: 'p1', name: 'web' } });
+
+    const load = done.data.lazy?.indexes.p1;
+    expect(load?.status).toBe('loaded');
+    expect(load?.status === 'loaded' ? load.index.rows[0].locations[0].project_name : null).toBe('web');
+    expect(done.data.index).toBeNull();
+    expect(done.data.projects[0].name).toBe('web');
+  });
+
   test('refused: back in the field with the typed name kept and the refusal shown; nothing is renamed', () => {
     const working = handleKey(press(atRename(), ...clear, ...'taken'.split('')), ENTER).state;
     const done = applyManageDone(working, { ok: false, refusal: { code: 'PROJECT_NAME_EXISTS', message: 'That name is taken.' } });

@@ -3,6 +3,8 @@ import {
   type ProjectsData,
   type ProjectsScreenState,
   applyManageDone,
+  applyMembersLoaded,
+  applyProjectIndexLoaded,
   applyRepoRowsChecked,
   handleKey,
   initialProjectsScreenState,
@@ -205,5 +207,33 @@ describe('the confirm hint', () => {
     expect(answered.effect).toBeNull();
     expect(answered.state.manage).toBeNull();
     expect(answered.state.notes).toEqual([MANAGE_CANCELLED_TEXT]);
+  });
+});
+
+describe('the [remote] check on the lazy screen', () => {
+  test('when refusals move the tab onto Git Repos with no key pressed, the check starts at once', () => {
+    const lazyData: ProjectsData = {
+      ...dataWith([REAL, TEMP]),
+      lazy: { indexes: {}, members: 'unloaded', adminProjectIds: null },
+    };
+    const opened = handleKey(initialProjectsScreenState(lazyData, false), ENTER);
+    expect(opened.effect).toEqual({ type: 'projectIndexLoad', projectId: 'p1' });
+
+    // The index is refused: the Secrets tab goes, the screen moves to Users and asks for the members.
+    const noIndex = applyProjectIndexLoaded(opened.state, 'p1', { ok: false, denied: true });
+    expect(noIndex.state.open?.tab).toBe('users');
+    expect(noIndex.effect).toEqual({ type: 'projectMembersLoad' });
+
+    // The members are refused too: the screen lands on Git Repos by itself, and its check starts.
+    const noMembers = applyMembersLoaded(noIndex.state, { ok: false, denied: true });
+    expect(noMembers.state.open?.tab).toBe('repos');
+    expect(noMembers.effect).toEqual({
+      type: 'projectRepoRowsCheck',
+      project: { id: 'p1', name: 'backend' },
+      rows: [
+        { host: 'github.com', owner: 'Acme', name: 'mono', path: 'backend' },
+        { host: 'github.com', owner: 'Acme', name: 'mono', path: '.claude/capy-temp' },
+      ],
+    });
   });
 });
