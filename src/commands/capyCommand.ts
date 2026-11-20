@@ -1376,6 +1376,17 @@ export class CapyCommand {
       variables: Object.keys(initialKeep.variables),
     } : 'NOT FOUND');
 
+    // readKeepFile() prefers the untracked working copy (.capy/keep.lock), so a
+    // deleted tracked keep.lock still reads as "present" and the server
+    // bootstrap below is skipped. Put the tracked file back from the working
+    // copy (what writeKeepFile last wrote there) so `capy run` and project
+    // detection find the project again. writeKeepFile only creates a missing
+    // tracked file; an existing one is never touched (CAP-303).
+    if (initialKeep && this.options.dryRun !== true && !existsSync(this.projectManager.getKeepPath())) {
+      this.debug('tracked keep.lock missing, restoring it from .capy/keep.lock');
+      this.fileManager.writeKeepFile(initialKeep);
+    }
+
     const pinned = pinnedHashes(initialKeep, branch);
     this.debug('pinned', pinned);
 
