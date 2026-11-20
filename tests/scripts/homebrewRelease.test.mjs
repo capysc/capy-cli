@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
 import { test, mock } from 'node:test';
-import { releaseVersion, waitForNpmRelease } from '../../scripts/wait-for-npm-release.mjs';
+import { homebrewUpdate, readHomebrewUpdate, releaseVersion, waitForNpmRelease } from '../../scripts/wait-for-npm-release.mjs';
 
 const version = '0.9.17';
 const tarball = `https://registry.npmjs.org/@capysc/cli/-/cli-${version}.tgz`;
 const metadata = () => Response.json({ name: '@capysc/cli', version, dist: { tarball } });
+const formula = (release) => `class Capy < Formula\n  url "https://registry.npmjs.org/@capysc/cli/-/cli-${release}.tgz"\nend\n`;
 const options = (responses) => {
   const iterator = responses.values();
   return {
@@ -23,6 +24,23 @@ test('stable release tags are normalized; missing, prerelease, and shell-like ta
     await assert.rejects(waitForNpmRelease(tag, config), /stable release tag/);
     assert.equal(config.fetchImpl.mock.callCount(), 0);
   }
+});
+
+test('the tap is bumped only for a newer release, including minor and major boundaries', () => {
+  assert.deepEqual(homebrewUpdate(version, formula('0.9.13')), { currentVersion: '0.9.13', needsUpdate: true });
+  assert.equal(homebrewUpdate(version, formula(version)).needsUpdate, false);
+  assert.equal(homebrewUpdate(version, formula('0.9.18')).needsUpdate, false);
+  assert.equal(homebrewUpdate('0.10.0', formula('0.9.17')).needsUpdate, true);
+  assert.equal(homebrewUpdate('1.0.0', formula('0.99.99')).needsUpdate, true);
+  assert.throws(() => homebrewUpdate(version, 'unknown formula source'), /Cannot determine/);
+});
+
+test('the tap check reads current main through the API and fails closed on errors', async () => {
+  const fetchImpl = mock.fn(async () => new Response(formula(version)));
+  assert.equal((await readHomebrewUpdate(version, { fetchImpl, token: 'test-token' })).needsUpdate, false);
+  assert.equal(fetchImpl.mock.calls[0].arguments[0], 'https://api.github.com/repos/capysc/homebrew-tap/contents/Formula/capy.rb?ref=main');
+  assert.equal(fetchImpl.mock.calls[0].arguments[1].headers.Authorization, 'Bearer test-token');
+  await assert.rejects(readHomebrewUpdate(version, { fetchImpl: async () => new Response(null, { status: 403 }), token: '' }), /Cannot read the Homebrew formula/);
 });
 
 test('published metadata and its actual tarball must both be available', async () => {

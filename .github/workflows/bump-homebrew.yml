@@ -33,9 +33,11 @@ jobs:
         id: npm
         env:
           RELEASE_TAG: ${{ inputs.tag || github.event.release.tag_name }}
+          GH_TOKEN: ${{ github.token }}
         run: node scripts/wait-for-npm-release.mjs "$RELEASE_TAG"
 
       - name: Bump capy formula
+        if: steps.npm.outputs.bump == 'true'
         # v11 includes SystemCommand::Helpers, required by current Homebrew.
         uses: dawidd6/action-homebrew-bump-formula@346ef10bbd55df1c9c70fbaa6b016d26876eefb1 # v11
         with:

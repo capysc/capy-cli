@@ -12,6 +12,26 @@ export function releaseVersion(tag) {
   return tag.replace(/^v/, '');
 }
 
+export function homebrewUpdate(version, formula) {
+  const currentVersion = formula.match(/^\s*url "https:\/\/registry\.npmjs\.org\/@capysc\/cli\/-\/cli-(\d+\.\d+\.\d+)\.tgz"/m)?.[1];
+  if (!currentVersion) throw new Error('Cannot determine the current Homebrew formula version; refusing to update it.');
+  const current = currentVersion.split('.').map(Number);
+  const difference = version.split('.').map((part, index) => Math.sign(Number(part) - current[index])).find((part) => part !== 0) ?? 0;
+  return { currentVersion, needsUpdate: difference > 0 };
+}
+
+export async function readHomebrewUpdate(version, { fetchImpl = fetch, token = process.env.GH_TOKEN } = {}) {
+  const response = await fetchImpl('https://api.github.com/repos/capysc/homebrew-tap/contents/Formula/capy.rb?ref=main', {
+    headers: {
+      Accept: 'application/vnd.github.raw+json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (!response.ok) throw new Error(`Cannot read the Homebrew formula (HTTP ${response.status}).`);
+  return homebrewUpdate(version, await response.text());
+}
+
 export async function waitForNpmRelease(tag, {
   fetchImpl = fetch,
   sleep = setTimeout,
@@ -55,8 +75,12 @@ if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.m
   try {
     const release = await waitForNpmRelease(process.argv[2]);
     console.log(`npm release ready: ${release.tarball}`);
+    const update = await readHomebrewUpdate(release.version);
+    console.log(update.needsUpdate
+      ? `Homebrew needs an update: ${update.currentVersion} -> ${release.version}`
+      : `Homebrew is already at ${update.currentVersion}; no update needed for ${release.version}.`);
     if (process.env.GITHUB_OUTPUT) {
-      await appendFile(process.env.GITHUB_OUTPUT, `tag=${release.tag}\nversion=${release.version}\n`);
+      await appendFile(process.env.GITHUB_OUTPUT, `tag=${release.tag}\nversion=${release.version}\nbump=${update.needsUpdate}\n`);
     }
   } catch (error) {
     console.error(error.message);
