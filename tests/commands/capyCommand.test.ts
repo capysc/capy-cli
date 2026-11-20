@@ -150,6 +150,8 @@ describe('CapyCommand', () => {
       getDefaultProjectName: mock(() => 'test-project'),
       getEnvPath: mock(() => '.env'),
       readKeepFile: mock(() => undefined),
+      // An existing file by default: the tracked keep.lock is present unless a test says otherwise.
+      getKeepPath: mock(() => __filename),
       readSyncState: mock(() => null),
       readActiveBranch: mock(() => null),
       writeActiveBranch: mock(() => undefined),
@@ -885,6 +887,72 @@ describe('CapyCommand', () => {
       expect(consoleSpy).toHaveBeenCalledWith('Everything is up to date!');
 
       consoleSpy.mockRestore();
+    });
+
+    describe('deleted tracked keep.lock with a .capy/keep.lock working copy', () => {
+      const workingKeep = {
+        version: '3.0',
+        org_id: 'capy-123',
+        project_id: 'proj-123',
+        project_name: 'test-project',
+        variables: {},
+      };
+
+      const TRACKED = '/capy-test-project/keep.lock';
+      let trackedPresent: boolean;
+      let existsSyncSpy: ReturnType<typeof spyOn>;
+
+      beforeEach(() => {
+        // readKeepFile() resolves to the working copy; the tracked file is gone.
+        mockProjectManager.readKeepFile.mockReturnValue(workingKeep);
+        mockProjectManager.getKeepPath.mockReturnValue(TRACKED);
+        trackedPresent = false;
+        // Own existsSync outright: earlier tests in this file leave it spied.
+        existsSyncSpy = spyOn(fs, 'existsSync').mockImplementation(((p: any) => p === TRACKED && trackedPresent) as any);
+      });
+
+      afterEach(() => {
+        existsSyncSpy.mockRestore();
+      });
+
+      test('restores the tracked keep.lock from the working copy', async () => {
+        const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
+
+        await (capyCommand as any).syncProject(mockProjectState);
+
+        expect(mockFileManager.writeKeepFile).toHaveBeenCalledWith(workingKeep);
+        consoleSpy.mockRestore();
+      });
+
+      test('restores it even when the remote fetch fails (offline)', async () => {
+        mockServiceClient.getDecryptData.mockRejectedValue(new Error('network down'));
+        const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
+
+        await (capyCommand as any).syncProject(mockProjectState);
+
+        expect(mockFileManager.writeKeepFile).toHaveBeenCalledWith(workingKeep);
+        consoleSpy.mockRestore();
+      });
+
+      test('a dry run writes nothing', async () => {
+        capyCommand = new CapyCommand({ dryRun: true } as any);
+        const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
+
+        await (capyCommand as any).syncProject(mockProjectState);
+
+        expect(mockFileManager.writeKeepFile).not.toHaveBeenCalled();
+        consoleSpy.mockRestore();
+      });
+
+      test('an existing tracked keep.lock is left alone', async () => {
+        trackedPresent = true;
+        const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
+
+        await (capyCommand as any).syncProject(mockProjectState);
+
+        expect(mockFileManager.writeKeepFile).not.toHaveBeenCalled();
+        consoleSpy.mockRestore();
+      });
     });
 
     test('should handle authentication failure during sync', async () => {
