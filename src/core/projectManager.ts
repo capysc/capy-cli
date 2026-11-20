@@ -59,7 +59,8 @@ export class ProjectManager {
    * run` and project-init detection read directly, and the only copy that
    * ever goes into git (see FileManager.writeKeepFile). Readers after
    * pins/variables should go through `readKeepFile()` instead, which prefers
-   * the untracked working copy when one exists.
+   * the untracked working copy when one exists. (`--no-pr` on `capy add`,
+   * `edit` and `remove` also writes it, uncommitted.)
    */
   getKeepPath(): string {
     return join(this.projectRoot, 'keep.lock');

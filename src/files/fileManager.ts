@@ -304,7 +304,10 @@ export class FileManager {
    * what caused constant merge conflicts and made `git pull` refuse with
    * "local changes would be overwritten" when the auto-commit didn't happen
    * to run. Only an explicit action (or `capy deploy`, into its
-   * own isolated worktree) ever writes the tracked file now.
+   * own isolated worktree) ever writes the tracked file now. The one other
+   * explicit action is `--no-pr` on `capy add`, `edit` and `remove`
+   * (`runKeepLockPrStep`): it writes the tracked file itself and leaves it
+   * uncommitted; this method is not involved.
    */
   writeKeepFile(keep: KeepFile): void {
     const content = serializeKeep(keep);
