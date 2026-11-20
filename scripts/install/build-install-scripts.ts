@@ -1,7 +1,7 @@
 // Writes install.sh and install.ps1 for one release.
 //
 //   bun scripts/install/build-install-scripts.ts \
-//     --version 0.9.17 --commit <40-hex sha> --checksums dist/checksums-0.9.17.txt --out dist
+//     --version 0.9.18 --commit <40-hex sha> --checksums dist/checksums-0.9.18.txt --out dist
 //
 // Exits non-zero, writing nothing, when a checksum is missing or malformed or a
 // placeholder is left unfilled.
