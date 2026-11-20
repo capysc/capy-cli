@@ -37,6 +37,7 @@
     "prepublishOnly": "npm pkg delete bin.capy-dev bin.capy-staging",
     "test": "bash tests/run-tests.sh",
     "test:release": "node --test tests/scripts/npmRemoteAuth.test.mjs",
+    "test:homebrew": "node --test tests/scripts/homebrewRelease.test.mjs",
     "release:login": "node scripts/npm-remote.mjs login",
     "release:publish": "node scripts/npm-remote.mjs publish",
     "typecheck": "tsc --noEmit",

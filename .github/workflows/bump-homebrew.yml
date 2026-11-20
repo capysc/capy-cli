@@ -6,24 +6,40 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Release tag (e.g. v0.2.1). If blank, uses the release event tag.'
-        required: false
+        description: 'Published stable release tag (e.g. v0.9.17).'
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: homebrew-capy
+  cancel-in-progress: false
 
 jobs:
   bump:
     # Skip pre-releases — they shouldn't push to the stable tap.
     if: github.event_name == 'workflow_dispatch' || github.event.release.prerelease == false
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      # npm sometimes lags a release event by a few seconds. Give it a
-      # breather before brew bump-formula-pr fetches the tarball.
+      - uses: actions/checkout@v4
+
+      - name: Test npm publication checks
+        run: node --test tests/scripts/homebrewRelease.test.mjs
+
+      # A release event can arrive before npm's metadata or tarball is ready.
       - name: Wait for npm to propagate
-        run: sleep 60
+        id: npm
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.event.release.tag_name }}
+        run: node scripts/wait-for-npm-release.mjs "$RELEASE_TAG"
 
       - name: Bump capy formula
-        uses: dawidd6/action-homebrew-bump-formula@v5
+        # v11 includes SystemCommand::Helpers, required by current Homebrew.
+        uses: dawidd6/action-homebrew-bump-formula@346ef10bbd55df1c9c70fbaa6b016d26876eefb1 # v11
         with:
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           tap: capysc/homebrew-tap
           formula: capy
-          tag: ${{ inputs.tag || github.event.release.tag_name }}
+          tag: ${{ steps.npm.outputs.tag }}
