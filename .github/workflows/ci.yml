@@ -53,6 +53,9 @@ jobs:
       - name: Release authentication tests
         run: bun run test:release
 
+      - name: Homebrew release publication tests
+        run: bun run test:homebrew
+
       # Embedded browser screens: dependency freeze + no external URLs +
       # __CAPY_DATA__ placeholders intact.
       - name: Screen checks
