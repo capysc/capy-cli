@@ -14,7 +14,7 @@
 import { createHash } from 'crypto';
 import { serializeKeep } from '../files/fileManager';
 import { deriveResourceId } from '../crypto/resourceId';
-import { KeepFile, KeepVariableEntry } from '../types/index';
+import { ERROR_CODES, KeepFile, KeepVariableEntry } from '../types/index';
 import { TargetDeliveryDescriptor, isDeliveryDescriptor, upsertTargetElement } from './targetsGate';
 
 /** keep.lock records this 16-hex-char hash per (var, branch) — never the value. */
@@ -236,4 +236,38 @@ export function reconcileVars(
   const added = current.filter((v) => !kn.has(v));
   const removed = selected.filter((v) => !cur.has(v));
   return { added, removed, drifted: added.length > 0 || removed.length > 0 };
+}
+
+/**
+ * Why a deploy must stop before it delivers anything: the folder has no `.env` to read values from, or none of the
+ * target's variables are in it. Either way the delivery would take every variable off the platform.
+ */
+export type VarSetProblem =
+  | { readonly code: typeof ERROR_CODES.NO_ENV_FILE }
+  | { readonly code: typeof ERROR_CODES.DEPLOY_REMOVES_ALL_VARS; readonly removed: readonly string[] };
+
+/**
+ * `selected`: the target's variables. `current`: the variables this folder has on its branch.
+ * Decided the same way in a dry run and in a real run, so the two never disagree.
+ */
+export function varSetProblem(
+  envFileExists: boolean,
+  selected: readonly string[],
+  current: readonly string[],
+): VarSetProblem | null {
+  if (!envFileExists) return { code: ERROR_CODES.NO_ENV_FILE };
+  const here = new Set(current);
+  if (selected.length > 0 && selected.every((v) => !here.has(v))) {
+    return { code: ERROR_CODES.DEPLOY_REMOVES_ALL_VARS, removed: [...selected] };
+  }
+  return null;
+}
+
+/** The refusal sentence, led by its code like the branch refusals. */
+export function describeVarSetProblem(p: VarSetProblem, targetName: string, branch: string): string {
+  // COPY-FLAG: minimal and neutral.
+  if (p.code === ERROR_CODES.NO_ENV_FILE) {
+    return `[${p.code}] this folder has no .env, so there are no values to deploy to "${targetName}". Nothing was changed. Run \`capy checkout ${branch}\` first.`;
+  }
+  return `[${p.code}] none of the ${p.removed.length} variable(s) of target "${targetName}" are in this folder's .env. Nothing was changed. Run \`capy checkout ${branch}\` first, or edit the target with \`capy deploy --edit\`.`;
 }

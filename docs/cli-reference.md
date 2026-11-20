@@ -1197,6 +1197,7 @@ Every refusal carries a stable `code` — branch on it, never on message text.
 - `DEPLOY_BATCH_PARTIAL`
 - `DEPLOY_NOTHING_TO_DEPLOY`
 - `DEPLOY_VARS_MISSING`
+- `DEPLOY_REMOVES_ALL_VARS`
 - `DEPLOY_PREFLIGHT_FAILED`
 - `DEPLOY_PUSH_FAILED`
 - `SECRET_NOT_PERSISTED`

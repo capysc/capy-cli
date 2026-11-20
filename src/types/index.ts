@@ -986,6 +986,8 @@ export const ERROR_CODES = {
   DEPLOY_NOTHING_TO_DEPLOY: 'DEPLOY_NOTHING_TO_DEPLOY',
   /** A batch deploy target ships a variable that is not in its Capy branch. Nothing was pushed to the platform. */
   DEPLOY_VARS_MISSING: 'DEPLOY_VARS_MISSING',
+  /** `capy deploy`: none of the target's variables are in this folder's `.env`, so the deploy would remove them all from the platform. Nothing was pushed. */
+  DEPLOY_REMOVES_ALL_VARS: 'DEPLOY_REMOVES_ALL_VARS',
   /** A batch deploy target's preflight refused and gave no code of its own. Nothing was pushed to the platform. */
   DEPLOY_PREFLIGHT_FAILED: 'DEPLOY_PREFLIGHT_FAILED',
   /** A batch deploy target's delivery to the platform failed and gave no code of its own. */
