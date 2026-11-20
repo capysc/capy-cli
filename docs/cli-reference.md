@@ -2,7 +2,7 @@
 
 # capy CLI reference
 
-Version `0.9.17`. Generated from `capy help --json`.
+Version `0.9.18`. Generated from `capy help --json`.
 
 ## Commands
 
@@ -1027,6 +1027,8 @@ Every refusal carries a stable `code` — branch on it, never on message text.
 - `BRANCH_NOT_FOUND`
 - `CANNOT_DELETE_CURRENT_BRANCH`
 - `NO_ACTIVE_BRANCH`
+- `UNCOMMITTED_CHANGES`
+- `UNPUSHED_CHANGES`
 - `BRANCH_STATE_INCONSISTENT`
 - `SNAPSHOT_NOT_FOUND`
 - `NO_SECRETS`
