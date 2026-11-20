@@ -3,8 +3,15 @@ name: Windows installer
 # Runs the generated install.ps1 on Windows runners, in Windows PowerShell 5.1
 # and PowerShell 7. The script is generated from the template with the latest
 # published release's version and checksums, then installs that release.
+# A tag push carries no path list, so without `branches` every release tag
+# started this workflow before the release had its checksums file. It now runs
+# for a release once "Release binaries" has uploaded the assets.
 on:
+  workflow_run:
+    workflows: ["Release binaries"]
+    types: [completed]
   push:
+    branches: [main]
     paths:
       - scripts/install/install.ps1.tmpl
       - scripts/install/render.ts
@@ -22,6 +29,7 @@ permissions:
 
 jobs:
   install:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     runs-on: windows-latest
     timeout-minutes: 10
     strategy:
