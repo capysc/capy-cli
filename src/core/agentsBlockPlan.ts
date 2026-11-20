@@ -24,6 +24,9 @@ export const AGENTS_BLOCK = [
   "This repo's secrets are managed by Capy.",
   '- Run `capy help --json` for every command, its options, and its error codes.',
   '- Always pass `--json` and branch on the `code` field, never on message text.',
+  '- To send a secret to GitHub or any other platform, run `capy deploy --json` (`capy deploy list --json` shows the targets). If no deploy target is set up, ask the human whether to set one up, and do not set one up yourself. Never push the value any other way, such as `gh secret set` or `vercel env add`. Never add `--yes` on your own.', // COPY-FLAG
+  '- To add a secret, run `capy add NAME --json`. To change one, run `capy edit NAME --json`. Pipe the value in on stdin from the file or command that holds it, and never read it into your context.', // COPY-FLAG
+  '- After any secret change, ask the human whether to open the keep.lock PR, and say why. `keep.lock` is the committed file that pins which version of each secret this branch uses. Until the change is merged, the repo still points at the old version, and a CI deploy that runs when `keep.lock` changes does not run. Never pass `--pr`, `--no-pr` or `--yes` before the human has answered.', // COPY-FLAG
   '- Run `capy pair --json` in an interactive terminal/PTY. After browser approval, it asks "Enable this location as [email]?" before installing the session or keys. Show the returned email to the human and obtain explicit Yes/No approval before answering. Never automatically confirm or pipe `yes`; Enter defaults to No. No upfront email is required.',
   '- Before a command that writes, run `capy info --json` and check its `org`, `project` and `branch`. If they are not the ones the human means, stop and ask.', // COPY-FLAG
   '- If a command starts a browser sign-in, this folder belongs to an organization this machine is not signed in to. Stop and tell the human. Never complete the sign-in yourself.', // COPY-FLAG
