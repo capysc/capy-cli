@@ -265,7 +265,8 @@ describe('what comes after the gate comes after it', () => {
   });
 
   test('capy deploy: the preflight and then the confirm screen follow the gate', async () => {
-    project();
+    // A gate that passed leaves the folder with its `.env`; a deploy from a folder without one is refused.
+    writeFileSync(join(project(), '.env'), 'X=1\n');
     await ran(() => deployCommand('t', {}, process.cwd()), true);
     expect(events()).toEqual(['gate', 'preflight', 'confirm']);
   });
