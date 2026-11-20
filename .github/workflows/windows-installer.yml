@@ -28,6 +28,10 @@ jobs:
       fail-fast: false
       matrix:
         shell: [powershell, pwsh]
+    # The matrix cannot be used in a step's own `shell`; the job default can take it.
+    defaults:
+      run:
+        shell: ${{ matrix.shell }}
     steps:
       - uses: actions/checkout@v4
 
@@ -51,7 +55,6 @@ jobs:
           echo "CAPY_EXPECTED_VERSION=$VERSION" >> "$GITHUB_ENV"
 
       - name: Install, run, and reinstall the official Windows release
-        shell: ${{ matrix.shell }}
         run: |
           $ErrorActionPreference = 'Stop'
           $script = Join-Path $env:RUNNER_TEMP 'generated\install.ps1'
@@ -84,7 +87,6 @@ jobs:
           }
 
       - name: Update an existing standalone capy in place
-        shell: ${{ matrix.shell }}
         run: |
           $ErrorActionPreference = 'Stop'
           $script = Join-Path $env:RUNNER_TEMP 'generated\install.ps1'
@@ -112,7 +114,6 @@ jobs:
           }
 
       - name: Stop when capy came from npm
-        shell: ${{ matrix.shell }}
         run: |
           $ErrorActionPreference = 'Stop'
           $script = Join-Path $env:RUNNER_TEMP 'generated\install.ps1'
