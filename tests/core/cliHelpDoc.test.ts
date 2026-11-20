@@ -125,6 +125,16 @@ describe('buildCliHelpDoc', () => {
     expect(foo.options.map((o) => o.long)).toEqual(['--visible']);
   });
 
+  test('conventions name what v0.9.18 adds: the rename form, the secrets set/deploy answers, and commands with no folder', () => {
+    const doc = buildCliHelpDoc(buildProgram());
+    expect(doc.conventions.elicitation).toContain('`capy projects rename` with no name refuses with PROJECT_NAME_REQUIRED');
+    expect(doc.conventions.conflicts).toContain('`secrets set` and `secrets deploy` take the same --resolve and --conflict');
+    expect(doc.conventions.orgs).toContain('ORG_SELECTION_REQUIRED');
+    expect(doc.conventions.orgs).toContain('users, grant-branch, revoke-branch');
+    expect(doc.errorCodes).toContain('ORG_SELECTION_REQUIRED');
+    expect(doc.errorCodes).toContain('PROJECT_NAME_REQUIRED');
+  });
+
   test('a short-only option (no long form) reports the short flag, not the value placeholder', () => {
     const program = new Command();
     program.name('capy').version('1.0.0');

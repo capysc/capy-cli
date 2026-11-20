@@ -823,7 +823,7 @@ const projectsCmd = program
 
 projectsCmd
   .command('rename [new-name]')
-  .description('Rename the project of this folder, and update its keep.lock (owners only)') // COPY-FLAG
+  .description("Rename a project and update its keep.lock: this folder's project, or the one --project-id names (owners and admins only)") // COPY-FLAG
   .option('--project-id <id>', 'rename the project with this id instead of the one this folder belongs to') // COPY-FLAG
   .option('--non-tty', 'same as --json: never ask, and answer in JSON (agents/CI)') // COPY-FLAG
   .option('--json', 'emit machine-readable JSON instead of the human UI')
@@ -1080,7 +1080,7 @@ program
 
 program
   .command('run')
-  .description('Run a command with decrypted secrets')
+  .description('Run a command with decrypted secrets (sets CAPY_RUN=1 for that command)') // COPY-FLAG
   .allowUnknownOption()
   .helpOption(false)
   .action(async (_opts: any, cmd: any) => {
