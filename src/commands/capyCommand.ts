@@ -1645,6 +1645,21 @@ export class CapyCommand {
       if (this.options.dryRun !== true) {
         const finalKeep = this.projectManager.readKeepFile();
         this.fileManager.writeEncryptedEnvFile(localPlaintext, encryptionKey, undefined, finalKeep, branch);
+        // Nothing differs and Capy was reached: keep.lock's pins for this branch are what Capy holds, so record that
+        // as the last sync. Without it a stale saved hash (from an earlier release) could never be cleared, and
+        // `capy checkout` kept refusing with "unpushed changes" that `capy push` reported as up to date.
+        if (networkAvailable && finalKeep) {
+          const syncState = this.projectManager.readSyncState();
+          const keepHash = SyncEngine.computeKeepHash(finalKeep, branch);
+          if (getSyncKeepHash(syncState, branch) !== keepHash) {
+            this.fileManager.writeSyncState({
+              last_sync: new Date().toISOString(),
+              synced_variables: Object.keys(localPlaintext),
+              ...syncState,
+              keep_hash: setSyncKeepHash(syncState, branch, keepHash),
+            });
+          }
+        }
         this.installGitHooks();
       }
       return 'up-to-date';

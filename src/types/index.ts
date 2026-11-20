@@ -499,6 +499,10 @@ export const ERROR_CODES = {
   CANNOT_DELETE_CURRENT_BRANCH: 'CANNOT_DELETE_CURRENT_BRANCH',
   // No .env header, no .capy/branch, and no unambiguous local fallback.
   NO_ACTIVE_BRANCH: 'NO_ACTIVE_BRANCH',
+  // `capy checkout` refused: .env differs from what keep.lock pins for the current branch.
+  UNCOMMITTED_CHANGES: 'UNCOMMITTED_CHANGES',
+  // `capy checkout` refused: keep.lock differs from the last sync for the current branch.
+  UNPUSHED_CHANGES: 'UNPUSHED_CHANGES',
   // .capy/branch and the .env header name different, real branches (an interrupted checkout) and the run cannot follow either.
   BRANCH_STATE_INCONSISTENT: 'BRANCH_STATE_INCONSISTENT',
   SNAPSHOT_NOT_FOUND: 'SNAPSHOT_NOT_FOUND',
