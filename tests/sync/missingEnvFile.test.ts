@@ -30,7 +30,7 @@ import { findDirtyBranchIssue } from '../../src/commands/checkoutCommand';
 import { Encryptor } from '../../src/crypto/encryptor';
 import { deriveResourceId } from '../../src/crypto/resourceId';
 import { SyncEngine } from '../../src/sync/syncEngine';
-import { CapyError, ERROR_CODES, type KeepFile } from '../../src/types/index';
+import { CapyError, ERROR_CODES, setSyncKeepHash, type KeepFile } from '../../src/types/index';
 
 const KEY = FIXED_PROJECT_KEY;
 const OTHER_KEY = 'a-different-project-key-this-profile-does-not-hold';
@@ -513,10 +513,10 @@ describe('A4. `capy checkout staging` with `.env` missing, `.capy/branch` set', 
     noWrites(w);
   });
 
-  test('[OK] in a terminal: the retrieve-only menu comes first; "Continue working" ends with exit 0 and the branch does not change', async () => {
+  test('[OK] in a terminal: the retrieve-only menu comes first; "Continue working" ends with exit 1 (the switch did not happen, CAP-834) and the branch does not change', async () => {
     const w = world({ env: 'missing' });
     const r = await run(() => new CheckoutCommand().execute(STAGING, {}), { terminal: true });
-    expect(r.exit).toBe(0);
+    expect(r.exit).toBe(1);
     expect(menuChoices()).toEqual(['retrieve_pinned', 'skip']);
     expect(w.folder.pm.readActiveBranch()).toBe(DEV);
     noWrites(w);
@@ -1022,10 +1022,10 @@ describe('H. `capy checkout <existing branch>` in a fresh clone (keep.lock only;
     expect(w.server.pushSecrets.mock.calls).toHaveLength(0);
   });
 
-  test('[terminal] choosing "Continue working" at the first step\'s menu keeps today\'s behaviour: exit 0, the named branch stays recorded, no `.env`', async () => {
+  test('[terminal] choosing "Continue working" at the first step\'s menu: exit 1 (the switch did not happen, CAP-834), the named branch stays recorded, no `.env`', async () => {
     const w = fresh();
     const r = await run(() => new CheckoutCommand().execute(STAGING, {}), { terminal: true });
-    expect(r.exit).toBe(0);
+    expect(r.exit).toBe(1);
     expect(menuChoices()).toEqual(['retrieve_pinned', 'skip']);
     expect(w.folder.pm.readActiveBranch()).toBe(STAGING);
     expect(existsSync(envPath(w.folder))).toBe(false);
@@ -1059,5 +1059,39 @@ describe('H. `capy checkout <existing branch>` in a fresh clone (keep.lock only;
     expect(r.error?.code).toBe(ERROR_CODES.NO_ACTIVE_BRANCH);
     expect(existsSync(branchFilePath(w.folder))).toBe(false);
     noWrites(w);
+  });
+});
+
+describe('I. `capy checkout <existing branch>` from a folder whose saved hash is stale but where nothing differs (CAP-834, fault 1)', () => {
+  /** On `development`, equal to its pins and to Capy everywhere, with a sync-state hash for `development` from an earlier release. */
+  const stuck = (): World => {
+    const w = world({ env: 'present' });
+    const state = w.folder.pm.readSyncState();
+    w.folder.fileManager.writeSyncState({ last_sync: '2026-10-26T00:00:00.000Z', synced_variables: Object.keys(VALUES), ...state, keep_hash: setSyncKeepHash(state, DEV, 'f'.repeat(64)) });
+    return w;
+  };
+
+  test('starting point: the guard reads the stale hash as unpushed changes', () => {
+    const w = stuck();
+    expect(findDirtyBranchIssue(w.folder.pm, w.folder.fileManager, KEY)?.code).toBe('UNPUSHED_CHANGES');
+  });
+
+  for (const [label, options] of [['`--non-tty`', { nonTty: true }], ['`--json`', { json: true }]] as const) {
+    test(`${label}: the switch happens (the gate records the hash), and nothing is sent to Capy`, async () => {
+      const w = stuck();
+      const r = await run(() => new CheckoutCommand().execute(STAGING, options));
+      expect(r.exit).toBeUndefined();
+      expect(r.error).toBeUndefined();
+      expect(w.folder.pm.readActiveBranch()).toBe(STAGING);
+      expect(w.folder.env()).toEqual(STAGING_VALUES);
+      expect(w.server.pushSecrets.mock.calls).toHaveLength(0);
+    });
+  }
+
+  test('`capy push`, the remedy the old refusal named, now clears it too', async () => {
+    const w = stuck();
+    await run(() => new PushCommand().execute({}));
+    expect(findDirtyBranchIssue(w.folder.pm, w.folder.fileManager, KEY)).toBeNull();
+    expect(w.server.pushSecrets.mock.calls).toHaveLength(0);
   });
 });

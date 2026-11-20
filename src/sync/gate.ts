@@ -62,6 +62,12 @@ export interface GateOptions {
   readonly throwConflicts?: boolean;
   /** The branch the command is about to switch to (`capy checkout <branch>`): it answers "which branch" for a folder that records none (see `CliOptions.branchHint`). */
   readonly branchHint?: string;
+  /**
+   * The exit code when the person stops at the gate (a "stop" choice or Ctrl+C). Default 0: nothing was written and
+   * nothing was asked of the command. `capy checkout` passes 1, because a stop means the requested switch did not
+   * happen, and `capy checkout x && …` must not go on with the previous branch's `.env`.
+   */
+  readonly stopExitCode?: number;
 }
 
 /** `in-sync`: the command may go on. `stopped`: the person cancelled; the command writes nothing and ends (exit 0). */
@@ -177,11 +183,17 @@ export async function syncFolder(dir: string, opts: GateOptions = {}, runner: Sy
   return done.value === 'in-sync' ? { ok: true } : { ok: false, code: FOLDER_SYNC_STOPPED, message: 'Stopped. Nothing was written.' }; // COPY-FLAG
 }
 
-/** The gate stopped (the person cancelled or chose "Continue working"): the command ends here, exit 0, nothing written. */
-export function stopWithNothingWritten(): never {
+/** The gate stopped (the person cancelled or chose "Continue working"): the command ends here, nothing written. Exit 0 unless the command says otherwise. */
+export function stopWithNothingWritten(exitCode: number = 0): never {
   console.error('Stopped. Nothing was written.'); // COPY-FLAG
-  return process.exit(0);
+  return process.exit(exitCode);
 }
+
+/** Ctrl+C (or Esc) at one of the gate's prompts: a stop, not a failure. */
+const isPromptCancel = (err: unknown): boolean => {
+  const name = (err as { name?: unknown } | null)?.name;
+  return name === 'ExitPromptError' || name === 'AbortPromptError';
+};
 
 /** The sync itself failed (a coded `CapyError`: no session, Capy unreachable): the command ends with that code, not a stack. */
 async function failedSync(err: unknown, opts: GateOptions): Promise<never> {
@@ -207,9 +219,10 @@ export async function gateFirst(opts: GateOptions = {}, runner: SyncRunner = run
   const done = await outcomeOf(syncUntilInSync(opts, runner));
   if (!done.ok) {
     exitOnConflictRefusal(done.error);
+    if (isPromptCancel(done.error)) stopWithNothingWritten(opts.stopExitCode);
     return failedSync(done.error, opts);
   }
-  if (done.value === 'stopped') stopWithNothingWritten();
+  if (done.value === 'stopped') stopWithNothingWritten(opts.stopExitCode);
 }
 
 /** A folder context the gate can be re-run for (`ResolvedContext` has all of it). */

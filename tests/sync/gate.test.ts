@@ -106,6 +106,38 @@ describe('gateFirst', () => {
     await expect(gateFirst({}, runnerOf('up-to-date').run)).resolves.toBeUndefined();
   });
 
+  test('a command may make a stop exit non-zero (capy checkout: the switch did not happen)', async () => {
+    const exit = exiting();
+    const err = spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      await expect(gateFirst({ stopExitCode: 1 }, runnerOf('stopped').run)).rejects.toBeInstanceOf(ExitSignal);
+      expect(exit).toHaveBeenCalledWith(1);
+      expect(String(err.mock.calls[0][0])).toContain('Stopped. Nothing was written.');
+    } finally {
+      exit.mockRestore();
+      err.mockRestore();
+    }
+  });
+
+  test('Ctrl+C at the gate\'s menu is a stop, with the command\'s stop exit code', async () => {
+    const cancelled = (name: string): SyncRunner => async () => Promise.reject(Object.assign(new Error('User force closed the prompt'), { name }));
+    const exit = exiting();
+    const err = spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      for (const name of ['ExitPromptError', 'AbortPromptError']) {
+        await expect(gateFirst({ stopExitCode: 1 }, cancelled(name))).rejects.toBeInstanceOf(ExitSignal);
+        expect(exit).toHaveBeenLastCalledWith(1);
+      }
+      // Commands that keep the default still end with 0, as before.
+      await expect(gateFirst({}, cancelled('ExitPromptError'))).rejects.toBeInstanceOf(ExitSignal);
+      expect(exit).toHaveBeenLastCalledWith(0);
+      expect(err.mock.calls.every((c) => String(c[0]).includes('Stopped. Nothing was written.'))).toBe(true);
+    } finally {
+      exit.mockRestore();
+      err.mockRestore();
+    }
+  });
+
   test('a failure of the sync itself (no session) ends the command with its code: JSON under --json, the error screen otherwise; a command may supply its own refusal', async () => {
     const failing: SyncRunner = async () => Promise.reject(new CapyError('no session', ERROR_CODES.AUTH_FAILED));
     const exit = exiting();

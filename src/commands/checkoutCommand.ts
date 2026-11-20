@@ -153,7 +153,7 @@ export class CheckoutCommand {
     if (!options.create) {
       conflictFlagsOrExit(options.conflictFlags ?? {}, options.json === true);
       if (!isRecoveryActive()) {
-        const gate: GateOptions = { devMode: this.devMode, json: options.json, nonTty: options.nonTty, conflictFlags: options.conflictFlags, branchHint: branchName };
+        const gate: GateOptions = { devMode: this.devMode, json: options.json, nonTty: options.nonTty, conflictFlags: options.conflictFlags, branchHint: branchName, stopExitCode: 1 };
         await gateFirst(gate);
       }
     }
@@ -217,6 +217,14 @@ export class CheckoutCommand {
     // Guard: block checkout if working tree is dirty (skip for branch creation)
     if (!options.create) {
       const issue = findDirtyBranchIssue(this.projectManager, this.fileManager, encryptionKey);
+      // Under --json the refusal is a coded result on stdout, so a script can branch on it.
+      if (issue !== null && options.json === true) {
+        const error = issue.code === 'UNCOMMITTED_CHANGES'
+          ? `You have uncommitted changes on "${issue.branch}" (${issue.varName}). Run capy to commit before switching branches.` // COPY-FLAG
+          : `You have unpushed changes on "${issue.branch}". Run capy push before switching branches.`; // COPY-FLAG
+        console.log(JSON.stringify({ ok: false, code: issue.code, branch: issue.branch, ...(issue.varName !== undefined ? { variable: issue.varName } : {}), error }, null, 2));
+        process.exit(1);
+      }
       if (issue !== null && issue.code === 'UNCOMMITTED_CHANGES') {
         console.error(`You have uncommitted changes on "${issue.branch}" (${issue.varName}).`);
         console.error(`Run ${B('capy')} to commit before switching branches.`);

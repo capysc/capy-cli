@@ -26,6 +26,7 @@ ISOLATED_FILES=(
   tests/auth/oauthServer.test.ts
   tests/commands/branchKeepFile.test.ts
   tests/commands/capyCommand.test.ts
+  tests/commands/staleSyncHash.test.ts
   tests/commands/readOnlyRun.e2e.test.ts
   tests/commands/kickCommand.test.ts
   tests/commands/inviteCommand.test.ts
