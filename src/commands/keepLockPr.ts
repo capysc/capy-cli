@@ -12,11 +12,16 @@
  *   "Create a PR with these changes?"  (--pr / --no-pr)
  *   "Select base branch for PR"        (--pr-base <branch>)
  *
+ * With `--no-pr` only the pull request is skipped: the TRACKED keep.lock in the folder is brought up to date on disk (same
+ * bytes the PR would carry), left modified and uncommitted. Nothing is staged, committed or pushed.
+ *
  * Never prompts without a terminal or under `--json`. A failure of this step
  * never fails the secret change: it is reported as `keep_lock.error`, decided
  * by error codes and statuses — never by message text.
  */
 import { randomBytes } from 'crypto';
+import { readFileSync, writeFileSync } from 'fs';
+import { join } from 'path';
 import inquirer from 'inquirer';
 import { ERROR_CODES, KeepFile } from '../types/index';
 import { serializeKeep } from '../files/fileManager';
@@ -742,13 +747,65 @@ async function answerFor(flags: PrFlags, interactive: boolean, deps: KeepLockPrD
   return (await deps.confirm()) === true ? 'yes' : 'declined';
 }
 
+/** What `--no-pr` does to the tracked keep.lock in the folder. */
+type TrackedPlan =
+  /** Not judged: no tracked file, not a git checkout, not readable as a keep.lock, or another project's. Nothing is written. */
+  | { readonly kind: 'skip' }
+  /** The tracked file already carries these records: its bytes would not change. */
+  | { readonly kind: 'unchanged' }
+  | { readonly kind: 'write'; readonly path: string; readonly content: string };
+
+function readTextOrNull(path: string): string | null {
+  try {
+    return readFileSync(path, 'utf-8');
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The tracked `<cwd>/keep.lock` with `records` folded into it, the way a PR folds them into the base branch's file
+ * (`planCommit`). Read only: it writes nothing. A folder that is not a git checkout, a missing or unreadable file, a file
+ * that is not a keep.lock, or another project's keep.lock is `skip`: those keep what `--no-pr` did before.
+ */
+export function planTrackedKeepLock(
+  req: Pick<KeepLockPrRequest, 'cwd' | 'records' | 'localKeep'>,
+  deps: Pick<KeepLockPrDeps, 'isGitRepo'>,
+): TrackedPlan {
+  const path = join(req.cwd, 'keep.lock');
+  const raw = readTextOrNull(path);
+  if (raw === null || !deps.isGitRepo(req.cwd)) return { kind: 'skip' };
+  const before = parseKeep(raw);
+  if (before === undefined || kindOfKeepText(raw, req.localKeep.project_id) === 'other') return { kind: 'skip' };
+  const content = serializeKeep(req.records.reduce(foldEditSaveIntoKeep, before));
+  if (content === serializeKeep(before) || content === raw) return { kind: 'unchanged' };
+  return { kind: 'write', path, content };
+}
+
+/** Writes a planned tracked keep.lock. A write that fails is a coded `keep_lock.error`, never a silent `changed: true`. */
+function writeTracked(plan: Extract<TrackedPlan, { kind: 'write' }>): KeepLockReport {
+  try {
+    writeFileSync(plan.path, plan.content, 'utf-8');
+    return { changed: true, committed: false };
+  } catch {
+    return errorReport(ERROR_CODES.PERMISSION_DENIED);
+  }
+}
+
+/** `--no-pr`: the tracked keep.lock is written (never committed); `changed` is true only when its bytes changed. */
+function reportNoPr(req: KeepLockPrRequest, deps: KeepLockPrDeps): KeepLockReport {
+  const plan = planTrackedKeepLock(req, deps);
+  if (plan.kind === 'write') return writeTracked(plan);
+  return plan.kind === 'unchanged' ? { changed: false } : { changed: true, committed: false };
+}
+
 async function runStep(req: KeepLockPrRequest, deps: KeepLockPrDeps): Promise<KeepLockPrOutcome> {
   if (req.records.length === 0) return { keep_lock: { changed: false } };
   const interactive = deps.hasTerminal() && !req.json && req.nonTty !== true;
   const notCommitted: KeepLockReport = { changed: true, committed: false };
 
   const answer = await answerFor(req.flags, interactive, deps);
-  if (answer === 'no') return { keep_lock: notCommitted };
+  if (answer === 'no') return { keep_lock: reportNoPr(req, deps) };
   if (answer === 'declined') return { keep_lock: notCommitted, declined: true };
   if (answer === 'unanswered') return { keep_lock: notCommitted, unanswered: unansweredStops(req.flags) };
 
@@ -767,6 +824,15 @@ async function previewBase(cwd: string, flags: PrFlags, deps: KeepLockPrDeps): P
   }
 }
 
+/** Does a real run change a keep.lock on disk? Under `--no-pr`, whether the tracked file's bytes would change (read only); otherwise `req.changed`. */
+function wouldChangeFile(
+  req: { readonly changed: boolean; readonly cwd: string; readonly flags: PrFlags; readonly records?: readonly EditSaveRecord[]; readonly localKeep?: KeepFile },
+  deps: KeepLockPrDeps,
+): boolean {
+  if (!req.changed || req.flags.noPr !== true || req.records === undefined || req.localKeep === undefined) return req.changed;
+  return planTrackedKeepLock({ cwd: req.cwd, records: req.records, localKeep: req.localKeep }, deps).kind !== 'unchanged';
+}
+
 /**
  * `--dry-run`: what the PR step would do, without doing any of it. Mirrors the
  * non-interactive answers of a real run: `--no-pr` or an unchanged keep.lock
@@ -775,10 +841,17 @@ async function previewBase(cwd: string, flags: PrFlags, deps: KeepLockPrDeps): P
  * `unanswered`. Never prompts, never writes, never throws.
  */
 export async function previewKeepLockPrStep(
-  req: { readonly changed: boolean; readonly cwd: string; readonly flags: PrFlags },
+  req: {
+    readonly changed: boolean;
+    readonly cwd: string;
+    readonly flags: PrFlags;
+    /** With `--no-pr`: what the command would change, so `changed` says whether the tracked keep.lock's bytes would change. Absent: `changed` as given. */
+    readonly records?: readonly EditSaveRecord[];
+    readonly localKeep?: KeepFile;
+  },
   deps: KeepLockPrDeps = defaultDeps,
 ): Promise<KeepLockPreviewOutcome> {
-  const none: KeepLockPreview = { changed: req.changed, committed: false, would_pr: null };
+  const none: KeepLockPreview = { changed: wouldChangeFile(req, deps), committed: false, would_pr: null };
   if (!req.changed || req.flags.noPr === true) return { keep_lock: none };
   if (req.flags.pr !== true) return { keep_lock: none, unanswered: unansweredStops(req.flags) };
   return { keep_lock: { ...none, would_pr: await previewBase(req.cwd, req.flags, deps) } };

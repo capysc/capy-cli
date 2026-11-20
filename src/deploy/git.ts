@@ -24,7 +24,8 @@ export interface GitStatusEntry {
  * caller's own explicit commit picks up the CURRENT pins, not whatever was
  * frozen into the tracked file at project init. capy's regular flows
  * (sync/push/rotate/connect/edit) write fresh pins only into the
- * untracked working copy — nothing else ever catches the tracked file up, so
+ * untracked working copy (apart from `--no-pr` on add/edit/remove, which
+ * writes the tracked file itself) — nothing else ever catches it up, so
  * every caller that commits the tracked file explicitly (direct-mode
  * deploy's own-branch commit, Dokploy discovery's fresh-branch commit) must
  * run this immediately before it does. A no-op when there's no working copy
