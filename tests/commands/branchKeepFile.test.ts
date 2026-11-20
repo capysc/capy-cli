@@ -473,6 +473,8 @@ describe('Direction detection — branch-aware keep_hash', () => {
       getDefaultProjectName: mock(() => 'test-project'),
       getEnvPath: mock(() => '.env'),
       readKeepFile: mock(() => undefined),
+      // An existing file: the tracked keep.lock is present.
+      getKeepPath: mock(() => __filename),
       readSyncState: mock(() => null),
       readActiveBranch: mock(() => null),
       writeActiveBranch: mock(() => undefined),
