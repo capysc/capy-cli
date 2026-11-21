@@ -39,6 +39,7 @@ mock.module('../../src/config/globalConfig', () => ({
   writeKeepCache: mock(() => undefined),
   fetchSecretsWithCache: mock(async () => null),
 }));
+mock.module('../../src/git/setupKeep', () => ({ configureSetupTracking: mock(() => undefined), commitInitialKeep: mock(() => undefined) }));
 mock.module('inquirer', () => ({
   default: {
     prompt: mock((questions: any) => {
@@ -543,6 +544,8 @@ describe('CapyCommand', () => {
         expect.any(String), // keep JSON
         expect.any(String), // env_blob
         expect.any(String), // branch
+        undefined,
+        expect.any(String), // expected empty branch
       );
       expect(mockSyncEngine.mergeWithKeep).toHaveBeenCalled();
 
