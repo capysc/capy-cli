@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { FileManager } from '../../src/files/fileManager';
 import { ProjectManager } from '../../src/core/projectManager';
 import { tracksKeepLock } from '../../src/git/keepTracking';
-import { configureSetupTracking } from '../../src/git/setupKeep';
+import { commitInitialKeep, configureSetupTracking } from '../../src/git/setupKeep';
 import { git, makeRepo, makeRoot } from '../helpers/keepLockGit';
 
 const root = makeRoot('capy-setup-tracking-');
@@ -48,6 +48,20 @@ describe('effective tracking for a folder', () => {
     git(repo, ['add', '--force', 'backend/keep.lock']);
     expect(tracksKeepLock(repo, 'backend/keep.lock')).toBe(true);
     expect(() => configureSetupTracking(nested, false)).toThrow('already has a tracked keep.lock');
+  });
+
+  test('the first shared commit captures pins updated while linking an existing project', () => {
+    const repo = makeRepo(root, 'linked');
+    git(repo, ['config', 'user.email', 'fixture@example.invalid']);
+    git(repo, ['config', 'user.name', 'Fixture']);
+    const manager = new FileManager(repo);
+    const original = { version: '3.0', org_id: 'o', project_id: 'p', project_name: 'app', variables: {} };
+    const updated = { ...original, variables: { API_KEY: [{ resource_id: 'r', value_hash: 'resolved' }] } };
+    configureSetupTracking(repo, true);
+    manager.writeKeepFile(original);
+    manager.writeKeepFile(updated);
+    commitInitialKeep(repo);
+    expect(JSON.parse(git(repo, ['show', 'HEAD:keep.lock']).stdout)).toMatchObject(updated);
   });
 
   test('explicit sharing can override an inherited ignore for the file', () => {

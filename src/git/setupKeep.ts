@@ -1,7 +1,7 @@
 import { execFileSync, spawnSync } from 'node:child_process';
 import { appendFileSync, existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { isGitRepo } from '../deploy/git';
+import { isGitRepo, syncTrackedKeepFromWorkingCopy } from '../deploy/git';
 import { CapyError, ERROR_CODES } from '../types';
 import { tracksKeepLock } from './keepTracking';
 
@@ -26,6 +26,7 @@ export function configureSetupTracking(folder: string, share: boolean): void {
 /** Commit just this folder's marker, even when the user has staged unrelated files. */
 export function commitInitialKeep(folder: string): void {
   try {
+    syncTrackedKeepFromWorkingCopy(folder);
     execFileSync('git', ['add', '--', 'keep.lock'], { cwd: folder, stdio: 'pipe' });
     execFileSync('git', ['commit', '--only', '-m', 'Set up Capy for this project', '--', 'keep.lock'], { cwd: folder, stdio: 'pipe' });
   } catch (error) {
