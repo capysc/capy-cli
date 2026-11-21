@@ -11,7 +11,7 @@ import { mkdirSync, writeFileSync, rmSync, existsSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { spawnSync } from 'child_process';
-import { withHarness, ORG_ID, PROJECT_ID, type Harness } from '../helpers/pipedHarness';
+import { trackFixtureKeep, withHarness, ORG_ID, PROJECT_ID, type Harness } from '../helpers/pipedHarness';
 import { hashValue } from '../../src/sync/compareSecrets';
 
 // Tests that run a full deploy through preflight need wrangler on PATH —
@@ -81,6 +81,7 @@ function syncedProject(h: Harness, values: Record<string, string> = {}, branch: 
     Object.entries(values).map(([name, value]) => [name, [{ resource_id: `rid-${name}`, branch, value_hash: hashValue(value) }]]),
   );
   writeFileSync(join(h.project, 'keep.lock'), JSON.stringify({ version: '3.0', org_id: ORG_ID, project_id: PROJECT_ID, project_name: 'test', variables }, null, 2));
+  trackFixtureKeep(h.project);
   writeFileSync(join(h.project, '.env'), Object.entries(values).map(([name, value]) => `${name}=${value}\n`).join(''));
 }
 

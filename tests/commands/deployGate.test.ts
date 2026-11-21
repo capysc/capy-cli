@@ -118,10 +118,10 @@ afterEach(() => {
 });
 
 /** The folder (pinned to 120, `.env` 120, a deploy target delivering GEMINI) and Capy (holding 180). */
-function world() {
+function world(git: 'tracked' | 'plain' = 'tracked') {
   const server = fakeCapyServer({ initial: seedServer({ projectKey: KEY, values: { [BRANCH]: { [NAME]: '180' } } }) });
   serverOf.mockReturnValue(server);
-  const folder = makeFolder({ git: 'tracked', projectKey: KEY, branch: BRANCH, keep: seedServer({ projectKey: KEY, values: { [BRANCH]: { [NAME]: '120' } } }).keep as KeepFile, env: { [NAME]: '120' }, client: server.client });
+  const folder = makeFolder({ git: git === 'plain' ? undefined : git, projectKey: KEY, branch: BRANCH, keep: seedServer({ projectKey: KEY, values: { [BRANCH]: { [NAME]: '120' } } }).keep as KeepFile, env: { [NAME]: '120' }, client: server.client });
   made(folder);
   mkdirSync(join(folder.dir, '.capy'), { recursive: true });
   writeFileSync(join(folder.dir, '.capy', 'branch'), BRANCH);
@@ -236,11 +236,11 @@ describe('Vince\'s case: folder 120, .env 120, Capy 180, deploy a target deliver
   }, 30_000);
 
   test('--resolve =local: 120 is committed to Capy, THEN delivered to Dokploy', async () => {
-    const w = world();
+    const w = world('plain');
     const first = JSON.parse((await run(dokployFetch([]), { yes: true }, w.folder.dir)).stdout) as { conflict_id: string };
     const f = dokployFetch([RAW_ENV, RAW_ENV, RAW_ENV, merged('120')]);
     const out = await run(f, { yes: true, conflictFlags: { resolve: [`${NAME}=local`], conflict: first.conflict_id } }, w.folder.dir);
-    expect(out.code).toBe(0);
+    expect(out.code, out.stderr).toBe(0);
     expect(serverValues(w.server.state(), BRANCH, KEY)[NAME]).toBe('120');
     expect(saves(f)).toHaveLength(1);
     expect(JSON.parse(String(saves(f)[0][1].body)).env).toContain(`${NAME}=120`);
@@ -251,11 +251,11 @@ describe('Vince\'s case: folder 120, .env 120, Capy 180, deploy a target deliver
   }, 30_000);
 
   test('--resolve =remote: 180 is delivered, and the folder takes it', async () => {
-    const w = world();
+    const w = world('plain');
     const first = JSON.parse((await run(dokployFetch([]), { yes: true }, w.folder.dir)).stdout) as { conflict_id: string };
     const f = dokployFetch([RAW_ENV, RAW_ENV, RAW_ENV, merged('180')]);
     const out = await run(f, { yes: true, conflictFlags: { resolve: [`${NAME}=remote`], conflict: first.conflict_id } }, w.folder.dir);
-    expect(out.code).toBe(0);
+    expect(out.code, out.stderr).toBe(0);
     expect(saves(f)).toHaveLength(1);
     expect(JSON.parse(String(saves(f)[0][1].body)).env).toContain(`${NAME}=180`);
     expect(serverValues(w.server.state(), BRANCH, KEY)[NAME]).toBe('180');

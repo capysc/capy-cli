@@ -19,7 +19,7 @@
  *
  * Needs `bun run build` first, like the other tests that spawn `dist/`.
  */
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { createServer, type Server } from 'node:http';
 import { createHash, randomBytes } from 'node:crypto';
@@ -113,6 +113,12 @@ function fakeJwt(workosOrgId: string): string {
 function writeJson(path: string, value: unknown): void {
   mkdirSync(join(path, '..'), { recursive: true });
   writeFileSync(path, JSON.stringify(value, null, 2));
+}
+
+/** A checkout explicitly exercising the Git-pinned baseline in command integration tests. */
+export function trackFixtureKeep(project: string): void {
+  execFileSync('git', ['init', '-q', project]);
+  execFileSync('git', ['-C', project, 'add', '--', 'keep.lock']);
 }
 
 export function seedHome(home: string, serviceUrl: string): string {

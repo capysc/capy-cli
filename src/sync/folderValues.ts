@@ -49,9 +49,12 @@ export async function syncFolderValues(input: FolderSyncInput): Promise<'changed
   const pins = pinnedHashes(snapshot.keep, branch);
   // A missing blob (or an unreadable line) is not evidence that this name was removed.
   // Keep unreadable remote-only lines byte-for-byte; never overwrite a local copy of one.
-  const unavailable = Object.keys(pins).filter((name) => {
+  const unavailable = [...new Set([...Object.keys(pins), ...Object.keys(snapshot.entries)])].filter((name) => {
     const entry = snapshot.entries[name];
-    return !entry || (entry.plaintext === undefined ? !hasEnv || present(localPlaintext, name) : hashValue(entry.plaintext) !== pins[name]);
+    if (!present(pins, name) || !entry) return true;
+    return entry.plaintext === undefined
+      ? !hasEnv || present(localPlaintext, name)
+      : hashValue(entry.plaintext) !== pins[name];
   });
   if (unavailable.length > 0) {
     throw new CapyError('Could not read the current Capy values for ' + unavailable.join(', ') + '.',

@@ -337,7 +337,7 @@ const collectResolve = (value: string, previous: string[]): string[] => [...prev
 export const resolveOption = (): Option =>
   new Option(
     '--resolve <NAME=pinned|local|remote|delete>',
-    'answer a difference from Capy: pinned, local, remote or delete; NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict)', // COPY-FLAG
+    'choose a source: local or remote for a folder-only setup, also pinned or delete for a Git-tracked lock; NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict)', // COPY-FLAG
   )
     .default([])
     .argParser(collectResolve);

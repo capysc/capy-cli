@@ -12,7 +12,7 @@
 import { describe, test, expect } from 'bun:test';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { join } from 'path';
-import { withHarness, ORG_ID, PROJECT_ID, type Harness } from '../helpers/pipedHarness';
+import { trackFixtureKeep, withHarness, ORG_ID, PROJECT_ID, type Harness } from '../helpers/pipedHarness';
 import { hashValue } from '../../src/sync/compareSecrets';
 import { describeVarSetProblem, varSetProblem } from '../../src/deploy/keepGate';
 
@@ -71,6 +71,7 @@ function syncedProject(h: Harness, targetVars: readonly string[]): void {
     join(h.project, 'keep.lock'),
     JSON.stringify({ version: '3.0', org_id: ORG_ID, project_id: PROJECT_ID, project_name: 'test', variables }, null, 2),
   );
+  trackFixtureKeep(h.project);
   writeDeployConfig(h.project, targetVars);
   writeFileSync(join(h.project, '.env'), '# capy:branch=production\nDATABASE_URL=x\n');
   writeFileSync(join(h.project, '.capy', 'branch'), 'production');

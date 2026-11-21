@@ -19,7 +19,7 @@ import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { spawnSync } from 'child_process';
-import { withHarness, ORG_ID, PROJECT_ID, type Harness } from '../helpers/pipedHarness';
+import { trackFixtureKeep, withHarness, ORG_ID, PROJECT_ID, type Harness } from '../helpers/pipedHarness';
 import { hashValue } from '../../src/sync/compareSecrets';
 
 const CLI = join(__dirname, '../../dist/index.js');
@@ -124,6 +124,7 @@ function syncedProject(h: Harness, opts: { header?: string; branches?: string[];
     DATABASE_URL: branches.map((b) => ({ resource_id: 'rid' + b[0], branch: b, value_hash: hashValue('x') })),
   };
   writeFileSync(join(h.project, 'keep.lock'), JSON.stringify({ version: '3.0', org_id: ORG_ID, project_id: PROJECT_ID, project_name: 'test', variables }, null, 2));
+  trackFixtureKeep(h.project);
   writeDeployConfig(h.project, [dokployTarget('production')]);
   writeFileSync(join(h.project, '.env'), `${opts.header === undefined ? '' : `${opts.header}\n`}DATABASE_URL=x\n`);
   if (opts.branchFile === null) rmSync(join(h.project, '.capy', 'branch'), { force: true });
@@ -201,6 +202,7 @@ function targetsProject(h: Harness, opts: { header?: string; branchFile?: string
     })),
   };
   writeFileSync(join(h.project, 'keep.lock'), JSON.stringify({ version: '3.0', org_id: ORG_ID, project_id: PROJECT_ID, project_name: 'test', variables }, null, 2));
+  trackFixtureKeep(h.project);
   writeDeployConfig(h.project, [dokployTarget('production')]);
   writeFileSync(join(h.project, '.env'), `${opts.header === undefined ? '' : `${opts.header}\n`}DATABASE_URL=x\n`);
   if (opts.branchFile === null) rmSync(join(h.project, '.capy', 'branch'), { force: true });
