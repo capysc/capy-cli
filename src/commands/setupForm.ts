@@ -33,6 +33,8 @@ export interface SetupFormInput {
   /** `--env-path` and `--dry-run` as typed: the rerun repeats them. */
   readonly envPath?: string;
   readonly dryRun?: boolean;
+  /** True under `capy-dev`, which does not set `CAPY_BIN_NAME`: the rerun then names `capy-dev`. */
+  readonly devMode?: boolean;
 }
 
 /** A regular-expression source that matches exactly one of `values`. */
@@ -54,7 +56,7 @@ function flagWords(flag: string, typed: string | undefined, placeholder: string 
 function rerunCommand(input: SetupFormInput): string {
   const { answers, gaps } = input;
   return [
-    binName(),
+    binName(input.devMode === true),
     ...flagWords('--env-path', input.envPath, undefined),
     ...(input.dryRun === true ? ['--dry-run'] : []),
     ...flagWords('--org', answers.org, input.orgChoices === undefined ? undefined : '<org>'),

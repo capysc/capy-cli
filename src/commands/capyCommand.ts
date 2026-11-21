@@ -275,6 +275,7 @@ export class CapyCommand {
   private agentSetupDeps(): AgentSetupDeps {
     return {
       options: this.options,
+      devMode: this.devMode,
       authService: this.authService,
       serviceClient: this.serviceClient,
       projectManager: this.projectManager,

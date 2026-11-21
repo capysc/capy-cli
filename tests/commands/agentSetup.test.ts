@@ -138,14 +138,14 @@ interface Captured {
 }
 
 /** Runs bare `capy` in agent mode with these flags and captures what it printed and how it ended. */
-async function run(answers: Partial<SetupOptions> = {}, extra: Partial<CliOptions> = {}): Promise<Captured> {
+async function run(answers: Partial<SetupOptions> = {}, extra: Partial<CliOptions> = {}, devMode: boolean = false): Promise<Captured> {
   const exitSpy = spyOn(process, 'exit').mockImplementation(((code?: number) => {
     throw new ExitSignal(code);
   }) as never);
   const logSpy = spyOn(console, 'log').mockImplementation(() => {});
   const errSpy = spyOn(console, 'error').mockImplementation(() => {});
   const setup: SetupOptions = { json: true, nonTty: true, agentMode: true, ...answers };
-  const thrown: unknown = await new CapyCommand({ setup, protocol: true, ...extra }, false).execute().then(() => null, (err: unknown) => err);
+  const thrown: unknown = await new CapyCommand({ setup, protocol: true, ...extra }, devMode).execute().then(() => null, (err: unknown) => err);
   const stdout = logSpy.mock.calls.map((args) => args.map(String).join('\n')).join('\n');
   const stderr = errSpy.mock.calls.map((args) => args.map(String).join('\n')).join('\n');
   const exitCode = exitSpy.mock.calls.length > 0 ? (exitSpy.mock.calls[exitSpy.mock.calls.length - 1][0] as number | undefined) : undefined;
@@ -216,6 +216,15 @@ describe('questions left: one INIT_INPUT_REQUIRED form, nothing created or writt
     const out = await run({ name: 'demo', branch: 'main' }).finally(() => env.mockRestore());
     expect(out.exitCode).toBe(3);
     expect(out.json!.elicitation.answer.rerun).toBe('capy-staging --name demo --branch main --protected <protected> --json');
+  });
+
+  test('under capy-dev (no CAPY_BIN_NAME) the rerun command starts with capy-dev', async () => {
+    fakeWorld();
+    const { CAPY_BIN_NAME: _unset, ...rest } = process.env;
+    const env = spyOn(process, 'env', 'get' as never).mockReturnValue(rest as never);
+    const out = await run({ name: 'demo', branch: 'main' }, {}, true).finally(() => env.mockRestore());
+    expect(out.exitCode).toBe(3);
+    expect(out.json!.elicitation.answer.rerun).toBe('capy-dev --name demo --branch main --protected <protected> --json');
   });
 
   test('several organizations and no --org: the organization is asked first, alone, as options of id and name; no project is looked up', async () => {

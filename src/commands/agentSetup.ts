@@ -58,6 +58,8 @@ export type PushOutcome =
 /** What agent-mode setup needs from `CapyCommand`; its own members, handed over so the logic is not copied. */
 export interface AgentSetupDeps {
   readonly options: CliOptions;
+  /** True under `capy-dev`: the commands handed to the agent name that binary. */
+  readonly devMode?: boolean;
   readonly authService: AuthService;
   readonly serviceClient: ServiceClient;
   readonly projectManager: ProjectManager;
@@ -431,6 +433,7 @@ async function actNew(
       suggestedName: suggestedName(isTaken),
       envPath: deps.options.envPath,
       dryRun: ctx.dryRun,
+      devMode: deps.devMode,
     }));
   }
   const name = setup.name as string;
@@ -509,6 +512,7 @@ export async function agentSetup(deps: AgentSetupDeps, setup: SetupOptions): Pro
       variables: env.value.variables,
       envPath: deps.options.envPath,
       dryRun: deps.options.dryRun === true,
+      devMode: deps.devMode,
     }));
   }
   return withOrg(deps, setup, env.value, choice.org);
