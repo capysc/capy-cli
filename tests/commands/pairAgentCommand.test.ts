@@ -9,7 +9,7 @@
 import { mock, jest, describe, test, expect, beforeEach, afterEach, afterAll, spyOn } from 'bun:test';
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
-import { dirname, join } from 'path';
+import { basename, dirname, join } from 'path';
 import jsQR from 'jsqr';
 import { PNG } from 'pngjs';
 import { webcrypto } from 'crypto';
@@ -21,6 +21,18 @@ const tempHome = mkdtempSync(join(require('os').tmpdir(), 'capy-pair-agent-'));
 mock.module('os', () => {
   const actual = require('os');
   const patched = { ...actual, homedir: () => tempHome };
+  return { ...patched, default: patched };
+});
+
+/** Every `writeFileSync` goes through this hook, so a test can make writes fail the way a full disk would. Unset, it writes for real. */
+const writeFault = { current: null as null | ((path: unknown) => boolean) };
+mock.module('fs', () => {
+  const actual = require('fs');
+  const writeFileSync = (path: unknown, ...rest: unknown[]) => {
+    if (writeFault.current?.(path)) throw Object.assign(new Error('no space left on device'), { code: 'ENOSPC' });
+    return actual.writeFileSync(path, ...rest);
+  };
+  const patched = { ...actual, writeFileSync };
   return { ...patched, default: patched };
 });
 
@@ -1123,6 +1135,64 @@ describe('capy pair, agent mode', () => {
       expect(mockPickupDevicePairing).not.toHaveBeenCalled();
       expect(existsSync(getAuthSessionPath(USER.id))).toBe(false);
       expect([fingerprint(ROOT(USER.id)), fingerprint(ENC(USER.id))]).toEqual(before);
+    });
+  });
+
+  describe('a failed write of the pending file never strands a QR image', () => {
+    /** Makes every write to the pending file (or a file a replacement is staged in) fail with ENOSPC, until the returned function is called. */
+    function failPendingWrites() {
+      writeFault.current = (path) => String(path).includes('pending.json');
+      return { mockRestore: () => { writeFault.current = null; } };
+    }
+    /** Every PNG directory this file made that no pending grant names: the leak. */
+    const orphanedQrDirs = (): readonly string[] => {
+      const named = pendingExists() ? [basename(dirname(JSON.parse(pendingRaw()).qr_file as string))] : [];
+      return newQrDirsSince(QR_DIRS_AT_START).filter((name) => !named.includes(name));
+    };
+
+    test('a start run that replaces a grant and cannot save the new one leaves no orphaned PNG', async () => {
+      stubFetch([PENDING]);
+      const first = await run({ email: 'mike@example.com' });
+      expect(first.exit).toBe(3);
+      const failing = failPendingWrites();
+      try {
+        stubFetch([PENDING], { ...AUTHORIZE_BODY, device_code: 'device-new', user_code: 'WXYZ-1234' });
+        const second = await run({ email: 'mike@example.com' });
+        expect(second.exit).toBe(1);
+        expect(second.json.code).toBe(ERROR_CODES.SERVICE_ERROR);
+      } finally {
+        failing.mockRestore();
+      }
+      expect(orphanedQrDirs()).toEqual([]);
+    });
+
+    test('a wait run that is still waiting and cannot save the grant leaves no orphaned PNG', async () => {
+      stubFetch([PENDING]);
+      await run({ email: 'mike@example.com' });
+      const failing = failPendingWrites();
+      try {
+        stubFetch([PENDING]);
+        const waited = await run({ wait: true });
+        expect(waited.exit).toBe(1);
+        expect(waited.json.code).toBe(ERROR_CODES.SERVICE_ERROR);
+      } finally {
+        failing.mockRestore();
+      }
+      expect(orphanedQrDirs()).toEqual([]);
+    });
+
+    test('the earlier grant is still there, whole, after a failed replacement', async () => {
+      stubFetch([PENDING]);
+      await run({ email: 'mike@example.com' });
+      const before = pendingRaw();
+      const failing = failPendingWrites();
+      try {
+        stubFetch([PENDING], { ...AUTHORIZE_BODY, device_code: 'device-new' });
+        await run({ email: 'mike@example.com' });
+      } finally {
+        failing.mockRestore();
+      }
+      expect(pendingRaw()).toBe(before);
     });
   });
 

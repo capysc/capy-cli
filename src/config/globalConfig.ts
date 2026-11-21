@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync, rmSync } from 'fs';
 import { homedir } from 'os';
 import { join } from 'path';
 import type { KeepFile, SyncState } from '../types/index';
@@ -202,10 +202,29 @@ export function saveAuthSession(token: object, userId?: string): void {
   writeSecureFile(getAuthSessionPath(userId), JSON.stringify(token, null, 2));
 }
 
-/** Writes the pending pair grant, mode 0600, replacing any earlier one (the old file goes first, so its mode never carries over). */
+/**
+ * Writes the pending pair grant, mode 0600, replacing any earlier one. The new content is staged in its own fresh file
+ * (so no earlier file's mode carries over) and moved over the old one, so a failed write leaves the earlier grant whole,
+ * still naming its QR image, instead of deleting it first.
+ */
 export function savePairPendingRaw(content: string): void {
-  rmSync(getPairPendingPath(), { force: true });
-  writeSecureFile(getPairPendingPath(), content);
+  const target = getPairPendingPath();
+  const staged = `${target}.new`;
+  const discardStaged = (): void => {
+    try {
+      rmSync(staged, { force: true });
+    } catch {
+      // Best effort: the original failure is the one to report.
+    }
+  };
+  try {
+    rmSync(staged, { force: true });
+    writeSecureFile(staged, content);
+    renameSync(staged, target);
+  } catch (error) {
+    discardStaged();
+    throw error;
+  }
 }
 
 export function readPairPendingRaw(): string | null {
