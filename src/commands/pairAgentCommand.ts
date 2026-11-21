@@ -213,6 +213,7 @@ async function startRun(options: PairAgentOptions, deps: PairAgentDeps): Promise
   const apiUrl = options.apiUrl || resolveActiveUrl(devMode);
   const keyPair = generatePairKeyPair();
   const authorize = await authorizeDevice(apiUrl, keyPair.publicKey);
+  const authorizedAt = now();
   if (typeof authorize.device_code !== 'string' || !authorize.device_code
     || typeof authorize.user_code !== 'string' || !authorize.user_code
     || !isPositiveNumber(authorize.interval)) {
@@ -220,7 +221,7 @@ async function startRun(options: PairAgentOptions, deps: PairAgentDeps): Promise
   }
   const deviceLink = `${resolveKeepOrigin()}/device?code=${encodeURIComponent(authorize.user_code)}`;
   // Everything that can throw is settled before the PNG exists, so a refusal never leaves one behind.
-  const expiresAt = expiryOf(authorize, now());
+  const expiresAt = expiryOf(authorize, authorizedAt);
   const previous = readPendingPairGrant();
   const image = await tryQrImage(deviceLink);
   const grant: PendingPairGrant = {
@@ -234,6 +235,8 @@ async function startRun(options: PairAgentOptions, deps: PairAgentDeps): Promise
     purpose: PAIR_DEFAULT_PURPOSE,
     expiresAt,
     intervalSeconds: authorize.interval,
+    // Like the terminal flow, the first "approved yet?" check waits one interval after the authorization.
+    nextPollAt: authorizedAt + authorize.interval * 1000,
     ...(image ? { qrFile: image.file } : {}),
   };
   saveOrDiscardQr(grant);
@@ -270,7 +273,7 @@ async function pollOnceBounded(grant: PendingPairGrant, timeoutMs: number): Prom
  * Polls at the grant's interval (+5s on every `slow_down`, as `pollDeviceToken` does) until approval, expiry, denial
  * or the ceiling, and never sleeps past the ceiling.
  *
- * The first poll waits until the grant's `nextPollAt` (set by the previous run), so back-to-back runs never poll before
+ * The first poll waits until the grant's `nextPollAt` (set by the start run, then by each wait run), so back-to-back runs never poll before
  * the interval is up. After a poll, the next one is scheduled at now + interval: if that is before the deadline the run
  * sleeps until then and polls; otherwise it stops, sleeping on to the deadline first unless the interval alone is at
  * least the ceiling (then it returns at once). Either way the earliest next poll time is handed back to be saved.

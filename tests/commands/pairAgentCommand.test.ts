@@ -330,7 +330,8 @@ describe('capy pair, agent mode', () => {
 
     test('approved by the expected account: installs the session, writes the keys, removes the pending file, prints the success JSON', async () => {
       const fetchMock = await startThenStub('mike@example.com', [PENDING, APPROVED]);
-      const clock = fakeClock();
+      // The start run saved authorize time + interval as the earliest first poll; this run starts after it, so it polls at once.
+      const clock = fakeClock(Date.now() + 5000);
       const ran = await run({ wait: true }, clock);
       expect(ran.exit).toBe(0);
       expect(ran.json).toEqual({ ok: true, user_id: USER.id, paired: [{ org_id: 'org-123', user_id: USER.id }], keys: 'picked_up' });
@@ -348,7 +349,8 @@ describe('capy pair, agent mode', () => {
 
     test('returns at the first poll when the grant is already approved, without sleeping', async () => {
       await startThenStub('mike@example.com', [APPROVED]);
-      const clock = fakeClock();
+      // The start run saved authorize time + interval as the earliest first poll; this run starts after it, so it polls at once.
+      const clock = fakeClock(Date.now() + 5000);
       const ran = await run({ wait: true }, clock);
       expect(ran.exit).toBe(0);
       expect(clock.sleep).not.toHaveBeenCalled();
@@ -406,7 +408,8 @@ describe('capy pair, agent mode', () => {
       stubFetch([PENDING]);
       const started = await run({ email: 'mike@example.com' });
       const fetchMock = stubFetch([PENDING]);
-      const clock = fakeClock();
+      // The start run saved authorize time + interval as the earliest first poll; this run starts after it, so it polls at once.
+      const clock = fakeClock(Date.now() + 5000);
       const ran = await run({ wait: true }, { ...clock, ceilingMs: PAIR_WAIT_CEILING_MS });
       expect(PAIR_WAIT_CEILING_MS).toBe(30_000);
       expect(ran.exit).toBe(3);
@@ -427,7 +430,8 @@ describe('capy pair, agent mode', () => {
 
     test('a slow_down adds 5 seconds to the interval, and the longer interval is kept for the next run', async () => {
       await startThenStub('mike@example.com', [SLOW_DOWN, PENDING]);
-      const clock = fakeClock();
+      // The start run saved authorize time + interval as the earliest first poll; this run starts after it, so it polls at once.
+      const clock = fakeClock(Date.now() + 5000);
       const ran = await run({ wait: true }, clock);
       expect(ran.json.code).toBe(ERROR_CODES.PAIR_STILL_WAITING);
       expect((clock.sleep.mock.calls as number[][])[0][0]).toBe(10_000);
@@ -438,7 +442,8 @@ describe('capy pair, agent mode', () => {
       stubFetch([PENDING], { ...AUTHORIZE_BODY, interval: 60 });
       await run({ email: 'mike@example.com' });
       const fetchMock = stubFetch([PENDING]);
-      const first = fakeClock();
+      // The start run saved authorize time + 60 seconds; this run starts after it, so it polls once.
+      const first = fakeClock(Date.now() + 60_000);
       const ran = await run({ wait: true }, first);
       expect(ran.exit).toBe(3);
       expect(ran.json.code).toBe(ERROR_CODES.PAIR_STILL_WAITING);
@@ -452,6 +457,42 @@ describe('capy pair, agent mode', () => {
       expect(second.sleep).not.toHaveBeenCalled();
     });
 
+    test('the first poll waits one interval after the authorize time: not before, and at that time', async () => {
+      const authorizedAt = 1_700_000_000_000;
+      const startFetch = stubFetch([PENDING]);
+      await run({ email: 'mike@example.com' }, fakeClock(authorizedAt));
+      const publicKey = sentPublicKey(startFetch);
+      mockPickupDevicePairing.mockImplementation(async () => ({ sealed: await sealAsBrowser(PAYLOAD, publicKey) }));
+      expect(JSON.parse(pendingRaw()).next_poll_at).toBe(authorizedAt + 5000);
+      const fetchMock = stubFetch([APPROVED]);
+      // A run whose ceiling ends before authorize time + interval sends no poll at all.
+      const early = fakeClock(authorizedAt);
+      const waiting = await run({ wait: true }, { ...early, ceilingMs: 4000 });
+      expect(waiting.json.code).toBe(ERROR_CODES.PAIR_STILL_WAITING);
+      expect(callsTo(fetchMock, '/auth/device/token')).toHaveLength(0);
+      expect(JSON.parse(pendingRaw()).next_poll_at).toBe(authorizedAt + 5000);
+      // A run that reaches that time sleeps up to it and polls then, never earlier.
+      const atTime = fakeClock(authorizedAt);
+      const sleepSeen = jest.fn(async (ms: number) => {
+        expect(callsTo(fetchMock, '/auth/device/token')).toHaveLength(0);
+        await atTime.sleep(ms);
+      });
+      const ran = await run({ wait: true }, { sleep: sleepSeen, now: atTime.now });
+      expect(ran.exit).toBe(0);
+      expect(sleepSeen).toHaveBeenCalledWith(5000);
+      expect(callsTo(fetchMock, '/auth/device/token')).toHaveLength(1);
+    });
+
+    test('a pending file written by the previous build (no next_poll_at) still works: its first wait run polls at once', async () => {
+      await startThenStub('mike@example.com', [APPROVED]);
+      const { next_poll_at: _dropped, ...legacy } = JSON.parse(pendingRaw());
+      savePairPendingRaw(JSON.stringify(legacy));
+      const clock = fakeClock();
+      const ran = await run({ wait: true }, clock);
+      expect(ran.exit).toBe(0);
+      expect(clock.sleep).not.toHaveBeenCalled();
+    });
+
     test('the interval is respected across runs: the next run sleeps until the saved earliest-next-poll time before it polls', async () => {
       await startThenStub('mike@example.com', [PENDING]);
       const first = await run({ wait: true });
@@ -459,8 +500,9 @@ describe('capy pair, agent mode', () => {
       const saved = JSON.parse(pendingRaw()).next_poll_at as number;
       expect(saved).toBeGreaterThan(Date.now());
       const fetchMock = stubFetch([APPROVED]);
-      // The real first run takes its 30 seconds; the fake one did not, so the second run starts a moment later.
-      const clock = fakeClock(Date.now() + 1000);
+      // The first run's first poll waited one interval, so its last one is 30 seconds after the start run. The real run
+      // takes that long; the fake one did not, so the second run starts a few seconds later, before the saved time.
+      const clock = fakeClock(Date.now() + 6000);
       const ran = await run({ wait: true }, clock);
       expect(ran.exit).toBe(0);
       expect(callsTo(fetchMock, '/auth/device/token')).toHaveLength(1);
@@ -492,16 +534,13 @@ describe('capy pair, agent mode', () => {
       stubFetch([PENDING], { ...AUTHORIZE_BODY, expires_in: 10, interval: 60 });
       const started = await run({ email: 'mike@example.com' });
       const image = started.json.elicitation.qr.image.file as string;
-      // The first wait run polls once; its interval is longer than the ceiling, so the earliest next poll is a minute away.
+      // The start run saved the earliest first poll a minute away (the interval is longer than the ceiling).
       const fetchMock = stubFetch([PENDING]);
-      const first = await run({ wait: true }, fakeClock());
-      expect(first.json.code).toBe(ERROR_CODES.PAIR_STILL_WAITING);
-      expect(callsTo(fetchMock, '/auth/device/token')).toHaveLength(1);
-      // The second run starts after the grant's own expiry (10 seconds) but before that next poll time: it does not poll.
+      // This run starts after the grant's own expiry (10 seconds) but before that poll time: it does not poll.
       const later = await run({ wait: true }, fakeClock(Date.now() + 20_000));
       expect(later.exit).toBe(1);
       expect(later.json.code).toBe(ERROR_CODES.PAIR_EXPIRED);
-      expect(callsTo(fetchMock, '/auth/device/token')).toHaveLength(1);
+      expect(callsTo(fetchMock, '/auth/device/token')).toHaveLength(0);
       expect(pendingExists()).toBe(false);
       expect(existsSync(image)).toBe(false);
     });

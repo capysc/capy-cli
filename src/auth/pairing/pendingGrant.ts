@@ -37,7 +37,7 @@ export interface PendingPairGrant {
   /** ISO time the grant expires. */
   readonly expiresAt: string;
   readonly intervalSeconds: number;
-  /** Earliest time (ms since the epoch) the next poll may be sent, so a later wait run never polls before the interval is up. Absent before the first poll. */
+  /** Earliest time (ms since the epoch) the next poll may be sent, so a later wait run never polls before the interval is up. The start run sets it to the authorize time plus one interval. Absent in a file written by an earlier build, which polls at once. */
   readonly nextPollAt?: number;
   /** Path of the QR PNG made for `deviceLink`. Absent when none was made. It encodes the link only. */
   readonly qrFile?: string;
