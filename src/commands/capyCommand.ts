@@ -1634,10 +1634,16 @@ export class CapyCommand {
     })();
 
     if (folderOnly && seenSnapshot !== undefined) {
-      const keep = currentKeep ?? {
-        version: '3.0', org_id: projectState.organizationId!, project_id: projectState.projectId!,
-        project_name: projectState.projectName!, variables: {},
-      };
+      const envMeta = this.fileManager.readEnvMeta(this.options.envPath);
+      if ((envMeta.org_id && envMeta.org_id !== projectState.organizationId) || (envMeta.project_id && envMeta.project_id !== projectState.projectId) ||
+          (currentKeep && (currentKeep.org_id !== projectState.organizationId || currentKeep.project_id !== projectState.projectId))) {
+        throw new CapyError('The environment file and project lockfiles must belong to the same Capy project.', ERROR_CODES.INVALID_FORMAT);
+      }
+      const keep = currentKeep ?? await (async (): Promise<KeepFile> => {
+        const project = (await this.serviceClient.listProjects()).find((p) => p.id === projectState.projectId && p.organization_id === projectState.organizationId);
+        if (!project) throw new CapyError('Could not recover the project named in this environment file.', ERROR_CODES.PROJECT_NOT_FOUND);
+        return { version: '3.0', org_id: project.organization_id, project_id: project.id, project_name: project.name, variables: {} };
+      })();
       try {
         const outcome = await syncFolderValues({
           folder: {

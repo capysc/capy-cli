@@ -17,7 +17,7 @@
  * `mock.module()` is process-wide: this file runs isolated (tests/run-tests.sh).
  */
 import { describe, test, expect, beforeAll, afterAll, afterEach, mock, spyOn } from 'bun:test';
-import { existsSync, readFileSync, rmSync } from 'fs';
+import { existsSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { getGlobalCapyDir } from '../../src/config/globalConfig';
 import { FIXED_PROJECT_KEY } from '../helpers/deployServer';
 import { EMPTY_SERVER, fakeCapyServer, pushOf, seedServer, serverValues } from '../helpers/fakeCapyServer';
@@ -64,6 +64,9 @@ mock.module('../../src/service/serviceClient', () => ({
     }
     pushSecrets(...args: unknown[]) {
       return serverOf()!.pushSecrets(...(args as Parameters<ReturnType<typeof fakeCapyServer>['pushSecrets']>));
+    }
+    async listProjects() {
+      return [{ id: 'proj', organization_id: 'org', name: 'demo' }];
     }
     async listBranches() {
       return [];
@@ -435,6 +438,36 @@ describe.each(['plain', 'ignored'] as const)('folder-only sync (%s)', (git) => {
     const w = world({}, {}, { initial: EMPTY_SERVER }, git);
     expect((await sync({ protocol: true })).outcome).toBe('up-to-date');
     expect(w.folder.keep().variables).toEqual({});
+    expect(w.server.pushSecrets.mock.calls).toHaveLength(0);
+  });
+
+  test('a mismatched environment identity is rejected before writing', async () => {
+    const w = setup();
+    const foreign = readFileSync('.env', 'utf8').replace('# capy:project_id=proj', '# capy:project_id=foreign');
+    writeFileSync('.env', foreign);
+    await expect(sync({ protocol: true })).rejects.toMatchObject({ code: ERROR_CODES.INVALID_FORMAT });
+    expect(readFileSync('.env', 'utf8')).toBe(foreign);
+    expect(w.server.pushSecrets.mock.calls).toHaveLength(0);
+  });
+
+  test('linked folder recovers the missing root and environment from the working identity', async () => {
+    const w = setup();
+    if (git === 'plain') writeFileSync('.gitignore', '/keep.lock\n');
+    w.folder.pm.writeActiveBranch(DEV);
+    rmSync('.env');
+    rmSync('keep.lock');
+    expect((await sync({ protocol: true })).outcome).toBe('changed');
+    expect(JSON.parse(readFileSync('keep.lock', 'utf8')).project_id).toBe('proj');
+    expect(w.folder.env()).toEqual({ ...OLD, X: 'x-theirs' });
+    expect(w.server.pushSecrets.mock.calls).toHaveLength(0);
+  });
+
+  test('a header is enough to recover the actual project name when both locks and remote values are missing', async () => {
+    const w = world({}, {}, { initial: EMPTY_SERVER }, git);
+    rmSync('keep.lock');
+    rmSync('.capy/keep.lock');
+    expect((await sync({ protocol: true })).outcome).toBe('up-to-date');
+    expect(w.folder.keep()).toMatchObject({ org_id: 'org', project_id: 'proj', project_name: 'demo', variables: {} });
     expect(w.server.pushSecrets.mock.calls).toHaveLength(0);
   });
 
