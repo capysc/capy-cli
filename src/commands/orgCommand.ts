@@ -8,10 +8,11 @@ import { AuthResult, Organization, KeepFile, CapyError, ERROR_CODES } from '../t
 import { hasOrgKey, resolveProjectKey, KeyServiceOps } from '../crypto/keyResolver';
 import { createNewOrganization } from './orgCreation';
 import { excludeSystemProject, assertProjectNameAllowed, isReservedProjectName, PROJECT_NAME_RESERVED_MESSAGE } from '../system/reservedProjectName';
-import { execSync } from 'child_process';
+import { configureSetupTracking, commitInitialKeep } from '../git/setupKeep';
+import { chooseSetupSharing } from '../ui/projectSetup';
 import { ACCENT } from '../ui/colors';
 import { orgProjectQuestion } from '../ui/projectQuestions';
-import { gateFirst, type GateOptions } from '../sync/gate';
+import { answersByProtocol, gateFirst, type GateOptions } from '../sync/gate';
 import { conflictFlagsOrExit } from '../sync/conflicts';
 import { switchRepoOrgRefusal, exitWithRepoOrgRefusal } from '../core/repoOrgGuard';
 
@@ -63,7 +64,7 @@ export class OrgCommand {
     conflictFlagsOrExit(gate.conflictFlags ?? {}, gate.json === true);
     await gateFirst({ ...gate, devMode: this.devMode });
     try {
-      await this._execute();
+      await this._execute(!answersByProtocol(gate));
     } catch (error: any) {
       if (error?.name === 'ExitPromptError') throw error;
       if (error instanceof CapyError && error.code === ERROR_CODES.REPO_ORG_MISMATCH) exitWithRepoOrgRefusal(error);
@@ -72,7 +73,7 @@ export class OrgCommand {
     }
   }
 
-  private async _execute(): Promise<void> {
+  private async _execute(human: boolean): Promise<void> {
     const projectState = await this.projectManager.detectProjectState();
 
     const hasProject = projectState.initialized && !!projectState.organizationId;
@@ -195,7 +196,7 @@ export class OrgCommand {
 
     if (orgProjects.length === 0) {
       if (keepNamesNoOrg) throw invalidKeepLockError();
-      await this.createFirstProjectInOrg(selectedOrg, authResult.user_id!, hasProject);
+      await this.createFirstProjectInOrg(selectedOrg, authResult.user_id!, hasProject, human);
       return;
     }
 
@@ -259,6 +260,7 @@ export class OrgCommand {
     selectedOrg: Organization,
     userId: string,
     hasProject: boolean,
+    human: boolean,
   ): Promise<void> {
     console.log(`\n  ${B(selectedOrg.name)} has no projects yet.`);
 
@@ -290,7 +292,8 @@ export class OrgCommand {
       },
     }]);
 
-    await this.bootstrapFirstProject(selectedOrg, userId, projectName);
+    const share = hasProject ? undefined : await chooseSetupSharing(process.cwd(), human);
+    await this.bootstrapFirstProject(selectedOrg, userId, projectName, share);
   }
 
   /**
@@ -318,9 +321,11 @@ export class OrgCommand {
     selectedOrg: Organization,
     userId: string,
     projectName: string,
+    share: boolean | undefined,
   ): Promise<void> {
     // Choke point: the reserved name must never reach the service.
     assertProjectNameAllowed(projectName.trim());
+    if (share !== undefined) configureSetupTracking(process.cwd(), share);
 
     const initSpinner = ora('Creating project...').start();
     const projectResult = await this.serviceClient.initializeProject(
@@ -365,11 +370,7 @@ export class OrgCommand {
     });
     this.fileManager.ensureCapyGitignore();
 
-    try {
-      execSync('git add keep.lock', { stdio: 'pipe' });
-    } catch {
-      // not a git repo — fine
-    }
+    if (share) commitInitialKeep(process.cwd());
 
     console.log(`\n  Switched to ${B(selectedOrg.name)} / ${B(projectResult.project_name)}`);
     console.log(`  Run ${B('capy')} to sync secrets.\n`);
