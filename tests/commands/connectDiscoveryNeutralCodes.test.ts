@@ -83,11 +83,11 @@ describe('the code tables', () => {
 
 const planEnv = { environmentName: 'preview', serviceId: 'prj_x', serviceName: 'x', serviceKind: 'vercel' } as unknown as DiscoveryPlanEnv;
 
-type ServiceOverrides = Partial<Record<'getDecryptData' | 'listProjects' | 'pushSecrets' | 'coDecrypt', unknown>>;
+type ServiceOverrides = Partial<Record<'getDecryptData' | 'listProjects' | 'listBranches' | 'pushSecrets' | 'coDecrypt', unknown>>;
 
 interface StepWorld {
   readonly root: string;
-  readonly ensure: (opts: { interactive: boolean; yes: boolean; snapshot?: { existingProjects: ReadonlyArray<{ id: string; name: string; organization_id: string }>; projectsUnavailable: boolean }; pick?: string; sameRun?: boolean }) => Promise<{ ok: boolean; code?: string }>;
+  readonly ensure: (opts: { interactive: boolean; yes: boolean; snapshot?: { existingProjects: ReadonlyArray<{ id: string; name: string; organization_id: string }>; projectsUnavailable: boolean }; pick?: string; sameRun?: boolean; joinBranch?: string }) => Promise<{ ok: boolean; code?: string }>;
   readonly checkout: () => Promise<{ ok: boolean; code?: string }>;
   readonly importAndPush: (outcome: ImportOutcome) => Promise<{ ok: boolean; code?: string }>;
 }
@@ -112,7 +112,7 @@ async function stepWorld(root: string, codes: DiscoveryCodes, opts: { keep: bool
     ...(opts.service ?? {}),
   };
   const ctx = { orgId: ORG, userId: USER, authService: {}, serviceClient } as unknown as DiscoveryContext;
-  const depsFor = (over: { interactive: boolean; yes: boolean; snapshot?: Parameters<StepWorld['ensure']>[0]['snapshot']; pick?: string; sameRun?: boolean }, importFn: (c: never, o: ConnectOpts) => Promise<ImportOutcome>) =>
+  const depsFor = (over: { interactive: boolean; yes: boolean; snapshot?: Parameters<StepWorld['ensure']>[0]['snapshot']; pick?: string; sameRun?: boolean; joinBranch?: string }, importFn: (c: never, o: ConnectOpts) => Promise<ImportOutcome>) =>
     buildRealDiscoverySequenceDeps(ctx, importFn as never, {
       noPush: false,
       interactive: over.interactive,
@@ -126,6 +126,7 @@ async function stepWorld(root: string, codes: DiscoveryCodes, opts: { keep: bool
       askProjectName: async (name) => name,
       existingProjectsSnapshot: over.snapshot,
       sameRunNameCollisions: new Set(over.sameRun ? [`${root}\u0000`] : []),
+      joinBranch: over.joinBranch,
     });
   const noImport = async (): Promise<ImportOutcome> => ({ ok: true, source: undefined, imported: [], unchanged: [], skipped: [], warnings: [] }) as unknown as ImportOutcome;
   const codeOf = (r: { ok: boolean; code?: string }) => ({ ok: r.ok, ...(r.ok ? {} : { code: (r as { code: string }).code }) });
@@ -177,8 +178,9 @@ async function observe(codes: DiscoveryCodes): Promise<Record<string, string | u
     projectNotFound: await run(false, { listProjects: async () => [{ id: 'p1', name: 'a', organization_id: ORG }] }, async (w) =>
       codeOf(await w.ensure({ interactive: true, yes: false, pick: 'nope' })),
     ),
-    initFailed: await run(false, { listProjects: async () => [{ id: 'p1', name: 'a', organization_id: ORG }], getDecryptData: async () => { throw new Error('refused'); } }, async (w) =>
-      codeOf(await w.ensure({ interactive: true, yes: false, pick: 'p1' })),
+    // The branch is named, so nobody is asked: this case is about the read that fails after it.
+    initFailed: await run(false, { listProjects: async () => [{ id: 'p1', name: 'a', organization_id: ORG }], listBranches: async () => [{ id: 'b1', name: 'prod', project_id: 'p1', is_protected: false }], getDecryptData: async () => { throw new Error('refused'); } }, async (w) =>
+      codeOf(await w.ensure({ interactive: true, yes: false, pick: 'p1', joinBranch: 'prod' })),
     ),
     branchProtected: await run(true, { getDecryptData: async () => { throw new CapyError('no', ERROR_CODES.PERMISSION_DENIED, { status: 403 }); } }, async (w) => codeOf(await w.checkout())),
     checkoutFailed: await run(true, { getDecryptData: async () => { throw new Error('boom'); } }, async (w) => codeOf(await w.checkout())),

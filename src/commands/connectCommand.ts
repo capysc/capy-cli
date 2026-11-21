@@ -45,12 +45,15 @@ function exitCodeForRefusalCode(code: string): number {
 /**
  * The exit code of a discovery run from its per-folder results: `undefined` when every folder was applied; `EXIT_NEEDS_INPUT`
  * when a folder differed from Capy and nobody could answer (its rows and `conflict_id` are in the report, nothing was
- * written into it); 1 for any other per-folder failure. The OTHER folders' steps still ran.
+ * written into it), and likewise when joining an existing project needed a branch nobody could be asked for (the project's
+ * `branches` are in the report); 1 for any other per-folder failure. The OTHER folders' steps still ran.
  */
-export function discoveryExitCode(applied: ReadonlyArray<{ readonly ok: boolean; readonly conflict?: unknown }> | undefined): number | undefined {
+export function discoveryExitCode(
+  applied: ReadonlyArray<{ readonly ok: boolean; readonly conflict?: unknown; readonly branches?: unknown }> | undefined,
+): number | undefined {
   const failed = (applied ?? []).filter((f) => !f.ok);
   if (failed.length === 0) return undefined;
-  return failed.some((f) => f.conflict !== undefined) ? EXIT_NEEDS_INPUT : 1;
+  return failed.some((f) => f.conflict !== undefined || f.branches !== undefined) ? EXIT_NEEDS_INPUT : 1;
 }
 
 /**
@@ -442,6 +445,8 @@ export class ConnectCommand {
             ok: false as const,
             code: f.code,
             message: f.message,
+            // Joining an existing project needed a branch and nobody could be asked: the project's branches, for the caller to show the human.
+            ...(f.branches === undefined ? {} : { branches: f.branches }),
             // A folder that differs from Capy and could not be asked: its rows and id, answered by a rerun (fingerprints only).
             ...(f.conflict === undefined ? {} : { conflict_id: f.conflict.conflict_id, conflicts: f.conflict.conflicts }),
             environments: f.environments.map((e) => ({
