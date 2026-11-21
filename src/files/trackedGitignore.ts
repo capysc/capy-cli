@@ -243,6 +243,11 @@ function appendToList(listPath: string, pattern: string): boolean {
  * step fails, only what this call did is undone: the file is removed only when
  * this call's own `checkout-index` wrote it, and a file or flag that another
  * writer changed is never touched.
+ *
+ * `afterWrite` is the caller's own change to the file git just wrote. It runs
+ * before the list line is added, so a failure there is undone like any other
+ * step (file removed, flag restored); its error is then rethrown unchanged.
+ * If the undo itself fails, 'rollback-failed' is returned instead.
  */
 export function addToSparseCheckout(
   cwd: string,
@@ -250,6 +255,7 @@ export function addToSparseCheckout(
   listPath: string,
   pattern: string,
   run: GitRunner = runGit,
+  afterWrite: () => void = () => undefined,
 ): ApplyOutcome {
   // Another process may have finished the same job since the plan was made.
   if (!stillAsPlanned(cwd, gitignorePath, run)) return 'changed-concurrently';
@@ -263,11 +269,35 @@ export function addToSparseCheckout(
   if (written !== 'ok') {
     return restoreFlag(cwd, run) ? written : 'rollback-failed';
   }
+  const failure = attempt(afterWrite);
+  if (failure.failed) {
+    return undoOwnFile(cwd, gitignorePath, run) ? rethrow(failure.error) : 'rollback-failed';
+  }
   if (!appendToList(listPath, pattern)) {
-    // The file is this call's own, so it is the only file removed.
-    const removed = removeFile(gitignorePath);
-    const flagged = restoreFlag(cwd, run);
-    return removed && flagged ? 'list-unwritable' : 'rollback-failed';
+    return undoOwnFile(cwd, gitignorePath, run) ? 'list-unwritable' : 'rollback-failed';
   }
   return 'ok';
+}
+
+type Attempt = { readonly failed: false } | { readonly failed: true; readonly error: unknown };
+
+function attempt(step: () => void): Attempt {
+  try {
+    step();
+    return { failed: false };
+  } catch (error) {
+    return { failed: true, error };
+  }
+}
+
+function rethrow(error: unknown): never {
+  throw error;
+}
+
+/** Undoes this call's own file and flag; true when both are back as they were. */
+function undoOwnFile(cwd: string, gitignorePath: string, run: GitRunner): boolean {
+  // The file is this call's own, so it is the only file removed.
+  const removed = removeFile(gitignorePath);
+  const flagged = restoreFlag(cwd, run);
+  return removed && flagged;
 }

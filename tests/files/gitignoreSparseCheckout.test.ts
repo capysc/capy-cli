@@ -393,6 +393,65 @@ describe('sparse add that cannot finish leaves nothing behind', () => {
     expect(indexState(s.top)).toEqual(before);
   });
 
+  test.skipIf(process.getuid?.() === 0)('the Capy append fails after git wrote the file: file removed, flag and list restored, then a normal run works', () => {
+    const s = sparseRepo('frontend/app/', ORIGINAL);
+    const listFile = join(s.top, '.git', 'info', 'sparse-checkout');
+    const before = indexState(s.top);
+    const listBefore = read(listFile);
+    // git (a child of this process) creates the file read-only, so appending to it fails
+    const previousMask = process.umask(0o277);
+    const seen = ((): readonly string[] => {
+      const spy = spyOn(console, 'error').mockImplementation(() => undefined);
+      try {
+        return [codeOf(() => run(s.folder)) ?? 'NO_ERROR', ...spy.mock.calls.map((args) => args.join(' '))];
+      } finally {
+        spy.mockRestore();
+        process.umask(previousMask);
+      }
+    })();
+    expect(seen).toEqual([ERROR_CODES.PERMISSION_DENIED]);
+    expect(lexists(s.gitignorePath)).toBe(false);
+    expect(read(listFile)).toBe(listBefore);
+    expect(indexState(s.top)).toEqual(before);
+    expect(gitOut(s.top, ['status', '--porcelain'])).toBe('');
+
+    captureStderr(() => run(s.folder));
+    expect(read(s.gitignorePath)).toBe(COMPLETE);
+    expect(git(s.folder, ['check-ignore', '-q', '.env']).status).toBe(0);
+  });
+
+  test('the Capy append fails (injected): the same rollback, and the original error is raised', () => {
+    const s = sparseRepo('frontend/app/', ORIGINAL);
+    const plan = planMissingGitignore(s.folder, CAPY_ENTRIES);
+    if (plan.kind !== 'sparse-add') throw new Error('expected sparse-add');
+    const before = indexState(s.top);
+    const listBefore = sparseList(s.top);
+    const failure = new Error('disk full');
+    const failing = (): void => {
+      writeFileSync(s.gitignorePath, ORIGINAL + '\n# Capy\n.en');
+      throw failure;
+    };
+    expect(() =>
+      addToSparseCheckout(s.folder, s.gitignorePath, plan.listPath, plan.pattern, runGit, failing),
+    ).toThrow(failure);
+    expect(lexists(s.gitignorePath)).toBe(false);
+    expect(indexState(s.top)).toEqual(before);
+    expect(sparseList(s.top)).toBe(listBefore);
+  });
+
+  test('the Capy append fails and the flag cannot be put back: reported as rollback-failed, the user file is never touched', () => {
+    const s = sparseRepo('frontend/app/', ORIGINAL);
+    const plan = planMissingGitignore(s.folder, CAPY_ENTRIES);
+    if (plan.kind !== 'sparse-add') throw new Error('expected sparse-add');
+    const noFlag: GitRunner = (args, cwd) =>
+      args.includes('--skip-worktree') ? { stdout: '', stderr: '', code: 1 } : runGit(args, cwd);
+    const outcome = addToSparseCheckout(s.folder, s.gitignorePath, plan.listPath, plan.pattern, noFlag, () => {
+      throw new Error('disk full');
+    });
+    expect(outcome).toBe('rollback-failed');
+    expect(gitOut(s.top, ['show', ':frontend/app/.gitignore'])).toBe(ORIGINAL);
+  });
+
   test('tracked symlink .gitignore that sparse checkout keeps off disk: refused, nothing written or changed', () => {
     const top = freshDir();
     mkdirSync(join(top, 'app'), { recursive: true });

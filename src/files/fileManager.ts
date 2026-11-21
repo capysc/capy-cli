@@ -441,7 +441,14 @@ export class FileManager {
     if (existingContent === null) {
       return;
     }
+    this.appendCapyEntries(gitignorePath, existingContent, entries);
+  }
 
+  private appendCapyEntries(
+    gitignorePath: string,
+    existingContent: string,
+    entries: readonly string[],
+  ): void {
     const newEntries = entriesMissingFrom(existingContent, entries);
 
     if (newEntries.length === 0) {
@@ -467,9 +474,10 @@ export class FileManager {
 
   /**
    * The content the new entries are appended to; null means there is nothing
-   * to do. When `.gitignore` is not on disk, git decides: a tracked file kept
-   * off disk is written by git (never rebuilt from text) and never replaced
-   * by a new one.
+   * left to do (nothing to add, or the sparse add already appended them).
+   * When `.gitignore` is not on disk, git decides: a tracked file kept off
+   * disk is written by git (never rebuilt from text) and never replaced by a
+   * new one.
    */
   private resolveGitignoreBase(
     gitignorePath: string,
@@ -489,7 +497,7 @@ export class FileManager {
       return this.restoreGitignoreFromIndex(gitignorePath);
     }
     if (plan.kind === 'sparse-add') {
-      return this.addGitignoreToSparseCheckout(gitignorePath, plan.listPath, plan.pattern);
+      return this.addGitignoreToSparseCheckout(gitignorePath, plan.listPath, plan.pattern, entries);
     }
     throw this.gitignoreNotInCheckout(gitignorePath, plan.reason);
   }
@@ -502,18 +510,31 @@ export class FileManager {
     return readFileSync(gitignorePath, 'utf-8');
   }
 
+  /**
+   * Adds the Capy entries as part of the sparse add itself, so a failed append
+   * undoes the file, the flag and the list line. Returns null: the entries are
+   * already written when this returns.
+   */
   private addGitignoreToSparseCheckout(
     gitignorePath: string,
     listPath: string,
     pattern: string,
-  ): string {
-    const outcome = addToSparseCheckout(this.projectRoot, gitignorePath, listPath, pattern);
+    entries: readonly string[],
+  ): null {
+    const outcome = addToSparseCheckout(
+      this.projectRoot,
+      gitignorePath,
+      listPath,
+      pattern,
+      undefined,
+      () => this.appendCapyEntries(gitignorePath, readFileSync(gitignorePath, 'utf-8'), entries),
+    );
     if (outcome !== 'ok') {
       throw this.gitignoreNotInCheckout(gitignorePath, outcome);
     }
     // COPY-FLAG
     console.error("Added .gitignore to this folder's sparse checkout.");
-    return readFileSync(gitignorePath, 'utf-8');
+    return null;
   }
 
   private gitignoreNotInCheckout(gitignorePath: string, reason: string): CapyError {
