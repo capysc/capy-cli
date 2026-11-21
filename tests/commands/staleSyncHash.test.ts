@@ -96,7 +96,7 @@ function stuckFolder() {
   const seed = seedServer({ projectKey: KEY, values: { [MAIN]: VALUES } });
   const server = fakeCapyServer({ initial: seed });
   serverOf.mockReturnValue(server);
-  const folder = makeFolder({ projectKey: KEY, branch: MAIN, keep: seed.keep as KeepFile, env: VALUES, client: server.client });
+  const folder = makeFolder({ git: 'tracked', projectKey: KEY, branch: MAIN, keep: seed.keep as KeepFile, env: VALUES, client: server.client });
   made(folder);
   folder.pm.writeActiveBranch(MAIN);
   folder.fileManager.writeSyncState({ last_sync: '2026-10-26T00:00:00.000Z', synced_variables: Object.keys(VALUES), keep_hash: setSyncKeepHash(null, MAIN, STALE) });

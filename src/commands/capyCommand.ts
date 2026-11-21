@@ -3,6 +3,7 @@ import { ProjectManager } from '../core/projectManager';
 import { FileManager } from '../files/fileManager';
 import { AuthService, silentAuthFailureMessage } from '../auth/authService';
 import { ServiceClient } from '../service/serviceClient';
+import { syncFolderValues } from '../sync/folderValues';
 import { SyncEngine } from '../sync/syncEngine';
 import { PromptEngine } from '../ui/promptEngine';
 import { debugLine } from '../ui/debug';
@@ -315,7 +316,7 @@ export class CapyCommand {
    * localMode skips all server steps; an unknown branch there falls back to
    * the local-mode default (local-only projects have exactly one branch).
    */
-  private async resolveActiveBranch(projectState: ProjectState, localMode: boolean): Promise<string> {
+  private async resolveActiveBranch(projectState: ProjectState, localMode: boolean, record = true): Promise<string> {
     const envMeta = this.fileManager.readEnvMeta(this.options.envPath);
     const local = resolveBranchFromLocalState({
       envBranch: envMeta.branch,
@@ -324,7 +325,7 @@ export class CapyCommand {
     this.debug('branch resolution (local signals)', local);
 
     if (local.kind === 'resolved') {
-      if (local.rebuildBranchFile) {
+      if (record && local.rebuildBranchFile) {
         // .capy/branch was missing — rebuild it from the .env header.
         this.projectManager.writeActiveBranch(local.branch);
       }
@@ -332,7 +333,7 @@ export class CapyCommand {
     }
 
     if (local.kind === 'conflict') {
-      return this.reconcileBranchConflict(projectState, localMode, local.envBranch, local.fileBranch);
+      return this.reconcileBranchConflict(projectState, localMode, local.envBranch, local.fileBranch, record);
     }
 
     // No .env header and no .capy/branch.
@@ -344,7 +345,7 @@ export class CapyCommand {
     }
 
     const selected = await this.pickProjectBranch(projectState.projectId!, syncedBranchNames(this.projectManager.readSyncState()), this.branchNamedForUnrecordedFolder());
-    this.projectManager.writeActiveBranch(selected);
+    if (record) this.projectManager.writeActiveBranch(selected);
     return selected;
   }
 
@@ -405,6 +406,7 @@ export class CapyCommand {
     localMode: boolean,
     envBranch: string,
     fileBranch: string,
+    record: boolean,
   ): Promise<string> {
     const knownLocally = new Set([
       ...branchesFromKeep(this.safeReadKeep()),
@@ -414,7 +416,7 @@ export class CapyCommand {
 
     if (!fileBranchIsReal) {
       console.log(`Ignoring stale .capy/branch (${B(fileBranch)} is not a branch in this project); staying on ${B(envBranch)}.`);
-      this.projectManager.writeActiveBranch(envBranch);
+      if (record) this.projectManager.writeActiveBranch(envBranch);
       return envBranch;
     }
 
@@ -1317,6 +1319,8 @@ export class CapyCommand {
     // gated by `localMode` at the few seams that would otherwise call out.
     const localMode = isLocalOnly();
 
+    const folderOnly = !localMode && !tracksKeepLock(process.cwd());
+
     const { authResult, branch } = await (async (): Promise<{ authResult: AuthResult; branch: string }> => {
       if (localMode) {
         const localBranch = await this.resolveActiveBranch(projectState, true);
@@ -1389,7 +1393,7 @@ export class CapyCommand {
       }
 
       // Persist user ID to sync state immediately (a dry run changes nothing, not even that)
-      if (result.user_id && this.options.dryRun !== true) {
+      if (!folderOnly && result.user_id && this.options.dryRun !== true) {
         this.projectManager.writeSyncStateUserId(result.user_id);
       }
 
@@ -1397,7 +1401,7 @@ export class CapyCommand {
 
       // Branch resolution needs a token (server-assisted steps: branch list,
       // conflict validation, fresh-clone prompt) — so it runs post-auth.
-      const resolvedBranch = await this.resolveActiveBranch(projectState, false);
+      const resolvedBranch = await this.resolveActiveBranch(projectState, false, !folderOnly);
 
       const orgName = result.organization_name
         || result.organizations?.find(o => o.id === result.organization_id)?.name
@@ -1468,7 +1472,7 @@ export class CapyCommand {
     // copy (what writeKeepFile last wrote there) so `capy run` and project
     // detection find the project again. writeKeepFile only creates a missing
     // tracked file; an existing one is never touched (CAP-303).
-    if (initialKeep && this.options.dryRun !== true && !existsSync(this.projectManager.getKeepPath())) {
+    if (!folderOnly && initialKeep && this.options.dryRun !== true && !existsSync(this.projectManager.getKeepPath())) {
       this.debug('tracked keep.lock missing, restoring it from .capy/keep.lock');
       this.fileManager.writeKeepFile(initialKeep);
     }
@@ -1500,7 +1504,7 @@ export class CapyCommand {
         this.debug('local hashes', hashes);
         return { localPlaintext: plaintext, localHashes: hashes };
       } catch (error: any) {
-        if (error instanceof CapyError) throw error;
+        if (folderOnly || error instanceof CapyError) throw error;
         this.debugError('.env read failed', error);
         return { localPlaintext: {}, localHashes: {} };
       }
@@ -1552,6 +1556,12 @@ export class CapyCommand {
 
         // Lines this key cannot decrypt are left out of the comparison (and kept verbatim by a commit).
         const snapshot = snapshotFrom(decryptData, branch, encryptionKey, this.fileManager);
+        if (folderOnly && (
+          (snapshot.keep === undefined && (decryptData.keep_file || decryptData.env_content?.trim())) ||
+          (snapshot.keep !== undefined && (snapshot.keep.org_id !== projectState.organizationId || snapshot.keep.project_id !== projectState.projectId))
+        )) {
+          throw new CapyError('Capy returned an unreadable snapshot or one for a different project.', ERROR_CODES.INVALID_FORMAT);
+        }
         const remotePlaintext = Object.fromEntries(
           Object.entries(snapshot.entries).flatMap(([key, entry]) => (entry.plaintext === undefined ? [] : [[key, entry.plaintext] as const])),
         );
@@ -1567,7 +1577,7 @@ export class CapyCommand {
           if (!decryptData.keep_file || initialKeep) return initialKeep;
           const serverKeep = JSON.parse(decryptData.keep_file) as KeepFile;
           this.debug('bootstrap: no local keep.lock, reconstructing from server');
-          this.fileManager.writeKeepFile(serverKeep);
+          if (!folderOnly && this.options.dryRun !== true) this.fileManager.writeKeepFile(serverKeep);
           return serverKeep;
         })();
         fetchSpinner.stop();
@@ -1621,10 +1631,46 @@ export class CapyCommand {
             throw err;
           }
         }
+        if (folderOnly) {
+          fetchSpinner.fail('Could not read the latest values from Capy.');
+          throw err;
+        }
         fetchSpinner.fail('Cannot reach remote. Showing local changes only.');
         return { currentKeep: initialKeep, networkAvailable: false, ...noRemote };
       }
     })();
+
+    if (folderOnly && seenSnapshot !== undefined) {
+      const envMeta = this.fileManager.readEnvMeta(this.options.envPath);
+      if ((envMeta.org_id && envMeta.org_id !== projectState.organizationId) || (envMeta.project_id && envMeta.project_id !== projectState.projectId) ||
+          (currentKeep && (currentKeep.org_id !== projectState.organizationId || currentKeep.project_id !== projectState.projectId))) {
+        throw new CapyError('The environment file and project lockfiles must belong to the same Capy project.', ERROR_CODES.INVALID_FORMAT);
+      }
+      const keep = currentKeep ?? await (async (): Promise<KeepFile> => {
+        const project = (await this.serviceClient.listProjects()).find((p) => p.id === projectState.projectId && p.organization_id === projectState.organizationId);
+        if (!project) throw new CapyError('Could not recover the project named in this environment file.', ERROR_CODES.PROJECT_NOT_FOUND);
+        return { version: '3.0', org_id: project.organization_id, project_id: project.id, project_name: project.name, variables: {} };
+      })();
+      try {
+        const outcome = await syncFolderValues({
+          folder: {
+            pm: this.projectManager, fileManager: this.fileManager, serviceClient: this.serviceClient,
+            orgId: keep.org_id, projectId: keep.project_id, branch, userId: authResult.user_id!,
+            projectKey: encryptionKey, keep, localPlaintext,
+          },
+          snapshot: seenSnapshot, hasEnv: existsSync(this.projectManager.getEnvPath(this.options.envPath)), envPath: this.options.envPath,
+          flags: parseConflictFlags(this.options.conflictFlags ?? {}), protocol: this.protocol, dryRun: this.options.dryRun === true,
+        });
+        if (outcome !== 'stopped' && this.options.dryRun !== true && this.projectManager.readActiveBranch() !== branch) {
+          this.projectManager.writeActiveBranch(branch);
+        }
+        if (outcome !== 'stopped' && this.options.quiet !== true) this.say(outcome === 'changed' ? 'This folder and Capy are in sync.' : 'Everything is up to date!');
+        return outcome;
+      } catch (err) {
+        if (isStaleBase(err) && !retried) return this.syncProject(projectState, true);
+        throw err;
+      }
+    }
 
     // 3-way comparison
     const hasRemote = Object.keys(remotePlaintext).length > 0;
