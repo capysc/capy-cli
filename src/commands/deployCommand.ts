@@ -2319,16 +2319,9 @@ async function chooseSavedTarget(
 async function resolveTargetById(
   cwd: string,
   keep: KeepInfo,
-  targetId: string,
+  adapter: DeployAdapter,
   options: DeployCliOptions,
 ): Promise<StepResult<TargetConfig>> {
-  const adapter = getAdapter(targetId);
-  if (!adapter) {
-    console.error(
-      `Unknown adapter "${targetId}". Known: ${ALL_ADAPTERS.map((a) => a.id).join(', ')}`,
-    );
-    return stepStop(1);
-  }
   if (options.yes) return stepOk(await adhocTarget(cwd, keep, adapter));
 
   // Interactive but adapter is pre-chosen — handoff path from the
@@ -2388,11 +2381,16 @@ async function resolveTarget(
     }
     return stepOk(target);
   }
+  const adapter = options.target ? getAdapter(options.target) : undefined;
+  if (options.target && !adapter) {
+    console.error(`Unknown adapter "${options.target}". Known: ${ALL_ADAPTERS.map((a) => a.id).join(', ')}`);
+    return stepStop(1);
+  }
   if (!options.dryRun && !tracksKeepLock(cwd) && (options.yes || !process.stdin.isTTY)) {
     console.error('Choose a saved target with capy deploy <name> so the Capy project, branch and destination are explicit. Run capy deploy in a terminal to set one up.');
     return stepStop(1);
   }
-  if (options.target) return resolveTargetById(cwd, keep, options.target, options);
+  if (adapter) return resolveTargetById(cwd, keep, adapter, options);
   return resolveTargetInteractively(cwd, keep, options);
 }
 
