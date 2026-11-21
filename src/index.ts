@@ -714,10 +714,12 @@ program
   .option('--wait', 'agent mode: wait for the pending pairing to be approved (exits 3 with PAIR_STILL_WAITING after 30 seconds; run it again)') // COPY-FLAG
   .option('--cancel', 'agent mode: drop the pending pairing') // COPY-FLAG
   .addHelpText('after', '\nIn a terminal, after browser approval: Enable this location as [email]? (y/N)\nAgents: ask the human which email will approve, run `capy pair --email <email> --json`, show the human the url, code and expires_at, then run `capy pair --wait`. Never fill in the email yourself.\n') // COPY-FLAG
-  .action(async (options) => {
+  .action(async (options, command) => {
     assertNotLocalOnly('pair');
     const { pairEntry } = await import('./commands/pairEntry');
-    await pairEntry({ json: options.json === true, force: options.force === true, email: options.email, wait: options.wait === true, cancel: options.cancel === true });
+    // Read from the merged view: the program's `-f/--force` takes that flag before this command sees it.
+    const merged = command.optsWithGlobals();
+    await pairEntry({ json: options.json === true, force: merged.force === true, email: options.email, wait: options.wait === true, cancel: options.cancel === true });
   });
 
 program

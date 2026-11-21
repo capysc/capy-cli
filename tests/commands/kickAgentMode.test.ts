@@ -4,7 +4,7 @@
  * The real `KickCommand` and `resolveOrgContext`; sign-in and the service are spies on the real classes, so the
  * assertions are about which service calls were made. No `mock.module()`.
  */
-import { describe, test, expect, beforeEach, afterEach, mock, spyOn } from 'bun:test';
+import { describe, test, expect, beforeEach, afterEach, afterAll, mock, spyOn } from 'bun:test';
 import { mkdtempSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
@@ -23,16 +23,17 @@ const MEMBERS = [
   { membershipId: 'mem-alice-2', userId: 'u-2', email: 'Alice@Acme.com', role: 'member', status: 'active', createdAt: '2025-02-01T00:00:00Z', projects: [] },
 ];
 
-const dirs = { made: [] as string[] };
+// One parent directory for the whole file; each test works in a fresh folder inside it, and the parent goes at the end.
+const PARENT = mkdtempSync(join(tmpdir(), 'capy-kick-'));
 beforeEach(() => {
-  const dir = mkdtempSync(join(tmpdir(), 'capy-kick-'));
-  dirs.made.push(dir);
-  process.chdir(dir);
+  process.chdir(mkdtempSync(join(PARENT, 'case-')));
 });
 afterEach(() => {
   mock.restore();
   process.chdir(ORIGIN);
-  dirs.made.splice(0).forEach((dir) => rmSync(dir, { recursive: true, force: true }));
+});
+afterAll(() => {
+  rmSync(PARENT, { recursive: true, force: true });
 });
 
 interface World {
