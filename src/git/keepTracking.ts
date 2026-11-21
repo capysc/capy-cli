@@ -7,8 +7,8 @@ import { spawnSync } from 'node:child_process';
  * 0 for ignored paths and 128 outside a worktree. An error or missing Git
  * cannot authorize repository writes.
  */
-export function tracksKeepLock(cwd: string): boolean {
-  return spawnSync('git', ['check-ignore', '--quiet', '--', 'keep.lock'], {
+export function tracksKeepLock(cwd: string, relativePath = 'keep.lock'): boolean {
+  return spawnSync('git', ['check-ignore', '--quiet', '--', relativePath], {
     cwd,
     stdio: 'ignore',
   }).status === 1;
