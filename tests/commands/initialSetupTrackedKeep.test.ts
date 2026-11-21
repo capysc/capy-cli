@@ -167,11 +167,13 @@ describe('first setup that does not push', () => {
     expect((JSON.parse(stagedText()) as KeepFile).variables).toEqual({});
   });
 
-  test('declined to encrypt: the tracked keep.lock still holds identity and zero pins, and the .env is untouched', async () => {
+  test('declined to encrypt: setup ends before anything exists (no project, no branch, no keep.lock) and the .env is untouched', async () => {
     const envText = 'API_KEY=value-one\nDB_URL=value-two\n';
     writeFileSync(join(process.cwd(), '.env'), envText, 'utf-8');
     confirmEncryptAnswer.mockReturnValue(false);
     const push = fakeService();
+    const createProject = spyOn(ServiceClient.prototype, 'initializeProject');
+    const createBranch = spyOn(ServiceClient.prototype, 'createBranch');
     const writeInitial = spyOn(FileManager.prototype, 'writeInitialKeepFile');
     const log = spyOn(console, 'log').mockImplementation(() => {});
 
@@ -181,12 +183,14 @@ describe('first setup that does not push', () => {
       log.mockRestore();
     }
 
-    expect(readJson(trackedPath())).toMatchObject({
-      org_id: 'org-1', project_id: 'proj-1', project_name: 'demo', variables: {},
-    });
+    // The question is asked before the project is created, so declining it leaves nothing behind.
+    expect(createProject).not.toHaveBeenCalled();
+    expect(createBranch).not.toHaveBeenCalled();
+    expect(existsSync(trackedPath())).toBe(false);
+    expect(existsSync(workingPath())).toBe(false);
+    expect(existsSync(join(process.cwd(), '.capy'))).toBe(false);
     expect(push).not.toHaveBeenCalled();
     expect(writeInitial).not.toHaveBeenCalled();
-    expect((JSON.parse(stagedText()) as KeepFile).variables).toEqual({});
     expect(readFileSync(join(process.cwd(), '.env'), 'utf-8')).toBe(envText);
   });
 });

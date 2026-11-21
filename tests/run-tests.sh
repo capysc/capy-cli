@@ -77,6 +77,7 @@ ISOLATED_FILES=(
   tests/commands/bootstrapBranch.test.ts
   tests/commands/bareCapyCommit.test.ts
   tests/commands/initialSetupTrackedKeep.test.ts
+  tests/commands/initialSetupCancel.test.ts
   tests/commands/initialSetupLocalTrackedKeep.test.ts
   tests/sync/missingEnvFile.test.ts
   tests/commands/deployGate.test.ts
