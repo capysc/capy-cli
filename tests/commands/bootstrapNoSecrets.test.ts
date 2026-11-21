@@ -16,6 +16,7 @@ mock.module('../../src/crypto/keyResolver', () => ({
   resolveProjectKey: async () => 'a'.repeat(64),
 }));
 
+import inquirer from 'inquirer';
 import { CapyCommand } from '../../src/commands/capyCommand';
 import { ServiceClient } from '../../src/service/serviceClient';
 import { CapyError, ERROR_CODES } from '../../src/types/index';
@@ -40,6 +41,8 @@ afterEach(() => {
 
 /** A command whose service answers `getDecryptData` with `failure` (the one call the bootstrap makes before it decides). */
 function commandFailingWith(failure: unknown): CapyCommand {
+  spyOn(ServiceClient.prototype, 'listBranches').mockResolvedValue([{ id: 'b-1', name: 'development', project_id: PROJECT.id, is_protected: false }]);
+  spyOn(inquirer, 'prompt').mockResolvedValue({ selected: 'development' } as never);
   spyOn(ServiceClient.prototype, 'getDecryptData').mockRejectedValue(failure);
   return new CapyCommand({}, false);
 }

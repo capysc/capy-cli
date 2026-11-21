@@ -1,6 +1,7 @@
 import { ServiceClient, type ListedBranch, type ListedProject, type ListedRepo, type OrgRepoLink } from '../service/serviceClient';
 import type { ProjectItem, ProjectsData } from '../ui/projectsScreen';
 import { resolveOrgContext } from '../core/orgContext';
+import { exitOrgSelectionRequired, isOrgSelectionRequired } from '../core/orgSelection';
 import { excludeSystemProject } from '../system/reservedProjectName';
 import { Spinner } from '../ui/spinner';
 import { CapyError, ERROR_CODES } from '../types/index';
@@ -206,7 +207,8 @@ export class ProjectsCommand {
 
     try {
       // The spinner starts once the org is known: resolving it may ask which org.
-      const { orgId, serviceClient } = await resolveOrgContext(this.apiUrl, this.devMode);
+      // Under --json or off a terminal nobody can answer a picker: ORG_SELECTION_REQUIRED and the orgs instead.
+      const { orgId, serviceClient } = await resolveOrgContext(this.apiUrl, this.devMode, { promptForOrg: !json && process.stdin.isTTY === true });
       spinner?.start();
       const listed = await this.listRawProjects(serviceClient, includeDeleted);
       const summaries = await this.loadProjectSummaries(serviceClient, listed, includeDeleted);
@@ -217,6 +219,7 @@ export class ProjectsCommand {
       this.render(projects, json);
     } catch (err) {
       spinner?.fail('Failed to load projects');
+      if (json && isOrgSelectionRequired(err)) exitOrgSelectionRequired(err);
       this.exitWithError(err, json);
     }
   }

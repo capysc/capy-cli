@@ -30,6 +30,7 @@ ISOLATED_FILES=(
   tests/commands/readOnlyRun.e2e.test.ts
   tests/commands/kickCommand.test.ts
   tests/commands/usersWithoutFolder.test.ts
+  tests/commands/orgSelectionWithoutFolder.test.ts
   tests/commands/orgSwitchRepoOrgGuard.test.ts
   tests/commands/redeemRepoOrgGuard.test.ts
   tests/commands/inviteCommand.test.ts
@@ -73,6 +74,7 @@ ISOLATED_FILES=(
   tests/commands/connectDokploy.test.ts
   tests/commands/gateFirst.test.ts
   tests/commands/bootstrapNoSecrets.test.ts
+  tests/commands/bootstrapBranch.test.ts
   tests/commands/bareCapyCommit.test.ts
   tests/commands/initialSetupTrackedKeep.test.ts
   tests/commands/initialSetupLocalTrackedKeep.test.ts
