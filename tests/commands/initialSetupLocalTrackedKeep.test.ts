@@ -4,7 +4,7 @@
  *
  * `initializeProjectLocal` writes identity with no pins, then runs `syncProject`, which pins the `.env` but (shared by
  * every command) leaves an existing tracked file alone. So the setup path itself must carry the pins into the tracked
- * file and stage it, or the file the user commits has zero pins.
+ * file so the local marker contains the pins.
  *
  * Real everything, in a temp home and a temp git repository; a network tripwire proves nothing leaves the machine.
  * Off a terminal the sync's differences are answered with `--resolve`, so the first run reports the rows and the
@@ -48,7 +48,7 @@ beforeAll(async () => {
 });
 
 beforeEach(() => {
-  // A throwaway git repository: setup stages keep.lock with `git add` in the working directory.
+  // Inspect the real index and ignore rules only inside this temporary repository.
   const dir = mkdtempSync(join(tmpdir(), 'capy-localsetup-proj-'));
   dirs(dir);
   execFileSync('git', ['init', '-q'], { cwd: dir });
@@ -82,7 +82,7 @@ async function setupLocal(options: SetupOptions): Promise<void> {
 
 const trackedPath = (): string => join(process.cwd(), 'keep.lock');
 const readKeep = (text: string): KeepLike => JSON.parse(text) as KeepLike;
-const stagedText = (): string => execFileSync('git', ['show', ':keep.lock'], { cwd: process.cwd(), encoding: 'utf-8' });
+
 
 /** The first run off a terminal reports the rows with a conflict_id; the id is returned and the project is reset. */
 async function conflictIdFromFirstRun(): Promise<string> {
@@ -98,7 +98,7 @@ async function conflictIdFromFirstRun(): Promise<string> {
 }
 
 describe('first local-only setup with a .env', () => {
-  test('the tracked keep.lock and the staged copy both pin the variables', async () => {
+  test('the ignored root and working copies both pin the variables without staging', async () => {
     writeFileSync(join(process.cwd(), '.env'), 'API_KEY=value-one\nDB_URL=value-two\n', 'utf-8');
     const conflict = await conflictIdFromFirstRun();
 
@@ -108,14 +108,14 @@ describe('first local-only setup with a .env', () => {
     });
 
     const tracked = readKeep(readFileSync(trackedPath(), 'utf-8'));
-    expect(Object.keys(tracked.variables).sort()).toEqual(['API_KEY', 'DB_URL']);
+    expect(Object.keys(tracked.variables).toSorted()).toEqual(['API_KEY', 'DB_URL']);
     expect(tracked.variables.API_KEY[0].branch).toBe('development');
     expect(tracked.variables.DB_URL[0].branch).toBe('development');
 
-    // Same as the working copy, and the STAGED copy is the same file: a bare `git commit` commits the pins.
+    // Both local copies carry the pins, while Git ignores the root file.
     expect(readFileSync(trackedPath(), 'utf-8')).toBe(readFileSync(join(process.cwd(), '.capy', 'keep.lock'), 'utf-8'));
-    expect(stagedText()).toBe(readFileSync(trackedPath(), 'utf-8'));
-    expect(Object.keys(readKeep(stagedText()).variables).sort()).toEqual(['API_KEY', 'DB_URL']);
+    expect(execFileSync('git', ['ls-files', '--', 'keep.lock'], { encoding: 'utf8' })).toBe('');
+    expect(execFileSync('git', ['check-ignore', '--', 'keep.lock'], { encoding: 'utf8' }).trim()).toBe('keep.lock');
     expect(fetchCalls).not.toHaveBeenCalled();
   });
 });

@@ -84,6 +84,7 @@ program
   .name('capy-dev')
   .description('Capy CLI (DEV MODE - mock auth enabled)')
   .version(CLI_VERSION)
+  .option('--folder <path>', 'run in this project folder (default: current directory)')
   .option('--env-path <path>', 'specify custom .env file location')
   .option('-v, --verbose', 'enable detailed logging')
   .option('-f, --force', 're-encrypt existing variables')
@@ -101,6 +102,7 @@ program
   .hook('preAction', (_thisCommand, actionCommand) => {
     const opts = actionCommand.optsWithGlobals();
     if (opts.web === true) refuseWebMode(opts.json === true);
+    if (opts.folder !== undefined) process.chdir(opts.folder);
   })
   .action(async (options, cmd) => {
     if (cmd.args.length > 0) {
@@ -120,7 +122,7 @@ program
     };
 
     const command = new CapyCommand(cliOptions, true);
-    await command.execute();
+    await command.execute(options.folder === undefined ? undefined : '.');
   });
 
 program
