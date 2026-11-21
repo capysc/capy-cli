@@ -188,7 +188,10 @@ function expiryOf(authorize: DeviceAuthorizeResult, nowMs: number): string {
     return new Date(at).toISOString();
   }
   if (!isPositiveNumber(authorize.expires_in)) throw malformedAuthorize();
-  return new Date(nowMs + authorize.expires_in * 1000).toISOString();
+  const at = new Date(nowMs + authorize.expires_in * 1000);
+  // A number too large to be a date is as unusable as a missing one.
+  if (Number.isNaN(at.getTime())) throw malformedAuthorize();
+  return at.toISOString();
 }
 
 async function startRun(options: PairAgentOptions, deps: PairAgentDeps): Promise<Outcome> {
@@ -277,6 +280,8 @@ async function pollUntil(grant: PendingPairGrant, ceilingMs: number, pollTimeout
   const startedAt = clock.now();
   const deadline = startedAt + ceilingMs;
   const expiresAtMs = Date.parse(grant.expiresAt);
+  // Past its own expiry the grant is over, whether or not this run would get to poll.
+  if (startedAt >= expiresAtMs) return { kind: 'expired' };
   const sleepUntil = async (at: number): Promise<void> => {
     const ms = at - clock.now();
     if (ms > 0) await clock.sleep(ms);

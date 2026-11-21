@@ -488,6 +488,24 @@ describe('capy pair, agent mode', () => {
       expect(pendingExists()).toBe(false);
     });
 
+    test('an expired grant (its own expiry has passed) is PAIR_EXPIRED even when this run would not poll', async () => {
+      stubFetch([PENDING], { ...AUTHORIZE_BODY, expires_in: 10, interval: 60 });
+      const started = await run({ email: 'mike@example.com' });
+      const image = started.json.elicitation.qr.image.file as string;
+      // The first wait run polls once; its interval is longer than the ceiling, so the earliest next poll is a minute away.
+      const fetchMock = stubFetch([PENDING]);
+      const first = await run({ wait: true }, fakeClock());
+      expect(first.json.code).toBe(ERROR_CODES.PAIR_STILL_WAITING);
+      expect(callsTo(fetchMock, '/auth/device/token')).toHaveLength(1);
+      // The second run starts after the grant's own expiry (10 seconds) but before that next poll time: it does not poll.
+      const later = await run({ wait: true }, fakeClock(Date.now() + 20_000));
+      expect(later.exit).toBe(1);
+      expect(later.json.code).toBe(ERROR_CODES.PAIR_EXPIRED);
+      expect(callsTo(fetchMock, '/auth/device/token')).toHaveLength(1);
+      expect(pendingExists()).toBe(false);
+      expect(existsSync(image)).toBe(false);
+    });
+
     test('a denied grant: PAIR_DENIED, pending file gone, nothing installed', async () => {
       await startThenStub('mike@example.com', [DENIED]);
       const ran = await run({ wait: true });
@@ -710,6 +728,7 @@ describe('capy pair, agent mode', () => {
       ['no interval', { interval: undefined }],
       ['no expiry at all', { expires_in: undefined }],
       ['a zero expires_in', { expires_in: 0 }],
+      ['an expires_in too large to be a date', { expires_in: 1e300 }],
       ['an unparseable expires_at', { expires_at: 'tomorrow-ish' }],
       ['no user code', { user_code: '' }],
     ])('%s from the service: INVALID_FORMAT and nothing is saved', async (_name, patch) => {
@@ -1033,6 +1052,22 @@ describe('capy pair, agent mode', () => {
       expect(ran.json.keys).toBe('picked_up');
       expect(mockPickupDevicePairing).toHaveBeenCalledTimes(1);
       expect(readFileSync(ENC(USER.id), 'utf8')).toBe(PAYLOAD.entries[0].key_enc);
+    });
+
+    test.each([
+      ['an empty user id', ''],
+      ['no user id', undefined],
+    ])('%s from the service: another account\'s un-scoped keys never answer already_present, so the pickup runs and fails closed', async (_name, id) => {
+      const approvedWithoutId = { status: 200, body: { ...APPROVED.body, user: { ...USER, id } } };
+      await startThenStub('mike@example.com', [approvedWithoutId]);
+      // The legacy files that every key path falls back to without a user id.
+      saveLocalRoot('org-123', EXISTING_K_LOCAL);
+      writeOrgKeyFileRaw('org-123', EXISTING_KEY_ENC);
+      const ran = await run({ wait: true });
+      // The normal pickup runs, and it finds no entry for an account with no id: it fails closed, never answers already_present.
+      expect(mockPickupDevicePairing).toHaveBeenCalledTimes(1);
+      expect(ran.json.code).toBe(ERROR_CODES.PAIR_NO_KEYS);
+      expect(ran.json.keys).toBeUndefined();
     });
 
     describe('an account in two organizations', () => {

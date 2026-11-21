@@ -185,6 +185,8 @@ async function pickUpPairedKeys(
 function keysAlreadyHere(session: InstalledPairSession, exchange: DeviceTokenExchange, force: boolean): boolean {
   if (force) return false;
   if (session.organizationId === '') return false;
+  // Without a user id every key path falls back to the un-scoped files, which could belong to anyone.
+  if (typeof exchange.user.id !== 'string' || exchange.user.id === '') return false;
   const orgIds = [...new Set([session.organizationId, ...exchange.organizations.map((org) => org.id)])];
   return orgIds.every((orgId) => hasUsableOrgKeys(orgId, exchange.user.id));
 }
