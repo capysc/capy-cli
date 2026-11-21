@@ -7,7 +7,7 @@ import { getShellPinnedEnv } from '../config/prodPins';
 import { resolveActiveUrl } from '../config/profileConfig';
 import type { ParsedSecretsBlob } from '../crypto/deployRuntime';
 import { ERROR_CODES } from '../types/index';
-import { planComposeForward, OVERRIDE_FD } from './composeForward';
+import { planComposeForwardDetailed, OVERRIDE_FD, type ComposePlan } from './composeForward';
 
 /**
  * Writes `.capy/next-env.js`, a CommonJS module mapping each decrypted env var
@@ -42,6 +42,17 @@ interface ChildExit {
 }
 
 /**
+ * Tells the command `capy run` starts that it is running under `capy run`.
+ * Returns a new object, so neither the caller's map nor `process.env` is
+ * touched; spread last so a `CAPY_RUN` of the user's own cannot beat it.
+ * Only ever part of the child's environment: never written to a file, never
+ * treated as a secret.
+ */
+export function withRunMarker(env: Record<string, string | undefined>): Record<string, string | undefined> {
+  return { ...env, CAPY_RUN: '1' };
+}
+
+/**
  * Spawns the child process with the provided environment, forwards signals,
  * and resolves with how it ended. `spawnChildDetailed` is the one place a child
  * is started; `spawnChild` is its exit-code-only face for the callers that
@@ -57,7 +68,7 @@ function spawnChildDetailed(
   // ENOENT. shell:true delegates to cmd.exe so PATHEXT resolution kicks in.
   // `pipe` is written to the child's fd OVERRIDE_FD (composeForward.ts).
   const child: ChildProcess = spawn(args[0], args.slice(1), {
-    env: env as Record<string, string>,
+    env: withRunMarker(env) as Record<string, string>,
     stdio: pipe === undefined ? 'inherit' : ['inherit', 'inherit', 'inherit', 'pipe'],
     shell: process.platform === 'win32',
   });
@@ -503,11 +514,18 @@ export async function runCommand(args: string[], devMode: boolean = false): Prom
   // `docker compose` doesn't pass its environment into containers, so
   // `env_file: .env` would hand them ciphertext. Forward the decrypted names
   // to the services that read this .env — see composeForward.ts.
-  const compose = planComposeForward(args, join(process.cwd(), '.env'), Object.keys(decryptedEnv), {
+  const forward = planComposeForwardDetailed(args, join(process.cwd(), '.env'), Object.keys(decryptedEnv), {
     cwd: process.cwd(),
     env: process.env,
     platform: process.platform,
   });
+  const compose: ComposePlan | undefined = forward.kind === 'forward' ? forward.plan : undefined;
+  if (forward.kind === 'undetermined') {
+    // A compose command whose setup could not be worked out runs unchanged: its
+    // containers get the .env as it is on disk. Say so once, on stderr.
+    console.error('capy run: Docker Compose forwarding was not applied; the command runs unchanged.'); // COPY-FLAG
+    debug(`capy run: compose forwarding not applied (${forward.gap})`);
+  }
   if (compose) debug(`capy run: compose override → ${compose.args.join(' ')}`);
   try {
     return await runChildThenSettle(compose?.args ?? args, { ...env, ...decryptedEnv }, projectKeyResult.reported, compose?.pipe);

@@ -29,9 +29,9 @@ const verdict = mock((): 'in-sync' | 'stopped' => 'in-sync');
 
 mock.module('../../src/sync/gate', () => ({
   ...realGate,
-  gateFirst: async () => {
+  gateFirst: async (opts: realGate.GateOptions = {}) => {
     event('gate');
-    if (verdict() === 'stopped') realGate.stopWithNothingWritten();
+    if (verdict() === 'stopped') realGate.stopWithNothingWritten(opts.stopExitCode);
   },
   ensureInSync: async () => {
     event('gate');
@@ -246,11 +246,13 @@ describe.each(COMMANDS)('%s', (_name, run, tty) => {
     expect(log.filter((e) => e === 'gate').length).toBeGreaterThanOrEqual(1);
   });
 
-  test('cancelled ("Continue working", or q): the command writes nothing and ends, exit 0 - the log is the gate alone', async () => {
+  // `capy checkout` alone exits 1 on a stop: the switch it was asked for did not happen (CAP-834, fault 3).
+  const stopCode = _name === 'capy checkout <existing branch>' ? 1 : 0;
+  test(`cancelled ("Continue working", or q): the command writes nothing and ends, exit ${stopCode} - the log is the gate alone`, async () => {
     project();
     verdict.mockImplementation(() => 'stopped');
     const code = await ran(run, tty);
-    expect(code).toBe(0);
+    expect(code).toBe(stopCode);
     expect(events()).toEqual(['gate']);
   });
 });
@@ -263,7 +265,8 @@ describe('what comes after the gate comes after it', () => {
   });
 
   test('capy deploy: the preflight and then the confirm screen follow the gate', async () => {
-    project();
+    // A gate that passed leaves the folder with its `.env`; a deploy from a folder without one is refused.
+    writeFileSync(join(project(), '.env'), 'X=1\n');
     await ran(() => deployCommand('t', {}, process.cwd()), true);
     expect(events()).toEqual(['gate', 'preflight', 'confirm']);
   });

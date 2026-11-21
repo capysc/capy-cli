@@ -11,11 +11,19 @@
 // `SecretsScreenScope`, so search, edit and deploy are the ones `capy secrets`
 // has, not copies.
 //
+// Everything loads progressively. The list draws from `GET /projects` alone
+// (its variable summary feeds the Variables and Last updated columns and the
+// order, its repos the Linked repo column). A project's secrets index is read
+// when its Secrets, Deployments or Connectors tab is first shown, and the member
+// list when the Users tab (or a branch's access dialog) first needs it; each is
+// kept (`ProjectsData.lazy`). The reads are effects the driver performs, and
+// their results come back through `applyProjectIndexLoaded` / `applyMembersLoaded`.
+//
 // What the service did not return to the caller is hidden, never shown empty:
-// the org secrets index (403 for a plain member) hides the Variables and Last
-// updated columns and the project's Secrets tab; the repo links hide the Linked
-// repo column. Every such decision keys off a status, a code or a field being
-// absent — `ProjectsData` carries `null` for "not returned".
+// a refused index (PERMISSION_DENIED) hides the project's Secrets, Deployments
+// and Connectors tabs, a refused member list the Users tab; the repo links hide
+// the Linked repo column. Every such decision keys off a status, a code or a
+// field being absent — `ProjectsData` carries `null` for "not returned".
 //
 // The index this screen reads carries names and hashes only: nothing here can
 // show a value (the embedded secrets screen reveals one on request, exactly as
@@ -32,6 +40,7 @@ import { oscHyperlink } from './osc8';
 import { clipLine, truncateCell } from './pickerTable';
 import { BEHIND_LABEL, DEPLOYED_LABEL, TARGET_STATUS_HEADING } from '../core/deployStatus';
 import { DELETE_CANCELLED_TEXT, DELETE_DRY_RUN_TEXT, deleteQuestion } from '../commands/projectLifecycleCommand';
+import { mayInviteAdmin } from '../core/inviteRoles';
 import {
   type SecretsScreenEffect,
   type SecretsScreenState,
@@ -47,6 +56,7 @@ import {
 } from './secretsScreen';
 import {
   type BranchRef,
+  type RepoRowRef,
   type ManageDialog,
   type ManageEffect,
   type ManageFinished,
@@ -59,6 +69,9 @@ import {
   renderManage,
   settingsLabel,
   startBranch,
+  startRepoRemove,
+  REMOTE_TAG,
+  repoRowKey,
   startSettings,
 } from './projectManage';
 import {
@@ -112,6 +125,14 @@ export interface ProjectItem {
   readonly branches: readonly { readonly id: string; readonly name: string; readonly protected: boolean }[];
   /** Linked repos; absent when they were not returned to the caller (the Git Repos tab is then hidden). `[]`: none linked. */
   readonly repos?: readonly ProjectRepoSummary[];
+  /**
+   * The variable summary `GET /projects` carries (a current service sends it; an older one does not, and these
+   * stay absent). `variableCount` is `null` when the service cannot say (the index is not ready) or the caller
+   * does not administer the project.
+   */
+  readonly variableCount?: number | null;
+  readonly variablesUpdatedAt?: string | null;
+  readonly indexStatus?: string | null;
 }
 
 /** The org secrets index (`GET /orgs/:orgId/secrets`), fetched once. */
@@ -127,7 +148,31 @@ export interface ProjectsIndex {
   readonly coveredProjectIds: readonly string[] | null;
 }
 
-/** Everything the screen shows. `null` (or `reposShown: false`) means the service did not return it to the caller. */
+/** Where one project's secrets index stands. It is read when the project's Secrets (or Deployments, Connectors) tab is first shown. */
+export type ProjectIndexLoad =
+  | { readonly status: 'loading' }
+  | { readonly status: 'loaded'; readonly index: ProjectsIndex }
+  /** The service refused it (PERMISSION_DENIED): what it feeds is hidden. */
+  | { readonly status: 'denied' }
+  /** Any other failure: the tab says so, and shows it again (and asks again) next time it is selected. */
+  | { readonly status: 'failed' };
+
+/** Where the org's member list stands. It is read when the Users tab (or the branch access dialog) first needs it. */
+export type MembersLoad = 'unloaded' | 'loading' | 'loaded' | 'denied' | 'failed';
+
+/** What the loader leaves to load on demand. Absent from `ProjectsData` when `index` and `members` are already in hand. */
+export interface LazyLoads {
+  /** Each opened project's index, by project id: read once, kept. A service that ignores the project filter sends the whole org: the screen reads this project's rows from it. */
+  readonly indexes: Readonly<Record<string, ProjectIndexLoad>>;
+  readonly members: MembersLoad;
+  /** The projects the caller administers, from `GET /orgs/:id/me`: read only for a service whose list does not say (`null` otherwise, or when it could not be read). */
+  readonly adminProjectIds: readonly string[] | null;
+}
+
+/**
+ * Everything the screen shows. `null` (or `reposShown: false`) means the service did not return it to the caller.
+ * With `lazy` set, `index` is `null` and `members` is `null` until loaded: they are not "hidden", they are not here yet.
+ */
 export interface ProjectsData {
   readonly projects: readonly ProjectItem[];
   readonly index: ProjectsIndex | null;
@@ -136,6 +181,33 @@ export interface ProjectsData {
   readonly reposShown: boolean;
   /** The caller's user id: their own row on the Users tab is locked (nobody changes their own role). Absent: unknown. */
   readonly selfUserId?: string;
+  readonly lazy?: LazyLoads;
+}
+
+/** True when the list carries the variable summary (some project has `variable_count`, `null` or not). */
+export function listHasSummary(projects: readonly ProjectItem[]): boolean {
+  return projects.some((p) => p.variableCount !== undefined);
+}
+
+/** The list alone says the caller administers this project: it carries its repos, a count, or an index status. */
+function administeredByList(project: ProjectItem): boolean {
+  return project.repos !== undefined || typeof project.variableCount === 'number' || (project.indexStatus !== undefined && project.indexStatus !== null);
+}
+
+/** Whether the list (or the admin ids read for an older service) says who administers what; otherwise a tab cannot be decided before it loads. */
+function administrationKnown(data: ProjectsData): boolean {
+  return listHasSummary(data.projects) || data.projects.some((p) => p.repos !== undefined) || (data.lazy?.adminProjectIds ?? null) !== null;
+}
+
+/** Whether the caller administers `project`, as far as the list and the admin ids say. */
+function administered(data: ProjectsData, project: ProjectItem): boolean {
+  return administeredByList(project) || (data.lazy?.adminProjectIds ?? []).includes(project.id);
+}
+
+/** The index to read `projectId`'s rows from: the one loaded for it, else the one supplied up front. `null`: none (yet). */
+export function indexOf(data: ProjectsData, projectId: string): ProjectsIndex | null {
+  const load = data.lazy?.indexes[projectId];
+  return load !== undefined && load.status === 'loaded' ? load.index : data.index;
 }
 
 /**
@@ -199,6 +271,36 @@ export function lastUpdatedOf(index: ProjectsIndex | null, project: ProjectItem)
   return stamps.reduce((latest, t) => ((timeOf(t) ?? 0) > (timeOf(latest) ?? 0) ? t : latest));
 }
 
+/**
+ * What the list says a project last changed. With the index supplied up front: what the index says. When the list
+ * says who administers what, a project the caller does not administer has no time (`null`); an administered one
+ * shows the summary's `variables_updated_at`, the creation time when it has none. When it does not say (an older
+ * service), the creation time.
+ */
+export function listUpdatedAt(data: ProjectsData, project: ProjectItem): string | null {
+  if (data.lazy === undefined) return lastUpdatedOf(data.index, project);
+  if (administrationKnown(data) && !administered(data, project)) return null;
+  const stamp = project.variablesUpdatedAt;
+  return stamp !== undefined && stamp !== null && timeOf(stamp) !== null ? stamp : project.createdAt;
+}
+
+/**
+ * What the project's index tabs (Secrets, Deployments, Connectors) show:
+ * `rows`, `empty` or `hidden` as `projectIndexState` says once the index is in; `pending` before that
+ * (the tab is shown and resolves on load); `failed` when the read failed for any reason but a refusal.
+ */
+export type IndexTabState = ProjectIndexState | 'pending' | 'failed';
+
+export function indexTabState(data: ProjectsData, project: ProjectItem): IndexTabState {
+  if (data.lazy === undefined) return projectIndexState(data.index, project.id);
+  const load = data.lazy.indexes[project.id];
+  if (load !== undefined && load.status === 'denied') return 'hidden';
+  if (load !== undefined && load.status === 'failed') return 'failed';
+  if (load !== undefined && load.status === 'loaded') return projectIndexState(load.index, project.id);
+  // Not read yet. When the list says who administers what, a project the caller does not administer is hidden at once.
+  return administrationKnown(data) && !administered(data, project) ? 'hidden' : 'pending';
+}
+
 // ── Tabs ──────────────────────────────────────────────────────────────────────
 
 export type ProjectTab = 'secrets' | 'users' | 'repos' | 'branches' | 'deployments' | 'connectors' | 'settings';
@@ -218,16 +320,26 @@ const TAB_LABELS: Readonly<Record<ProjectTab, string>> = {
 /** The Settings tab's actions, in order. Enter runs the one under the cursor. */
 // The Settings rows are `projectManage.ts`'s SETTINGS_ROWS.
 
+/** The tabs that read the project's secrets index. */
+const INDEX_TABS: readonly ProjectTab[] = ['secrets', 'deployments', 'connectors'];
+
+/** Whether the Users tab is shown: unless the member list was refused (before it loads, it is shown and resolves on load). */
+function usersTabShown(data: ProjectsData): boolean {
+  return data.lazy === undefined ? data.members !== null : data.lazy.members !== 'denied';
+}
+
 /**
  * The tabs a project shows: only those whose data the service returned to the
  * caller. Secrets, Deployments and Connectors come from the secrets index;
  * Users from the user list; Git Repos from the project's linked repos.
+ * Before that data has loaded, a tab shows unless the list already says the
+ * caller does not administer the project (then the index tabs are hidden); it resolves on load.
  */
 export function visibleTabs(data: ProjectsData, project: ProjectItem): readonly ProjectTab[] {
-  const indexShown = projectIndexState(data.index, project.id) !== 'hidden';
+  const indexShown = indexTabState(data, project) !== 'hidden';
   const shown: Readonly<Record<ProjectTab, boolean>> = {
     secrets: indexShown,
-    users: data.members !== null,
+    users: usersTabShown(data),
     repos: project.repos !== undefined,
     branches: true,
     deployments: indexShown,
@@ -334,7 +446,8 @@ function linkRepoLines(lines: readonly string[], repos: readonly ProjectRepoSumm
 
 /** The table a (non-Secrets) tab shows. */
 export function tabTable(data: ProjectsData, project: ProjectItem, tab: ProjectTab, now?: Date): TabTable {
-  const rows = data.index === null ? [] : projectRows(data.index.rows, project.id);
+  const index = indexOf(data, project.id);
+  const rows = index === null ? [] : projectRows(index.rows, project.id);
   if (tab === 'users') {
     return { headings: ['EMAIL', 'ROLE'], rows: projectMembers(data.members ?? [], project.id).map((m) => [m.email, m.role]) }; // COPY-FLAG: EMAIL, ROLE
   }
@@ -359,6 +472,10 @@ export function tabTable(data: ProjectsData, project: ProjectItem, tab: ProjectT
   return { headings: [], rows: [] };
 }
 
+/** What a tab says while its data is being read, and when reading it failed. */
+export const LOADING_TEXT = 'Loading...'; // COPY-FLAG
+export const LOAD_FAILED_TEXT = 'Could not load.'; // COPY-FLAG
+
 /** What the Secrets tab says for a project nobody has pushed secrets to yet. */
 export const NO_SECRETS_YET_LINES: readonly string[] = [
   'This project has no secrets yet.', // COPY-FLAG
@@ -382,6 +499,8 @@ export interface ProjectView {
   readonly settingsCursor: number;
   /** The Capy Branches tab's selected branch. */
   readonly branchCursor: number;
+  /** The Git Repos tab's selected row. */
+  readonly repoCursor: number;
 }
 
 export interface ProjectsScreenState {
@@ -402,19 +521,24 @@ export interface ProjectsScreenState {
   readonly manage: ManageDialog | null;
   /** Short lines shown above the footer until the next key (what a delete did). */
   readonly notes: readonly string[];
+  /**
+   * By project id: the keys (`repoRowKey`) of the rows whose folder holds the project's keep.lock on the remote.
+   * A project absent here has not been checked; `[]` is "being checked" or "none".
+   */
+  readonly remoteRows: Readonly<Record<string, readonly string[]>>;
   readonly quit: boolean;
   /** Printed after the screen is left (the embedded edit and deploy confirmations). */
   readonly exitText: string | null;
 }
 
 export function initialProjectsScreenState(data: ProjectsData, dryRun: boolean = false): ProjectsScreenState {
-  return { data, dryRun, query: '', cursor: 0, open: null, dialog: null, usersDialog: null, manage: null, notes: [], quit: false, exitText: null };
+  return { data, dryRun, query: '', cursor: 0, open: null, dialog: null, usersDialog: null, manage: null, notes: [], remoteRows: {}, quit: false, exitText: null };
 }
 
-/** Most recently updated first; projects with no known time last; then by name. */
-export function sortProjects(data: Pick<ProjectsData, 'projects' | 'index'>): readonly ProjectItem[] {
+/** Most recently updated first; projects with no known time last (including, when the list says who administers what, those the caller does not administer); then by name. */
+export function sortProjects(data: ProjectsData): readonly ProjectItem[] {
   const at = (p: ProjectItem): number => {
-    const iso = lastUpdatedOf(data.index, p);
+    const iso = listUpdatedAt(data, p);
     return iso === null ? -Infinity : timeOf(iso) ?? -Infinity;
   };
   return sortedCopy(data.projects, (a, b) => at(b) - at(a) || a.name.localeCompare(b.name));
@@ -473,8 +597,22 @@ export type DeleteDialog =
 export type ProjectsOwnEffect =
   | { readonly type: 'projectDeletePreview'; readonly project: ProjectRefLite }
   | { readonly type: 'projectDelete'; readonly project: ProjectRefLite }
+  | ProjectsLoadEffect
   | UsersEffect
   | ManageEffect;
+
+/** Reads the data a tab needs the first time it is shown. The result comes back through `applyProjectIndexLoaded` / `applyMembersLoaded`. */
+export type ProjectsLoadEffect =
+  | { readonly type: 'projectIndexLoad'; readonly projectId: string }
+  | { readonly type: 'projectMembersLoad' };
+
+/** What reading one project's secrets index came back with: its rows, or a refusal (`denied`: PERMISSION_DENIED) or another failure. */
+export type ProjectIndexLoaded =
+  | { readonly ok: true; readonly rows: readonly SecretIndexRow[]; readonly skipped: readonly SecretIndexSkipped[] }
+  | { readonly ok: false; readonly denied: boolean };
+
+/** What reading the org's member list came back with. */
+export type MembersLoaded = { readonly ok: true; readonly members: readonly MemberDetail[] } | { readonly ok: false; readonly denied: boolean };
 
 /** Opens the delete question for `project`: its summary is read first. */
 function startDelete(state: ProjectsScreenState, project: ProjectItem): ProjectsReduceResult {
@@ -525,18 +663,28 @@ export function applyDeletePreview(state: ProjectsScreenState, projectId: string
   };
 }
 
-/** `data` without the project: gone from the list and from the index (so no row still counts it as another project). */
+/** `data` with `change` applied to the index supplied up front and to every index loaded for a project. */
+function mapIndexes(data: ProjectsData, change: (index: ProjectsIndex) => ProjectsIndex): ProjectsData {
+  const loaded = (load: ProjectIndexLoad): ProjectIndexLoad => (load.status === 'loaded' ? { status: 'loaded', index: change(load.index) } : load);
+  const lazy: Pick<ProjectsData, 'lazy'> = data.lazy === undefined
+    ? {}
+    : { lazy: { ...data.lazy, indexes: Object.fromEntries(Object.entries(data.lazy.indexes).map(([id, load]) => [id, loaded(load)])) } };
+  return { ...data, index: data.index === null ? null : change(data.index), ...lazy };
+}
+
+/** `data` without the project: gone from the list and from every index (so no row still counts it as another project). */
 function withoutProject(data: ProjectsData, projectId: string): ProjectsData {
-  const index = data.index === null
-    ? null
-    : {
-        ...data.index,
-        rows: data.index.rows
-          .map((r) => ({ ...r, locations: r.locations.filter((l) => l.project_id !== projectId) }))
-          .filter((r) => r.locations.length > 0),
-        skipped: data.index.skipped.filter((sk) => sk.project_id !== projectId),
-      };
-  return { ...data, projects: data.projects.filter((p) => p.id !== projectId), index };
+  const pruned = mapIndexes(data, (index) => ({
+    ...index,
+    rows: index.rows
+      .map((r) => ({ ...r, locations: r.locations.filter((l) => l.project_id !== projectId) }))
+      .filter((r) => r.locations.length > 0),
+    skipped: index.skipped.filter((sk) => sk.project_id !== projectId),
+  }));
+  const lazy: Pick<ProjectsData, 'lazy'> = pruned.lazy === undefined
+    ? {}
+    : { lazy: { ...pruned.lazy, indexes: Object.fromEntries(Object.entries(pruned.lazy.indexes).filter(([id]) => id !== projectId)) } };
+  return { ...pruned, projects: pruned.projects.filter((p) => p.id !== projectId), ...lazy };
 }
 
 /** The delete answered: on success, back to the list without the project, saying so; else the refusal. */
@@ -560,8 +708,12 @@ const noEffect = (state: ProjectsScreenState): ProjectsReduceResult => ({ state,
 
 /** Pure reducer: `(state, key) => { state, effect }`. */
 export function handleKey(state: ProjectsScreenState, key: string): ProjectsReduceResult {
+  return withRepoRowsCheck(reduceKey(state, key));
+}
+
+function reduceKey(state: ProjectsScreenState, key: string): ProjectsReduceResult {
   // The notes last until the next key.
-  if (state.notes.length > 0) return handleKey({ ...state, notes: [] }, key);
+  if (state.notes.length > 0) return reduceKey({ ...state, notes: [] }, key);
   if (state.dialog) return handleDialogKey(state, state.dialog, key);
   if (state.usersDialog && state.open) return handleUsersDialogKey(state, state.open, state.usersDialog, key);
   if (state.manage && state.open) return handleManageKey(state, state.manage, key);
@@ -569,9 +721,36 @@ export function handleKey(state: ProjectsScreenState, key: string): ProjectsRedu
   return handleListKey(state, key);
 }
 
-/** Opens `project`: its secrets screen, scoped to its rows. */
-function openProject(state: ProjectsScreenState, project: ProjectItem): ProjectsScreenState {
-  const index = state.data.index;
+const rowRefOf = (r: ProjectRepoSummary): RepoRowRef => ({ host: r.host, owner: r.owner, name: r.name, path: r.path });
+
+/**
+ * The first time a project's Git Repos tab is shown, its rows are checked against GitHub once (the `[remote]` tag).
+ * Only when the key started nothing else: the check then starts on the next key.
+ */
+function withRepoRowsCheck(result: ProjectsReduceResult): ProjectsReduceResult {
+  const { state, effect } = result;
+  if (effect !== null || state.open === null || state.open.tab !== 'repos' || state.quit) return result;
+  const project = projectById(state.data, state.open.projectId);
+  const rows = project?.repos ?? [];
+  if (project === undefined || rows.length === 0 || state.remoteRows[project.id] !== undefined) return result;
+  return {
+    state: { ...state, remoteRows: { ...state.remoteRows, [project.id]: [] } },
+    effect: { type: 'projectRepoRowsCheck', project: { id: project.id, name: project.name }, rows: rows.map(rowRefOf) },
+  };
+}
+
+/** The check came back: `remote` are the rows whose folder holds the project's keep.lock on the remote. */
+export function applyRepoRowsChecked(state: ProjectsScreenState, projectId: string, remote: readonly RepoRowRef[]): ProjectsScreenState {
+  return { ...state, remoteRows: { ...state.remoteRows, [projectId]: remote.map(repoRowKey) } };
+}
+
+/**
+ * The embedded secrets screen over `project`'s rows (none until its index is in). The "also in N other projects" note
+ * counts only what the index response holds: a response limited to this project holds no other project's
+ * locations, so no note is shown; the whole org's index (a service that ignores the filter) shows it.
+ */
+function secretsStateFor(data: ProjectsData, project: ProjectItem, dryRun: boolean): SecretsScreenState {
+  const index = indexOf(data, project.id);
   const rows = index === null ? [] : projectRows(index.rows, project.id);
   const scope = {
     title: project.name,
@@ -580,8 +759,105 @@ function openProject(state: ProjectsScreenState, project: ProjectItem): Projects
       { key: '←→', label: 'switch tab' }, // COPY-FLAG
     ],
   };
+  return initialSecretsScreenState(rows, dryRun, scope);
+}
+
+/** Opens `project`: its secrets screen, scoped to its rows. */
+function openProject(state: ProjectsScreenState, project: ProjectItem): ProjectsScreenState {
   const tab = visibleTabs(state.data, project)[0] ?? 'branches';
-  return { ...state, open: { projectId: project.id, tab, secrets: initialSecretsScreenState(rows, state.dryRun, scope), scroll: 0, userCursor: 0, settingsCursor: 0, branchCursor: 0 } };
+  return { ...state, open: { projectId: project.id, tab, secrets: secretsStateFor(state.data, project, state.dryRun), scroll: 0, userCursor: 0, settingsCursor: 0, branchCursor: 0, repoCursor: 0 } };
+}
+
+/** `state` with the lazy loads changed (only when the data has any). */
+function withLazy(state: ProjectsScreenState, change: (lazy: LazyLoads) => LazyLoads): ProjectsScreenState {
+  return state.data.lazy === undefined ? state : { ...state, data: { ...state.data, lazy: change(state.data.lazy) } };
+}
+
+function startIndexLoad(state: ProjectsScreenState, projectId: string): ProjectsReduceResult {
+  const started = withLazy(state, (lazy) => ({ ...lazy, indexes: { ...lazy.indexes, [projectId]: { status: 'loading' } } }));
+  return { state: started, effect: { type: 'projectIndexLoad', projectId } };
+}
+
+function startMembersLoad(state: ProjectsScreenState): ProjectsReduceResult {
+  return { state: withLazy(state, (lazy) => ({ ...lazy, members: 'loading' })), effect: { type: 'projectMembersLoad' } };
+}
+
+/** The member list has not been read (or its last read failed). */
+function membersWanted(data: ProjectsData): boolean {
+  return data.lazy !== undefined && (data.lazy.members === 'unloaded' || data.lazy.members === 'failed');
+}
+
+/** The member list is not in yet (not asked for, on its way, or its read failed): what needs it waits. A refusal is not pending: there is nothing more to wait for. */
+function membersPending(data: ProjectsData): boolean {
+  return data.lazy !== undefined && (data.lazy.members === 'unloaded' || data.lazy.members === 'loading' || data.lazy.members === 'failed');
+}
+
+/** The member list is in, or was supplied up front: the Users tab can act on it. */
+function membersReady(data: ProjectsData): boolean {
+  return data.lazy === undefined || data.lazy.members === 'loaded';
+}
+
+/**
+ * Reads what the selected tab needs when it is first shown: the project's secrets index for Secrets,
+ * Deployments and Connectors, the member list for Users. Nothing when it is in, or on its way.
+ */
+function loadsFor(state: ProjectsScreenState): ProjectsReduceResult {
+  const view = state.open;
+  const lazy = state.data.lazy;
+  const project = view === null ? undefined : projectById(state.data, view.projectId);
+  if (view === null || lazy === undefined || project === undefined) return noEffect(state);
+  if (INDEX_TABS.includes(view.tab)) {
+    const load = lazy.indexes[view.projectId];
+    const wanted = (load === undefined || load.status === 'failed') && indexTabState(state.data, project) !== 'hidden';
+    return wanted ? startIndexLoad(state, view.projectId) : noEffect(state);
+  }
+  return view.tab === 'users' && membersWanted(state.data) ? startMembersLoad(state) : noEffect(state);
+}
+
+/** The open project's tab moved to the first one shown, when the selected one has just been hidden (a refusal). */
+function settleTab(state: ProjectsScreenState): ProjectsReduceResult {
+  const view = state.open;
+  const project = view === null ? undefined : projectById(state.data, view.projectId);
+  if (view === null || project === undefined) return noEffect(state);
+  const tabs = visibleTabs(state.data, project);
+  if (tabs.includes(view.tab)) return noEffect(state);
+  // A load's answer can land the tab on Git Repos with no key pressed: its first-show check starts here too.
+  return withRepoRowsCheck(loadsFor({ ...state, open: { ...view, tab: tabs[0] ?? 'branches', scroll: 0 } }));
+}
+
+/** The load's result for one project: its index, or what the failure was. */
+function indexLoadOf(data: ProjectsData, project: ProjectItem, lazy: LazyLoads, loaded: ProjectIndexLoaded): ProjectIndexLoad {
+  if (!loaded.ok) return { status: loaded.denied ? 'denied' : 'failed' };
+  const covered = administered(data, project) ? [project.id] : lazy.adminProjectIds;
+  return { status: 'loaded', index: { rows: loaded.rows, skipped: loaded.skipped, coveredProjectIds: covered } };
+}
+
+/** One project's secrets index arrived (or was refused, or failed). Kept for the rest of the session; the embedded secrets screen is built from it. */
+export function applyProjectIndexLoaded(state: ProjectsScreenState, projectId: string, loaded: ProjectIndexLoaded): ProjectsReduceResult {
+  const project = projectById(state.data, projectId);
+  const lazy = state.data.lazy;
+  if (project === undefined || lazy === undefined || lazy.indexes[projectId]?.status !== 'loading') return noEffect(state);
+  const load = indexLoadOf(state.data, project, lazy, loaded);
+  const stored = withLazy(state, (l) => ({ ...l, indexes: { ...l.indexes, [projectId]: load } }));
+  const view = stored.open;
+  // The project is open: its secrets screen is built now (nothing was shown there before, so nothing is lost).
+  const open = view !== null && view.projectId === projectId && load.status === 'loaded'
+    ? { ...view, secrets: secretsStateFor(stored.data, project, stored.dryRun) }
+    : view;
+  return settleTab({ ...stored, open });
+}
+
+/** The load's outcome for the member list. */
+function membersLoadOf(loaded: MembersLoaded): MembersLoad {
+  if (loaded.ok) return 'loaded';
+  return loaded.denied ? 'denied' : 'failed';
+}
+
+/** The org's member list arrived (or was refused, or failed). Kept for the rest of the session. */
+export function applyMembersLoaded(state: ProjectsScreenState, loaded: MembersLoaded): ProjectsReduceResult {
+  if (state.data.lazy === undefined || state.data.lazy.members !== 'loading') return noEffect(state);
+  const data = { ...state.data, members: loaded.ok ? loaded.members : null, lazy: { ...state.data.lazy, members: membersLoadOf(loaded) } };
+  return settleTab({ ...state, data });
 }
 
 /** The list: a search bar that is always live (like `capy secrets`), arrows to move, Enter to open. */
@@ -597,7 +873,7 @@ function handleListKey(state: ProjectsScreenState, key: string): ProjectsReduceR
   if (key === KEY_PGDN) return noEffect({ ...state, cursor: clampIndex(state.cursor + PAGE_SIZE, projects.length) });
   if (key === KEY_ENTER) {
     const project = projects[clampIndex(state.cursor, projects.length)];
-    return noEffect(project ? openProject(state, project) : state);
+    return project ? loadsFor(openProject(state, project)) : noEffect(state);
   }
   if (key === KEY_BACKSPACE || key === KEY_BACKSPACE2) return noEffect(withQuery(state, state.query.slice(0, -1)));
   if (key.length === 1 && key.charCodeAt(0) >= 0x20 && key.charCodeAt(0) !== 0x7f) return noEffect(withQuery(state, state.query + key));
@@ -638,7 +914,8 @@ function forwardToSecrets(state: ProjectsScreenState, view: ProjectView, key: st
 
 /** The Secrets tab is showing the embedded secrets screen (the project has rows in the index). */
 function onSecretsScreen(data: ProjectsData, view: ProjectView): boolean {
-  return view.tab === 'secrets' && projectIndexState(data.index, view.projectId) === 'rows';
+  const project = projectById(data, view.projectId);
+  return view.tab === 'secrets' && project !== undefined && indexTabState(data, project) === 'rows';
 }
 
 /**
@@ -654,11 +931,12 @@ function handleProjectKey(state: ProjectsScreenState, view: ProjectView, key: st
   if (key === KEY_ESC || key === KEY_ESC_ESC) return noEffect({ ...state, open: null });
   // Settings: Enter runs the action under the cursor (its only one, Delete project, asks first).
   const tabs = visibleTabs(state.data, project);
-  if (key === KEY_RIGHT) return noEffect({ ...state, open: { ...view, tab: stepTab(tabs, view.tab, 1), scroll: 0 } });
-  if (key === KEY_LEFT) return noEffect({ ...state, open: { ...view, tab: stepTab(tabs, view.tab, -1), scroll: 0 } });
+  if (key === KEY_RIGHT) return loadsFor({ ...state, open: { ...view, tab: stepTab(tabs, view.tab, 1), scroll: 0 } });
+  if (key === KEY_LEFT) return loadsFor({ ...state, open: { ...view, tab: stepTab(tabs, view.tab, -1), scroll: 0 } });
   if (view.tab === 'users') return handleUsersTabKey(state, view, project, key);
   if (view.tab === 'settings') return handleSettingsTabKey(state, view, project, key);
   if (view.tab === 'branches') return handleBranchesTabKey(state, view, project, key);
+  if (view.tab === 'repos') return handleReposTabKey(state, view, project, key);
   const lastLine = Math.max(0, tabTable(state.data, project, view.tab).rows.length - 1);
   const scrollBy = (delta: number): ProjectsReduceResult =>
     noEffect({ ...state, open: { ...view, scroll: Math.max(0, Math.min(lastLine, view.scroll + delta)) } });
@@ -677,6 +955,8 @@ function handleProjectKey(state: ProjectsScreenState, view: ProjectView, key: st
 
 /** On the Users tab: the arrows move the cursor, Enter opens the row's role choices, i invites. */
 function handleUsersTabKey(state: ProjectsScreenState, view: ProjectView, project: ProjectItem, key: string): ProjectsReduceResult {
+  // Nothing to act on until the member list is in.
+  if (!membersReady(state.data)) return noEffect(state);
   const rows = userRowsOf(state.data, project.id);
   const ref = { id: project.id, name: project.name };
   const moveTo = (cursor: number): ProjectsReduceResult => noEffect({ ...state, open: { ...view, userCursor: clampIndex(cursor, rows.length) } });
@@ -693,9 +973,20 @@ function handleUsersTabKey(state: ProjectsScreenState, view: ProjectView, projec
   return noEffect(state);
 }
 
+/** Whether the caller's own org role may invite an org admin; no when the caller or the users are unknown. */
+function callerMayInviteAdmin(data: ProjectsData): boolean {
+  const self = (data.members ?? []).find((m) => m.userId === data.selfUserId);
+  return mayInviteAdmin(self?.role);
+}
+
 function handleUsersDialogKey(state: ProjectsScreenState, view: ProjectView, dialog: UsersDialog, key: string): ProjectsReduceResult {
-  const stepped = usersDialogKey(dialog, key, { dryRun: state.dryRun, rows: userRowsOf(state.data, view.projectId) });
+  const stepped = usersDialogKey(dialog, key, { dryRun: state.dryRun, rows: userRowsOf(state.data, view.projectId), canInviteAdmin: callerMayInviteAdmin(state.data) });
   return { state: { ...state, usersDialog: stepped.dialog, notes: stepped.notes }, effect: stepped.effect };
+}
+
+/** `data` with the member list replaced (it is in now, whatever its load said before). */
+function withMembers(data: ProjectsData, members: readonly MemberDetail[]): ProjectsData {
+  return { ...data, members, ...(data.lazy === undefined ? {} : { lazy: { ...data.lazy, members: 'loaded' as const } }) };
 }
 
 /**
@@ -706,7 +997,7 @@ function handleUsersDialogKey(state: ProjectsScreenState, view: ProjectView, dia
 export function applyUsersDone(state: ProjectsScreenState, finished: UsersFinished): ProjectsScreenState {
   if (state.usersDialog === null || state.usersDialog.step !== 'working') return state;
   const stepped = usersDialogDone(state.usersDialog, finished);
-  const data = finished.ok && finished.members !== null ? { ...state.data, members: finished.members } : state.data;
+  const data = finished.ok && finished.members !== null ? withMembers(state.data, finished.members) : state.data;
   const open = state.open === null
     ? null
     : { ...state.open, userCursor: clampIndex(state.open.userCursor, userRowsOf(data, state.open.projectId).length) };
@@ -745,9 +1036,26 @@ function handleBranchesTabKey(state: ProjectsScreenState, view: ProjectView, pro
   return noEffect({ ...state, manage: started.dialog, notes: started.notes });
 }
 
+/** On the Git Repos tab: the arrows move the cursor; d asks to remove the row (the project's only row stays). */
+function handleReposTabKey(state: ProjectsScreenState, view: ProjectView, project: ProjectItem, key: string): ProjectsReduceResult {
+  const rows = project.repos ?? [];
+  const moveTo = (cursor: number): ProjectsReduceResult => noEffect({ ...state, open: { ...view, repoCursor: clampIndex(cursor, rows.length) } });
+  if (key === KEY_UP) return moveTo(view.repoCursor - 1);
+  if (key === KEY_DOWN) return moveTo(view.repoCursor + 1);
+  if (key === KEY_PGUP) return moveTo(view.repoCursor - PAGE_SIZE);
+  if (key === KEY_PGDN) return moveTo(view.repoCursor + PAGE_SIZE);
+  const row = rows[clampIndex(view.repoCursor, rows.length)];
+  if ((key !== 'd' && key !== 'D') || row === undefined) return noEffect(state);
+  const started = startRepoRemove({ id: project.id, name: project.name }, { host: row.host, owner: row.owner, name: row.name, path: row.path }, rows.length);
+  return noEffect({ ...state, manage: started.dialog, notes: started.notes });
+}
+
 function handleManageKey(state: ProjectsScreenState, dialog: ManageDialog, key: string): ProjectsReduceResult {
   const stepped = manageKey(dialog, key, { dryRun: state.dryRun, members: state.data.members ?? [] });
-  return { state: { ...state, manage: stepped.dialog, notes: stepped.notes }, effect: stepped.effect };
+  const next = { ...state, manage: stepped.dialog, notes: stepped.notes };
+  // Who can use a branch needs the member list: it is read the first time that dialog opens.
+  if (stepped.dialog !== null && stepped.dialog.step === 'access' && membersWanted(state.data)) return startMembersLoad(next);
+  return { state: next, effect: stepped.effect };
 }
 
 /** The project's id was copied (or not). */
@@ -763,28 +1071,65 @@ export function applyTokensLoaded(
   return { ...state, manage: manageTokensLoaded(state.manage, loaded) };
 }
 
-/** `data` with `projectId`'s branches replaced; the index forgets the locations of a branch that is gone. */
+/** `project` with `branches` in place of its own. When a branch is gone, the list's variable count is no longer known (`null`). */
+function withNewBranches(project: ProjectItem, branches: readonly BranchRef[]): ProjectItem {
+  const names = new Set(branches.map((b) => b.name));
+  const lostOne = project.branches.some((b) => !names.has(b.name));
+  return { ...project, branches, ...(lostOne && project.variableCount !== undefined ? { variableCount: null } : {}) };
+}
+
+/** `data` with `projectId`'s branches replaced; every index forgets the locations of a branch that is gone. */
 function withBranches(data: ProjectsData, projectId: string, branches: readonly BranchRef[]): ProjectsData {
   const names = new Set(branches.map((b) => b.name));
-  const index = data.index === null
-    ? null
-    : {
-        ...data.index,
-        rows: data.index.rows
-          .map((r) => ({ ...r, locations: r.locations.filter((l) => l.project_id !== projectId || names.has(l.branch)) }))
-          .filter((r) => r.locations.length > 0),
-      };
-  return { ...data, index, projects: data.projects.map((p) => (p.id === projectId ? { ...p, branches } : p)) };
+  const pruned = mapIndexes(data, (index) => ({
+    ...index,
+    rows: index.rows
+      .map((r) => ({ ...r, locations: r.locations.filter((l) => l.project_id !== projectId || names.has(l.branch)) }))
+      .filter((r) => r.locations.length > 0),
+  }));
+  return { ...pruned, projects: pruned.projects.map((p) => (p.id === projectId ? withNewBranches(p, branches) : p)) };
+}
+
+/** Whether a stored link is `row`: same host, owner and name (owner and name compare case-insensitively, as on the service) and the same folder. */
+function isRepoRow(link: ProjectRepoSummary, row: RepoRowRef): boolean {
+  return link.host === row.host && link.owner.toLowerCase() === row.owner.toLowerCase() && link.name.toLowerCase() === row.name.toLowerCase() && link.path === row.path;
+}
+
+/** `data` with `projectId` under its new name, in the list and in every index location of it. */
+function withProjectName(data: ProjectsData, projectId: string, name: string): ProjectsData {
+  // Every index: the one supplied up front and each project's index loaded since (the lazy screen).
+  const renamed = mapIndexes(data, (index) => ({
+    ...index,
+    rows: index.rows.map((r) => ({ ...r, locations: r.locations.map((l) => (l.project_id === projectId ? { ...l, project_name: name } : l)) })),
+  }));
+  return { ...renamed, projects: renamed.projects.map((p) => (p.id === projectId ? { ...p, name } : p)) };
+}
+
+/** `data` with `row` gone from `projectId`'s repo links. */
+function withoutRepoRow(data: ProjectsData, projectId: string, row: RepoRowRef): ProjectsData {
+  return {
+    ...data,
+    projects: data.projects.map((p) => (p.id === projectId && p.repos !== undefined ? { ...p, repos: p.repos.filter((r) => !isRepoRow(r, row)) } : p)),
+  };
 }
 
 /** A token revoke or branch change came back: what was read again replaces the old, and the dialog moves on. */
 export function applyManageDone(state: ProjectsScreenState, finished: ManageFinished): ProjectsScreenState {
   if (state.manage === null || state.manage.step !== 'working' || state.open === null) return state;
   const stepped = manageDone(state.manage, finished);
-  const withMembers = finished.ok && finished.members !== undefined ? { ...state.data, members: finished.members } : state.data;
-  const data = finished.ok && finished.branches !== undefined ? withBranches(withMembers, state.open.projectId, finished.branches) : withMembers;
+  const membersIn = finished.ok && finished.members !== undefined ? withMembers(state.data, finished.members) : state.data;
+  const withNewBranches = finished.ok && finished.branches !== undefined ? withBranches(membersIn, state.open.projectId, finished.branches) : membersIn;
+  const withoutRow = finished.ok && finished.removedRepoRow !== undefined ? withoutRepoRow(withNewBranches, state.open.projectId, finished.removedRepoRow) : withNewBranches;
+  const data = finished.ok && finished.renamed !== undefined ? withProjectName(withoutRow, finished.renamed.id, finished.renamed.name) : withoutRow;
   const project = projectById(data, state.open.projectId);
-  const open = { ...state.open, branchCursor: clampIndex(state.open.branchCursor, project?.branches.length ?? 0) };
+  // A renamed project's embedded secrets screen is made again, so its title and rows carry the new name.
+  const renamedSecrets = finished.ok && finished.renamed !== undefined && project !== undefined ? openProject({ ...state, data }, project).open?.secrets : undefined;
+  const open = {
+    ...state.open,
+    ...(renamedSecrets === undefined ? {} : { secrets: renamedSecrets }),
+    branchCursor: clampIndex(state.open.branchCursor, project?.branches.length ?? 0),
+    repoCursor: clampIndex(state.open.repoCursor, project?.repos?.length ?? 0),
+  };
   return { ...state, data, open, manage: stepped.dialog, notes: stepped.notes };
 }
 
@@ -836,13 +1181,36 @@ export function lastUpdatedCell(index: ProjectsIndex | null, project: ProjectIte
   return at === null ? '—' : formatRelativeTime(at, now);
 }
 
+/** The list's VARIABLES cell: the summary's count; `—` when the service cannot say (`null`). Without a summary: what the index supplied up front says. */
+export function listVariablesCell(data: ProjectsData, project: ProjectItem): string {
+  if (data.lazy === undefined) return variablesCell(data.index, project);
+  return typeof project.variableCount === 'number' ? String(project.variableCount) : '—';
+}
+
+/** The list's LAST UPDATED cell, from `listUpdatedAt`. */
+export function listLastUpdatedCell(data: ProjectsData, project: ProjectItem, now?: Date): string {
+  const at = listUpdatedAt(data, project);
+  return at === null ? '—' : formatRelativeTime(at, now);
+}
+
+/** The VARIABLES column needs a count to show: some project's numeric count in the list, or an index supplied up front. Otherwise (an older service, a plain member) it is hidden. */
+function variablesColumnShown(data: ProjectsData): boolean {
+  return data.lazy === undefined ? data.index !== null : data.projects.some((p) => typeof p.variableCount === 'number');
+}
+
+/** The LAST UPDATED column: with the index supplied up front, when it was; with the list's own times, unless the list says the caller administers no project. */
+function updatedColumnShown(data: ProjectsData): boolean {
+  if (data.lazy === undefined) return data.index !== null;
+  return !administrationKnown(data) || data.projects.some((p) => administered(data, p));
+}
+
 function listColumns(data: ProjectsData, available: number): readonly ListColumn[] {
-  const variables: readonly ListColumn[] = data.index === null
+  const variables: readonly ListColumn[] = variablesColumnShown(data)
+    ? [{ heading: 'VARIABLES', width: 10, cell: (p) => listVariablesCell(data, p) }] // COPY-FLAG
+    : [];
+  const updated: readonly ListColumn[] = !updatedColumnShown(data)
     ? []
-    : [{ heading: 'VARIABLES', width: 10, cell: (p) => variablesCell(data.index, p) }]; // COPY-FLAG
-  const updated: readonly ListColumn[] = data.index === null
-    ? []
-    : [{ heading: 'LAST UPDATED', width: 14, cell: (p) => lastUpdatedCell(data.index, p) }]; // COPY-FLAG
+    : [{ heading: 'LAST UPDATED', width: 14, cell: (p) => listLastUpdatedCell(data, p) }]; // COPY-FLAG
   const fixed = [...variables, ...updated].reduce((sum, c) => sum + c.width + MARGIN, 0);
   const rest = Math.max(16, available - 2 - fixed);
   // NAME is as wide as the longest name (never under its heading), capped at half the room when repos share it.
@@ -985,6 +1353,20 @@ function tabTableLines(table: TabTable, scroll: number, height: number, availabl
   return ['', `${m}${DIM}${line(table.headings)}${RESET}`, '', ...shown.map((r) => m + line(r))];
 }
 
+/** What a tab says while its data is on its way, or when reading it failed; `null` when it is in (or the tab reads nothing lazily). */
+function pendingLines(data: ProjectsData, project: ProjectItem, tab: ProjectTab): readonly string[] | null {
+  const m = ' '.repeat(MARGIN);
+  const say = (text: string): readonly string[] => [`${m}${DIM}${text}${RESET}`];
+  if (INDEX_TABS.includes(tab)) {
+    const state = indexTabState(data, project);
+    if (state === 'pending') return say(LOADING_TEXT);
+    return state === 'failed' ? say(LOAD_FAILED_TEXT) : null;
+  }
+  if (tab !== 'users' || data.lazy === undefined) return null;
+  if (data.lazy.members === 'failed') return say(LOAD_FAILED_TEXT);
+  return data.lazy.members === 'loaded' ? null : say(LOADING_TEXT);
+}
+
 /** A (non-embedded) tab's lines: the no-secrets note, the Settings actions, or the tab's table. */
 function tabBody(
   state: ProjectsScreenState,
@@ -996,10 +1378,12 @@ function tabBody(
   boxed: boolean,
 ): readonly string[] {
   const m = ' '.repeat(MARGIN);
+  const pending = pendingLines(state.data, project, view.tab);
+  if (pending !== null) return pending;
   if (view.tab === 'secrets') return NO_SECRETS_YET_LINES.map((l) => `${m}${l}`);
   if (view.tab === 'settings') return settingsLines(project.id, view.settingsCursor, width, boxed);
   if (view.tab === 'branches') return branchLines(project, view.branchCursor, width, boxed);
-  if (view.tab === 'repos') return linkRepoLines(tabTableLines(tabTable(state.data, project, view.tab), view.scroll, height, available), project.repos ?? []);
+  if (view.tab === 'repos') return linkRepoLines(repoLines(project, state.remoteRows[project.id] ?? [], view.repoCursor, width, boxed), project.repos ?? []);
   if (view.tab === 'users') return usersTabLines(userRowsOf(state.data, project.id), view.userCursor, height, available, width, boxed);
   return tabTableLines(tabTable(state.data, project, view.tab), view.scroll, height, available);
 }
@@ -1036,12 +1420,16 @@ function usersTabLines(
   return ['', `${m}${DIM}${padTo('EMAIL', emailW)}${gap}ROLE${RESET}`, '', ...shown]; // COPY-FLAG: EMAIL, ROLE
 }
 
-function projectFooter(tab: ProjectTab): string {
+/** `usersActive`: the Users tab's keys (change role, invite) work, because the member list is in. `repoRowCount`: the Git Repos tab offers d only with more than one row. */
+function projectFooter(tab: ProjectTab, usersActive: boolean, repoRowCount: number): string {
   const lead = ((): readonly string[] => {
     // The Settings tab has actions, not a table: Enter runs the one under the cursor.
     if (tab === 'settings') return [renderHint(null, '↑↓ navigate'), renderHint('enter', 'select')]; // COPY-FLAG
     if (tab === 'branches') return [renderHint(null, '↑↓ navigate'), renderHint('enter', 'actions')]; // COPY-FLAG
+    if (tab === 'users' && !usersActive) return [renderHint(null, '↑↓ navigate')]; // COPY-FLAG
     if (tab === 'users') return [renderHint(null, '↑↓ navigate'), renderHint('enter', 'change role'), renderHint('i', 'invite')]; // COPY-FLAG
+    // The project's only row stays: d is offered only when there is another.
+    if (tab === 'repos') return repoRowCount > 1 ? [renderHint(null, '↑↓ navigate'), renderHint('d', 'remove')] : [renderHint(null, '↑↓ navigate')]; // COPY-FLAG
     return [renderHint(null, '↑↓ scroll')]; // COPY-FLAG
   })();
   return joinHints([
@@ -1081,6 +1469,17 @@ function branchLines(project: ProjectItem, cursor: number, width: number, boxed:
   return ['', ...actionRows(project.branches.map((b) => (b.protected ? `${b.name} (protected)` : b.name)), cursor, width, boxed)];
 }
 
+/** The Git Repos tab: each stored row (a repo, at the folder the project was seen in), with a cursor. */
+function repoLines(project: ProjectItem, remoteKeys: readonly string[], cursor: number, width: number, boxed: boolean): readonly string[] {
+  const rows = project.repos ?? [];
+  if (rows.length === 0) return ['', `${' '.repeat(MARGIN)}${DIM}(none)${RESET}`];
+  const label = (r: ProjectRepoSummary): string => {
+    const text = repoUrl(r) ?? formatRepo(r);
+    return remoteKeys.includes(repoRowKey(rowRefOf(r))) ? `${text} ${REMOTE_TAG}` : text;
+  };
+  return ['', ...actionRows(rows.map(label), cursor, width, boxed)];
+}
+
 /** The notes (what a delete did), dim, above the footer. */
 function noteLines(notes: readonly string[]): readonly string[] {
   return notes.map((n) => `${' '.repeat(MARGIN)}${DIM}${n}${RESET}`);
@@ -1098,7 +1497,7 @@ function renderDialog(state: ProjectsScreenState, dialog: DeleteDialog, termHeig
   const question = dialog.step === 'refused' ? [] : [`${m}${BOLD}${deleteQuestion(dialog.project.name)}${RESET}`];
   const keys = dialog.step === 'refused'
     ? [renderHint('esc', 'back')]
-    : [renderHint('y', 'yes'), renderHint('n', 'no'), renderHint('enter', 'no')]; // COPY-FLAG
+    : [renderHint('y', 'yes'), renderHint('esc', 'no')]; // COPY-FLAG
   // The question and its keys stay at the bottom; the lines above them scroll when they do not fit.
   const room = Math.max(1, termHeight - head.length - question.length - 2);
   const overflows = body.length > room;
@@ -1142,7 +1541,7 @@ function renderProject(state: ProjectsScreenState, view: ProjectView, termWidth:
 
   const m = ' '.repeat(MARGIN);
   const title = `${m}${BOLD}${project.name}${RESET}${dryRunTag(state.dryRun)}`;
-  const footer: readonly string[] = ['', ...noteLines(state.notes), m + projectFooter(view.tab)];
+  const footer: readonly string[] = ['', ...noteLines(state.notes), m + projectFooter(view.tab, membersReady(state.data), project.repos?.length ?? 0)];
   const bodyHeight = Math.max(3, innerHeight(1) - footer.length);
   const available = Math.max(20, boxed ? innerWidth : innerWidth - MARGIN * 2);
   const body = tabBody(state, project, view, bodyHeight, available, width, boxed);
@@ -1163,7 +1562,11 @@ export function render(state: ProjectsScreenState, termWidth: number, termHeight
     const m = ' '.repeat(MARGIN);
     const project = projectById(state.data, state.open.projectId);
     const head = [`${m}${BOLD}capy projects${RESET}${dryRunTag(state.dryRun)} ${DIM}${project?.name ?? ''}${RESET}`, ''];
-    return [...head, ...renderManage(state.manage, width, m, state.data.members ?? [])]
+    // A refused member list draws the dialog's empty list, as it did when there were no members to show.
+    const body = state.manage.step === 'access' && membersPending(state.data)
+      ? [`${m}${DIM}${state.data.lazy?.members === 'failed' ? LOAD_FAILED_TEXT : LOADING_TEXT}${RESET}`]
+      : renderManage(state.manage, width, m, state.data.members ?? []);
+    return [...head, ...body]
       .slice(0, Math.max(1, termHeight))
       .map((l) => clipLine(l, width) + CLEAR_EOL)
       .join('\n');

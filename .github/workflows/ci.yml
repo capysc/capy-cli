@@ -9,10 +9,27 @@ on:
 
 jobs:
   test:
-    runs-on: latchkey-small
+    runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v4
+
+      # The keep.lock merge driver tests compare the driver's result with git's
+      # own text merge, byte for byte. That needs the conflict label
+      # placeholders (%S %X %Y), which git expands from 2.44 on. A runner image
+      # with an older git gets the current one from the git maintainers' PPA.
+      - name: Git 2.44 or newer
+        run: |
+          need=2.44.0
+          have() { git version | awk '{print $3}'; }
+          new_enough() { [ "$(printf '%s\n' "$need" "$(have)" | sort -V | head -n1)" = "$need" ]; }
+          if ! new_enough; then
+            sudo add-apt-repository -y ppa:git-core/ppa
+            sudo apt-get update -q
+            sudo apt-get install -y -q git
+          fi
+          git version
+          new_enough
 
       - uses: oven-sh/setup-bun@v2
 
@@ -21,6 +38,9 @@ jobs:
 
       - name: Typecheck
         run: bun run typecheck
+
+      - name: Typecheck install script generator
+        run: bun run typecheck:install
 
       # `capy run` tests spawn `node dist/index.js` as a subprocess — build
       # the dist artifact before the test step so those 14 tests can find it.
@@ -32,6 +52,9 @@ jobs:
 
       - name: Release authentication tests
         run: bun run test:release
+
+      - name: Homebrew release publication tests
+        run: bun run test:homebrew
 
       # Embedded browser screens: dependency freeze + no external URLs +
       # __CAPY_DATA__ placeholders intact.

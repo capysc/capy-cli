@@ -187,7 +187,8 @@ describe('inside a project: the embedded secrets screen', () => {
     expect(s.open?.secrets.rows.map((r) => r.name)).toEqual(['API_KEY', 'DB_URL', 'DB_URL']);
     const frame = strip(render(s, 140, 24));
     expect(frame).toContain('web (3 secrets)');
-    expect(frame).toContain('also in 2 other projects');
+    expect(frame).toContain('(+2 projects)');
+    expect(frame).not.toContain('also in');
     expect(frame).not.toContain('capy secrets');
   });
 

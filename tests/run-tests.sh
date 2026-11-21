@@ -26,8 +26,10 @@ ISOLATED_FILES=(
   tests/auth/oauthServer.test.ts
   tests/commands/branchKeepFile.test.ts
   tests/commands/capyCommand.test.ts
+  tests/commands/staleSyncHash.test.ts
   tests/commands/readOnlyRun.e2e.test.ts
   tests/commands/kickCommand.test.ts
+  tests/commands/usersWithoutFolder.test.ts
   tests/commands/orgSwitchRepoOrgGuard.test.ts
   tests/commands/redeemRepoOrgGuard.test.ts
   tests/commands/inviteCommand.test.ts
@@ -84,11 +86,14 @@ ISOLATED_FILES=(
   tests/commands/projectsDeleted.test.ts
   tests/commands/projectsInteractive.test.ts
   tests/commands/projectsSingleRequest.test.ts
+  tests/commands/projectsScreenData.test.ts
+  tests/commands/projectsLazyLoad.test.ts
   tests/commands/projectLifecycleCommand.test.ts
   tests/commands/projectCreateCommand.test.ts
   tests/commands/projectRenameCommand.test.ts
   tests/commands/secretsCommand.test.ts
   tests/commands/runCommandSystemStore.test.ts
+  tests/commands/runComposeWarning.test.ts
   tests/commands/connectDiscoveryRouting.test.ts
   tests/commands/agentsCommand.test.ts
   tests/commands/transportCommand.test.ts

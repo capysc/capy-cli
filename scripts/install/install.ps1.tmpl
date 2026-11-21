@@ -1,0 +1,124 @@
+# Capy @@VERSION@@, @@COMMIT@@
+# Source: https://github.com/capysc/capy-cli/tree/v@@VERSION@@
+# Capy standalone installer for Windows x64, Windows PowerShell 5.1 and PowerShell 7.
+# Downloads the official binary from GitHub Releases; Node and npm are not required.
+# Run in PowerShell: irm https://capy.sc/install.ps1 | iex
+
+function Install-Capy {
+    $ErrorActionPreference = 'Stop'
+    $ProgressPreference = 'SilentlyContinue'
+    Set-StrictMode -Version 2.0
+
+    if ($env:OS -ne 'Windows_NT') {
+        throw 'Use https://capy.sc/install.sh on macOS or Linux.'
+    }
+    $architecture = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
+    if ($architecture -ne 'AMD64') {
+        throw 'The standalone Windows release currently supports x64 only.'
+    }
+
+    $version = '@@VERSION@@'
+    $url = "https://github.com/capysc/capy-cli/releases/download/v$version/capy-win-x64-$version.zip"
+    $expectedHash = '@@SHA256_WIN_X64@@'
+
+    # Without CAPY_INSTALL_DIR, an existing capy on PATH decides where to install.
+    # Only filesystem facts are used: the file extension of what Get-Command finds
+    # and whether an npm package folder sits next to a shim.
+    function Get-ExistingCapyDirectory {
+        $found = @(Get-Command capy -ErrorAction SilentlyContinue | Where-Object {
+            $_.CommandType -eq 'Application' -or $_.CommandType -eq 'ExternalScript'
+        } | Select-Object -First 1)
+        if ($found.Count -eq 0) { return $null }
+        $existingPath = $found[0].Source
+        $existingFolder = Split-Path -Parent $existingPath
+        $extension = [IO.Path]::GetExtension($existingPath)
+        if ($extension -ieq '.exe') {
+            $probe = Join-Path $existingFolder (".capy-write-test-" + [Guid]::NewGuid().ToString('N'))
+            try {
+                [IO.File]::WriteAllBytes($probe, [byte[]]@())
+                Remove-Item -LiteralPath $probe -Force
+            } catch {
+                throw "Cannot write to $existingFolder, where capy is installed. Nothing was installed." # COPY-FLAG
+            }
+            return $existingFolder
+        }
+        if (($extension -ieq '.cmd' -or $extension -ieq '.ps1') -and (Test-Path -LiteralPath (Join-Path $existingFolder 'node_modules\@capysc\cli'))) {
+            throw 'Capy was installed with npm. Nothing was installed. Update it with: npm install -g @capysc/cli' # COPY-FLAG
+        }
+        throw "Found capy at $existingPath, which this installer does not manage. Nothing was installed." # COPY-FLAG
+    }
+
+    $updatingInPlace = $false
+    $installDirectory = if ($env:CAPY_INSTALL_DIR) {
+        [IO.Path]::GetFullPath($env:CAPY_INSTALL_DIR)
+    } else {
+        $existingDirectory = Get-ExistingCapyDirectory
+        if ($existingDirectory) {
+            $updatingInPlace = $true
+            $existingDirectory
+        } else {
+            if (-not $env:LOCALAPPDATA) { throw 'LOCALAPPDATA is unavailable. Set CAPY_INSTALL_DIR to a writable directory.' }
+            Join-Path $env:LOCALAPPDATA 'Programs\Capy\bin'
+        }
+    }
+
+    function Add-CapyPath([string] $PathValue) {
+        $existing = @($PathValue -split ';' | Where-Object {
+            $_.Trim().Trim('"').TrimEnd('\') -ieq $installDirectory.TrimEnd('\')
+        })
+        if ($existing.Count -gt 0) { return $PathValue }
+        if ([string]::IsNullOrWhiteSpace($PathValue)) { return $installDirectory }
+        return "$($PathValue.TrimEnd(';'));$installDirectory"
+    }
+
+    $temporaryDirectory = Join-Path ([IO.Path]::GetTempPath()) ("capy-install-" + [Guid]::NewGuid().ToString('N'))
+    $stagedExecutable = Join-Path $installDirectory (".capy-" + [Guid]::NewGuid().ToString('N') + '.exe')
+    $backupExecutable = Join-Path $installDirectory (".capy-backup-" + [Guid]::NewGuid().ToString('N') + '.exe')
+    $previousSecurityProtocol = [Net.ServicePointManager]::SecurityProtocol
+    try {
+        New-Item -ItemType Directory -Path $temporaryDirectory -Force | Out-Null
+        $archive = Join-Path $temporaryDirectory 'capy.zip'
+        Write-Host "Downloading Capy $version for Windows x64..."
+        [Net.ServicePointManager]::SecurityProtocol = $previousSecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+        Invoke-WebRequest -Uri $url -OutFile $archive -UseBasicParsing
+        $actualHash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash
+        if ($actualHash -ine $expectedHash) { throw 'Capy download checksum mismatch. Installation stopped.' }
+
+        $extracted = Join-Path $temporaryDirectory 'extracted'
+        Expand-Archive -LiteralPath $archive -DestinationPath $extracted
+        $candidate = Join-Path $extracted 'capy.exe'
+        $reportedVersion = & $candidate --version
+        if ($LASTEXITCODE -ne 0 -or ($reportedVersion -join "`n").Trim() -ne $version) {
+            throw 'The downloaded Capy executable did not pass its version check.'
+        }
+
+        New-Item -ItemType Directory -Path $installDirectory -Force | Out-Null
+        Copy-Item -LiteralPath $candidate -Destination $stagedExecutable
+        $destination = Join-Path $installDirectory 'capy.exe'
+        if (Test-Path -LiteralPath $destination) {
+            [IO.File]::Replace($stagedExecutable, $destination, $backupExecutable)
+        } else {
+            Move-Item -LiteralPath $stagedExecutable -Destination $destination
+        }
+        Copy-Item -LiteralPath (Join-Path $extracted 'LICENSE') -Destination (Join-Path $installDirectory 'capy-LICENSE') -Force
+        Copy-Item -LiteralPath (Join-Path $extracted 'THIRD-PARTY-NOTICES.md') -Destination (Join-Path $installDirectory 'capy-THIRD-PARTY-NOTICES.md') -Force
+
+        if (-not $updatingInPlace) {
+            $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+            $updatedUserPath = Add-CapyPath $userPath
+            if ($updatedUserPath -cne $userPath) {
+                [Environment]::SetEnvironmentVariable('Path', $updatedUserPath, 'User')
+            }
+            $env:Path = Add-CapyPath $env:Path
+        }
+        Write-Host "Installed Capy $version to $destination"
+        Write-Host 'Capy is available in this PowerShell session and new terminals. Run capy --help to get started.'
+    } finally {
+        [Net.ServicePointManager]::SecurityProtocol = $previousSecurityProtocol
+        if (Test-Path -LiteralPath $stagedExecutable) { Remove-Item -LiteralPath $stagedExecutable -Force }
+        if (Test-Path -LiteralPath $backupExecutable) { Remove-Item -LiteralPath $backupExecutable -Force }
+        if (Test-Path -LiteralPath $temporaryDirectory) { Remove-Item -LiteralPath $temporaryDirectory -Recurse -Force }
+    }
+}
+
+Install-Capy

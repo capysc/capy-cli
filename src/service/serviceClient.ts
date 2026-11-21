@@ -1101,8 +1101,11 @@ export class ServiceClient {
    * (name, value_hash), with every location and every user who can read it.
    * Read-only, never returns a value — see `SecretIndexResponse`'s own doc.
    */
-  async getSecretIndex(orgId: string): Promise<SecretIndexResponse> {
-    return this.request('GET', `/orgs/${orgId}/secrets`);
+  async getSecretIndex(orgId: string, options?: { projectId?: string }): Promise<SecretIndexResponse> {
+    // The argument is only passed to ask for one project's rows, so a plain call sends exactly the request it always did.
+    // A service that predates the parameter ignores it and answers the whole index.
+    const query = options?.projectId === undefined ? '' : `?project_id=${encodeURIComponent(options.projectId)}`;
+    return this.request('GET', `/orgs/${orgId}/secrets${query}`);
   }
 
   /**
@@ -1118,6 +1121,19 @@ export class ServiceClient {
     timeoutMs?: number,
   ): Promise<ProjectRepoReportResponse> {
     return this.request('PUT', `/orgs/${orgId}/projects/${projectId}/repos`, link, { timeout: timeoutMs });
+  }
+
+  /**
+   * Removes one repo link row from a project: that repo at that folder. Org owners/admins and the project's
+   * admins only. The project's only row is refused (a coded 409). `repos`: the project's links now.
+   */
+  async deleteProjectRepoRow(
+    orgId: string,
+    projectId: string,
+    row: { readonly host: string; readonly owner: string; readonly name: string; readonly path: string },
+  ): Promise<{ ok: boolean; removed: number; repos: KnownRepo[] }> {
+    const part = (value: string): string => encodeURIComponent(value);
+    return this.request('DELETE', `/orgs/${orgId}/projects/${projectId}/repos/${part(row.host)}/${part(row.owner)}/${part(row.name)}?path=${part(row.path)}`);
   }
 
   /** CAP-697: every project → repo link the caller can see (owners, admins and project admins only; a plain member gets a 403). */

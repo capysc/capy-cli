@@ -1,6 +1,7 @@
 import { CapyError, ERROR_CODES } from '../types/index';
 import { isMembershipRevokedError } from '../errors/membershipRevoked';
 import { keepLockProject } from '../errors/projectDeleted';
+import { isDevBuild } from '../config/prodPins';
 
 const grey = (s: string) => `\x1b[90m${s}\x1b[0m`;
 const bold = (s: string) => `\x1b[1m${s}\x1b[0m`;
@@ -15,7 +16,11 @@ interface ErrorContext {
  * Render a user-friendly error screen for a CapyError.
  * Returns the formatted string to print (does not print itself).
  */
-export function renderError(error: any, context: ErrorContext = {}): string {
+export function renderError(
+  error: any,
+  context: ErrorContext = {},
+  env: NodeJS.ProcessEnv = process.env,
+): string {
   // Handle Ctrl+C
   if (error?.name === 'ExitPromptError') {
     return '';
@@ -35,7 +40,7 @@ export function renderError(error: any, context: ErrorContext = {}): string {
           ? renderMembershipRevoked()
           : renderPermissionDenied(error, context);
       case ERROR_CODES.NETWORK_ERROR:
-        return renderNetworkError(error);
+        return renderNetworkError(error, env);
       case ERROR_CODES.SERVICE_ERROR:
         return renderServiceError(error, context);
       // Each of these used to be a sentence this file matched against inside
@@ -152,7 +157,9 @@ function renderPermissionDenied(error: CapyError, ctx: ErrorContext): string {
   return lines.join('\n');
 }
 
-function renderNetworkError(error: CapyError): string {
+function renderNetworkError(error: CapyError, env: NodeJS.ProcessEnv): string {
+  // The localhost hint belongs to the dev build only; the prod build has no local service.
+  const devHint = isDevBuild(env) ? ` ${grey('(capy-dev: http://localhost:3000)')}` : '';
   const lines = [
     '',
     `  ${bold('Connection failed')}`,
@@ -160,7 +167,8 @@ function renderNetworkError(error: CapyError): string {
     '',
     `  Check:`,
     `    1. Your internet connection`,
-    `    2. The service is running ${grey('(capy-dev: http://localhost:3000)')}`,
+    `    2. The service is running${devHint}`,
+    `    3. A firewall, antivirus or proxy is not blocking the connection`, // COPY-FLAG
     '',
     `  If you're the org owner, run ${bold('capy decrypt')} to decrypt secrets offline with your seed phrase.`,
     '',

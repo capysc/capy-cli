@@ -10,6 +10,7 @@
 // The service enforces every rule again; a refusal is shown in its words.
 
 import type { MemberDetail } from '../service/serviceClient';
+import { INVITE_ROLE_LABELS, inviteRoleAbout, type InviteRole } from '../core/inviteRoles';
 
 const ESC = '\x1b';
 const INVERSE = `${ESC}[7m`;
@@ -96,7 +97,10 @@ export const PROJECT_ROLE_LABELS: Readonly<Record<ProjectRole, string>> = {
 };
 
 type RoleChoice = ProjectRole | 'remove';
-const INVITE_CHOICES: readonly RoleChoice[] = ['member', 'project-admin'];
+/** What an invite offers: the project's roles, and `admin` (org-wide) for a caller who may grant it. */
+const PROJECT_INVITE_CHOICES: readonly InviteRole[] = ['member', 'project-admin'];
+const ADMIN_INVITE_CHOICES: readonly InviteRole[] = [...PROJECT_INVITE_CHOICES, 'admin'];
+export const inviteChoices = (canInviteAdmin: boolean): readonly InviteRole[] => (canInviteAdmin ? ADMIN_INVITE_CHOICES : PROJECT_INVITE_CHOICES);
 const CHANGE_CHOICES: readonly RoleChoice[] = ['member', 'project-admin', 'remove'];
 const REMOVE_LABEL = 'Remove from project'; // COPY-FLAG
 
@@ -112,7 +116,7 @@ export interface UsersRefusal {
 
 export type UsersDialog =
   | { readonly step: 'email'; readonly project: UsersProjectRef; readonly email: string; readonly error: string | null }
-  | { readonly step: 'inviteRole'; readonly project: UsersProjectRef; readonly email: string; readonly choice: number }
+  | { readonly step: 'inviteRole'; readonly project: UsersProjectRef; readonly email: string; readonly choice: number; readonly choices: readonly InviteRole[] }
   | { readonly step: 'changeRole'; readonly project: UsersProjectRef; readonly target: UserTarget; readonly current: string; readonly choice: number }
   | { readonly step: 'confirmRemove'; readonly project: UsersProjectRef; readonly target: UserTarget }
   | { readonly step: 'working'; readonly project: UsersProjectRef; readonly label: string }
@@ -120,7 +124,7 @@ export type UsersDialog =
   | { readonly step: 'refused'; readonly project: UsersProjectRef; readonly refusal: UsersRefusal };
 
 export type UsersEffect =
-  | { readonly type: 'projectUserInvite'; readonly project: UsersProjectRef; readonly email: string; readonly role: ProjectRole }
+  | { readonly type: 'projectUserInvite'; readonly project: UsersProjectRef; readonly email: string; readonly role: InviteRole }
   | { readonly type: 'projectUserRole'; readonly project: UsersProjectRef; readonly target: UserTarget; readonly role: ProjectRole }
   | { readonly type: 'projectUserRemove'; readonly project: UsersProjectRef; readonly target: UserTarget }
   | { readonly type: 'projectUserCopy'; readonly text: string };
@@ -181,13 +185,13 @@ function looksLikeEmail(email: string): boolean {
 }
 
 /** The email typed: refused here when it is already in the project (or reaches every project). */
-function submitEmail(dialog: Extract<UsersDialog, { step: 'email' }>, rows: readonly ProjectUserRow[]): UsersStep {
+function submitEmail(dialog: Extract<UsersDialog, { step: 'email' }>, rows: readonly ProjectUserRow[], canInviteAdmin: boolean): UsersStep {
   const email = dialog.email.trim().toLowerCase();
   if (!looksLikeEmail(email)) return stay({ ...dialog, error: 'Enter an email address.' }); // COPY-FLAG
   const row = rows.find((r) => r.email.toLowerCase() === email);
   if (row !== undefined && row.lock !== null && row.lock !== 'self') return stay(null, [`${row.email} already reaches every project.`]); // COPY-FLAG
   if (row !== undefined) return stay(null, [`${row.email} is already in this project.`]); // COPY-FLAG
-  return stay({ step: 'inviteRole', project: dialog.project, email, choice: 0 });
+  return stay({ step: 'inviteRole', project: dialog.project, email, choice: 0, choices: inviteChoices(canInviteAdmin) });
 }
 
 function editEmail(dialog: Extract<UsersDialog, { step: 'email' }>, key: string): UsersStep {
@@ -204,7 +208,12 @@ function send(project: UsersProjectRef, label: string, effect: UsersEffect, dryR
 }
 
 /** Pure reducer over an open dialog. `rows`: the project's users now. */
-export function usersDialogKey(dialog: UsersDialog, key: string, ctx: { readonly dryRun: boolean; readonly rows: readonly ProjectUserRow[] }): UsersStep {
+export function usersDialogKey(
+  dialog: UsersDialog,
+  key: string,
+  /** `canInviteAdmin`: the caller may invite an org admin (absent: no). */
+  ctx: { readonly dryRun: boolean; readonly rows: readonly ProjectUserRow[]; readonly canInviteAdmin?: boolean },
+): UsersStep {
   if (dialog.step === 'working') return stay(dialog);
   if (dialog.step === 'refused') return stay(null);
   if (dialog.step === 'invited') {
@@ -213,11 +222,11 @@ export function usersDialogKey(dialog: UsersDialog, key: string, ctx: { readonly
   }
   if (isEsc(key)) return stay(null, [USERS_CANCELLED_TEXT]);
 
-  if (dialog.step === 'email') return key === KEY_ENTER ? submitEmail(dialog, ctx.rows) : editEmail(dialog, key);
+  if (dialog.step === 'email') return key === KEY_ENTER ? submitEmail(dialog, ctx.rows, ctx.canInviteAdmin === true) : editEmail(dialog, key);
 
   if (dialog.step === 'inviteRole') {
-    if (key !== KEY_ENTER) return stay({ ...dialog, choice: step(dialog.choice, INVITE_CHOICES.length, key) });
-    const role = INVITE_CHOICES[dialog.choice] as ProjectRole;
+    if (key !== KEY_ENTER) return stay({ ...dialog, choice: step(dialog.choice, dialog.choices.length, key) });
+    const role = dialog.choices[dialog.choice];
     return send(dialog.project, `Inviting ${dialog.email}...`, { type: 'projectUserInvite', project: dialog.project, email: dialog.email, role }, ctx.dryRun); // COPY-FLAG
   }
 
@@ -277,6 +286,14 @@ function choiceLines(choices: readonly RoleChoice[], selected: number, current: 
   });
 }
 
+/** The invite's roles as inquirer's select draws them, each with what it can access beside it. */
+function inviteChoiceLines(choices: readonly InviteRole[], selected: number, margin: string): readonly string[] {
+  return choices.map((role, i) => {
+    const about = inviteRoleAbout(role);
+    return i === selected ? `${margin}${CYAN}❯ ${INVITE_ROLE_LABELS[role]}${RESET}${about}` : `${margin}  ${INVITE_ROLE_LABELS[role]}${about}`;
+  });
+}
+
 /** The dialog's lines, under the screen's title. `width`: the terminal's. */
 export function renderUsersDialog(dialog: UsersDialog, width: number, margin: string): readonly string[] {
   const m = margin;
@@ -293,7 +310,7 @@ export function renderUsersDialog(dialog: UsersDialog, width: number, margin: st
   if (dialog.step === 'inviteRole') {
     return [
       promptLine(`Select a role for ${dialog.email}:`, m), // reused from `capy invite`
-      ...choiceLines(INVITE_CHOICES, dialog.choice, null, m),
+      ...inviteChoiceLines(dialog.choices, dialog.choice, m),
       '',
       m + hints(`${DIM}↑↓ choose${RESET}`, hint('enter', 'invite'), hint('esc', 'cancel')), // COPY-FLAG
     ];
@@ -311,7 +328,7 @@ export function renderUsersDialog(dialog: UsersDialog, width: number, margin: st
       `${m}${BOLD}Remove ${dialog.target.email} from ${dialog.project.name}?${RESET}`, // COPY-FLAG
       `${m}${DIM}They stay in the organization.${RESET}`, // COPY-FLAG
       '',
-      m + hints(hint('y', 'yes'), hint('n', 'no'), hint('enter', 'no')),
+      m + hints(hint('y', 'yes'), hint('esc', 'no')),
     ];
   }
   if (dialog.step === 'working') return [`${m}${DIM}${dialog.label}${RESET}`];

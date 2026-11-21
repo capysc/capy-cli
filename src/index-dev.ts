@@ -835,7 +835,8 @@ const projectsCmd = program
 
 projectsCmd
   .command('rename [new-name]')
-  .description('Rename the project of this folder, and update its keep.lock (owners only)') // COPY-FLAG
+  .description("Rename a project and update its keep.lock: this folder's project, or the one --project-id names (owners and admins only)") // COPY-FLAG
+  .option('--project-id <id>', 'rename the project with this id instead of the one this folder belongs to') // COPY-FLAG
   .option('--non-tty', 'same as --json: never ask, and answer in JSON (agents/CI)') // COPY-FLAG
   .option('--json', 'emit machine-readable JSON instead of the human UI')
   .action(async (name: string | undefined, _options: any, command: any) => {
@@ -869,6 +870,7 @@ secretsCmd
   .option('--exclude <project:branch>', 'leave this location out (repeatable)', collectRepeatable, [])
   .addOption(new Option('--no-pr-for <owner/name>', 'do not open a PR in this repo (repeatable)').argParser(collectRepeatable).default([]))
   .option('--no-pr', 'do not open any PR')
+  .option('--pr-repo <project_id=owner/name[/folder]>', 'the repo a project\'s PR goes to, when the project is linked to more than one (repeatable)', collectRepeatable, [])
   .option('--confirm <plan_id>', 'run the plan that --dry-run printed (required for a real run)')
   .addHelpText(
     'after',
@@ -897,6 +899,7 @@ secretsCmd
         exclude: options.exclude,
         noPrFor: options.prFor,
         noPr: options.pr === false,
+        prRepo: options.prRepo,
         conflictFlags: rawConflictFlagsOf(command),
       },
       true,
@@ -913,6 +916,7 @@ secretsCmd
   .option('--row <row_id>', 'deploy this row of a name (repeatable; ids from `capy secrets --name NAME --json`)', collectRepeatable, [])
   .option('--all-rows', 'deploy every row of those names')
   .option('--exclude <project:branch>', 'leave this location out (repeatable)', collectRepeatable, [])
+  .option('--pr-repo <project_id=owner/name[/folder]>', 'the repo a project is deployed from and its PR goes to, when the project is linked to more than one (repeatable)', collectRepeatable, [])
   .option('--confirm <plan_id>', 'run the plan that --dry-run printed (required for a real run)')
   .addHelpText(
     'after',
@@ -939,6 +943,7 @@ secretsCmd
         row: options.row,
         allRows: options.allRows === true,
         exclude: options.exclude,
+        prRepo: options.prRepo,
         conflictFlags: rawConflictFlagsOf(command),
       },
       true,
@@ -1087,7 +1092,7 @@ program
 
 program
   .command('run')
-  .description('Run a command with decrypted secrets')
+  .description('Run a command with decrypted secrets (sets CAPY_RUN=1 for that command)') // COPY-FLAG
   .allowUnknownOption()
   .helpOption(false)
   .action(async (_opts: any, cmd: any) => {

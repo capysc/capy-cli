@@ -93,6 +93,19 @@ jobs:
           shasum -a 256 *.tar.gz *.zip > "checksums-${VERSION}.txt"
           ls -la
 
+      # install.sh and install.ps1 are generated from the templates in
+      # scripts/install with this release's version, this commit and the
+      # checksums just written, then published next to the archives.
+      - name: Generate install scripts
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.version.outputs.version }}"
+          bun scripts/install/build-install-scripts.ts \
+            --version "$VERSION" \
+            --commit "$(git rev-parse HEAD)" \
+            --checksums "dist/checksums-${VERSION}.txt" \
+            --out dist
+
       - name: Smoke-test linux-x64 binary in python:3.12-slim (no Node)
         run: |
           docker run --rm \
@@ -108,5 +121,17 @@ jobs:
             dist/*.tar.gz
             dist/*.zip
             dist/checksums-*.txt
+            dist/install.sh
+            dist/install.ps1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Runs the script as published for this tag, the way a user would, in a
+      # clean container with no Node.
+      - name: Smoke-test the published installer in alpine (no Node)
+        run: |
+          docker run --rm \
+            -e TAG="${{ steps.version.outputs.tag }}" \
+            -e VERSION="${{ steps.version.outputs.version }}" \
+            alpine:3 \
+            sh -c 'set -eu && wget -qO- "https://github.com/capysc/capy-cli/releases/download/$TAG/install.sh" | sh && test "$(capy --version)" = "$VERSION"'

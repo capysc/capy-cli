@@ -46,7 +46,7 @@ import {
   deleteLocalBranch,
   syncTrackedKeepFromWorkingCopy,
 } from '../deploy/git';
-import { buildDeployKeep, touchDeployKeep, reconcileVars, hashValue } from '../deploy/keepGate';
+import { buildDeployKeep, touchDeployKeep, reconcileVars, hashValue, varSetProblem, describeVarSetProblem, type VarSetProblem } from '../deploy/keepGate';
 import {
   branchPushProblem,
   describeBranchProblem,
@@ -1894,11 +1894,25 @@ const stripAnsiText = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, '');
  * stop no flag answered comes back in `unanswered`, which is precisely the
  * list a headless caller needs to know it must refuse rather than pick.
  */
+/** The var-set refusal a real run of this saved target would make, read from local files only. No keep.lock: none. */
+function savedTargetVarSetProblem(cwd: string, saved: TargetConfig): VarSetProblem | null {
+  const keep = readKeep(cwd);
+  if (!keep) return null;
+  const here = branchVarNames(cwd);
+  return varSetProblem(existsSync(join(cwd, '.env')), saved.vars, keep.variables.filter((v) => here.has(v)));
+}
+
 export function describeDeployRoute(
   nameArg: string | undefined,
   options: DeployCliOptions,
   cwd: string,
-): { stops: DeployPlanConfirmStop[]; unanswered: string[]; problem?: { code: ErrorCode; activeBranch: string; targetBranch: string } } {
+): {
+  stops: DeployPlanConfirmStop[];
+  unanswered: string[];
+  problem?:
+    | { code: ErrorCode; activeBranch: string; targetBranch: string }
+    | { code: ErrorCode; target: string; targetBranch: string; removed: readonly string[] };
+} {
   const saved = nameArg ? getTarget(cwd, nameArg) : null;
   // CAP-679: `--json` never travels the route (see this function's own
   // doc — no network, no decryption), so a real run's branch check never
@@ -1942,11 +1956,22 @@ export function describeDeployRoute(
     skipped,
     dryRun,
   });
+  const varProblem = saved && !branchProblem ? savedTargetVarSetProblem(cwd, saved) : null;
   return {
     stops,
     unanswered: unansweredDeployStops(stops),
     ...(branchProblem
       ? { problem: { code: branchProblem.code, activeBranch: branchProblem.activeBranch!, targetBranch: saved!.branch } }
+      : {}),
+    ...(varProblem && saved
+      ? {
+          problem: {
+            code: varProblem.code,
+            target: saved.name,
+            targetBranch: saved.branch,
+            removed: varProblem.code === ERROR_CODES.DEPLOY_REMOVES_ALL_VARS ? varProblem.removed : [],
+          },
+        }
       : {}),
   };
 }
@@ -2411,6 +2436,13 @@ async function reconcileTargetVars(
 ): Promise<StepResult<TargetConfig>> {
   const branchVarSet = branchVarNames(cwd);
   const currentVars = keep.variables.filter((v) => branchVarSet.has(v));
+  // A folder with no `.env`, or with none of the target's variables, has nothing to deliver: going on would take
+  // every variable off the platform. Refused before anything is asked, saved or delivered, in a dry run too.
+  const problem = varSetProblem(existsSync(join(cwd, '.env')), target.vars, currentVars);
+  if (problem) {
+    console.error(`${RED('✗')} ${describeVarSetProblem(problem, target.name, target.branch)}`);
+    return stepStop(1);
+  }
   // Legacy targets have no `knownVars` baseline; treat current as known so we
   // don't false-flag intentionally-unselected vars as "newly added".
   const known = target.knownVars ?? currentVars;
@@ -2437,8 +2469,9 @@ async function reconcileTargetVars(
     );
     return stepStop(1);
   }
-  if (options.yes && removed.length) {
-    // Non-interactive: a removed var can't be pushed; drop it and carry on.
+  if ((options.yes || options.dryRun) && removed.length) {
+    // Nobody is asked: a removed var can't be pushed; drop it and carry on. A dry run drops it too, so its plan
+    // lists the variables the real run would deliver.
     return stepOk({ ...target, vars: target.vars.filter((v) => currentVars.includes(v)), knownVars: currentVars });
   }
   return stepOk(target);

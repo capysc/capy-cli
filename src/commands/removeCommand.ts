@@ -108,7 +108,13 @@ export async function proceedWithRemoval(
 
   if (opts.dryRun === true) {
     // Everything above only read. Nothing below this line runs: no removal, no push, no PR.
-    const preview = await previewKeepLockPrStep({ changed: true, cwd: opts.cwd, flags: opts.pr ?? {} });
+    const preview = await previewKeepLockPrStep({
+      changed: true,
+      cwd: opts.cwd,
+      flags: opts.pr ?? {},
+      records: recordsForRemoval(ctx.branch, names),
+      localKeep: ctx.keep,
+    });
     if (opts.json) {
       console.log(
         JSON.stringify(

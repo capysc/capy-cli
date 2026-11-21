@@ -86,6 +86,8 @@ export interface CliHelpDoc {
     codes: string;
     /** What a command that writes from a folder does first, and how a difference is answered off a terminal (CAP-717). */
     conflicts?: string;
+    /** Which commands run with no project folder, and how the organization is found. */
+    orgs?: string;
     /** What an `elicitation` in a refusal is and what to do with it (CAP-748). */
     elicitation?: string;
     /** How an agent runs `capy pair` and shows its link step (the one agent pairing flow). */
@@ -207,7 +209,10 @@ export function buildCliHelpDoc(program: Command): CliHelpDoc {
       codes: 'Branch only on the machine-readable `code` field (from --json output or a CapyError), never on human-readable message text — messages may be reworded without notice.',
       // COPY-FLAG: minimal and neutral; the contract is docs/conflict-resolution.md.
       conflicts:
-        'Every command that writes from a folder (edit, add, remove, connect, rotate, push, checkout, org, deploy, deploy revoke, deploy targets-remove) runs bare `capy` first; `checkout -b` is the one exception (a new branch carries the uncommitted values of the folder). Off a terminal, if the folder and Capy differ on any variable, nothing is written, the exit code is 3, and stdout is {ok:false, code:"SECRETS_CONFLICT", conflict_id, conflicts:[{name, project, branch, type, pinned, local, remote}]} (fingerprints only, never values; a Dokploy value has {name, target, pinned, local, remote}). Ask the person, then rerun the same command with --resolve NAME=pinned|local|remote|delete for every row (NAME@TARGET=local|remote for a Dokploy value) and --conflict <conflict_id>. A state that moved since is SECRETS_CONFLICT_STALE with the fresh rows. There is no resolve-all.',
+        'Every command that writes from a folder (edit, add, remove, connect, rotate, push, checkout, org, deploy, deploy revoke, deploy targets-remove) runs bare `capy` first; `checkout -b` is the one exception (a new branch carries the uncommitted values of the folder). Off a terminal, if the folder and Capy differ on any variable, nothing is written, the exit code is 3, and stdout is {ok:false, code:"SECRETS_CONFLICT", conflict_id, conflicts:[{name, project, branch, type, pinned, local, remote}]} (fingerprints only, never values; a Dokploy value has {name, target, pinned, local, remote}). Ask the person, then rerun the same command with --resolve NAME=pinned|local|remote|delete for every row (NAME@TARGET=local|remote for a Dokploy value) and --conflict <conflict_id>. A state that moved since is SECRETS_CONFLICT_STALE with the fresh rows. There is no resolve-all. `secrets set` and `secrets deploy` take the same --resolve and --conflict for a location that changed since its row was listed.',
+      // COPY-FLAG: minimal and neutral.
+      orgs:
+        'These commands work on an organization, not on a folder, and run with no project folder: users, grant-branch, revoke-branch, invite, kick, projects, projects rename --project-id, project create, project delete, project restore, secrets, secrets set, secrets deploy, system. The organization is the one in the keep.lock of the folder when it has one, else the only organization the account belongs to. With several organizations, no keep.lock and nobody to ask, `users --json`, `projects rename` and `project create|delete|restore` refuse with ORG_SELECTION_REQUIRED and `orgs:[{id, name}]`: show them to the person and stop.',
       elicitation: ELICITATION_HELP,
       pairing: PAIRING_PRESENTATION,
     },

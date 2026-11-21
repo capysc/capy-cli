@@ -15,6 +15,11 @@
  *
  * `--dry-run` reads the project list to say what would change and sends nothing that writes; the service has no
  * dry run, so the PATCH is simply never sent, and no file is touched.
+ *
+ * `--project-id <id>` renames that project of the active organization instead, from any folder. The id is matched
+ * exactly (never a name, which several projects can share); an id the organization does not have is
+ * PROJECT_NOT_FOUND. keep.lock is rewritten only when this folder's keep.lock names that same project; otherwise no
+ * file is touched.
  */
 import { relative } from 'path';
 import { resolveOrgContext } from '../core/orgContext';
@@ -36,6 +41,8 @@ export interface RenameProjectOpts {
   nonTty?: boolean;
   /** The global `--dry-run`: say what would change, change nothing. */
   dryRun?: boolean;
+  /** `--project-id <id>`: the project to rename, instead of the one this folder's keep.lock names. */
+  projectId?: string;
   apiUrl?: string;
   devMode?: boolean;
 }
@@ -52,6 +59,7 @@ export function renameProjectOptsFrom(command: CommandWithGlobals): RenameProjec
     json: merged.json === true || merged.nonTty === true,
     nonTty: merged.nonTty === true,
     dryRun: merged.dryRun === true,
+    projectId: typeof merged.projectId === 'string' ? merged.projectId : undefined,
   };
 }
 
@@ -108,7 +116,7 @@ export function suggestedRenameName(
 }
 
 /** The form that asks for the new name, with the suggestion (when there is one) as the default. */
-function renameForm(org: OrgRef, project: ProjectRef, suggestion: string | undefined): ElicitationForm {
+function renameForm(org: OrgRef, project: ProjectRef, suggestion: string | undefined, rerun: string): ElicitationForm {
   return {
     kind: 'form',
     question: 'What should the project be renamed to?', // COPY-FLAG
@@ -121,7 +129,7 @@ function renameForm(org: OrgRef, project: ProjectRef, suggestion: string | undef
       question: 'What should the project be called?', // COPY-FLAG
       ...(suggestion === undefined ? {} : { default: suggestion }),
     }],
-    answer: { rerun: 'capy projects rename <name> --json' },
+    answer: { rerun },
   };
 }
 
@@ -165,38 +173,69 @@ function othersIn(
   return projects.filter((p) => p.id !== projectId);
 }
 
-async function renameFlow(typed: string | undefined, folder: FolderProject, opts: RenameProjectOpts): Promise<RenameOutcome> {
+/**
+ * The project to rename: the folder's own, or the one of this organization with exactly the id `--project-id` gives.
+ * An id the organization does not have is refused here, before anything is sent.
+ */
+async function renameTarget(
+  projectId: string | undefined,
+  folder: FolderProject | null,
+  org: OrgRef,
+  client: RenameClient,
+): Promise<ProjectRef> {
+  if (projectId === undefined) {
+    if (folder === null) throw new CapyError('This folder has no keep.lock.', ERROR_CODES.NO_KEEP_FILE); // COPY-FLAG
+    return { id: folder.id, name: folder.name };
+  }
+  const found = (await client.listProjects()).find((p) => p.organization_id === org.id && p.id === projectId);
+  if (found === undefined) {
+    throw new CapyError(`This organization has no live project ${projectId}.`, ERROR_CODES.PROJECT_NOT_FOUND, { project_id: projectId }); // COPY-FLAG: same wording as the dry run
+  }
+  return { id: found.id, name: found.name };
+}
+
+async function renameFlow(typed: string | undefined, folder: FolderProject | null, opts: RenameProjectOpts): Promise<RenameOutcome> {
+  const named = opts.projectId;
   // Before any network call: every keep.lock copy must be one that can be rewritten, or nothing is renamed.
-  const planned = typed === undefined ? [] : new FileManager().planKeepProjectName(typed);
+  const planned = typed === undefined || named !== undefined ? [] : new FileManager().planKeepProjectName(typed);
 
   // The folder's own org wins inside resolveOrgContext; nothing is ever asked.
   const { orgId, orgName, serviceClient } = await resolveOrgContext(opts.apiUrl, opts.devMode === true, { promptForOrg: false });
   const org: OrgRef = { id: orgId, name: orgName };
-  const project: ProjectRef = { id: folder.id, name: folder.name };
   const client: RenameClient = serviceClient;
+  const project = await renameTarget(named, folder, org, client);
+  // Only this folder's own project has a keep.lock here to follow the new name.
+  const inFolder = folder !== null && folder.id === project.id;
 
   if (typed === undefined) {
-    const projects = othersIn(await client.listProjects(), folder.id);
-    const suggestion = suggestedRenameName(process.cwd(), folder.name, (n) => existingProjectNamed(projects, orgId, n) !== undefined);
-    return { kind: 'needs-input', project, org, elicitation: renameForm(org, project, suggestion), suggestion };
+    if (named !== undefined) {
+      return { kind: 'needs-input', project, org, elicitation: renameForm(org, project, undefined, `capy projects rename <name> --project-id ${project.id} --json`), suggestion: undefined };
+    }
+    const projects = othersIn(await client.listProjects(), project.id);
+    const suggestion = suggestedRenameName(process.cwd(), project.name, (n) => existingProjectNamed(projects, orgId, n) !== undefined);
+    return { kind: 'needs-input', project, org, elicitation: renameForm(org, project, suggestion, 'capy projects rename <name> --json'), suggestion };
   }
 
-  if (opts.dryRun === true) return dryRunOutcome(typed, project, org, client, shownPaths(planned.map((p) => p.path)));
+  // With `--project-id`, the same check as above, now that the project is known to be this folder's.
+  const rewrites = named !== undefined && inFolder ? new FileManager().planKeepProjectName(typed) : planned;
 
-  const sent = await settle(() => client.renameProject(orgId, folder.id, typed));
+  if (opts.dryRun === true) return dryRunOutcome(typed, project, org, client, shownPaths(rewrites.map((p) => p.path)));
+
+  const sent = await settle(() => client.renameProject(orgId, project.id, typed));
   // An answer that is not JSON is as unusable as one without the project: it is neither a rename nor a refusal.
   if (!sent.ok) throw sent.error instanceof CapyError ? sent.error : badServiceAnswer();
-  const renamed = renamedProjectOf(sent.value, folder.id);
+  const renamed = renamedProjectOf(sent.value, project.id);
   if (renamed === null) throw badServiceAnswer();
   const { changed, previousName } = answerExtras(sent.value);
+  if (!inFolder) return { kind: 'renamed', project: renamed, previousName: previousName ?? project.name, changed, org, files: [] };
 
   // The local files follow the service's answer (its stored name), even when the service had nothing to change.
   const written = await settle(async () => {
     const files = new FileManager();
     return files.writeKeepRewrites(files.planKeepProjectName(renamed.name));
   });
-  if (!written.ok) return { kind: 'local-failed', project: renamed, previousName: previousName ?? folder.name, org };
-  return { kind: 'renamed', project: renamed, previousName: previousName ?? folder.name, changed, org, files: shownPaths(written.value) };
+  if (!written.ok) return { kind: 'local-failed', project: renamed, previousName: previousName ?? project.name, org };
+  return { kind: 'renamed', project: renamed, previousName: previousName ?? project.name, changed, org, files: shownPaths(written.value) };
 }
 
 /** What a real run would do, read from the project list and the planned keep.lock rewrites alone. */
@@ -312,7 +351,7 @@ export async function renameProjectCommand(name: string | undefined, opts: Renam
   const folder = await settle(readFolderProject);
   if (!folder.ok) return refuse(json, refusalFor(folder.error));
   const project = folder.value;
-  if (project === null) {
+  if (project === null && opts.projectId === undefined) {
     return refuse(json, {
       code: ERROR_CODES.NO_KEEP_FILE,
       message: 'This folder has no keep.lock, so there is no project to rename.', // COPY-FLAG

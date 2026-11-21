@@ -201,10 +201,10 @@ describe('handleKey — column cycling (CAP-702: PROJECT first, STATUS added)', 
     expect(states.slice(1).map((st) => st.column)).toEqual(order as SecretsScreenState['column'][]);
   });
 
-  test('Shift-Tab cycles backwards, wrapping the other way', () => {
+  test('the left arrow cycles backwards, wrapping the other way (Shift+Tab now opens the sort menu)', () => {
     const order = ['users', 'integrations', 'target', 'connector', 'status', 'branch', 'project'];
     const states = order.reduce<SecretsScreenState[]>(
-      (acc) => [...acc, handleKey(acc[acc.length - 1], KEY_SHIFT_TAB).state],
+      (acc) => [...acc, handleKey(acc[acc.length - 1], `${ESC}[D`).state],
       [initialSecretsScreenState([row()])],
     );
     expect(states.slice(1).map((st) => st.column)).toEqual(order as SecretsScreenState['column'][]);

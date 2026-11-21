@@ -84,6 +84,18 @@ export function getShellPinnedEnv(): Record<string, string> {
   return { ...strippedFromShell };
 }
 
+/**
+ * True when this process is the dev build (`capy-dev` / `capy-staging`).
+ *
+ * The prod entrypoint strips `CAPY_GLOBAL_DIR_NAME` before anything runs
+ * (see `PINNED_ENV_VARS`), and the dev entrypoint always sets it to isolate
+ * its state directory. So the variable being present is a structural fact
+ * about which build is running, not something read from any printed text.
+ */
+export function isDevBuild(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.CAPY_GLOBAL_DIR_NAME !== undefined;
+}
+
 /** Test seam — forget what a previous `applyProdPins` captured. */
 export function resetShellPinnedEnv(): void {
   strippedFromShell = {};
