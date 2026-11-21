@@ -142,6 +142,7 @@ function previewRig(over: Partial<KeepLockPrDeps> = {}, apiOver: Partial<GithubA
     ...apiOver,
   };
   const deps: KeepLockPrDeps = {
+    tracksKeepLock: () => true,
     hasTerminal: () => true,
     confirm: mock(async () => true),
     pickBase: mock(async () => 'x'),

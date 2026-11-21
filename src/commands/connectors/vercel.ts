@@ -122,6 +122,7 @@ import {
   defaultConfirm,
   defaultPickCollisionWinner,
   discoveryCommitPathsFor,
+  tracksDiscoveryFolder,
   peekLocalKeepForFolder,
 } from './discoverySteps';
 import { buildVercelDiscoveryPlan, reportVercelDiscovery } from './vercelDiscovery';
@@ -733,16 +734,17 @@ export function createVercelConnector(deps: VercelConnectorDeps = {}): Connector
       return { ok: false, code: ERROR_CODES.VERCEL_CONFIRMATION_REQUIRED, message: 'Pass --yes to apply non-interactively, or run this interactively.' };
     }
 
+    const trackedFolders = resolvedFolders.filter(tracksDiscoveryFolder);
     const commitBranchName =
-      promptable && !opts.yes
+      trackedFolders.length > 0 && promptable && !opts.yes
         ? await askDiscoveryCommitBranchName(defaultDiscoveryCommitBranchName(new Date(), 'vercel'))
         : defaultDiscoveryCommitBranchName(new Date(), 'vercel');
 
     // Snapshotted BEFORE any write, per repo, so the commit step can tell
     // "discovery made this change" from "already dirty before the run".
     const beforeStatusByRepo = new Map(
-      [...new Set(resolvedFolders.map((f) => f.repoDir))].map((repoDir) => {
-        const paths = resolvedFolders.filter((f) => f.repoDir === repoDir).flatMap((f) => discoveryCommitPathsFor(f.folder));
+      [...new Set(trackedFolders.map((f) => f.repoDir))].map((repoDir) => {
+        const paths = trackedFolders.filter((f) => f.repoDir === repoDir).flatMap((f) => discoveryCommitPathsFor(f.folder));
         return [repoDir, snapshotPathStatus(repoDir, paths)] as const;
       }),
     );

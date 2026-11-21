@@ -11,12 +11,6 @@ import { createHarness, withHarness, BRANCH, type Harness } from '../helpers/pip
 
 const PEM = readFileSync(join(__dirname, '../fixtures/rsa_test_key.pem'), 'utf8').trimEnd();
 
-// Neither --pr nor --no-pr and no terminal: the PR step does not run and says which flags would answer it.
-const UNANSWERED = [
-  { id: 'create_pr', flag: '--pr' },
-  { id: 'pr_base', flag: '--pr-base' },
-];
-
 function parseJson(stdout: string): Record<string, unknown> {
   return JSON.parse(stdout) as Record<string, unknown>;
 }
@@ -38,7 +32,7 @@ describe('capy add NAME < value (piped)', () => {
     const r = await h().run(['add', 'ADD_NEW', '--json'], 'v\n');
     expect(r.code).toBe(0);
     expect(r.stderr).toBe('');
-    expect(parseJson(r.stdout)).toEqual({ ok: true, name: 'ADD_NEW', branch: BRANCH, action: 'created', pushed: true, keep_lock: { changed: true, committed: false }, unanswered: UNANSWERED });
+    expect(parseJson(r.stdout)).toEqual({ ok: true, name: 'ADD_NEW', branch: BRANCH, action: 'created', pushed: true, keep_lock: { changed: true, committed: false } });
     expect(h().envValue('ADD_NEW')).toBe('v');
     expect(h().pushCount()).toBe(1);
   });
@@ -67,7 +61,7 @@ describe('capy add NAME < value (piped)', () => {
   test('--force overwrites: updated', async () => {
     const r = await h().run(['add', 'ADD_EXISTS', '--force', '--json'], 'second\n');
     expect(r.code).toBe(0);
-    expect(parseJson(r.stdout)).toEqual({ ok: true, name: 'ADD_EXISTS', branch: BRANCH, action: 'updated', pushed: true, keep_lock: { changed: true, committed: false }, unanswered: UNANSWERED });
+    expect(parseJson(r.stdout)).toEqual({ ok: true, name: 'ADD_EXISTS', branch: BRANCH, action: 'updated', pushed: true, keep_lock: { changed: true, committed: false } });
     expect(h().envValue('ADD_EXISTS')).toBe('second');
   });
 
