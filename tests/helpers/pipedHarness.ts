@@ -115,7 +115,7 @@ function writeJson(path: string, value: unknown): void {
   writeFileSync(path, JSON.stringify(value, null, 2));
 }
 
-function seedHome(home: string, serviceUrl: string): string {
+export function seedHome(home: string, serviceUrl: string): string {
   const masterKey = randomBytes(32);
   const kLocal = randomBytes(32);
   const capyDir = join(home, '.capy');
@@ -147,7 +147,7 @@ function seedHome(home: string, serviceUrl: string): string {
   return deriveProjectKey(masterKey, PROJECT_ID, ORG_ID);
 }
 
-function seedProject(project: string): void {
+export function seedProject(project: string): void {
   const keep: KeepFile = {
     version: '3.0',
     org_id: ORG_ID,
