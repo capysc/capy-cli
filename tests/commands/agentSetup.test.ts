@@ -338,6 +338,62 @@ describe('an existing project', () => {
     expect(readJson(folder('keep.lock'))).toMatchObject({ project_id: 'proj-web' });
   });
 
+  const WEB = { id: 'proj-web', name: 'web', organization_id: ORG.id };
+  /** What the form tells the human about the folder's variables, which the human approves before choosing a project. */
+  const variablesRowOf = (display: string): string => display.split('\n').find((line) => line.includes('Variables')) ?? '';
+
+  test('with a project to choose, the summary states both outcomes, and choosing an existing project does what it says (secrets: replaced, copy kept, nothing pushed)', async () => {
+    const calls = fakeWorld({ projects: [WEB] });
+    writeFileSync(folder('.env'), `API_KEY=${SENTINEL}\nDB_URL=other\n`, 'utf-8');
+
+    const asked = await run();
+    const row = variablesRowOf(asked.json!.elicitation.display);
+    expect(row).toContain('2 variables to encrypt and push');
+    expect(row).toContain('Existing project');
+    expect(row).toContain('nothing is pushed');
+    expect(row).toContain('replace');
+    expect(row).toContain('.pre-capy.old');
+
+    const keep = { version: '3.0', org_id: ORG.id, project_id: WEB.id, project_name: WEB.name, variables: {} };
+    spyOn(ServiceClient.prototype, 'getDecryptData').mockResolvedValue({
+      keep_hash: 'a'.repeat(64),
+      keep_file: JSON.stringify(keep),
+      env_content: `API_KEY=capy:${deriveResourceId('development', 'API_KEY')}:${Encryptor.encrypt('remote-value', 'a'.repeat(64))}\n`,
+    } as never);
+    const out = await run({ project: WEB.id });
+
+    expect(out.json).toMatchObject({ ok: true, created: false, pushed: 0, pulled: 1 });
+    expect(calls.pushSecrets).not.toHaveBeenCalled();
+    const env = readFileSync(folder('.env'), 'utf-8');
+    expect(env).toContain('API_KEY=capy:');
+    expect(env).not.toContain('DB_URL');
+    expect(env).not.toContain(SENTINEL);
+    const backup = readFileSync(folder('.env.pre-capy.old'), 'utf-8');
+    expect(backup).toContain(`# API_KEY=${SENTINEL}`);
+    expect(backup).toContain('# DB_URL=other');
+  });
+
+  test('with a project to choose, an existing project with no secrets leaves the .env as it is and pushes nothing, as the summary says', async () => {
+    const calls = fakeWorld({ projects: [WEB] });
+    writeFileSync(folder('.env'), `API_KEY=${SENTINEL}\n`, 'utf-8');
+    const asked = await run();
+    expect(variablesRowOf(asked.json!.elicitation.display)).toContain('nothing is pushed');
+    spyOn(ServiceClient.prototype, 'getDecryptData').mockRejectedValue(new CapyError('No secrets', ERROR_CODES.NO_SECRETS, { status: 404 }));
+    const out = await run({ project: WEB.id });
+    expect(out.json).toMatchObject({ ok: true, created: false, pushed: 0 });
+    expect(calls.pushSecrets).not.toHaveBeenCalled();
+    expect(readFileSync(folder('.env'), 'utf-8')).toBe(`API_KEY=${SENTINEL}\n`);
+  });
+
+  test('with no project to choose (a new one), the summary keeps saying only what will be encrypted and pushed', async () => {
+    fakeWorld();
+    writeFileSync(folder('.env'), `API_KEY=${SENTINEL}\n`, 'utf-8');
+    const asked = await run();
+    const row = variablesRowOf(asked.json!.elicitation.display);
+    expect(row).toContain('1 variable to encrypt and push');
+    expect(row).not.toContain('Existing project');
+  });
+
   test('--project that matches nothing is PROJECT_NOT_FOUND and nothing is created', async () => {
     const calls = fakeWorld({ projects: [{ id: 'proj-web', name: 'web', organization_id: ORG.id }] });
     const out = await run({ project: 'api' });

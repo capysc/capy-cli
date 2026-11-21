@@ -158,6 +158,7 @@ export function setupForm(input: SetupFormInput): ElicitationForm {
       branch: input.answers.branch,
       isProtected: input.answers.protectedAnswer === undefined ? undefined : input.answers.protectedAnswer === PROTECTED_YES,
       variables: input.variables,
+      projectChoice: input.projects !== undefined,
       branchDescription: BRANCH_DESCRIPTION,
     }),
     fields: fieldsOf(input),

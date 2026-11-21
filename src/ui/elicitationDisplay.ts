@@ -137,12 +137,17 @@ export interface SetupDisplayInput {
   readonly isProtected?: boolean;
   /** How many variables the folder's `.env` holds. 0 or absent: no row. */
   readonly variables?: number;
+  /** Whether the human is still choosing between a new project and an existing one: then the row says what each choice does to the variables. */
+  readonly projectChoice?: boolean;
   /** What a branch is, shown under the table. */
   readonly branchDescription: string;
 }
 
-function variablesCell(count: number): string {
-  return `${count} ${count === 1 ? 'variable' : 'variables'} to encrypt and push`; // COPY-FLAG
+const EXISTING_PROJECT_OUTCOME = ' (new project). Existing project: nothing is pushed; if it has secrets they replace these, and the old values are kept in a .pre-capy.old file.'; // COPY-FLAG
+
+function variablesCell(count: number, projectChoice: boolean): string {
+  const base = `${count} ${count === 1 ? 'variable' : 'variables'} to encrypt and push`; // COPY-FLAG
+  return projectChoice ? `${base}${EXISTING_PROJECT_OUTCOME}` : base;
 }
 
 /**
@@ -155,7 +160,7 @@ export function setupDisplay(input: SetupDisplayInput): string {
     ['Project', input.project ?? TO_CHOOSE],
     ['First branch', input.branch ?? TO_CHOOSE], // COPY-FLAG
     ['Protected', protectedCell(input.isProtected)], // COPY-FLAG
-    ...(input.variables !== undefined && input.variables > 0 ? [['Variables', variablesCell(input.variables)] as const] : []),
+    ...(input.variables !== undefined && input.variables > 0 ? [['Variables', variablesCell(input.variables, input.projectChoice === true)] as const] : []),
   ];
   return `${table(['', ''], rows)}\n\n${input.branchDescription}`;
 }
