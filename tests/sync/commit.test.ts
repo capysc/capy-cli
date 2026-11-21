@@ -27,7 +27,7 @@ import {
 import { hashValue } from '../../src/sync/compareSecrets';
 import { SyncEngine } from '../../src/sync/syncEngine';
 import { CapyError, ERROR_CODES, type KeepFile } from '../../src/types/index';
-import { fakeCapyServer, pushOf, seedServer, serverHash, serverLine, serverValues } from '../helpers/fakeCapyServer';
+import { EMPTY_SERVER, fakeCapyServer, pushOf, seedServer, serverHash, serverLine, serverValues } from '../helpers/fakeCapyServer';
 import { makeFolder, removeFolder, type Folder } from '../helpers/folderWorld';
 
 const KEY = Encryptor.generateKey();
@@ -104,6 +104,14 @@ describe('uploadChanges', () => {
     expect(serverLine(after, DEV, 'KEEP')).toBe(serverLine(w.before, DEV, 'KEEP'));
     expect(serverValues(after, STG, KEY)).toEqual({ X: 'x-stg', Y: 'y-stg' });
     expect(serverHash(after, STG, 'Y')).toBe(hashValue('y-stg'));
+  });
+
+  test('racing first writes include the empty-branch hash and preserve the winner', async () => {
+    const winner = pushOf({ projectKey: KEY, branch: DEV, values: { X: 'winner' } });
+    const w = world({ initial: EMPTY_SERVER, racing: (read) => read === 1 ? [winner] : [] });
+    await expect(upload(w, { set: { Y: 'mine' }, remove: [] })).rejects.toMatchObject({ code: ERROR_CODES.SECRETS_STALE_BASE });
+    expect(w.server.pushSecrets.mock.calls[0][5]).toBe(SyncEngine.computeKeepHash({ ...w.folder.keep(), variables: {} }, DEV));
+    expect(serverValues(w.server.state(), DEV, KEY)).toEqual({ X: 'winner' });
   });
 
   test('names the keep it was built from: base_keep_hash is the branch hash of the keep it read', async () => {

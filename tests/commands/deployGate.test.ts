@@ -121,7 +121,7 @@ afterEach(() => {
 function world() {
   const server = fakeCapyServer({ initial: seedServer({ projectKey: KEY, values: { [BRANCH]: { [NAME]: '180' } } }) });
   serverOf.mockReturnValue(server);
-  const folder = makeFolder({ projectKey: KEY, branch: BRANCH, keep: seedServer({ projectKey: KEY, values: { [BRANCH]: { [NAME]: '120' } } }).keep as KeepFile, env: { [NAME]: '120' }, client: server.client });
+  const folder = makeFolder({ git: 'tracked', projectKey: KEY, branch: BRANCH, keep: seedServer({ projectKey: KEY, values: { [BRANCH]: { [NAME]: '120' } } }).keep as KeepFile, env: { [NAME]: '120' }, client: server.client });
   made(folder);
   mkdirSync(join(folder.dir, '.capy'), { recursive: true });
   writeFileSync(join(folder.dir, '.capy', 'branch'), BRANCH);

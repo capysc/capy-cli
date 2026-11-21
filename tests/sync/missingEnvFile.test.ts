@@ -244,7 +244,7 @@ function world(opts: {
   const withPinnedBlobs = opts.pinned === undefined ? seed : { ...seed, blobs: { ...seed.blobs, ...pins.blobs } };
   const server2 = opts.pinned === undefined ? server : fakeCapyServer({ initial: withPinnedBlobs });
   serverOf.mockReturnValue(server2);
-  const folder = makeFolder({ projectKey: KEY, branch: DEV, keep: pins.keep as KeepFile, env: opts.local ?? VALUES, client: server2.client });
+  const folder = makeFolder({ git: 'tracked', projectKey: KEY, branch: DEV, keep: pins.keep as KeepFile, env: opts.local ?? VALUES, client: server2.client });
   made(folder);
   if (opts.branchFile !== false) folder.pm.writeActiveBranch(DEV);
   if (opts.env === 'missing') rmSync(join(folder.dir, '.env'));

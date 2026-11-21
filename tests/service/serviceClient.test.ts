@@ -133,6 +133,11 @@ describe('ServiceClient', () => {
       expect(result.env_content).toBe('');
     });
 
+    test('an unrecognized 404 is a failed read, not permission to create an empty branch', async () => {
+      mockFetch.mockResolvedValue(mockFetchResponse({ error: 'route unavailable' }, false, 404));
+      await expect(serviceClient.getDecryptData('proj')).rejects.toMatchObject({ code: ERROR_CODES.SERVICE_ERROR });
+    });
+
     test('should throw on non-404 service errors', async () => {
       mockFetch.mockResolvedValue(mockFetchResponse(
         { error: 'Internal server error' }, false, 500

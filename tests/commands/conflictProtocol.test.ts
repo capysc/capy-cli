@@ -19,6 +19,7 @@
  *     of answers with the rows still open, and refuse `--resolve` without `--conflict`.
  * The property asserted is always the server's: what its latest DECRYPTS to.
  */
+import { execFileSync } from 'node:child_process';
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
 import { readFileSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -28,7 +29,7 @@ import { deriveResourceId } from '../../src/crypto/resourceId';
 import { FileManager } from '../../src/files/fileManager';
 import { SyncEngine } from '../../src/sync/syncEngine';
 import type { KeepFile } from '../../src/types/index';
-import { createHarness, BRANCH, ORG_ID, PROJECT_ID, type CliResult, type Harness } from '../helpers/pipedHarness';
+import { createHarness as createFolderHarness, BRANCH, ORG_ID, PROJECT_ID, type CliResult, type Harness } from '../helpers/pipedHarness';
 
 const hash16 = (v: string): string => createHash('sha256').update(v).digest('hex').slice(0, 16);
 
@@ -39,6 +40,13 @@ const THEIRS = 'SENTINEL-x-theirs-c04f';
 const THEIRS_AGAIN = 'SENTINEL-x-theirs-AGAIN-88d1';
 const NEW_Z = 'SENTINEL-z-new-d2e8';
 const ALL_SENTINELS = [OLD.X, OLD.Y, MINE, THEIRS, THEIRS_AGAIN, NEW_Z];
+
+async function createHarness(): Promise<Harness> {
+  const harness = await createFolderHarness();
+  execFileSync('git', ['init', '-q', harness.project]);
+  execFileSync('git', ['-C', harness.project, 'add', '--', 'keep.lock']);
+  return harness;
+}
 
 const keepOf = (values: Readonly<Record<string, string>>): KeepFile => ({
   version: '3.0',

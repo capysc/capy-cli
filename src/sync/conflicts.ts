@@ -35,7 +35,8 @@ export interface SourceConflict {
   readonly project: string;
   readonly branch: string;
   readonly type: DiffResult['type'];
-  readonly pinned: string | null;
+  readonly pinned?: string | null;
+  readonly choices?: readonly ('local' | 'remote')[];
   readonly local: string | null;
   readonly remote: string | null;
 }
@@ -64,6 +65,7 @@ export interface ConflictView {
 }
 
 export interface ConflictScope extends ConflictView {
+  readonly folderIdentity?: readonly [orgId: string, projectId: string, hasEnv: boolean];
   readonly conflicts: readonly Conflict[];
 }
 
@@ -97,7 +99,7 @@ const canonical = (c: Conflict) => ({
   name: c.name,
   target: isTargetConflict(c) ? c.target : null,
   type: isTargetConflict(c) ? null : c.type,
-  pinned: c.pinned,
+  ...(c.pinned !== undefined ? { pinned: c.pinned } : {}),
   local: c.local,
   remote: c.remote,
 });
@@ -118,7 +120,7 @@ function mergedScopes(scopes: readonly ConflictScope[]): readonly ConflictScope[
  */
 export function conflictIdOf(scopes: readonly ConflictScope[]): string {
   const bound = sortedBy(
-    mergedScopes(scopes).map((s) => ({ project: s.project, branch: s.branch, server_keep_hash: s.serverKeepHash, conflicts: sortedConflicts(s.conflicts).map(canonical) })),
+    mergedScopes(scopes).map((s) => ({ project: s.project, branch: s.branch, server_keep_hash: s.serverKeepHash, ...(s.folderIdentity === undefined ? {} : { folder: s.folderIdentity }), conflicts: sortedConflicts(s.conflicts).map(canonical) })),
     (a, b) => byText(`${a.project}\u0000${a.branch}\u0000${a.server_keep_hash}`, `${b.project}\u0000${b.branch}\u0000${b.server_keep_hash}`),
   );
   const body = bound.length === 1 ? bound[0] : bound;
@@ -162,7 +164,7 @@ export function conflictRefusalFor(
 ): ConflictRefusal {
   const message =
     code === ERROR_CODES.SECRETS_CONFLICT_STALE
-      ? `${namesOf(listed)}: the state changed since that id was issued. Nothing was written.` // COPY-FLAG
+      ? `${namesOf(listed) || 'This folder'}: the state changed since that id was issued. Nothing was written.` // COPY-FLAG
       : `${namesOf(listed)} differ between this folder and Capy. Nothing was written.`; // COPY-FLAG
   return new ConflictRefusal(
     { ok: false, code, conflict_id: conflictIdOf(scopes), conflicts: sortedConflicts(listed), ...(opts.dryRun === true ? { dry_run: true as const } : {}) },
@@ -174,6 +176,18 @@ export function conflictRefusalFor(
 export function printConflictRefusal(refusal: ConflictRefusal, extra: object = {}): void {
   console.log(JSON.stringify({ ...refusal.payload, ...extra }, null, 2));
   console.error(refusal.message);
+  if (refusal.payload.conflicts.length === 0) {
+    console.error('Rerun the command without the previous conflict answers.');
+    return;
+  }
+  if (refusal.payload.conflicts.every((row) => !isTargetConflict(row) && row.choices?.length === 1 && row.choices[0] === 'remote')) {
+    console.error('Run the command without --dry-run to retrieve the latest from Capy into the missing environment file.');
+    return;
+  }
+  if (refusal.payload.conflicts.some((row) => !isTargetConflict(row) && row.choices !== undefined)) {
+    console.error('Rerun with --resolve NAME=local|remote for each difference and --conflict <conflict_id>. Choosing an absent value removes that name.');
+    return;
+  }
   console.error('Rerun with --resolve NAME=pinned|local|remote|delete for each name (NAME@TARGET=local|remote for a platform value) and --conflict <conflict_id>.'); // COPY-FLAG
 }
 
@@ -266,6 +280,12 @@ export function gateConflicts(flags: ConflictFlags, scopes: readonly ConflictSco
   if (opts.dryRun === true) throw conflictRefusalFor(ERROR_CODES.SECRETS_CONFLICT, scopes, all, opts);
   if (flags.conflictId === undefined) throw conflictRefusalFor(ERROR_CODES.SECRETS_CONFLICT, scopes, all, opts);
   if (flags.conflictId !== conflictIdOf(scopes)) throw conflictRefusalFor(ERROR_CODES.SECRETS_CONFLICT_STALE, scopes, all, opts);
+  for (const row of all) {
+    const choice = flags.resolutions[resolveKeyOf(row)];
+    if (!isTargetConflict(row) && row.choices && choice !== undefined && !row.choices.some((allowed) => allowed === choice)) {
+      throw invalid(`Choose ${row.choices.join(' or ')} for ${row.name}.`);
+    }
+  }
   const open = all.filter((c) => flags.resolutions[resolveKeyOf(c)] === undefined);
   if (open.length > 0) throw conflictRefusalFor(ERROR_CODES.SECRETS_CONFLICT, scopes, open, opts);
   return Object.fromEntries(all.map((c) => [resolveKeyOf(c), flags.resolutions[resolveKeyOf(c)]]));
