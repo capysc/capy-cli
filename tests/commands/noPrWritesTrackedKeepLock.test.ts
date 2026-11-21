@@ -271,7 +271,6 @@ test('folder-only setup uploads the change without publishing the ignored pins, 
   await withWorld(async (h) => {
     gitInit(h.project, 'git@github.com:Acme/solo.git');
     writeFileSync(join(h.project, '.gitignore'), '/keep.lock\n/.capy/\n.env\n');
-    const before = h.keepLockText();
     const preview = await h.run(['add', NAME, '--dry-run', '--json', '--pr'], 'local-only-test-value\n');
     expect(preview.code).toBe(0);
     expect(json(preview).unanswered).toBeUndefined();
@@ -281,7 +280,8 @@ test('folder-only setup uploads the change without publishing the ignored pins, 
     expect(h.pushCount()).toBe(1);
     expect(json(added).keep_lock).toEqual({ changed: true, committed: false });
     expect(json(added).unanswered).toBeUndefined();
-    expect(h.keepLockText()).toBe(before);
+    expect(JSON.parse(h.keepLockText()).variables[NAME]).toBeDefined();
+    expect(readFileSync(join(h.project, '.capy', 'keep.lock'), 'utf8')).toBe(h.keepLockText());
     expect(h.envValue(NAME)).toBe('local-only-test-value');
     expect(gitIn(h, ['ls-files', '--', 'keep.lock']).stdout).toBe('');
   });
