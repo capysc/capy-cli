@@ -600,6 +600,8 @@ export class ServiceClient {
     keepHash?: string,
     includeLatestHash?: boolean,
     onRateLimit?: (rate: RateInfo) => void,
+    /** Give up on the read after this long (default: the client's usual timeout). For callers that must never hang, such as a git hook. */
+    timeoutMs?: number,
   ): Promise<DecryptResponse> {
     try {
       const params: string[] = [];
@@ -614,7 +616,7 @@ export class ServiceClient {
         latest_keep_hash?: string;
         keep_file?: string;
       }>(
-        'GET', `/secrets/${projectId}${query}`, undefined, { onRateLimit },
+        'GET', `/secrets/${projectId}${query}`, undefined, { onRateLimit, ...(timeoutMs === undefined ? {} : { timeout: timeoutMs }) },
       );
 
       return {

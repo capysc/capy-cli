@@ -5,10 +5,10 @@ import { ServiceClient } from '../service/serviceClient';
 import { SyncEngine } from '../sync/syncEngine';
 import { compareSecrets, hashValue, type DiffResult } from '../sync/compareSecrets';
 import { CapyError, ERROR_CODES, KeepFile } from '../types/index';
-import { fetchSecretsWithCache, readSecretsLocal } from '../config/globalConfig';
+import { readSecretsLocal } from '../config/globalConfig';
 import { isLocalOnly } from '../config/profileConfig';
 import { resolveLocalProjectKey } from '../core/localUnlock';
-import { pinnedHashes } from '../sync/commit';
+import { pinnedHashes, readSnapshot, remoteHashesFrom } from '../sync/commit';
 import { placeholdersOnBranch, placeholderSetCommand } from '../core/placeholder';
 import { isProjectDeletedError } from '../errors/projectDeleted';
 
@@ -53,6 +53,33 @@ export function formatSnippet(value: string): string {
   return `${value.slice(0, 3)}...${value.slice(-3)}`;
 }
 
+/**
+ * Names whose value on Capy differs from what keep.lock pins for the branch: the changes Capy holds that this folder
+ * does not. `new` is on Capy and not pinned, `removed` is pinned and no longer on Capy, `changed` is on both with
+ * another value. Names only: a diff carries hashes, never a value.
+ */
+export interface RemoteChanges {
+  readonly new: readonly string[];
+  readonly changed: readonly string[];
+  readonly removed: readonly string[];
+}
+
+export function remoteChangesOf(diffs: readonly DiffResult[]): RemoteChanges {
+  const names = (keep: (d: DiffResult) => boolean): readonly string[] => diffs.filter(keep).map((d) => d.variable);
+  const onCapyDiffers = (d: DiffResult): boolean => d.remote !== d.pinned;
+  return {
+    new: names((d) => onCapyDiffers(d) && d.pinned === undefined),
+    changed: names((d) => onCapyDiffers(d) && d.pinned !== undefined && d.remote !== undefined),
+    removed: names((d) => onCapyDiffers(d) && d.pinned !== undefined && d.remote === undefined),
+  };
+}
+
+/**
+ * How long a terse (git hook) run waits for Capy. It runs after every checkout and merge, so an unreachable network
+ * must cost it seconds, not the client's usual half minute; the read then fails as any other unreachable remote does.
+ */
+const TERSE_READ_TIMEOUT_MS = 3000;
+
 // Where they have always been imported from (the comparison itself lives in sync/compareSecrets.ts).
 export { compareSecrets, hashValue };
 export type { DiffResult };
@@ -94,6 +121,13 @@ export class StatusCommand {
     }
     const { displayErrorAndExit } = await import('../ui/errorScreen');
     return displayErrorAndExit(err);
+  }
+
+  /** `--json` in a folder with no keep.lock: the coded failure, exit 1 (as `capy remove --json` does). */
+  private endNoKeepFile(): never {
+    const err = new CapyError('No keep.lock found in this directory. Run `capy` to initialize.', ERROR_CODES.NO_KEEP_FILE); // COPY-FLAG
+    console.log(JSON.stringify({ ok: false, code: err.code, error: err.message }, null, 2));
+    return process.exit(1);
   }
 
   /** The project key, or why it could not be had. Never throws. */
@@ -167,7 +201,13 @@ export class StatusCommand {
     }
   }
 
-  /** Hashes of the remote (Keep) values for the pinned keep, or why there are none to show. */
+  /**
+   * Hashes of what Capy holds for the branch now, or why there are none to show.
+   *
+   * Capy's LATEST for the branch, read the way bare `capy` reads it (`readSnapshot`, no pinned keep_hash). Reading at
+   * the folder's own pinned state could only ever return what the folder already has, so a push from another folder
+   * was invisible. Local-only mode has no Capy: its own copy at the pinned state is all there is.
+   */
   private async fetchRemoteHashes(args: {
     keep: KeepFile;
     branch: string;
@@ -180,26 +220,17 @@ export class StatusCommand {
     const { keep, branch, pinned, encryptionKey, organizationId, projectId, localMode } = args;
     try {
       const hasVariables = Object.keys(pinned).length > 0;
-      if (!hasVariables) return { remoteHashes: {}, skip: undefined };
-      const keepHash = SyncEngine.computeKeepHash(keep, branch);
-      const blob = localMode
-        ? readSecretsLocal(organizationId, projectId, keepHash)
-        : await fetchSecretsWithCache(this.serviceClient, organizationId, projectId, keepHash);
-      if (!blob?.env_file) {
+      if (!hasVariables && localMode) return { remoteHashes: {}, skip: undefined };
+      const remoteHashes = localMode
+        ? this.localCopyHashes(readSecretsLocal(organizationId, projectId, SyncEngine.computeKeepHash(keep, branch)), encryptionKey)
+        : remoteHashesFrom(
+            await readSnapshot(this.serviceClient, projectId, branch, encryptionKey, this.terse ? TERSE_READ_TIMEOUT_MS : undefined),
+          );
+      if (Object.keys(remoteHashes).length === 0 && hasVariables) {
         // Known here, so recorded here. Nothing downstream re-reads the
         // sentence to work out what this line already knew.
-        return { remoteHashes: {}, skip: { reason: 'no data at this keep_hash', kind: 'no_data' } };
+        return { remoteHashes: {}, skip: { reason: 'no data on this branch', kind: 'no_data' } }; // COPY-FLAG
       }
-      const encrypted = this.fileManager.parseEnvContent(blob.env_file);
-      const remoteHashes = Object.fromEntries(
-        Object.entries(encrypted).flatMap(([key, value]) => {
-          try {
-            return [[key, hashValue(this.fileManager.decryptValue(value, encryptionKey))] as const];
-          } catch {
-            return []; // Skip values we can't decrypt
-          }
-        }),
-      );
       return { remoteHashes, skip: undefined };
     } catch (err: any) {
       if (isProjectDeletedError(err)) throw err;
@@ -207,10 +238,25 @@ export class StatusCommand {
     }
   }
 
+  /** Hashes of the values in a local-only copy of the branch; a value this key cannot decrypt is left out. */
+  private localCopyHashes(blob: { env_file: string } | null, encryptionKey: string): Record<string, string> {
+    if (!blob?.env_file) return {};
+    return Object.fromEntries(
+      Object.entries(this.fileManager.parseEnvContent(blob.env_file)).flatMap(([key, value]) => {
+        try {
+          return [[key, hashValue(this.fileManager.decryptValue(value, encryptionKey))] as const];
+        } catch {
+          return []; // Skip values we can't decrypt
+        }
+      }),
+    );
+  }
+
   private async _execute(opts: { json?: boolean } = {}): Promise<void> {
     const projectState = await this.projectManager.detectProjectState();
     if (!projectState.initialized) {
       if (this.terse) return;
+      if (opts.json) return this.endNoKeepFile();
       console.log(`No keep.lock found. Run ${B('capy')} to initialize.`);
       return;
     }
@@ -264,6 +310,7 @@ export class StatusCommand {
     // draws the same numbers below — so what a person reads and what a script
     // parses cannot describe different states. diffs carry value HASHES only
     // (sha256 prefix), never plaintext.
+    const remoteChanges = remoteChangesOf(diffs);
     const totalSecrets = new Set([...Object.keys(pinned), ...Object.keys(localHashes)]).size;
     const report = {
       projectName: keep.project_name,
@@ -273,6 +320,9 @@ export class StatusCommand {
       localMatchesPinned: !showLocal,
       remoteMatchesPinned: !showRemote,
       remoteFailure: remoteFailure ?? null,
+      // What Capy holds on this branch that keep.lock does not pin (by name). Empty when Capy could not be read.
+      remoteHasChanges: remoteChanges.new.length + remoteChanges.changed.length + remoteChanges.removed.length > 0,
+      remoteChanges,
       diffs,
       // Names with no value yet (see `capy list`); they are not differences.
       placeholders,
