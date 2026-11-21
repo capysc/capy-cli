@@ -28,6 +28,7 @@ import {
 import { validateSeedPhrase } from '../crypto/keyManager';
 import { offerAgentsSetupAfterInit } from './agentsCommand';
 import { exitOnSetupRefusal, setupNeedsTerminal } from '../core/setupRefusal';
+import { validateBranchNameInput } from '../core/branchNameRule';
 import {
   resolveBranchFromLocalState,
   selectBranchWithServer,
@@ -364,7 +365,7 @@ export class CapyCommand {
 
   /**
    * Joining a project that has no branch at all: its setup stopped after the project was created and before its
-   * first branch was. The person names the branch and says whether it is protected, it is created, and the join
+   * first branch was. The person names the branch, it is created open to the project, and the join
    * goes on with it. No name is assumed. Only a project admin can create a branch: anyone else gets
    * FIRST_BRANCH_NEEDS_ADMIN, its own code so the screen says who to ask instead of the generic "no access to these secrets".
    */
@@ -378,18 +379,14 @@ export class CapyCommand {
     console.log(`\n${project.name} has no branches yet. Create its first branch to join it.`); // COPY-FLAG
     const choice = await this.resolveInitialBranchChoice();
     const name = choice === 'other' ? await this.resolveCustomBranchName() : choice;
-    const { protect } = await inquirer.prompt([{
-      type: 'confirm',
-      name: 'protect',
-      message: `Make "${name}" a protected branch? \x1b[90m(invite-only)\x1b[0m`,
-      default: false,
-    }]);
     const spinner = ora(`Creating branch ${name}...`).start();
     try {
-      await this.serviceClient.createBranch(project.id, name, protect === true);
+      // Open to the project, like a new project's first branch: protection is a separate, later action.
+      await this.serviceClient.createBranch(project.id, name, false);
     } catch (err) {
       spinner.fail(`Failed to create branch ${name}`);
-      if (err instanceof CapyError && err.code === ERROR_CODES.PERMISSION_DENIED) {
+      // A 403 with no code of its own is "not a project admin". One that carries a code (a revoked membership) is that refusal, and keeps its screen.
+      if (err instanceof CapyError && err.code === ERROR_CODES.PERMISSION_DENIED && err.details?.code === undefined) {
         throw new CapyError(
           `${project.name} has no branches yet, and only a project admin can create one. Ask a project admin to run \`capy\` in a folder for this project and create its first branch.`, // COPY-FLAG
           ERROR_CODES.FIRST_BRANCH_NEEDS_ADMIN,
@@ -398,7 +395,7 @@ export class CapyCommand {
       }
       throw err;
     }
-    spinner.succeed(protect === true ? `Created protected branch ${name}` : `Created branch ${name}`);
+    spinner.succeed(`Created branch ${name}`);
     return name;
   }
 
@@ -940,7 +937,7 @@ export class CapyCommand {
       type: 'input',
       name: 'branchName',
       message: 'Branch name:',
-      validate: (input: string) => input.trim().length > 0 || 'Branch name cannot be empty',
+      validate: validateBranchNameInput,
     }]);
     return String(branchName).trim();
   }

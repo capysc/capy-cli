@@ -135,13 +135,13 @@ describe('bootstrapExistingProject: the branch comes from the project', () => {
     const log = spyOn(console, 'log').mockImplementation(() => {});
     const prompt = spyOn(inquirer, 'prompt')
       .mockResolvedValueOnce({ initialBranchChoice: 'other' } as never)
-      .mockResolvedValueOnce({ branchName: 'prod' } as never)
-      .mockResolvedValueOnce({ protect: true } as never);
-    const create = spyOn(ServiceClient.prototype, 'createBranch').mockResolvedValue(branchNamed('prod', true));
+      .mockResolvedValueOnce({ branchName: 'prod' } as never);
+    const create = spyOn(ServiceClient.prototype, 'createBranch').mockResolvedValue(branchNamed('prod'));
     try {
       const { cmd, read } = commandFor([]);
       await bootstrap(cmd);
-      expect(create.mock.calls).toEqual([[PROJECT.id, 'prod', true]]);
+      expect(prompt).toHaveBeenCalledTimes(2);
+      expect(create.mock.calls).toEqual([[PROJECT.id, 'prod', false]]);
       expect(read.mock.calls[0]?.[1]).toBe('prod');
       expect(activeBranch()).toBe('prod');
     } finally {
@@ -154,8 +154,7 @@ describe('bootstrapExistingProject: the branch comes from the project', () => {
   test('a project with no branches, joined by someone who cannot create one: FIRST_BRANCH_NEEDS_ADMIN, nothing written', async () => {
     const log = spyOn(console, 'log').mockImplementation(() => {});
     const prompt = spyOn(inquirer, 'prompt')
-      .mockResolvedValueOnce({ initialBranchChoice: 'development' } as never)
-      .mockResolvedValueOnce({ protect: false } as never);
+      .mockResolvedValueOnce({ initialBranchChoice: 'development' } as never);
     const create = spyOn(ServiceClient.prototype, 'createBranch').mockRejectedValue(
       new CapyError('denied', ERROR_CODES.PERMISSION_DENIED, { status: 403 }),
     );
@@ -170,6 +169,32 @@ describe('bootstrapExistingProject: the branch comes from the project', () => {
       create.mockRestore();
       log.mockRestore();
     }
+  });
+
+  test('a project with no branches, joined by someone whose membership was revoked: the refusal the service gave is kept', async () => {
+    const log = spyOn(console, 'log').mockImplementation(() => {});
+    const prompt = spyOn(inquirer, 'prompt').mockResolvedValueOnce({ initialBranchChoice: 'development' } as never);
+    const revoked = new CapyError('revoked', ERROR_CODES.PERMISSION_DENIED, { status: 403, code: 'MEMBERSHIP_REVOKED' });
+    const create = spyOn(ServiceClient.prototype, 'createBranch').mockRejectedValue(revoked);
+    try {
+      const { cmd } = commandFor([]);
+      const refusal = await bootstrap(cmd).then(() => undefined, (err: unknown) => err);
+      expect(refusal).toBe(revoked);
+    } finally {
+      prompt.mockRestore();
+      create.mockRestore();
+      log.mockRestore();
+    }
+  });
+
+  test('the branch list is refused by the service (no access): that refusal is kept, not reported as "service unreachable"', async () => {
+    const denied = new CapyError('denied', ERROR_CODES.PERMISSION_DENIED, { status: 403 });
+    spyOn(ServiceClient.prototype, 'listBranches').mockRejectedValue(denied);
+    const read = spyOn(ServiceClient.prototype, 'getDecryptData').mockRejectedValue(NO_SECRETS);
+    const refusal = await bootstrap(new CapyCommand({}, false)).then(() => undefined, (err: unknown) => err);
+    expect(refusal).toBe(denied);
+    expect(read).not.toHaveBeenCalled();
+    expect(existsSync(join(process.cwd(), 'keep.lock'))).toBe(false);
   });
 
   test('a project with no branches and nobody to answer stops with BRANCH_NOT_FOUND: no branch is created or assumed', async () => {

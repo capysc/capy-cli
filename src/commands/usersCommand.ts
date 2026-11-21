@@ -1,7 +1,6 @@
 import { ServiceClient, MemberDetail } from '../service/serviceClient';
 import { resolveOrgContext, type OrgContext } from '../core/orgContext';
 import { exitOrgSelectionRequired, isOrgSelectionRequired } from '../core/orgSelection';
-import { CapyError, ERROR_CODES } from '../types/index';
 import { InteractiveTable } from '../ui/interactiveTable';
 import { Spinner } from '../ui/spinner';
 import { excludeSystemProject } from '../system/reservedProjectName';

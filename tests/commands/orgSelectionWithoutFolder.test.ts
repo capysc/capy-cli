@@ -62,4 +62,20 @@ describe('several organizations, no keep.lock, nobody to ask', () => {
     expect(out.exitCode).toBe(1);
     expect(JSON.parse(out.stdout)).toEqual({ ok: false, code: 'ORG_SELECTION_REQUIRED', message: 'pick one', orgs: ORGS });
   });
+
+  it('capy projects without --json, off a terminal, refuses the same way: the code and the orgs on stdout', async () => {
+    const { ProjectsCommand } = await import('../../src/commands/projectsCommand');
+    const out = await capture(() => new ProjectsCommand().execute({}));
+    expect(resolveOrgContext.mock.calls[0][2]).toEqual({ promptForOrg: false });
+    expect(out.exitCode).toBe(1);
+    expect(JSON.parse(out.stdout)).toEqual({ ok: false, code: 'ORG_SELECTION_REQUIRED', message: 'pick one', orgs: ORGS });
+  });
+
+  it('capy secrets without --json, off a terminal, refuses the same way', async () => {
+    const { SecretsCommand } = await import('../../src/commands/secretsCommand');
+    const out = await capture(() => new SecretsCommand().execute({}));
+    expect(resolveOrgContext.mock.calls[0][2]).toEqual({ promptForOrg: false });
+    expect(out.exitCode).toBe(1);
+    expect(JSON.parse(out.stdout)).toEqual({ ok: false, code: 'ORG_SELECTION_REQUIRED', message: 'pick one', orgs: ORGS });
+  });
 });

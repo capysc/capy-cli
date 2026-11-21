@@ -124,6 +124,9 @@ export async function selectBranchWithServer(deps: {
     try {
       return await deps.listBranches();
     } catch (err) {
+      // Only "could not reach the service" is this sentence. A refusal the service gave (no access, a deleted
+      // project, a server fault) keeps its own code and its own screen.
+      if (err instanceof CapyError && err.code !== ERROR_CODES.NETWORK_ERROR) throw err;
       throw new CapyError(
         'Cannot determine the active branch: this directory has no .env and no .capy/branch, ' +
         'and the Capy service is unreachable to list branches.\n\n' +

@@ -204,11 +204,13 @@ export class ProjectsCommand {
     // Same CAP-273 contract as `usersCommand`/`listCommand`: under --json, no
     // progress output at all, so stdout stays pure JSON even on a TTY.
     const spinner = json ? null : new Spinner('Loading projects...');
+    // Which organization is asked only when someone can answer: not under --json, not off a terminal.
+    const promptForOrg = !json && process.stdin.isTTY === true;
 
     try {
       // The spinner starts once the org is known: resolving it may ask which org.
       // Under --json or off a terminal nobody can answer a picker: ORG_SELECTION_REQUIRED and the orgs instead.
-      const { orgId, serviceClient } = await resolveOrgContext(this.apiUrl, this.devMode, { promptForOrg: !json && process.stdin.isTTY === true });
+      const { orgId, serviceClient } = await resolveOrgContext(this.apiUrl, this.devMode, { promptForOrg });
       spinner?.start();
       const listed = await this.listRawProjects(serviceClient, includeDeleted);
       const summaries = await this.loadProjectSummaries(serviceClient, listed, includeDeleted);
@@ -218,8 +220,9 @@ export class ProjectsCommand {
       spinner?.succeed(`${projects.length} project${projects.length !== 1 ? 's' : ''}`);
       this.render(projects, json);
     } catch (err) {
+      // Nobody was asked, so the refusal is the result: the code and the orgs on stdout, with or without --json.
+      if (!promptForOrg && isOrgSelectionRequired(err)) exitOrgSelectionRequired(err);
       spinner?.fail('Failed to load projects');
-      if (json && isOrgSelectionRequired(err)) exitOrgSelectionRequired(err);
       this.exitWithError(err, json);
     }
   }
