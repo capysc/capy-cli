@@ -23,8 +23,8 @@ import {
   PreflightResult,
   TargetConfig,
 } from '../deploy/adapter';
+import { tracksKeepLock } from '../git/keepTracking';
 import {
-  isGitRepo,
   hasKeepLockChanges,
   stageAndCommit,
   deployConfigToCommit,
@@ -92,7 +92,7 @@ import { buildDeployPrBody } from '../deploy/deployPrBody';
 import { resolveDokployApiKeyOnce } from '../deploy/dokployApiKeyOnce';
 import { resolveVercelTokenOnce } from '../deploy/vercelTokenOnce';
 import { resolveVercelSetup } from '../deploy/vercelSetup';
-import { isVercelApiMode } from '../deploy/vercelTargetApi';
+import { isVercelApiMode, sortedNames } from '../deploy/vercelTargetApi';
 import type { AdapterCallContext } from '../deploy/adapter';
 import { deliveredBefore, deliveryFor, recordDeliveriesOnServer, targetRefFor } from '../deploy/deliveryRecord';
 import { deployPlan, unansweredDeployStops, type DeployStopId } from '../core/deployPlan';
@@ -188,6 +188,7 @@ async function authenticateSilentWithFallback(
 // ── Project-level keep.lock parsing ────────────────────────────────────────
 
 export interface KeepInfo {
+  readonly projectName?: string;
   orgId: string;
   projectId: string;
   variables: string[];
@@ -210,6 +211,7 @@ interface ParsedKeepEntry {
  * code that reads the parsed result.
  */
 interface ParsedKeepJson {
+  readonly project_name?: string;
   org_id: string;
   project_id: string;
   variables?: Record<string, ParsedKeepEntry[]>;
@@ -247,16 +249,17 @@ export function readKeep(cwd: string): KeepInfo | null {
   const pm = new ProjectManager(cwd);
   const raw = tryReadKeepJson(pm.getWorkingKeepPath()) ?? tryReadKeepJson(pm.getKeepPath());
   if (!raw || !raw.org_id || !raw.project_id) return null;
-  const variables = Object.keys(raw.variables ?? {}).sort();
-  const branches = Array.from(
+  const variables = sortedNames(Object.keys(raw.variables ?? {}));
+  const branches = sortedNames(Array.from(
     new Set(
       Object.values(raw.variables ?? {})
         .flatMap((entries) => (Array.isArray(entries) ? entries : []))
         .map((e) => e?.branch)
         .filter((b): b is string => Boolean(b)),
     ),
-  ).sort();
+  ));
   return {
+    ...(typeof raw.project_name === 'string' ? { projectName: raw.project_name } : {}),
     orgId: raw.org_id,
     projectId: raw.project_id,
     variables,
@@ -1555,7 +1558,8 @@ export async function runPicker(
   //
   // CI-only adapters (Vercel) have no direct mode at all — capy never runs
   // their CLI — so skip the question and force 'ci'.
-  const mode = await resolveMode(adapter, existing);
+  const tracksPins = tracksKeepLock(cwd);
+  const mode = tracksPins ? await resolveMode(adapter, existing) : 'direct';
 
   // 6b. CI mode only — type the git branch the deploy PR opens against.
   // Repos can have hundreds of branches, so a list picker is the wrong
@@ -1593,11 +1597,13 @@ export async function runPicker(
 
 // ── Plan rendering ─────────────────────────────────────────────────────────
 
-function renderPlan(target: TargetConfig, adapter: DeployAdapter, out: (line: string) => void = console.log): void {
+function renderPlan(target: TargetConfig, adapter: DeployAdapter, keep: KeepInfo, tracksPins: boolean): void {
+  const out = console.log;
   out('');
+  out(`  ${B('Project:')} ${keep.projectName ?? keep.projectId}`);
   out(`  ${B('Target:')}  ${target.name}  ${DIM(`(${adapter.label})`)}`);
   out(`  ${B('Branch:')}  ${target.branch}`);
-  if (target.mode === 'ci' && target.gitBaseBranch) {
+  if (tracksPins && target.mode === 'ci' && target.gitBaseBranch) {
     out(`  ${B('PR base:')} ${target.gitBaseBranch}`);
   }
   for (const [k, v] of Object.entries(target.options)) {
@@ -1914,6 +1920,7 @@ export function describeDeployRoute(
     | { code: ErrorCode; target: string; targetBranch: string; removed: readonly string[] };
 } {
   const saved = nameArg ? getTarget(cwd, nameArg) : null;
+  const tracksPins = tracksKeepLock(cwd);
   // CAP-679: `--json` never travels the route (see this function's own
   // doc — no network, no decryption), so a real run's branch check never
   // gets a chance to run under `--json` either. This is the ONE place that
@@ -1933,7 +1940,7 @@ export function describeDeployRoute(
           platform: stripAnsiText(savedAdapter?.label ?? saved.kind),
           branch: saved.branch,
           variables: `${saved.vars.length} ${saved.vars.length === 1 ? 'variable' : 'variables'}`,
-          delivery: (savedAdapter?.ciOnly ? 'ci' : saved.mode ?? 'direct') === 'ci' ? 'CI' : 'Direct',
+          delivery: !tracksPins && savedAdapter?.ciOnly ? 'Provider settings' : (savedAdapter?.ciOnly ? 'ci' : saved.mode ?? 'direct') === 'ci' ? 'CI' : 'Direct',
           name: saved.name,
           ...(Object.keys(saved.options).length > 0 ? { settings: 'saved' } : {}),
         }
@@ -2492,8 +2499,9 @@ async function confirmOrEdit(
   /** A dry run: the edit picker's setup may read but never save a key. */
   dryRun: boolean = false,
 ): Promise<StepResult<TargetConfig>> {
-  const summary =
-    mode === 'ci'
+  const summary = !tracksKeepLock(cwd)
+    ? `Deliver ${keep.projectName ?? keep.projectId} / ${target.branch} to ${adapter.label} target ${target.name}?`
+    : mode === 'ci'
       ? `Open a deploy PR (commit keep.lock + push secrets, no live deploy)?`
       : `Deploy now (commit keep.lock + ship from HEAD; your WIP is stashed and restored)?`;
   const action = await keypressConfirm({ message: summary });
@@ -2521,7 +2529,7 @@ async function confirmOrEdit(
     }
     upsertTarget(cwd, edited);
     console.log(GREEN(`✓ Saved target "${edited.name}" to .capy/deploy.json`));
-    renderPlan(edited, adapter);
+    renderPlan(edited, adapter, keep, tracksKeepLock(cwd));
     // Re-run preflight after edit — paths/options may have changed.
     // Reuses the SAME resolvedApiKey from above: it was resolved once
     // for this command, and an edit here changes vars/branch/mode, never
@@ -2610,6 +2618,11 @@ export async function deployCommand(
   }
 
   // Heal Vercel Preview targets saved before options.gitBranch existed.
+  const tracksPins = tracksKeepLock(cwd);
+  if (!tracksPins && resolved.value.mode === 'ci' && (adapter.id === 'cf-pages' || adapter.id === 'cf-worker')) {
+    console.error(`Target ${resolved.value.name} requires a deploy PR. Run capy deploy --edit to configure direct delivery for this folder.`);
+    return 1;
+  }
   const healed = await healVercelGitBranch(cwd, resolved.value, options);
   if (!healed.ok) return healed.code;
 
@@ -2622,11 +2635,12 @@ export async function deployCommand(
   // stdout (CAP-717): the plan and the preflight heads-up are printed once the conflicts are settled, not before.
   // A run that may ask a person shows them first, as it always did.
   const deferPlan = options.yes === true || options.dryRun === true;
-  if (!deferPlan) renderPlan(reconciled.value, adapter);
+  if (!deferPlan) renderPlan(reconciled.value, adapter, keep, tracksPins);
 
   // CI-only adapters (Vercel) always take the CI/PR path, even if a legacy or
   // ad-hoc target carries a stale 'direct' mode — capy never runs their CLI.
-  const mode: DeployMode = adapter.ciOnly ? 'ci' : (reconciled.value.mode ?? 'direct');
+  const mode: DeployMode = tracksPins && (adapter.ciOnly || reconciled.value.mode === 'ci') ? 'ci' : 'direct';
+  const settingsOnly = !tracksPins && (adapter.ciOnly === true || reconciled.value.mode === 'ci');
 
   // Dokploy only: resolve the org system store's API key ONCE for this whole
   // command and reuse it across preflight, the edit-loop's re-preflight, and
@@ -2661,7 +2675,8 @@ export async function deployCommand(
   const preflightOrEdit = async (
     t: TargetConfig,
   ): Promise<{ ok: true; target: TargetConfig; preflight: PreflightResult } | { ok: false }> => {
-    const result = await adapter.preflight(t, { cwd, ...adapterCallCtx });
+    const deployment = !tracksPins && t.mode === 'ci' ? { ...t, mode: 'direct' as const } : t;
+    const result = await adapter.preflight(deployment, { cwd, ...adapterCallCtx });
     if (result.ok) return { ok: true, target: t, preflight: result };
     console.error(`${RED('✗')} preflight: ${result.reason}`);
     if (result.hint) console.error('\n' + result.hint);
@@ -2675,7 +2690,7 @@ export async function deployCommand(
     if (!edited) return { ok: false };
     upsertTarget(cwd, edited);
     console.log(GREEN(`✓ Saved target "${edited.name}" to .capy/deploy.json`));
-    renderPlan(edited, adapter);
+    renderPlan(edited, adapter, keep, tracksKeepLock(cwd));
     return preflightOrEdit(edited);
   };
   const preflightOutcome = await preflightOrEdit(reconciled.value);
@@ -2690,7 +2705,7 @@ export async function deployCommand(
 
   // capy never blocks on uncommitted source changes. It only ever stages and
   // commits keep.lock — your work-in-progress is left exactly as it was.
-  const gitOk = !options.dryRun && isGitRepo(cwd);
+  const gitOk = !options.dryRun && tracksPins;
 
   // Confirm-or-edit loop. Single-keypress picker (c/e/d/esc) so the user
   // can fix a saved target inline instead of having to abort, run
@@ -2735,7 +2750,7 @@ export async function deployCommand(
   })();
   if (!settled.ok) return settled.code;
   if (deferPlan) {
-    renderPlan(target, adapter);
+    renderPlan(target, adapter, keep, tracksPins);
     showPreflightWarnings();
   }
   // What this delivery records: the target without the variables whose platform value was kept (`remote`).
@@ -2851,7 +2866,7 @@ export async function deployCommand(
     deployToken,
     dryRun: !!options.dryRun,
     secretsOnly: mode === 'ci',
-    noDeploy: !!options.noDeploy,
+    noDeploy: settingsOnly || !!options.noDeploy,
     cwd,
     ...(adapter.id === 'vercel' ? placeholderDeliveryContext(cwd, target, adapter, options) : {}),
     ...adapterCallCtx,
@@ -2870,7 +2885,7 @@ export async function deployCommand(
     return 1;
   }
   if (mode === 'direct') await unwindGitState(cwd, null, directStashed);
-  if (!options.dryRun) console.log(`  ${GREEN('✓')} ${pushedLine(target, !!options.noDeploy)}`);
+  if (!options.dryRun) console.log(`  ${GREEN('✓')} ${pushedLine(target, settingsOnly || !!options.noDeploy)}`);
 
   // ── Record targets (CAP-679, CI mode CAP-687) ────────────────────────────
   // Direct mode: record against the user's own branch, same as always.
@@ -2885,13 +2900,13 @@ export async function deployCommand(
   // same as the PR-open below it: only when the CI gate actually decided to
   // proceed is there a real delivery worth recording server-side.
   if (mode === 'direct' && !options.dryRun) {
-    await recordDeployTargets(cwd, recorded, adapter, valueHashes, deployToken?.deployId, options.devMode, !!options.noDeploy);
+    await recordDeployTargets(cwd, recorded, adapter, valueHashes, deployToken?.deployId, options.devMode, settingsOnly || !!options.noDeploy);
     // "No untracked tokens" (CAP-679 follow-up): only once THIS deploy is a
     // REAL one (never `--no-deploy` — that config is pending, and its
     // predecessor may still be the one actually running) does it become safe
     // to revoke whatever `recordDeployTargets` just moved to
     // `superseded_deploy_ids` — see `revokeSupersededDeployTokens`'s own doc.
-    if (!options.noDeploy) {
+    if (!settingsOnly && !options.noDeploy) {
       await revokeSupersededDeployTokens(cwd, recorded, adapter, options.devMode);
     }
   } else if (mode === 'ci' && !options.dryRun && keepLockChanged) {

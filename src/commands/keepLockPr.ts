@@ -19,6 +19,7 @@
  * never fails the secret change: it is reported as `keep_lock.error`, decided
  * by error codes and statuses — never by message text.
  */
+import { tracksKeepLock } from '../git/keepTracking';
 import { randomBytes } from 'crypto';
 import { readFileSync, writeFileSync } from 'fs';
 import { join } from 'path';
@@ -148,6 +149,7 @@ export interface KeepLockPrRequest {
 
 /** Injectable seam: tests replace prompts, git reads and the GitHub API. */
 export interface KeepLockPrDeps {
+  readonly tracksKeepLock: (cwd: string) => boolean;
   readonly hasTerminal: () => boolean;
   /** `null`: cancelled (Esc / Ctrl-C). */
   readonly confirm: () => Promise<boolean | null>;
@@ -801,6 +803,7 @@ function reportNoPr(req: KeepLockPrRequest, deps: KeepLockPrDeps): KeepLockRepor
 
 async function runStep(req: KeepLockPrRequest, deps: KeepLockPrDeps): Promise<KeepLockPrOutcome> {
   if (req.records.length === 0) return { keep_lock: { changed: false } };
+  if (!deps.tracksKeepLock(req.cwd)) return { keep_lock: { changed: true, committed: false } };
   const interactive = deps.hasTerminal() && !req.json && req.nonTty !== true;
   const notCommitted: KeepLockReport = { changed: true, committed: false };
 
@@ -851,6 +854,7 @@ export async function previewKeepLockPrStep(
   },
   deps: KeepLockPrDeps = defaultDeps,
 ): Promise<KeepLockPreviewOutcome> {
+  if (!deps.tracksKeepLock(req.cwd)) return { keep_lock: { changed: req.changed, committed: false, would_pr: null } };
   const none: KeepLockPreview = { changed: wouldChangeFile(req, deps), committed: false, would_pr: null };
   if (!req.changed || req.flags.noPr === true) return { keep_lock: none };
   if (req.flags.pr !== true) return { keep_lock: none, unanswered: unansweredStops(req.flags) };
@@ -986,6 +990,7 @@ function realGithub(): GithubApi | undefined {
 }
 
 export const defaultDeps: KeepLockPrDeps = {
+  tracksKeepLock,
   hasTerminal: () => process.stdin.isTTY === true && process.stdout.isTTY === true,
   confirm: confirmPr,
   pickBase: pickBaseBranch,

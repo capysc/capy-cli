@@ -74,6 +74,7 @@ import {
   defaultConfirm,
   defaultPickCollisionWinner,
   discoveryCommitPathsFor,
+  tracksDiscoveryFolder,
   peekLocalKeepForFolder,
 } from './discoverySteps';
 import {
@@ -1086,15 +1087,16 @@ export function createDokployConnector(deps: DokployConnectorDeps = {}): Connect
       // default outright, same "proceed without asking" contract as every
       // other discovery confirmation. Asked only AFTER the plan-level
       // confirm passes — a decline above must never reach this ask.
+      const trackedFolders = resolvedFolders.filter(tracksDiscoveryFolder);
       const commitBranchName =
-        promptable && !opts.yes ? await askDiscoveryCommitBranchName(defaultDiscoveryCommitBranchName()) : defaultDiscoveryCommitBranchName();
+        trackedFolders.length > 0 && promptable && !opts.yes ? await askDiscoveryCommitBranchName(defaultDiscoveryCommitBranchName()) : defaultDiscoveryCommitBranchName();
 
       // Snapshotted BEFORE any write, per repo — so the commit step below
       // can tell "discovery itself made this change" apart from "this path
       // was already dirty before the run started" (DOKPLOY_COMMIT_WOULD_MIX).
       const beforeStatusByRepo = new Map(
-        [...new Set(resolvedFolders.map((f) => f.repoDir))].map((repoDir) => {
-          const paths = resolvedFolders.filter((f) => f.repoDir === repoDir).flatMap((f) => discoveryCommitPathsFor(f.folder));
+        [...new Set(trackedFolders.map((f) => f.repoDir))].map((repoDir) => {
+          const paths = trackedFolders.filter((f) => f.repoDir === repoDir).flatMap((f) => discoveryCommitPathsFor(f.folder));
           return [repoDir, snapshotPathStatus(repoDir, paths)] as const;
         }),
       );
