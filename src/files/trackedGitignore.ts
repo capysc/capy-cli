@@ -28,9 +28,29 @@ export interface GitResult {
 /** Runs `git <args>` in `cwd`. Injectable so tests can simulate failures. */
 export type GitRunner = (args: readonly string[], cwd: string) => GitResult;
 
+/**
+ * Variables that point git at a repository, work tree or index other than the
+ * one found from the folder. They are dropped so every question and every
+ * write is about the folder's own repository, never another one the caller's
+ * environment happens to name.
+ */
+const REPOSITORY_REDIRECTS: ReadonlySet<string> = new Set([
+  'GIT_DIR',
+  'GIT_WORK_TREE',
+  'GIT_INDEX_FILE',
+  'GIT_COMMON_DIR',
+  'GIT_OBJECT_DIRECTORY',
+  'GIT_ALTERNATE_OBJECT_DIRECTORIES',
+  'GIT_NAMESPACE',
+  'GIT_PREFIX',
+]);
+
+const folderScopedEnv = (): NodeJS.ProcessEnv =>
+  Object.fromEntries(Object.entries(process.env).filter(([name]) => !REPOSITORY_REDIRECTS.has(name)));
+
 /** Text output only: nothing that needs exact bytes may go through here. */
 export const runGit: GitRunner = (args, cwd) => {
-  const r = spawnSync('git', [...args], { cwd, encoding: 'utf-8' });
+  const r = spawnSync('git', [...args], { cwd, encoding: 'utf-8', env: folderScopedEnv() });
   return { stdout: r.stdout ?? '', stderr: r.stderr ?? '', code: r.status ?? 1 };
 };
 
@@ -95,7 +115,8 @@ function indexEntry(cwd: string, run: GitRunner): IndexEntry | null | undefined 
 }
 
 function isConeMode(cwd: string, run: GitRunner): boolean {
-  const r = run(['config', '--get', 'core.sparseCheckoutCone'], cwd);
+  // --bool: git reads yes, on, 1 and true (any case) alike.
+  const r = run(['config', '--bool', '--get', 'core.sparseCheckoutCone'], cwd);
   return r.code === 0 && r.stdout.trim() === 'true';
 }
 
@@ -173,6 +194,8 @@ export type ApplyOutcome =
   | 'git-refused'
   | 'not-on-disk'
   | 'list-unwritable'
+  /** Another writer got there first (file on disk or flag already cleared): nothing was touched. */
+  | 'changed-concurrently'
   /** A step failed and undoing the earlier steps failed too. */
   | 'rollback-failed';
 
@@ -192,11 +215,14 @@ export function restoreFromIndex(cwd: string, gitignorePath: string, run: GitRun
   return somethingAt(gitignorePath) ? 'ok' : 'not-on-disk';
 }
 
-/** Undo for the steps below: put the flag back and take away the file git wrote. */
-function rollBack(cwd: string, gitignorePath: string, run: GitRunner): boolean {
-  const flagged = run(['update-index', '--skip-worktree', '--', '.gitignore'], cwd).code === 0;
-  const removed = removeFile(gitignorePath);
-  return flagged && removed;
+function restoreFlag(cwd: string, run: GitRunner): boolean {
+  return run(['update-index', '--skip-worktree', '--', '.gitignore'], cwd).code === 0;
+}
+
+/** True while the path is still flagged skip-worktree with nothing on disk: the state that was planned for. */
+function stillAsPlanned(cwd: string, gitignorePath: string, run: GitRunner): boolean {
+  const entry = indexEntry(cwd, run);
+  return entry !== null && entry !== undefined && entry.tag === 'S' && !somethingAt(gitignorePath);
 }
 
 function appendToList(listPath: string, pattern: string): boolean {
@@ -213,8 +239,10 @@ function appendToList(listPath: string, pattern: string): boolean {
 /**
  * Brings one tracked, skip-worktree `.gitignore` into the checkout without
  * re-applying the sparse list to anything else: clear that one path's flag,
- * have git write that one file, then add that one pattern to the list. If any
- * step fails, the earlier ones are undone.
+ * have git write that one file, then add that one pattern to the list. If a
+ * step fails, only what this call did is undone: the file is removed only when
+ * this call's own `checkout-index` wrote it, and a file or flag that another
+ * writer changed is never touched.
  */
 export function addToSparseCheckout(
   cwd: string,
@@ -223,13 +251,23 @@ export function addToSparseCheckout(
   pattern: string,
   run: GitRunner = runGit,
 ): ApplyOutcome {
+  // Another process may have finished the same job since the plan was made.
+  if (!stillAsPlanned(cwd, gitignorePath, run)) return 'changed-concurrently';
   if (run(['update-index', '--no-skip-worktree', '--', '.gitignore'], cwd).code !== 0) return 'git-refused';
+  // `checkout-index` without force never overwrites: success means this call created the file.
   const written = restoreFromIndex(cwd, gitignorePath, run);
+  if (written === 'git-refused' && somethingAt(gitignorePath)) {
+    // Someone else's file is there now; their file, flag and list entry stand.
+    return 'changed-concurrently';
+  }
   if (written !== 'ok') {
-    return rollBack(cwd, gitignorePath, run) ? written : 'rollback-failed';
+    return restoreFlag(cwd, run) ? written : 'rollback-failed';
   }
   if (!appendToList(listPath, pattern)) {
-    return rollBack(cwd, gitignorePath, run) ? 'list-unwritable' : 'rollback-failed';
+    // The file is this call's own, so it is the only file removed.
+    const removed = removeFile(gitignorePath);
+    const flagged = restoreFlag(cwd, run);
+    return removed && flagged ? 'list-unwritable' : 'rollback-failed';
   }
   return 'ok';
 }

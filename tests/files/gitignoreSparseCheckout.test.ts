@@ -7,7 +7,10 @@ import { join } from 'path';
 import { randomUUID } from 'crypto';
 import { tmpdir } from 'os';
 import { FileManager } from '../../src/files/fileManager';
-import { escapeSparsePattern } from '../../src/files/trackedGitignore';
+import {
+  addToSparseCheckout, escapeSparsePattern, planMissingGitignore, runGit,
+  type GitRunner,
+} from '../../src/files/trackedGitignore';
 import { CapyError, ERROR_CODES } from '../../src/types/index';
 
 // Real git in temp folders. A tracked `.gitignore` that sparse checkout keeps
@@ -488,5 +491,147 @@ describe('restore from git keeps the tracked bytes exactly', () => {
 describe('escapeSparsePattern', () => {
   test('escapes git pattern syntax characters and leaves spaces alone', () => {
     expect(escapeSparsePattern('a b/c[1]/d*e?f\\g!h#/')).toBe('a b/c\\[1\\]/d\\*e\\?f\\\\g\\!h\\#/');
+  });
+});
+
+describe.each(['yes', 'on', '1', 'TRUE', 'true'])(
+  'cone mode written as core.sparseCheckoutCone=%s',
+  (value) => {
+    test('throws GITIGNORE_NOT_IN_CHECKOUT, writes nothing, leaves the cone list and config alone', () => {
+      const s = committedRepo('app/', ORIGINAL);
+      mkdirSync(join(s.top, 'src'), { recursive: true });
+      writeFileSync(join(s.top, 'src', 'a.txt'), 'a\n');
+      git(s.top, ['add', '-A']);
+      git(s.top, ['commit', '-q', '-m', 'src']);
+      expect(git(s.top, ['sparse-checkout', 'set', '--cone', 'src']).status).toBe(0);
+      expect(git(s.top, ['config', '--worktree', 'core.sparseCheckoutCone', value]).status).toBe(0);
+      expect(git(s.top, ['config', '--bool', '--get', 'core.sparseCheckoutCone']).stdout.trim()).toBe('true');
+      expect(lexists(s.gitignorePath)).toBe(false);
+      // the user made the folder again; its tracked .gitignore is still kept off disk
+      mkdirSync(s.folder, { recursive: true });
+      const listFile = join(s.top, '.git', 'info', 'sparse-checkout');
+      const listBefore = read(listFile);
+      const indexBefore = indexState(s.top);
+      const configBefore = gitOut(s.top, ['config', '--list', '--show-scope']);
+
+      expect(codeOf(() => run(s.folder))).toBe(ERROR_CODES.GITIGNORE_NOT_IN_CHECKOUT);
+
+      expect(lexists(s.gitignorePath)).toBe(false);
+      expect(read(listFile)).toBe(listBefore);
+      expect(indexState(s.top)).toEqual(indexBefore);
+      expect(gitOut(s.top, ['config', '--list', '--show-scope'])).toBe(configBefore);
+      // git still reads the list as a cone list
+      const listed = git(s.top, ['sparse-checkout', 'list']);
+      expect(listed.status).toBe(0);
+      expect(listed.stderr).toBe('');
+    });
+  },
+);
+
+// Runs FileManager.updateGitignore in a child process, so the parent environment is left alone.
+const SCRIPT = join(ROOT, 'update-gitignore-child.ts');
+writeFileSync(
+  SCRIPT,
+  `import { FileManager } from ${JSON.stringify(join(__dirname, '..', '..', 'src', 'files', 'fileManager'))};\n` +
+    'new FileManager(process.argv[2] ?? "").updateGitignore([".env"]);\n',
+);
+const runChild = (folder: string, extraEnv: Record<string, string>) =>
+  spawnSync(process.execPath, [SCRIPT, folder], { encoding: 'utf-8', env: { ...GIT_ENV, ...extraEnv } });
+
+const NEW_FILE = '\n# Capy\n.env\n';
+
+describe.each([
+  ['GIT_DIR', (r: string) => ({ GIT_DIR: join(r, '.git') })],
+  ['GIT_DIR and GIT_WORK_TREE', (r: string) => ({ GIT_DIR: join(r, '.git'), GIT_WORK_TREE: r })],
+])('%s points at another repository while the folder is not a git folder', (_label, envFor) => {
+  test('a tracked .gitignore that sparse checkout keeps off disk in the other repo is left alone', () => {
+    const other = sparseRepo('', ORIGINAL);
+    const plain = freshDir();
+    const listBefore = sparseList(other.top);
+    const indexBefore = indexState(other.top);
+    const configBefore = read(join(other.top, '.git', 'config'));
+
+    const r = runChild(plain, envFor(other.top));
+
+    expect(r.status).toBe(0);
+    expect(read(join(plain, '.gitignore'))).toBe(NEW_FILE);
+    expect(sparseList(other.top)).toBe(listBefore);
+    expect(indexState(other.top)).toEqual(indexBefore);
+    expect(read(join(other.top, '.git', 'config'))).toBe(configBefore);
+    expect(gitOut(other.top, ['status', '--porcelain'])).toBe('');
+    expect(lexists(other.gitignorePath)).toBe(false);
+  });
+
+  test('a tracked .gitignore the other repo lost locally is not copied into the folder', () => {
+    const other = committedRepo('', ORIGINAL);
+    rmSync(other.gitignorePath);
+    const plain = freshDir();
+
+    const r = runChild(plain, envFor(other.top));
+
+    expect(r.status).toBe(0);
+    expect(read(join(plain, '.gitignore'))).toBe(NEW_FILE);
+    expect(lexists(other.gitignorePath)).toBe(false);
+    expect(gitOut(other.top, ['status', '--porcelain'])).toBe(' D .gitignore\n');
+  });
+});
+
+describe('another process wrote .gitignore between the plan and the apply', () => {
+  test('its file, flag and list entry are kept and Capy changes nothing more', () => {
+    const s = sparseRepo('frontend/app/', ORIGINAL);
+    const plan = planMissingGitignore(s.folder, CAPY_ENTRIES);
+    if (plan.kind !== 'sparse-add') throw new Error('expected sparse-add');
+    // process A runs the whole update
+    captureStderr(() => run(s.folder));
+    const fileA = read(s.gitignorePath);
+    const listA = sparseList(s.top);
+    const indexA = indexState(s.top);
+
+    // process B applies the plan it made before A finished
+    const outcome = addToSparseCheckout(s.folder, s.gitignorePath, plan.listPath, plan.pattern);
+
+    expect(outcome).not.toBe('ok');
+    expect(outcome).not.toBe('rollback-failed');
+    expect(read(s.gitignorePath)).toBe(fileA);
+    expect(fileA).toBe(COMPLETE);
+    expect(sparseList(s.top)).toBe(listA);
+    expect(indexState(s.top)).toEqual(indexA);
+    expect(git(s.folder, ['check-ignore', '-q', '.env']).status).toBe(0);
+  });
+
+  test('the file appears while git is writing it: the other file is not deleted', () => {
+    const s = sparseRepo('frontend/app/', ORIGINAL);
+    const plan = planMissingGitignore(s.folder, CAPY_ENTRIES);
+    if (plan.kind !== 'sparse-add') throw new Error('expected sparse-add');
+    const listBefore = sparseList(s.top);
+    // the other process wins the race right before our checkout-index
+    const racing: GitRunner = (args, cwd) => {
+      if (args[0] === 'checkout-index') writeFileSync(s.gitignorePath, COMPLETE);
+      return runGit(args, cwd);
+    };
+
+    const outcome = addToSparseCheckout(s.folder, s.gitignorePath, plan.listPath, plan.pattern, racing);
+
+    expect(outcome).not.toBe('ok');
+    expect(outcome).not.toBe('rollback-failed');
+    expect(read(s.gitignorePath)).toBe(COMPLETE);
+    expect(sparseList(s.top)).toBe(listBefore);
+    expect(git(s.folder, ['check-ignore', '-q', '.env']).status).toBe(0);
+  });
+
+  test('git refuses to write and nothing is on disk: the flag is put back, nothing else changes', () => {
+    const s = sparseRepo('frontend/app/', ORIGINAL);
+    const plan = planMissingGitignore(s.folder, CAPY_ENTRIES);
+    if (plan.kind !== 'sparse-add') throw new Error('expected sparse-add');
+    const before = indexState(s.top);
+    const listBefore = sparseList(s.top);
+    const refusing: GitRunner = (args, cwd) =>
+      args[0] === 'checkout-index' ? { stdout: '', stderr: '', code: 1 } : runGit(args, cwd);
+
+    expect(addToSparseCheckout(s.folder, s.gitignorePath, plan.listPath, plan.pattern, refusing)).toBe('git-refused');
+
+    expect(lexists(s.gitignorePath)).toBe(false);
+    expect(indexState(s.top)).toEqual(before);
+    expect(sparseList(s.top)).toBe(listBefore);
   });
 });
