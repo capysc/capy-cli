@@ -33,7 +33,7 @@
  *
  * The no-submit screens (auth-success / auth-error) answer with a typed
  * acknowledgement rather than key material — the SAME envelope machinery a
- * payload-bearing screen (device-key ceremony, CAP-381) will reuse.
+ * payload-bearing screen (device-key ceremony) will reuse.
  */
 import {
   createCipheriv,
@@ -132,7 +132,7 @@ export function envelopeHkdfInfo(
 
 /**
  * The `req` sibling of {@link envelopeHkdfInfo} — CLI->page (broker reverse
- * channel, CAP-403/W2-A). A separate function rather than a `direction`
+ * channel, W2-A). A separate function rather than a `direction`
  * parameter on the existing one: `envelopeHkdfInfo` is pinned byte-for-byte
  * by an existing interop tripwire test, and this keeps that test (and every
  * other `ans` caller) untouched rather than threading a new argument through

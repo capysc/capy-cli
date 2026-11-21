@@ -22,7 +22,7 @@ import {
 
 const CONNECTION_ID = '4f9c02e2-92cf-4a6b-8f3e-27cf6f6f2f10';
 
-// CAP-376/CAP-381 Gate-2 MINOR-4: keep-app's page-side seal hardcodes this
+// Gate-2 MINOR-4: keep-app's page-side seal hardcodes this
 // same literal (`envelope.ts`) instead of importing it, because the two
 // repos share no code. The tests above only prove self-consistency — they
 // derive both halves of the HKDF info string from this repo's own constant,
@@ -48,7 +48,7 @@ test('the answer info string carries the `ans` direction tag (interop tripwire)'
 });
 
 // The `req` producer's own tripwire — keep-app's request-opening half (W2-A)
-// independently hardcodes this same literal, exactly as CAP-376's `ans`
+// independently hardcodes this same literal, exactly as the `ans`
 // pairing already does. A drift here would keep this suite green while
 // breaking real CLI -> page interop.
 test('the request info string carries the `req` direction tag (interop tripwire)', () => {
