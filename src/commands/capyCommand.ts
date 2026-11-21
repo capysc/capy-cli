@@ -26,6 +26,8 @@ import {
 } from '../types/index';
 import { validateSeedPhrase } from '../crypto/keyManager';
 import { offerAgentsSetupAfterInit } from './agentsCommand';
+import { exitOnSetupRefusal, setupNeedsTerminal } from '../core/setupRefusal';
+import { askCustomBranchName, askInitialBranchChoice, promptBranchPick, resolveJoinBranch } from '../core/joinBranch';
 import {
   resolveBranchFromLocalState,
   selectBranchWithServer,
@@ -222,6 +224,7 @@ export class CapyCommand {
       this.debugError('execute caught error', error);
       // A conflict off a terminal is the protocol's answer, not a failure: exit 3 with the payload on stdout.
       exitOnConflictRefusal(error);
+      exitOnSetupRefusal(error);
       const { displayErrorAndExit } = await import('../ui/errorScreen');
       await displayErrorAndExit(error);
     }
@@ -320,32 +323,31 @@ export class CapyCommand {
       listBranches: () => this.serviceClient.listBranches(projectState.projectId!),
       syncedBranches: syncedBranchNames(this.projectManager.readSyncState()),
       preferred: this.branchNamedForUnrecordedFolder(),
-      promptPick: async (branches, defaultName) => {
-        // Off a terminal nobody can pick: the run ends with a code and the command that records the choice.
-        if (this.protocol) {
-          throw new CapyError(
-            `No branch is checked out in this directory. Run \`capy checkout <branch>\` first (branches: ${branches.map((b) => b.name).join(', ')}).`, // COPY-FLAG
+      promptPick: (branches, defaultName) =>
+        promptBranchPick(!this.protocol, branches, defaultName, 'No branch is checked out in this directory yet.', (names) =>
+          // Off a terminal nobody can pick: the run ends with a code and the command that records the choice.
+          new CapyError(
+            `No branch is checked out in this directory. Run \`capy checkout <branch>\` first (branches: ${names.join(', ')}).`, // COPY-FLAG
             ERROR_CODES.NO_ACTIVE_BRANCH,
-            { branches: branches.map((b) => b.name) },
-          );
-        }
-        const grey = (s: string) => `\x1b[90m${s}\x1b[0m`;
-        console.log('\nNo branch is checked out in this directory yet.');
-        const { selected: pick } = await inquirer.prompt([{
-          type: 'list',
-          name: 'selected',
-          message: 'Which branch do you want to use?',
-          choices: branches.map(b => ({
-            name: b.is_protected ? `${b.name}  ${grey('(protected)')}` : b.name,
-            value: b.name,
-          })),
-          default: defaultName,
-        }]);
-        return pick;
-      },
+            { branches: names },
+          )),
     });
     this.projectManager.writeActiveBranch(selected);
     return selected;
+  }
+
+  /**
+   * The branch an existing project is joined on (see `core/joinBranch.ts`, which discovery shares): the one the person
+   * picks from the project's own branch list, never an assumed name. Off a terminal nobody can pick, so the run stops
+   * with the branch names.
+   */
+  private resolveBootstrapBranch(project: { id: string; name: string }): Promise<string> {
+    return resolveJoinBranch({
+      project,
+      listBranches: () => this.serviceClient.listBranches(project.id),
+      createBranch: (name, isProtected) => this.serviceClient.createBranch(project.id, name, isProtected),
+      canAsk: !this.protocol,
+    });
   }
 
   /**
@@ -483,6 +485,8 @@ export class CapyCommand {
 
   /** First run in this directory. */
   private async initializeProject(): Promise<void> {
+    // Setup asks which organization, project and branch. With nobody to answer, it stops before it signs in or writes.
+    if (this.protocol) throw setupNeedsTerminal();
     await this.runInitialization();
     // The same one-time, TTY-only offer as the local-only init path above —
     // same --dry-run gating.
@@ -843,28 +847,13 @@ export class CapyCommand {
   }
 
   /** Asks whether the initial branch is 'development' or a custom name. */
-  private async resolveInitialBranchChoice(): Promise<string> {
-    const { initialBranchChoice } = await inquirer.prompt([{
-      type: 'list',
-      name: 'initialBranchChoice',
-      message: 'What branch should this project start with?',
-      choices: [
-        { name: 'development (default)', value: 'development' },
-        { name: 'another branch', value: 'other' },
-      ],
-    }]);
-    return initialBranchChoice;
+  private resolveInitialBranchChoice(): Promise<string> {
+    return askInitialBranchChoice();
   }
 
   /** Asks for the custom initial branch name. */
-  private async resolveCustomBranchName(): Promise<string> {
-    const { branchName } = await inquirer.prompt([{
-      type: 'input',
-      name: 'branchName',
-      message: 'Branch name:',
-      validate: (input: string) => input.trim().length > 0 || 'Branch name cannot be empty',
-    }]);
-    return String(branchName).trim();
+  private resolveCustomBranchName(): Promise<string> {
+    return askCustomBranchName();
   }
 
   /**
@@ -1035,7 +1024,7 @@ export class CapyCommand {
    *
    * Used when the user lands in a directory with no keep.lock and picks an
    * existing project from the org's project list. Pulls the latest keep.json
-   * + env_blob for the development branch from the server, decrypts each
+   * + env_blob for the project's branch (see `resolveBootstrapBranch`) from the server, decrypts each
    * variable, writes keep.lock + encrypted .env. After this returns, the
    * directory looks identical to one that did `capy push` from scratch.
    */
@@ -1044,7 +1033,7 @@ export class CapyCommand {
     orgId: string,
     userId: string,
   ): Promise<void> {
-    const branch = 'development';
+    const branch = await this.resolveBootstrapBranch(project);
     const encryptionKey = await resolveProjectKey(orgId, project.id, userId, this.keyServiceOps());
 
     const fetchSpinner = ora(`Pulling ${project.name} (${branch})...`).start();

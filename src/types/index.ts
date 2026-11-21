@@ -564,6 +564,10 @@ export const ERROR_CODES = {
   // --- Agent onboarding (CAP-681) ---
   /** `capy agents` needs a terminal to confirm a write, and neither --print nor --remove was passed. */
   AGENTS_SETUP_NEEDS_TTY: 'AGENTS_SETUP_NEEDS_TTY',
+  /** Bare `capy` in a folder that is not a project yet, with nobody to answer its questions (organization, project, branch). */
+  SETUP_NEEDS_TTY: 'SETUP_NEEDS_TTY',
+  /** Joining a project that has no branch yet, as someone who is not a project admin and so cannot create its first one. */
+  FIRST_BRANCH_NEEDS_ADMIN: 'FIRST_BRANCH_NEEDS_ADMIN',
   /**
    * AGENTS.md or CLAUDE.md has exactly one of the `capy:agents:begin`/`end`
    * markers, or more than one of either — the file was hand-edited into a

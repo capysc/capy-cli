@@ -115,11 +115,18 @@ export async function selectBranchWithServer(deps: {
   syncedBranches: string[];
   /** A branch the caller already named (`capy checkout <branch>`): it wins over auto-selection and the picker when the server has it. */
   preferred?: string;
+  /** Joining a project into a new folder: the person always picks, even when the project has one branch. Nothing is auto-selected. */
+  alwaysAsk?: boolean;
+  /** The project has no branch at all (its setup stopped before the first one was created): creates one and returns its name. Without it the run stops with BRANCH_NOT_FOUND. */
+  createFirst?: () => Promise<string>;
 }): Promise<string> {
   const listBranches = async (): Promise<Branch[]> => {
     try {
       return await deps.listBranches();
     } catch (err) {
+      // Only "could not reach the service" is this sentence. A refusal the service gave (no access, a deleted
+      // project, a server fault) keeps its own code and its own screen.
+      if (err instanceof CapyError && err.code !== ERROR_CODES.NETWORK_ERROR) throw err;
       throw new CapyError(
         'Cannot determine the active branch: this directory has no .env and no .capy/branch, ' +
         'and the Capy service is unreachable to list branches.\n\n' +
@@ -132,11 +139,14 @@ export async function selectBranchWithServer(deps: {
   const branches = await listBranches();
 
   if (branches.length === 0) {
+    if (deps.createFirst !== undefined) return deps.createFirst();
     throw new CapyError(
       'This project has no branches yet. Create one with: capy checkout -b <branch>',
       ERROR_CODES.BRANCH_NOT_FOUND,
     );
   }
+
+  if (deps.alwaysAsk === true) return deps.promptPick(branches, defaultBranchChoice(branches));
 
   if (deps.preferred !== undefined && branches.some((b) => b.name === deps.preferred)) return deps.preferred;
 

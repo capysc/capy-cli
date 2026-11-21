@@ -1058,7 +1058,7 @@ export interface DiscoverySequenceDeps {
     folder: string,
     /** This folder's repo's own parsed `origin`, when known — passed through from `DiscoveryPlanFolder.remote` (decision #2) rather than making an implementation re-read git. */
     remote?: GitRemoteRef,
-  ) => Promise<{ ok: true; projectId: string; created: boolean } | { ok: false; code: string; message: string }>;
+  ) => Promise<{ ok: true; projectId: string; created: boolean } | { ok: false; code: string; message: string; branches?: readonly string[] }>;
   /**
    * The SAME dirty-working-tree guard `capy checkout` enforces before
    * switching branches — run ONCE per folder, right after `ensureProject`
@@ -1128,6 +1128,8 @@ export type DiscoveryFolderResult =
       /** Stable refusal code — branch on this, never on `message`. */
       code: string;
       message: string;
+      /** Joining an existing project needed a branch and nobody could be asked: the project's branch names, for the caller to show the human. */
+      branches?: readonly string[];
       /** Environments this folder finished BEFORE the step that aborted it. */
       environments: readonly DiscoverySequenceEnvResult[];
       /** The folder differed from Capy and nobody could answer: the rows and `conflict_id` for a rerun with `--resolve` + `--conflict`. */
@@ -1178,7 +1180,15 @@ export async function runDiscoverySequence(
 
   const project = await deps.ensureProject(folder.repoDir, folder.folder, folder.remote);
   if (!project.ok) {
-    return { repoDir: folder.repoDir, folder: folder.folder, ok: false, code: project.code, message: project.message, environments: [] };
+    return {
+      repoDir: folder.repoDir,
+      folder: folder.folder,
+      ok: false,
+      code: project.code,
+      message: project.message,
+      ...(project.branches === undefined ? {} : { branches: project.branches }),
+      environments: [],
+    };
   }
 
   // A brand-new project has nothing to be dirty about yet — only check an
