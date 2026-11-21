@@ -12,6 +12,7 @@ import type { SetupAnswers } from '../types/index';
 import { BRANCH_DESCRIPTION, BRANCH_NAME_PATTERN_SOURCE, DEFAULT_FIRST_BRANCH, FIRST_BRANCH_QUESTION } from '../core/branchNameRule';
 import { PROJECT_NAME_PATTERN_SOURCE } from '../core/projectNameRule';
 import { NEW_PROJECT, type NewProjectGaps, type OrgRef, type ProjectRef } from '../core/initPlan';
+import { binName } from './binName';
 import { PROTECTED_NO, PROTECTED_YES, protectedQuestion } from './projectCreateCommand';
 
 export interface SetupFormInput {
@@ -53,7 +54,7 @@ function flagWords(flag: string, typed: string | undefined, placeholder: string 
 function rerunCommand(input: SetupFormInput): string {
   const { answers, gaps } = input;
   return [
-    'capy',
+    binName(),
     ...flagWords('--env-path', input.envPath, undefined),
     ...(input.dryRun === true ? ['--dry-run'] : []),
     ...flagWords('--org', answers.org, input.orgChoices === undefined ? undefined : '<org>'),

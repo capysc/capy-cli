@@ -210,6 +210,14 @@ describe('questions left: one INIT_INPUT_REQUIRED form, nothing created or writt
     expect(out.json!.elicitation.answer.rerun).toBe('capy --name demo --branch main --protected <protected> --json');
   });
 
+  test('under another binary (CAPY_BIN_NAME) the rerun command starts with that binary', async () => {
+    fakeWorld();
+    const env = spyOn(process, 'env', 'get' as never).mockReturnValue({ ...process.env, CAPY_BIN_NAME: 'capy-staging' } as never);
+    const out = await run({ name: 'demo', branch: 'main' }).finally(() => env.mockRestore());
+    expect(out.exitCode).toBe(3);
+    expect(out.json!.elicitation.answer.rerun).toBe('capy-staging --name demo --branch main --protected <protected> --json');
+  });
+
   test('several organizations and no --org: the organization is asked first, alone, as options of id and name; no project is looked up', async () => {
     const calls = fakeWorld({ orgs: [ORG, OTHER_ORG] });
     const out = await run();

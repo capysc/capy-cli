@@ -35,6 +35,7 @@ import { pairEmailDisplay } from '../ui/elicitationDisplay';
 import { EXIT_NEEDS_INPUT } from '../ui/interactive';
 import { createPairingQrImage, removePairingQrImage, type PairingQrImage } from '../ui/pairingPresentation';
 import { buildTerminalQr } from '../ui/terminalQr';
+import { binName } from './binName';
 import { PAIR_DEFAULT_PURPOSE, finishPairing, type PairOptions } from './pairCommand';
 import { refuseError } from './pairingRefusal';
 import { refuse, settle, type Refusal } from './refusal';
@@ -68,11 +69,6 @@ const defaultSleep = (ms: number): Promise<void> => new Promise((resolve) => set
 /** The email comparison key: trimmed and lower-cased, compared for exact equality. */
 export function normalizeEmail(email: string): string {
   return email.trim().toLowerCase();
-}
-
-/** The binary this process was invoked as (`capy`, `capy-dev`, `capy-staging`). */
-function binName(devMode: boolean): string {
-  return process.env.CAPY_BIN_NAME ?? (devMode ? 'capy-dev' : 'capy');
 }
 
 /** What an email must look like: the email form field's own `pattern`, and the check `--email` has to pass. */

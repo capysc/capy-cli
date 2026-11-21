@@ -15,6 +15,7 @@ import { CapyError, ERROR_CODES } from '../types/index';
 import { isInteractive, EXIT_NEEDS_INPUT } from '../ui/interactive';
 import type { ElicitationConfirm } from '../ui/elicitation';
 import { kickMemberDisplay } from '../ui/elicitationDisplay';
+import { binName } from './binName';
 import { refuse, settle } from './refusal';
 
 /** What `capy kick` was given besides the email. */
@@ -150,7 +151,7 @@ export class KickCommand {
           question: confirmQuestion(email), // the terminal question, word for word
           details: { org, member: { email: match.email } },
           display: kickMemberDisplay({ org, email: match.email }),
-          answer: { yes: `capy kick ${shellWord(email)} --yes --json` },
+          answer: { yes: `${binName(this.devMode)} kick ${shellWord(email)} --yes --json` },
         },
       };
     }

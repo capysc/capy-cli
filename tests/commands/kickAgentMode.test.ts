@@ -126,6 +126,14 @@ describe('capy kick without --yes in agent mode', () => {
     expect(out.json!.elicitation.question).toBe("Remove o'brien@acme.com from this organization? They will lose access to all secrets.");
   });
 
+  test('under another binary (CAPY_BIN_NAME) the answer command starts with that binary', async () => {
+    fakeWorld();
+    const env = spyOn(process, 'env', 'get' as never).mockReturnValue({ ...process.env, CAPY_BIN_NAME: 'capy-staging' } as never);
+    const out = await kick('alice@acme.com', { json: true }).finally(() => env.mockRestore());
+    expect(out.exitCode).toBe(3);
+    expect(out.json!.elicitation.answer.yes).toBe('capy-staging kick alice@acme.com --yes --json');
+  });
+
   test('an email that matches no member is MEMBER_NOT_FOUND (exit 1) and nothing is asked or removed', async () => {
     const calls = fakeWorld();
     const out = await kick('nobody@acme.com', { json: true });
