@@ -524,6 +524,8 @@ export const ERROR_CODES = {
   NO_ENV_FILE: 'NO_ENV_FILE',
   NO_KEEP_FILE: 'NO_KEEP_FILE',
   PERMISSION_DENIED: 'PERMISSION_DENIED',
+  // A tracked .gitignore that git keeps off disk (sparse checkout) cannot be brought into the checkout.
+  GITIGNORE_NOT_IN_CHECKOUT: 'GITIGNORE_NOT_IN_CHECKOUT',
   MEMBERSHIP_REVOKED: 'MEMBERSHIP_REVOKED',
   NETWORK_ERROR: 'NETWORK_ERROR',
   ENCRYPTION_ERROR: 'ENCRYPTION_ERROR',
