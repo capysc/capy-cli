@@ -167,6 +167,26 @@ export function hasOrgKey(orgId: string, userId?: string): boolean {
 }
 
 /**
+ * Whether both key files of this org+user are on this machine and shaped like what `capy pair` and `capy transport`
+ * write: `local.key` decodes to a 32-byte K_local, and `key.enc` is JSON with a non-empty `encrypted_master_key`. A
+ * missing, truncated or corrupt file is not usable. This is a shape check only: it cannot tell a stale key from a
+ * current one, which needs the service.
+ */
+export function hasUsableOrgKeys(orgId: string, userId?: string): boolean {
+  if (readLocalRoot(orgId, userId) === null) return false;
+  const raw = readFileOrNull(getOrgKeyPath(orgId, userId));
+  if (raw === null) return false;
+  try {
+    const data: unknown = JSON.parse(raw);
+    if (typeof data !== 'object' || data === null) return false;
+    const blob = (data as { readonly encrypted_master_key?: unknown }).encrypted_master_key;
+    return typeof blob === 'string' && blob !== '';
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Reads `key.enc`'s file content verbatim (the JSON `saveMasterKey` wrote,
  * unparsed) — for `capy transport`/`capy pair` (CAP-684), which move the
  * file "as-is" rather than decomposing and re-wrapping it. `readMasterKey`

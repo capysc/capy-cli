@@ -987,6 +987,79 @@ describe('capy pair, agent mode', () => {
       expect(pendingExists()).toBe(false);
     });
 
+    test('local.key missing: the keys are not "already here", so the pickup repairs the machine', async () => {
+      await startThenStub('mike@example.com', [APPROVED]);
+      placeKeysFor(USER.id);
+      rmSync(ROOT(USER.id));
+      const ran = await run({ wait: true });
+      expect(ran.exit).toBe(0);
+      expect(ran.json.keys).toBe('picked_up');
+      expect(mockPickupDevicePairing).toHaveBeenCalledTimes(1);
+      expect(readLocalRoot('org-123', USER.id)?.equals(Buffer.alloc(32, 5))).toBe(true);
+    });
+
+    test('local.key corrupt: the pickup repairs the machine', async () => {
+      await startThenStub('mike@example.com', [APPROVED]);
+      placeKeysFor(USER.id);
+      writeFileSync(ROOT(USER.id), 'AAAA');
+      const ran = await run({ wait: true });
+      expect(ran.json.keys).toBe('picked_up');
+      expect(readLocalRoot('org-123', USER.id)?.equals(Buffer.alloc(32, 5))).toBe(true);
+    });
+
+    test.each([
+      ['not JSON', 'not json at all'],
+      ['JSON with no wrapped master key', JSON.stringify({ version: '2.0', org_id: 'org-123' })],
+      ['a wrapped master key that is empty', JSON.stringify({ version: '2.0', encrypted_master_key: '' })],
+    ])('key.enc corrupt (%s): the pickup repairs the machine', async (_name, content) => {
+      await startThenStub('mike@example.com', [APPROVED]);
+      // The same local key the sealed payload carries, so only the damaged key.enc is in the way.
+      saveLocalRoot('org-123', Buffer.alloc(32, 5), USER.id);
+      writeFileSync(ENC(USER.id), content);
+      const ran = await run({ wait: true });
+      expect(ran.json.keys).toBe('picked_up');
+      expect(mockPickupDevicePairing).toHaveBeenCalledTimes(1);
+      expect(readFileSync(ENC(USER.id), 'utf8')).toBe(PAYLOAD.entries[0].key_enc);
+    });
+
+    describe('an account in two organizations', () => {
+      const SECOND_ORG = { id: 'org-456', workos_org_id: 'wo_2', name: 'Beta' };
+      const TWO_ORGS = { status: 200, body: { ...APPROVED.body, organizations: [...APPROVED.body.organizations, SECOND_ORG] } };
+      const SECOND_ENTRY = { ...PAYLOAD.entries[0], org_id: 'org-456', k_local: Buffer.alloc(32, 6).toString('base64url') };
+      const TWO_ORG_PAYLOAD: PairingPayload = { v: 1, entries: [...PAYLOAD.entries, SECOND_ENTRY] };
+
+      async function startTwoOrgs(): Promise<void> {
+        const startFetch = stubFetch([PENDING]);
+        await run({ email: 'mike@example.com' });
+        const publicKey = sentPublicKey(startFetch);
+        mockPickupDevicePairing.mockImplementation(async () => ({ sealed: await sealAsBrowser(TWO_ORG_PAYLOAD, publicKey) }));
+        stubFetch([TWO_ORGS]);
+      }
+
+      test('keys here for one organization only: the pickup runs and writes the other one too', async () => {
+        await startTwoOrgs();
+        saveLocalRoot('org-123', Buffer.alloc(32, 5), USER.id);
+        writeOrgKeyFileRaw('org-123', PAYLOAD.entries[0].key_enc, USER.id);
+        const ran = await run({ wait: true });
+        expect(ran.exit).toBe(0);
+        expect(ran.json.keys).toBe('picked_up');
+        expect(ran.json.paired).toEqual([{ org_id: 'org-123', user_id: USER.id }, { org_id: 'org-456', user_id: USER.id }]);
+        expect(readLocalRoot('org-456', USER.id)?.equals(Buffer.alloc(32, 6))).toBe(true);
+        expect(existsSync(getOrgKeyPath('org-456', USER.id))).toBe(true);
+      });
+
+      test('keys here for both organizations: sign in only, nothing picked up', async () => {
+        await startTwoOrgs();
+        saveLocalRoot('org-123', Buffer.alloc(32, 5), USER.id);
+        writeOrgKeyFileRaw('org-123', PAYLOAD.entries[0].key_enc, USER.id);
+        saveLocalRoot('org-456', Buffer.alloc(32, 6), USER.id);
+        writeOrgKeyFileRaw('org-456', PAYLOAD.entries[0].key_enc, USER.id);
+        const ran = await run({ wait: true });
+        expect(ran.json).toEqual({ ok: true, user_id: USER.id, paired: [], keys: 'already_present' });
+        expect(mockPickupDevicePairing).not.toHaveBeenCalled();
+      });
+    });
+
     test('keys absent: the pickup runs and keys is picked_up', async () => {
       await startThenStub('mike@example.com', [APPROVED]);
       const ran = await run({ wait: true });
@@ -1091,6 +1164,18 @@ describe('capy pair, agent mode', () => {
       expect(existsSync(getAuthSessionPath(USER.id))).toBe(true);
       expect(ran.stdout).toContain('signed in');
       expect(ran.stdout).not.toContain('Paired');
+    });
+
+    test('local.key missing: the pickup runs and repairs the machine', async () => {
+      mockConfirmPairAccount.mockResolvedValue(true);
+      approvedTerminalPairing();
+      placeKeysFor(USER.id);
+      rmSync(ROOT(USER.id));
+      const ran = await runTerminal({});
+      expect(ran.exit).toBe(0);
+      expect(mockPickupDevicePairing).toHaveBeenCalledTimes(1);
+      expect(readLocalRoot('org-123', USER.id)?.equals(Buffer.alloc(32, 5))).toBe(true);
+      expect(ran.stdout).toContain('Paired 1 organization to this machine.');
     });
 
     test('keys absent: the pickup runs and the paired line is printed exactly as before', async () => {

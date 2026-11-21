@@ -8,8 +8,8 @@
  * 3. Once approved, require confirmation of the returned account before
  *    installing the session the same way `capy` login does
  *    (`AuthService#installDeviceGrantSession`).
- * 4. Unless the keys of the approving account are already on this machine for
- *    the organization the session landed on (and `--force` was not given; then
+ * 4. Unless usable keys of the approving account are already on this machine for
+ *    every organization of the account (and `--force` was not given; then
  *    pairing only signs in): `POST /device-pairings/pickup` with the new token,
  *    open the sealed payload with the key pair from step 1, and write
  *    `local.key` + `key.enc` for every entry whose `user_id` matches the
@@ -22,7 +22,7 @@ import { generatePairKeyPair, openPairEnvelope, parsePairEnvelope, type PairKeyP
 import { authorizeDevice, pollDeviceToken, type DeviceTokenExchange } from '../auth/deviceGrant';
 import { AuthService } from '../auth/authService';
 import { ServiceClient } from '../service/serviceClient';
-import { hasOrgKey, readLocalRoot, saveLocalRoot, writeOrgKeyFileRaw } from '../config/globalConfig';
+import { hasUsableOrgKeys, readLocalRoot, saveLocalRoot, writeOrgKeyFileRaw } from '../config/globalConfig';
 import { renderTerminalQr, type RenderedTerminalQr } from '../ui/terminalQr';
 import { printMaskedLinkBlock, maskLink, type MaskedLinkPromptHandle } from '../ui/maskedLinkPrompt';
 import { isFullScreenQrEligible, startFullScreenQrView, printMaskedLinkFooter } from '../ui/fullScreenQr';
@@ -177,13 +177,16 @@ async function pickUpPairedKeys(
 }
 
 /**
- * Sign-in-only pairing: the keys of the approving account are already on this machine for the organization the session
- * landed on, and `--force` was not given. Then nothing is picked up and no key file is read, moved or rewritten.
+ * Sign-in-only pairing: usable keys of the approving account are already on this machine for the organization the
+ * session landed on AND for every other organization of the account, and `--force` was not given. Then nothing is picked
+ * up and no key file is read, moved or rewritten. If any of them is missing, unreadable or corrupt, the pickup runs, as
+ * it always did, and rewrites them.
  */
-function keysAlreadyHere(session: InstalledPairSession, userId: string, force: boolean): boolean {
+function keysAlreadyHere(session: InstalledPairSession, exchange: DeviceTokenExchange, force: boolean): boolean {
   if (force) return false;
   if (session.organizationId === '') return false;
-  return hasOrgKey(session.organizationId, userId);
+  const orgIds = [...new Set([session.organizationId, ...exchange.organizations.map((org) => org.id)])];
+  return orgIds.every((orgId) => hasUsableOrgKeys(orgId, exchange.user.id));
 }
 
 /**
@@ -198,7 +201,7 @@ export async function finishPairing(
   options: PairOptions,
 ): Promise<PairResult> {
   const session = await installPairSession(exchange, options);
-  if (keysAlreadyHere(session, exchange.user.id, options.force === true)) {
+  if (keysAlreadyHere(session, exchange, options.force === true)) {
     return { paired: [], keys: 'already_present' };
   }
   const paired = await pickUpPairedKeys(session, exchange, keyPair, deviceCode, options);
