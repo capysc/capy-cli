@@ -3,11 +3,12 @@ import { ProjectManager } from '../core/projectManager';
 import { FileManager } from '../files/fileManager';
 import { AuthService, silentAuthFailureMessage } from '../auth/authService';
 import { ServiceClient } from '../service/serviceClient';
+import { syncFolderValues } from '../sync/folderValues';
 import { SyncEngine } from '../sync/syncEngine';
 import { PromptEngine } from '../ui/promptEngine';
 import { debugLine } from '../ui/debug';
 import { existsSync, unlinkSync, rmSync } from 'fs';
-import { join } from 'path';
+import { join, resolve } from 'path';
 import { execSync } from 'child_process';
 import inquirer from 'inquirer';
 import {
@@ -61,6 +62,10 @@ import {
 } from '../sync/conflicts';
 import { ACCENT } from '../ui/colors';
 import { installSyncHooks } from '../git/syncHooks';
+import { tracksKeepLock } from '../git/keepTracking';
+import { configureSetupTracking, commitInitialKeep } from '../git/setupKeep';
+import { pickProjectFolder, chooseSetupSharing } from '../ui/projectSetup';
+import { isInteractive } from '../ui/interactive';
 import { initProjectQuestion } from '../ui/projectQuestions';
 import { reportRepoLinkForCommand } from '../core/repoLinkReporter';
 import { orgKeyMissingMessage } from '../core/orgKeyMissing';
@@ -193,7 +198,7 @@ export class CapyCommand {
     else console.log(line);
   }
 
-  async execute(): Promise<void> {
+  async execute(folder?: string): Promise<void> {
     // A bad --resolve / --conflict is refused before anything is read.
     conflictFlagsOrExit(this.options.conflictFlags ?? {}, false);
     // Nobody to ask (`--json`, `--non-tty`, no terminal): setting up a folder asks nothing and answers in JSON.
@@ -202,16 +207,28 @@ export class CapyCommand {
     // Setup flags typed on a folder that is already a project apply to nothing; the answer says so.
     const ignoredFlags = forAgent?.ignoredFlags ?? [];
     try {
+      if (folder !== undefined && resolve(folder) !== process.cwd()) {
+        return await this.executeInFolder(folder);
+      }
       const projectState = await this.detectOrRecoverProjectState();
 
       if (projectState === undefined) {
+        if (this.options.dryRun) {
+          this.say(`No Capy project is set up in ${process.cwd()}. A dry run leaves it unchanged.`);
+          return;
+        }
+        if (folder === undefined && !this.protocol && isInteractive()) {
+          const selected = await pickProjectFolder(process.cwd());
+          if (selected !== process.cwd()) return await this.executeInFolder(selected);
+        }
+        const share = await chooseSetupSharing(process.cwd(), !this.protocol);
         if (isLocalOnly()) {
           // Local-only mode: bootstrap a project entirely on this machine
           // (synthetic org, generated projectId) instead of server onboarding.
-          await this.initializeProjectLocal();
-          return;
+          await this.initializeProjectLocal(share);
+        } else {
+          await this.initializeProject(share);
         }
-        await this.initializeProject();
         return;
       }
 
@@ -236,6 +253,17 @@ export class CapyCommand {
       exitOnConflictRefusal(error);
       const { displayErrorAndExit } = await import('../ui/errorScreen');
       await displayErrorAndExit(error);
+    }
+  }
+
+  /** Construct every project-scoped reader and writer inside the selected folder, then restore the caller's cwd. */
+  private async executeInFolder(folder: string): Promise<void> {
+    const previous = process.cwd();
+    process.chdir(folder);
+    try {
+      await new CapyCommand(this.options, this.devMode).execute('.');
+    } finally {
+      process.chdir(previous);
     }
   }
 
@@ -283,7 +311,7 @@ export class CapyCommand {
       keyServiceOps: this.keyServiceOps(),
       decryptLocalEnv: (raw, key) => this.resolveDecryptedLocalEnv(raw, key),
       pushEnv: (localEnv, key, branch, keep, project, auth) => this.pushAndEncryptLocalEnv(localEnv, key, branch, keep, project, auth),
-      stageKeepLock: () => this.stageKeepLock(),
+      configureFolder: () => configureSetupTracking(process.cwd(), false),
       installGitHooks: () => this.installGitHooks(),
     };
   }
@@ -349,7 +377,7 @@ export class CapyCommand {
    * localMode skips all server steps; an unknown branch there falls back to
    * the local-mode default (local-only projects have exactly one branch).
    */
-  private async resolveActiveBranch(projectState: ProjectState, localMode: boolean): Promise<string> {
+  private async resolveActiveBranch(projectState: ProjectState, localMode: boolean, record = true): Promise<string> {
     const envMeta = this.fileManager.readEnvMeta(this.options.envPath);
     const local = resolveBranchFromLocalState({
       envBranch: envMeta.branch,
@@ -358,7 +386,7 @@ export class CapyCommand {
     this.debug('branch resolution (local signals)', local);
 
     if (local.kind === 'resolved') {
-      if (local.rebuildBranchFile) {
+      if (record && local.rebuildBranchFile) {
         // .capy/branch was missing — rebuild it from the .env header.
         this.projectManager.writeActiveBranch(local.branch);
       }
@@ -366,7 +394,7 @@ export class CapyCommand {
     }
 
     if (local.kind === 'conflict') {
-      return this.reconcileBranchConflict(projectState, localMode, local.envBranch, local.fileBranch);
+      return this.reconcileBranchConflict(projectState, localMode, local.envBranch, local.fileBranch, record);
     }
 
     // No .env header and no .capy/branch.
@@ -377,10 +405,16 @@ export class CapyCommand {
       return SyncEngine.DEFAULT_BRANCH;
     }
 
-    const selected = await selectBranchWithServer({
-      listBranches: () => this.serviceClient.listBranches(projectState.projectId!),
-      syncedBranches: syncedBranchNames(this.projectManager.readSyncState()),
-      preferred: this.branchNamedForUnrecordedFolder(),
+    const selected = await this.pickProjectBranch(projectState.projectId!, syncedBranchNames(this.projectManager.readSyncState()), this.branchNamedForUnrecordedFolder());
+    if (record) this.projectManager.writeActiveBranch(selected);
+    return selected;
+  }
+
+  private pickProjectBranch(projectId: string, syncedBranches: string[], preferred?: string): Promise<string> {
+    return selectBranchWithServer({
+      listBranches: () => this.serviceClient.listBranches(projectId),
+      syncedBranches,
+      preferred,
       promptPick: async (branches, defaultName) => {
         // Off a terminal nobody can pick: the run ends with a code and the command that records the choice.
         if (this.protocol) {
@@ -405,8 +439,6 @@ export class CapyCommand {
         return pick;
       },
     });
-    this.projectManager.writeActiveBranch(selected);
-    return selected;
   }
 
   /**
@@ -435,6 +467,7 @@ export class CapyCommand {
     localMode: boolean,
     envBranch: string,
     fileBranch: string,
+    record: boolean,
   ): Promise<string> {
     const knownLocally = new Set([
       ...branchesFromKeep(this.safeReadKeep()),
@@ -444,7 +477,7 @@ export class CapyCommand {
 
     if (!fileBranchIsReal) {
       console.log(`Ignoring stale .capy/branch (${B(fileBranch)} is not a branch in this project); staying on ${B(envBranch)}.`);
-      this.projectManager.writeActiveBranch(envBranch);
+      if (record) this.projectManager.writeActiveBranch(envBranch);
       return envBranch;
     }
 
@@ -498,7 +531,7 @@ export class CapyCommand {
    * keep.lock with the synthetic local org, then runs the normal (local-gated)
    * sync so the user can commit their .env.
    */
-  private async initializeProjectLocal(): Promise<void> {
+  private async initializeProjectLocal(share = false): Promise<void> {
     this.debug('initializeProjectLocal start', { cwd: process.cwd() });
     const { randomUUID } = await import('crypto');
     const { basename } = await import('path');
@@ -506,6 +539,7 @@ export class CapyCommand {
     // Unlock now so a missing/locked key fails before we write keep.lock.
     await resolveLocalProjectKey('bootstrap');
 
+    configureSetupTracking(process.cwd(), share);
     const projectName = basename(process.cwd()) || 'local-project';
     const keep: KeepFile = {
       version: '3.0',
@@ -523,6 +557,7 @@ export class CapyCommand {
     // First setup is the one moment the tracked keep.lock is Capy's to create: when the sync pinned the .env, the
     // file the user commits carries those pins. "up-to-date" (nothing to pin) and "stopped" leave the first write.
     if (outcome === 'changed' && !this.options.dryRun) this.writePinnedKeepOnFirstSetup();
+    if (share) commitInitialKeep(process.cwd());
 
     // One additional TTY-only prompt at the very end of a successful init —
     // skipped under --dry-run (a dry run must never prompt or write), and a
@@ -532,19 +567,19 @@ export class CapyCommand {
 
   /**
    * Local-only first setup: copies the keep.lock the sync just wrote (the working copy, which `readKeepFile` prefers)
-   * into the tracked file and stages it. `syncProject` is shared by every command and leaves the tracked file alone;
+   * into the root file before any setup commit. `syncProject` is shared by every command and leaves the tracked file alone;
    * only this first-setup path writes it.
    */
   private writePinnedKeepOnFirstSetup(): void {
     const pinned = this.safeReadKeep();
     if (pinned === null) return;
     this.fileManager.writeInitialKeepFile(pinned);
-    this.stageKeepLock();
   }
 
   /** First run in this directory. */
-  private async initializeProject(): Promise<void> {
-    await this.runInitialization();
+  private async initializeProject(share = false): Promise<void> {
+    await this.runInitialization(share);
+    if (share) commitInitialKeep(process.cwd());
     // The same one-time, TTY-only offer as the local-only init path above —
     // same --dry-run gating.
     if (!this.options.dryRun) await offerAgentsSetupAfterInit();
@@ -640,7 +675,7 @@ export class CapyCommand {
     orgSpinner.succeed(`Organization: ${org.name}`);
   }
 
-  private async runInitialization(): Promise<void> {
+  private async runInitialization(share = false): Promise<void> {
     this.debug('initializeProject start', { cwd: process.cwd() });
     // A flag that breaks a rule is refused before anything is shown or sent.
     const answerBroken = this.options.setup === undefined ? null : answerProblem(this.options.setup);
@@ -715,6 +750,7 @@ export class CapyCommand {
         picked,
         selectedOrg.id,
         authResult.user_id!,
+        share,
       );
       return;
     }
@@ -727,6 +763,8 @@ export class CapyCommand {
     // "_system" (CAP-664), but this is the actual choke point before the
     // service is asked to create anything, so it's checked again here.
     assertProjectNameAllowed(projectName);
+
+    configureSetupTracking(process.cwd(), share);
 
     // Initialize project on service
     const initSpinner = ora('Creating project...').start();
@@ -791,9 +829,6 @@ export class CapyCommand {
     this.fileManager.ensureCapyGitignore();
     console.log('> .gitignore updated (added .env, .capy/)');
 
-    // Stage keep.lock in git so collaborators don't hit "untracked file" errors on pull
-    this.stageKeepLock();
-
     // Check if there's an existing .env file with variables to sync
     const localEnvPath = this.projectManager.getEnvPath(this.options.envPath);
     const hasLocalEnv = existsSync(localEnvPath);
@@ -843,9 +878,6 @@ export class CapyCommand {
         if (syncResult.ok) {
           syncSpinner.succeed(`keep.lock created (pinned to ${initBranch}, ${localVarCount} secrets)`);
 
-          // The pins were written after the first staging above — stage again so the staged copy carries them
-          this.stageKeepLock();
-
           // Install git hooks
           this.installGitHooks();
 
@@ -857,6 +889,7 @@ export class CapyCommand {
           const syncError: any = syncResult.error;
           syncSpinner.fail(`Failed to sync variables: ${syncError.message}`);
           console.log(`You can run ${B('capy')} again to retry syncing`);
+          if (isStaleBase(syncResult.error)) throw syncResult.error;
         }
       } else {
         console.log(`\nNo .env file found. Add secrets to .env, then run ${B('capy push')}`);
@@ -1080,6 +1113,8 @@ export class CapyCommand {
         keepJson,
         envBlob,
         initBranch,
+        undefined,
+        SyncEngine.computeKeepHash(keep, initBranch),
       );
       // pushedToKeep is true for every outcome from here down.
 
@@ -1131,7 +1166,7 @@ export class CapyCommand {
    *
    * Used when the user lands in a directory with no keep.lock and picks an
    * existing project from the org's project list. Pulls the latest keep.json
-   * + env_blob for the development branch from the server, decrypts each
+   * + env_blob for the selected branch from the server, decrypts each
    * variable, writes keep.lock + encrypted .env. After this returns, the
    * directory looks identical to one that did `capy push` from scratch.
    */
@@ -1139,8 +1174,9 @@ export class CapyCommand {
     project: { id: string; name: string; organization_id: string },
     orgId: string,
     userId: string,
+    share = false,
   ): Promise<void> {
-    const branch = this.options.setup?.branch ?? 'development';
+    const branch = this.options.setup?.branch ?? await this.pickProjectBranch(project.id, []);
     const encryptionKey = await resolveProjectKey(orgId, project.id, userId, this.keyServiceOps());
 
     const fetchSpinner = ora(`Pulling ${project.name} (${branch})...`).start();
@@ -1154,34 +1190,12 @@ export class CapyCommand {
       (data) => ({ ok: true as const, data }),
       (err: any) => ({ ok: false as const, err }),
     );
-    if (!fetched.ok) {
-      const err = fetched.err;
-      // 404 coded NO_SECRETS (minted once, in serviceClient's classifyResponse) → empty project, write a stub keep.lock and exit
-      if (err instanceof CapyError && err.details?.status === 404 && err.code === ERROR_CODES.NO_SECRETS) {
-        fetchSpinner.stop();
-        const stub: KeepFile = {
-          version: '3.0',
-          org_id: orgId,
-          project_id: project.id,
-          project_name: project.name,
-          variables: {},
-        };
-        this.fileManager.writeKeepFile(stub);
-        this.projectManager.writeActiveBranch(branch);
-        this.fileManager.ensureCapyGitignore();
-        console.log(`\n${B(project.name)} has no secrets yet.`);
-        console.log(`Add secrets to .env, then run ${B('capy push')}.`);
-        this.installGitHooks();
-        return;
-      }
+    if (!fetched.ok && !(fetched.err instanceof CapyError && fetched.err.details?.status === 404 && fetched.err.code === ERROR_CODES.NO_SECRETS)) {
       fetchSpinner.fail(`Failed to pull from ${B(project.name)}.`);
-      throw err;
+      throw fetched.err;
     }
-    const decryptData = fetched.data;
-
-    if (!decryptData.keep_file) {
-      // No keep_file means the project exists but has never been pushed to.
-      // Treat it like an empty project — write a stub keep.lock.
+    const decryptData = fetched.ok ? fetched.data : undefined;
+    if (!decryptData?.keep_file) {
       fetchSpinner.stop();
       const stub: KeepFile = {
         version: '3.0',
@@ -1190,10 +1204,11 @@ export class CapyCommand {
         project_name: project.name,
         variables: {},
       };
+      configureSetupTracking(process.cwd(), share);
       this.fileManager.writeKeepFile(stub);
       this.projectManager.writeActiveBranch(branch);
       this.fileManager.ensureCapyGitignore();
-      console.log(`\n${B(project.name)} has no secrets yet.`);
+      console.log(`\n${B(project.name)} has no secrets yet on ${B(branch)}.`);
       console.log(`Add secrets to .env, then run ${B('capy push')}.`);
       this.installGitHooks();
       return;
@@ -1221,11 +1236,21 @@ export class CapyCommand {
       }),
     );
 
-    // Write keep.lock + encrypted .env locally
+    // A folder joining an existing project may already contain its own values. Bind the selected
+    // project and branch, then let the ordinary reconciliation preserve edits and resolve conflicts.
+    const existingEnv = this.fileManager.readEnvFile(this.options.envPath);
+    const hasLocalValues = Object.keys(existingEnv).length > 0;
+    if (hasLocalValues) this.resolveDecryptedLocalEnv(existingEnv, encryptionKey);
+    configureSetupTracking(process.cwd(), share);
     this.fileManager.writeKeepFile(serverKeep);
     this.projectManager.writeActiveBranch(branch);
     this.fileManager.ensureCapyGitignore();
-    this.fileManager.writeEncryptedEnvFile(plaintext, encryptionKey, undefined, serverKeep, branch);
+    if (hasLocalValues) {
+      fetchSpinner.stop();
+      await this.syncProject(await this.projectManager.detectProjectState());
+      return;
+    }
+    this.fileManager.writeEncryptedEnvFile(plaintext, encryptionKey, this.options.envPath, serverKeep, branch);
 
     this.fileManager.writeSyncState({
       last_sync: new Date().toISOString(),
@@ -1238,23 +1263,7 @@ export class CapyCommand {
       `Pulled ${Object.keys(plaintext).length} secret(s) from ${B(project.name)} (${branch})`,
     );
 
-    // Stage keep.lock so the user can commit it for the rest of the team
-    try {
-      execSync('git add keep.lock', { stdio: 'pipe' });
-    } catch {
-      // Not a git repo — fine
-    }
-
     this.installGitHooks();
-  }
-
-  /** Stages keep.lock in git. Silent when this is not a git repository. */
-  private stageKeepLock(): void {
-    try {
-      execSync('git add keep.lock', { stdio: 'pipe' });
-    } catch {
-      // Not a git repo — fine
-    }
   }
 
   /**
@@ -1262,6 +1271,7 @@ export class CapyCommand {
    * No pre-push hook.
    */
   private installGitHooks(): void {
+    if (!tracksKeepLock(process.cwd())) return;
     try {
       const gitDir = execSync('git rev-parse --git-dir', { stdio: 'pipe', encoding: 'utf-8' }).trim();
       installSyncHooks(gitDir, this.devMode ? 'capy-dev' : 'capy');
@@ -1405,6 +1415,8 @@ export class CapyCommand {
     // gated by `localMode` at the few seams that would otherwise call out.
     const localMode = isLocalOnly();
 
+    const folderOnly = !localMode && !tracksKeepLock(process.cwd());
+
     const { authResult, branch } = await (async (): Promise<{ authResult: AuthResult; branch: string }> => {
       if (localMode) {
         const localBranch = await this.resolveActiveBranch(projectState, true);
@@ -1477,7 +1489,7 @@ export class CapyCommand {
       }
 
       // Persist user ID to sync state immediately (a dry run changes nothing, not even that)
-      if (result.user_id && this.options.dryRun !== true) {
+      if (!folderOnly && result.user_id && this.options.dryRun !== true) {
         this.projectManager.writeSyncStateUserId(result.user_id);
       }
 
@@ -1485,7 +1497,7 @@ export class CapyCommand {
 
       // Branch resolution needs a token (server-assisted steps: branch list,
       // conflict validation, fresh-clone prompt) — so it runs post-auth.
-      const resolvedBranch = await this.resolveActiveBranch(projectState, false);
+      const resolvedBranch = await this.resolveActiveBranch(projectState, false, !folderOnly);
 
       const orgName = result.organization_name
         || result.organizations?.find(o => o.id === result.organization_id)?.name
@@ -1556,7 +1568,7 @@ export class CapyCommand {
     // copy (what writeKeepFile last wrote there) so `capy run` and project
     // detection find the project again. writeKeepFile only creates a missing
     // tracked file; an existing one is never touched (CAP-303).
-    if (initialKeep && this.options.dryRun !== true && !existsSync(this.projectManager.getKeepPath())) {
+    if (!folderOnly && initialKeep && this.options.dryRun !== true && !existsSync(this.projectManager.getKeepPath())) {
       this.debug('tracked keep.lock missing, restoring it from .capy/keep.lock');
       this.fileManager.writeKeepFile(initialKeep);
     }
@@ -1588,7 +1600,7 @@ export class CapyCommand {
         this.debug('local hashes', hashes);
         return { localPlaintext: plaintext, localHashes: hashes };
       } catch (error: any) {
-        if (error instanceof CapyError) throw error;
+        if (folderOnly || error instanceof CapyError) throw error;
         this.debugError('.env read failed', error);
         return { localPlaintext: {}, localHashes: {} };
       }
@@ -1640,6 +1652,12 @@ export class CapyCommand {
 
         // Lines this key cannot decrypt are left out of the comparison (and kept verbatim by a commit).
         const snapshot = snapshotFrom(decryptData, branch, encryptionKey, this.fileManager);
+        if (folderOnly && (
+          (snapshot.keep === undefined && (decryptData.keep_file || decryptData.env_content?.trim())) ||
+          (snapshot.keep !== undefined && (snapshot.keep.org_id !== projectState.organizationId || snapshot.keep.project_id !== projectState.projectId))
+        )) {
+          throw new CapyError('Capy returned an unreadable snapshot or one for a different project.', ERROR_CODES.INVALID_FORMAT);
+        }
         const remotePlaintext = Object.fromEntries(
           Object.entries(snapshot.entries).flatMap(([key, entry]) => (entry.plaintext === undefined ? [] : [[key, entry.plaintext] as const])),
         );
@@ -1655,7 +1673,7 @@ export class CapyCommand {
           if (!decryptData.keep_file || initialKeep) return initialKeep;
           const serverKeep = JSON.parse(decryptData.keep_file) as KeepFile;
           this.debug('bootstrap: no local keep.lock, reconstructing from server');
-          this.fileManager.writeKeepFile(serverKeep);
+          if (!folderOnly && this.options.dryRun !== true) this.fileManager.writeKeepFile(serverKeep);
           return serverKeep;
         })();
         fetchSpinner.stop();
@@ -1709,10 +1727,46 @@ export class CapyCommand {
             throw err;
           }
         }
+        if (folderOnly) {
+          fetchSpinner.fail('Could not read the latest values from Capy.');
+          throw err;
+        }
         fetchSpinner.fail('Cannot reach remote. Showing local changes only.');
         return { currentKeep: initialKeep, networkAvailable: false, ...noRemote };
       }
     })();
+
+    if (folderOnly && seenSnapshot !== undefined) {
+      const envMeta = this.fileManager.readEnvMeta(this.options.envPath);
+      if ((envMeta.org_id && envMeta.org_id !== projectState.organizationId) || (envMeta.project_id && envMeta.project_id !== projectState.projectId) ||
+          (currentKeep && (currentKeep.org_id !== projectState.organizationId || currentKeep.project_id !== projectState.projectId))) {
+        throw new CapyError('The environment file and project lockfiles must belong to the same Capy project.', ERROR_CODES.INVALID_FORMAT);
+      }
+      const keep = currentKeep ?? await (async (): Promise<KeepFile> => {
+        const project = (await this.serviceClient.listProjects()).find((p) => p.id === projectState.projectId && p.organization_id === projectState.organizationId);
+        if (!project) throw new CapyError('Could not recover the project named in this environment file.', ERROR_CODES.PROJECT_NOT_FOUND);
+        return { version: '3.0', org_id: project.organization_id, project_id: project.id, project_name: project.name, variables: {} };
+      })();
+      try {
+        const outcome = await syncFolderValues({
+          folder: {
+            pm: this.projectManager, fileManager: this.fileManager, serviceClient: this.serviceClient,
+            orgId: keep.org_id, projectId: keep.project_id, branch, userId: authResult.user_id!,
+            projectKey: encryptionKey, keep, localPlaintext,
+          },
+          snapshot: seenSnapshot, hasEnv: existsSync(this.projectManager.getEnvPath(this.options.envPath)), envPath: this.options.envPath,
+          flags: parseConflictFlags(this.options.conflictFlags ?? {}), protocol: this.protocol, dryRun: this.options.dryRun === true,
+        });
+        if (outcome !== 'stopped' && this.options.dryRun !== true && this.projectManager.readActiveBranch() !== branch) {
+          this.projectManager.writeActiveBranch(branch);
+        }
+        if (outcome !== 'stopped' && this.options.quiet !== true) this.say(outcome === 'changed' ? 'This folder and Capy are in sync.' : 'Everything is up to date!');
+        return outcome;
+      } catch (err) {
+        if (isStaleBase(err) && !retried) return this.syncProject(projectState, true);
+        throw err;
+      }
+    }
 
     // 3-way comparison
     const hasRemote = Object.keys(remotePlaintext).length > 0;

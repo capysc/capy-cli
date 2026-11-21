@@ -44,6 +44,7 @@ async function runEdit(h: Harness, env: Record<string, string>, ...extra: string
 async function baseline(...extra: string[]): Promise<{ stdout: string; stderr: string; code: number | null }> {
   const h = await createHarness();
   try {
+    makeRepo(h.project, null);
     const out = await h.run(['edit', NAME, ...extra], 'v\n', undefined, { CAPY_NO_REPO_LINK: '1' });
     return { stdout: out.stdout, stderr: out.stderr, code: out.code };
   } finally {

@@ -86,13 +86,11 @@ async function openFolder(cwd: string, branch: string, devMode: boolean | undefi
     coDecrypt: (o, c) => serviceClient.coDecrypt(o, c).then((r) => r.plaintext),
     wrapOuterLayer: (o, p) => serviceClient.wrapOuterLayer(o, p).then((r) => r.ciphertext),
   });
-  const snapshot = await readSnapshot(serviceClient, state.projectId, branch, projectKey).catch((err: unknown) =>
-    err instanceof CapyError && err.details?.status === 404 ? { keep: undefined, entries: {} } : Promise.reject(err),
-  );
+  const snapshot = await readSnapshot(serviceClient, state.projectId, branch, projectKey);
   return {
     keep,
     localPlaintext: readLocalPlaintext(new FileManager(cwd), projectKey),
-    view: { project: keep.project_name, branch, serverKeepHash: baseHashOf(snapshot, branch) ?? '' },
+    view: { project: keep.project_name, branch, serverKeepHash: baseHashOf(snapshot, branch) },
   };
 }
 

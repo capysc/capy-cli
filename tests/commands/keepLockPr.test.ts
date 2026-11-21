@@ -86,6 +86,7 @@ function makeFakes(over: { api?: Partial<GithubApi>; deps?: Partial<KeepLockPrDe
   const isGitRepo = mock((_cwd: string) => true);
   const originUrl = mock((_cwd: string): string | null => 'git@github.com:acme/app.git');
   const deps: KeepLockPrDeps = {
+    tracksKeepLock: () => true,
     hasTerminal: () => false,
     confirm,
     pickBase,

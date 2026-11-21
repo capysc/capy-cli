@@ -3,7 +3,8 @@
  * whatever keep the test hands it. Reads go through the same `ProjectManager` /
  * `FileManager` the commands use, so what a test asserts is what the next command would see.
  */
-import { mkdtempSync, rmSync } from 'fs';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { ProjectManager } from '../../src/core/projectManager';
@@ -26,6 +27,7 @@ export interface Folder {
 }
 
 export function makeFolder(opts: {
+  readonly git?: 'tracked' | 'ignored';
   readonly projectKey: string;
   readonly branch: string;
   /** The keep.lock the folder is pinned to. */
@@ -36,9 +38,12 @@ export function makeFolder(opts: {
   readonly projectId?: string;
 }): Folder {
   const dir = mkdtempSync(join(tmpdir(), 'capy-folder-'));
+  if (opts.git) execFileSync('git', ['init', '-q', dir]);
+  if (opts.git === 'ignored') writeFileSync(join(dir, '.gitignore'), '/keep.lock\n/.capy/\n/.env\n');
   const pm = new ProjectManager(dir);
   const fileManager = new FileManager(dir);
   fileManager.writeKeepFile(opts.keep);
+  if (opts.git === 'tracked') execFileSync('git', ['-C', dir, 'add', '--', 'keep.lock']);
   fileManager.writeEncryptedEnvFile({ ...opts.env }, opts.projectKey, undefined, opts.keep, opts.branch);
   const keep = (): KeepFile => pm.readKeepFile() as KeepFile;
   return {

@@ -186,6 +186,8 @@ export interface DeployContext extends AdapterCallContext {
    * delivery ignores this field and behaves as if it were unset.
    */
   noDeploy?: boolean;
+  /** Folder-only setup updates provider settings without opening a release PR. */
+  readonly manualRelease?: boolean;
   /** cwd of the user's invocation. */
   cwd: string;
   /**

@@ -389,17 +389,13 @@ describe('proceedWithRemoval', () => {
     return { ...r, parsed: JSON.parse(r.stdout.trim()) as Record<string, unknown> };
   }
 
-  test('--json with no PR flags and no terminal: exit 0, keep_lock changed-not-committed, both questions unanswered', async () => {
+  test('--json with no PR flags and no terminal: exit 0, keep_lock changed-not-committed, no Git questions in a plain folder', async () => {
     const r = await removeJson({});
     expect(r.exitCode).toBeUndefined();
     expect(r.parsed).toEqual({
       removed: ['TARGET'],
       branch: 'development',
       keep_lock: { changed: true, committed: false },
-      unanswered: [
-        { id: 'create_pr', flag: '--pr' },
-        { id: 'pr_base', flag: '--pr-base' },
-      ],
     });
     expect(r.stderr).toBe('');
   });

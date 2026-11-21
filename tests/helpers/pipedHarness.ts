@@ -19,7 +19,7 @@
  *
  * Needs `bun run build` first, like the other tests that spawn `dist/`.
  */
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { createServer, type Server } from 'node:http';
 import { createHash, randomBytes } from 'node:crypto';
@@ -115,7 +115,13 @@ function writeJson(path: string, value: unknown): void {
   writeFileSync(path, JSON.stringify(value, null, 2));
 }
 
-function seedHome(home: string, serviceUrl: string): string {
+/** A checkout explicitly exercising the Git-pinned baseline in command integration tests. */
+export function trackFixtureKeep(project: string): void {
+  execFileSync('git', ['init', '-q', project]);
+  execFileSync('git', ['-C', project, 'add', '--', 'keep.lock']);
+}
+
+export function seedHome(home: string, serviceUrl: string): string {
   const masterKey = randomBytes(32);
   const kLocal = randomBytes(32);
   const capyDir = join(home, '.capy');
@@ -147,7 +153,7 @@ function seedHome(home: string, serviceUrl: string): string {
   return deriveProjectKey(masterKey, PROJECT_ID, ORG_ID);
 }
 
-function seedProject(project: string): void {
+export function seedProject(project: string): void {
   const keep: KeepFile = {
     version: '3.0',
     org_id: ORG_ID,
@@ -235,7 +241,7 @@ async function startMockService(requestLog: string, failFlag: string, root: stri
       if (data !== undefined) return send(200, data);
       // No fixture: answer like the real server does, from what was pushed (nothing pushed yet: 404).
       const stored = readStore(root);
-      if (stored.keep === undefined) return send(404, { error: 'no branch fixture' });
+      if (stored.keep === undefined) return send(404, { code: 'NO_SECRETS', error: 'No secrets have been pushed to this project yet.' });
       const hash = SyncEngine.computeKeepHash(stored.keep, branch);
       return send(200, { env_file: stored.blobs[hash] ?? '', permissions: ['*'], keep_hash: hash, keep_file: JSON.stringify(stored.keep) });
     }

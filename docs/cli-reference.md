@@ -69,7 +69,7 @@ capy edit [name] [options]
 | `--pr` | create a PR with the keep.lock change (answers the prompt) |  |
 | `--no-pr` | do not create a PR with the keep.lock change |  |
 | `--pr-base <branch>` | base branch for the PR (answers the prompt) |  |
-| `--resolve <NAME=pinned|local|remote|delete>` | answer a difference from Capy: pinned, local, remote or delete; NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict) | `[]` |
+| `--resolve <NAME=pinned|local|remote|delete>` | choose a source: local or remote for a folder-only setup, also pinned or delete for a Git-tracked lock; NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict) | `[]` |
 | `--conflict <conflict_id>` | the conflict_id a conflict returned: binds --resolve to what was seen |  |
 
 JSON support: yes (`--json`)
@@ -108,7 +108,7 @@ capy checkout <branch> [options]
 | `--no-protected` | Create it open to the project |  |
 | `--json` | emit machine-readable JSON instead of the human UI |  |
 | `--non-tty` | treat stdin as not a terminal; differences from Capy stop the checkout with the conflict_id (agents/CI) |  |
-| `--resolve <NAME=pinned|local|remote|delete>` | answer a difference from Capy: pinned, local, remote or delete; NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict) | `[]` |
+| `--resolve <NAME=pinned|local|remote|delete>` | choose a source: local or remote for a folder-only setup, also pinned or delete for a Git-tracked lock; NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict) | `[]` |
 | `--conflict <conflict_id>` | the conflict_id a conflict returned: binds --resolve to what was seen |  |
 
 JSON support: yes (`--json`)
@@ -124,7 +124,7 @@ capy push [options]
 | Option | Description | Default |
 |---|---|---|
 | `--non-tty` | treat stdin as not a terminal; differences from Capy stop the push with the conflict_id (agents/CI) |  |
-| `--resolve <NAME=pinned|local|remote|delete>` | answer a difference from Capy: pinned, local, remote or delete; NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict) | `[]` |
+| `--resolve <NAME=pinned|local|remote|delete>` | choose a source: local or remote for a folder-only setup, also pinned or delete for a Git-tracked lock; NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict) | `[]` |
 | `--conflict <conflict_id>` | the conflict_id a conflict returned: binds --resolve to what was seen |  |
 
 JSON support: no
@@ -156,7 +156,7 @@ capy deploy [target] [options]
 | `--plan <file>` | dokploy/vercel --discover: the plan file to check (see schemas.deploy_dokploy_plan and schemas.deploy_vercel_plan in `capy help --json`) |  |
 | `--confirm <plan_id>` | dokploy/vercel --discover: write the plan that --dry-run printed (one PR per repo) |  |
 | `--base-url <url>` | dokploy --discover: the Dokploy dashboard URL (else the org system variable _CONNECTOR_DOKPLOY_BASE_URL) |  |
-| `--resolve <NAME=pinned|local|remote|delete>` | answer a difference from Capy: pinned, local, remote or delete; NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict) | `[]` |
+| `--resolve <NAME=pinned|local|remote|delete>` | choose a source: local or remote for a folder-only setup, also pinned or delete for a Git-tracked lock; NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict) | `[]` |
 | `--conflict <conflict_id>` | the conflict_id a conflict returned: binds --resolve to what was seen |  |
 
 JSON support: yes (`--json`)
@@ -183,7 +183,7 @@ capy deploy revoke <deployId> [options]
 | Option | Description | Default |
 |---|---|---|
 | `--non-tty` | treat stdin as not a terminal; differences from Capy stop the revoke with the conflict_id (agents/CI) |  |
-| `--resolve <NAME=pinned|local|remote|delete>` | answer a difference from Capy: pinned, local, remote or delete; NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict) | `[]` |
+| `--resolve <NAME=pinned|local|remote|delete>` | choose a source: local or remote for a folder-only setup, also pinned or delete for a Git-tracked lock; NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict) | `[]` |
 | `--conflict <conflict_id>` | the conflict_id a conflict returned: binds --resolve to what was seen |  |
 
 JSON support: no
@@ -224,7 +224,7 @@ capy deploy targets-remove <name> [options]
 |---|---|---|
 | `--no-deploy` | strip the config but skip the redeploy that would apply the revert |  |
 | `--non-tty` | treat stdin as not a terminal; differences from Capy stop the removal with the conflict_id (agents/CI) |  |
-| `--resolve <NAME=pinned|local|remote|delete>` | answer a difference from Capy: pinned, local, remote or delete; NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict) | `[]` |
+| `--resolve <NAME=pinned|local|remote|delete>` | choose a source: local or remote for a folder-only setup, also pinned or delete for a Git-tracked lock; NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict) | `[]` |
 | `--conflict <conflict_id>` | the conflict_id a conflict returned: binds --resolve to what was seen |  |
 
 JSON support: no
@@ -507,7 +507,7 @@ capy org [options]
 | Option | Description | Default |
 |---|---|---|
 | `--non-tty` | treat stdin as not a terminal; differences from Capy stop the switch with the conflict_id (agents/CI) |  |
-| `--resolve <NAME=pinned|local|remote|delete>` | answer a difference from Capy: pinned, local, remote or delete; NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict) | `[]` |
+| `--resolve <NAME=pinned|local|remote|delete>` | choose a source: local or remote for a folder-only setup, also pinned or delete for a Git-tracked lock; NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict) | `[]` |
 | `--conflict <conflict_id>` | the conflict_id a conflict returned: binds --resolve to what was seen |  |
 
 JSON support: no
@@ -693,7 +693,7 @@ capy secrets set <name> [options]
 | `--no-pr` | do not open any PR |  |
 | `--pr-repo <project_id=owner/name[/folder]>` | the repo a project's PR goes to, when the project is linked to more than one (repeatable) | `[]` |
 | `--confirm <plan_id>` | run the plan that --dry-run printed (required for a real run) |  |
-| `--resolve <NAME=pinned|local|remote|delete>` | answer a difference from Capy: pinned, local, remote or delete; NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict) | `[]` |
+| `--resolve <NAME=pinned|local|remote|delete>` | choose a source: local or remote for a folder-only setup, also pinned or delete for a Git-tracked lock; NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict) | `[]` |
 | `--conflict <conflict_id>` | the conflict_id a conflict returned: binds --resolve to what was seen |  |
 
 JSON support: yes (`--json`)
@@ -716,7 +716,7 @@ capy secrets deploy <names...> [options]
 | `--exclude <project:branch>` | leave this location out (repeatable) | `[]` |
 | `--pr-repo <project_id=owner/name[/folder]>` | the repo a project is deployed from and its PR goes to, when the project is linked to more than one (repeatable) | `[]` |
 | `--confirm <plan_id>` | run the plan that --dry-run printed (required for a real run) |  |
-| `--resolve <NAME=pinned|local|remote|delete>` | answer a difference from Capy: pinned, local, remote or delete; NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict) | `[]` |
+| `--resolve <NAME=pinned|local|remote|delete>` | choose a source: local or remote for a folder-only setup, also pinned or delete for a Git-tracked lock; NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict) | `[]` |
 | `--conflict <conflict_id>` | the conflict_id a conflict returned: binds --resolve to what was seen |  |
 
 JSON support: yes (`--json`)
@@ -800,7 +800,7 @@ capy add <vars...> [options]
 | `--pr` | create a PR with the keep.lock change (answers the prompt) |  |
 | `--no-pr` | do not create a PR with the keep.lock change |  |
 | `--pr-base <branch>` | base branch for the PR (answers the prompt) |  |
-| `--resolve <NAME=pinned|local|remote|delete>` | answer a difference from Capy: pinned, local, remote or delete; NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict) | `[]` |
+| `--resolve <NAME=pinned|local|remote|delete>` | choose a source: local or remote for a folder-only setup, also pinned or delete for a Git-tracked lock; NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict) | `[]` |
 | `--conflict <conflict_id>` | the conflict_id a conflict returned: binds --resolve to what was seen |  |
 
 JSON support: yes (`--json`)
@@ -823,7 +823,7 @@ capy remove <vars...> [options]
 | `--pr` | create a PR with the keep.lock change (answers the prompt) |  |
 | `--no-pr` | do not create a PR with the keep.lock change |  |
 | `--pr-base <branch>` | base branch for the PR (answers the prompt) |  |
-| `--resolve <NAME=pinned|local|remote|delete>` | answer a difference from Capy: pinned, local, remote or delete; NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict) | `[]` |
+| `--resolve <NAME=pinned|local|remote|delete>` | choose a source: local or remote for a folder-only setup, also pinned or delete for a Git-tracked lock; NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict) | `[]` |
 | `--conflict <conflict_id>` | the conflict_id a conflict returned: binds --resolve to what was seen |  |
 
 JSON support: yes (`--json`)
@@ -859,7 +859,7 @@ capy connect [provider] [options]
 | `--overwrite` | dokploy import: set the branch's vars to EXACTLY Dokploy's set — clear names not in Dokploy, replace differing values, import new ones |  |
 | `--environment <names>` | dokploy/vercel discover: restrict the plan to these environment names, comma-separated (e.g. staging,preview); vercel import: which Vercel environment to read (default: the current branch's name) |  |
 | `--import-environment <environment[=branch]>` | vercel discover: import only this environment, on a branch of the same name or on <branch> (repeatable; e.g. preview=staging) | `[]` |
-| `--resolve <NAME=pinned|local|remote|delete>` | answer a difference from Capy: pinned, local, remote or delete; NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict) | `[]` |
+| `--resolve <NAME=pinned|local|remote|delete>` | choose a source: local or remote for a folder-only setup, also pinned or delete for a Git-tracked lock; NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict) | `[]` |
 | `--conflict <conflict_id>` | the conflict_id a conflict returned: binds --resolve to what was seen |  |
 
 JSON support: yes (`--json`)
@@ -882,7 +882,7 @@ capy rotate [var] [options]
 | `--skip-prompts` | alias for --yes |  |
 | `--non-tty` | never prompt; resolve choices from flags or fail fast (agents/CI) |  |
 | `--provider <name>` | integration to promote an unmanaged var through (non-interactive) |  |
-| `--resolve <NAME=pinned|local|remote|delete>` | answer a difference from Capy: pinned, local, remote or delete; NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict) | `[]` |
+| `--resolve <NAME=pinned|local|remote|delete>` | choose a source: local or remote for a folder-only setup, also pinned or delete for a Git-tracked lock; NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict) | `[]` |
 | `--conflict <conflict_id>` | the conflict_id a conflict returned: binds --resolve to what was seen |  |
 
 JSON support: no
@@ -1247,6 +1247,6 @@ Every refusal carries a stable `code` — branch on it, never on message text.
 
 - **JSON**: Pass --json on any command whose supportsJson is true and parse stdout as JSON; prose (progress, prompts, errors) goes to stderr so stdout stays pure JSON.
 - **Codes**: Branch only on the machine-readable `code` field (from --json output or a CapyError), never on human-readable message text — messages may be reworded without notice.
-- **Conflicts**: Every command that writes from a folder (edit, add, remove, connect, rotate, push, checkout, org, deploy, deploy revoke, deploy targets-remove) runs bare `capy` first; `checkout -b` is the one exception (a new branch carries the uncommitted values of the folder). Off a terminal, if the folder and Capy differ on any variable, nothing is written, the exit code is 3, and stdout is {ok:false, code:"SECRETS_CONFLICT", conflict_id, conflicts:[{name, project, branch, type, pinned, local, remote}]} (fingerprints only, never values; a Dokploy value has {name, target, pinned, local, remote}). Ask the person, then rerun the same command with --resolve NAME=pinned|local|remote|delete for every row (NAME@TARGET=local|remote for a Dokploy value) and --conflict <conflict_id>. A state that moved since is SECRETS_CONFLICT_STALE with the fresh rows. There is no resolve-all. `secrets set` and `secrets deploy` take the same --resolve and --conflict for a location that changed since its row was listed.
+- **Conflicts**: Every command that writes from a folder (edit, add, remove, connect, rotate, push, checkout, org, deploy, deploy revoke, deploy targets-remove) runs bare `capy` first; `checkout -b` is the one exception (a new branch carries the uncommitted values of the folder). Off a terminal, if the folder and Capy differ on any variable, nothing is written, the exit code is 3, and stdout is {ok:false, code:"SECRETS_CONFLICT", conflict_id, conflicts:[{name, project, branch, type, pinned, local, remote}]} (fingerprints only, never values; a Dokploy value has {name, target, pinned, local, remote}). Folder-only rows omit pinned and list their available choices. Choosing an absent side removes that name. Ask the person to select from the choices for each row, then rerun the same command with --resolve NAME=<choice> for every row (NAME@TARGET=local|remote for a Dokploy value) and --conflict <conflict_id>. A state that moved since is SECRETS_CONFLICT_STALE with the fresh rows. There is no resolve-all. `secrets set` and `secrets deploy` take the same --resolve and --conflict for a location that changed since its row was listed.
 - **Organizations**: These commands work on an organization, not on a folder, and run with no project folder: users, grant-branch, revoke-branch, invite, kick, projects, projects rename --project-id, project create, project delete, project restore, secrets, secrets set, secrets deploy, system. The organization is the one in the keep.lock of the folder when it has one, else the only organization the account belongs to. With several organizations, no keep.lock and nobody to ask, `users --json`, `projects rename` and `project create|delete|restore` refuse with ORG_SELECTION_REQUIRED and `orgs:[{id, name}]`: show them to the person and stop.
 - **Elicitation**: A refusal with exit code 3 can carry an `elicitation` next to its `code`: a question for the human, never for you. Write `display` (a markdown table) in your reply exactly as given, without shortening or reordering it and never inside the question. Then ask the short `question` as an elicitation with your question tool: one question per field, using the field's own `question` followed by its `description` when it has them, and its `options` or `default` as the choices; without a question tool, end your reply with the `question` and the human answers in chat. kind "confirm" is a yes/no ({kind, question, details, display, answer:{yes}}): ask the human; on yes, run the command in `answer.yes`; on no, stop. kind "form" asks for values ({kind, question, details, display, fields:[{name, type, pattern, question?, default?, description?, options?:[{value, label}]}], answer:{rerun}}): ask the human for each field, then run `answer.rerun` with the values filled in. A field with `options` is a choice: the human picks a `label`, and you fill in its `value`. A field without `options` is typed in. With a `default`, offer exactly two choices, the `default` and "Cancel"; the human types any other answer in your question tool's own free-text answer. With no `default`, leave it out of the question tool: after the other questions, ask its `question` in chat and wait for the human to type the answer. On "Cancel", stop. `details` holds names and ids only, never a value. Today: `capy project restore` without --yes refuses with CONFIRMATION_REQUIRED and a confirm (details: {org:{id,name}, project:{id,name,deleted_at}}); `capy project delete` without --yes refuses with CONFIRMATION_REQUIRED and a confirm (details: {org:{id,name}, project:{id,name}, branches:[name], variables:[{name, branches:[name]}], live_deploy_tokens:[{deploy_id, label}], unavailable?:["branches"|"variables"]}); `capy project create` missing the name, `--branch` or `--protected` in agent mode refuses with PROJECT_NAME_REQUIRED, BRANCH_NAME_REQUIRED or BRANCH_PROTECTION_REQUIRED and a form (fields: name, branch, protected (options yes/no); details: {org:{id,name}}); `capy project delete` / `project restore` with a name several projects share refuses with PROJECT_AMBIGUOUS and a form with one `project` field whose options are the projects (details: {org:{id,name}, matches:[{id, name, created_at, variables}]}); `capy kick <email>` without --yes refuses with CONFIRMATION_REQUIRED and a confirm (details: {org:{id,name}, member:{email}}); `capy projects rename` with no name refuses with PROJECT_NAME_REQUIRED and a form with one `name` field (details: {org:{id,name}, project:{id,name}}); `capy secrets set` / `capy secrets deploy` with a project that is linked to more than one repo refuses with PR_REPO_AMBIGUOUS and a form with one field per such project whose options are its repos (details: {projects:[{id, name, repos:[owner/name[/folder]]}]}); pass the same `--pr-repo` again on the run with `--confirm`. kind "link" hands the human a page to approve on ({kind, url, code, purpose, expires_at, qr?:{text?, image?:{mime_type, file, data_uri?}}, answer:{wait}}): show the human the `url`, the `code` and `expires_at` (and the `qr` as `conventions.pairing` says), then run `answer.wait` at once in the foreground, and run it again whenever it exits 3 with PAIR_STILL_WAITING. Today `capy pair` in agent mode refuses with PAIR_EMAIL_REQUIRED and a form (field: email), then PAIR_APPROVAL_PENDING and a link; never fill in the email yourself. Bare `capy` in a folder that is not a project, in agent mode, with questions left refuses with INIT_INPUT_REQUIRED and one form that asks only what is unanswered: org (options: the organizations; asked first and alone when there are several), project (options: the existing projects, and `new`), then for a new project name, branch and protected (options yes/no); its `display` is the whole summary, so after the human answers, run `answer.rerun` with no further confirmation (details: {org?, orgs?, projects?, new_project_fields?, variables}; `variables` is a count). Never answer it yourself and never add --yes on your own.
