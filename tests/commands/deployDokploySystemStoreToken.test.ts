@@ -39,6 +39,11 @@ mock.module('../../src/auth/authService', () => ({
 mock.module('../../src/service/serviceClient', () => ({
   ServiceClient: class {
     setTokenProvider() {}
+    async getLatestSecrets(_projectId: string, branch: string) {
+      const keep = JSON.parse(readFileSync(join(ROOT, 'keep.lock'), 'utf-8'));
+      return { env_file: '', keep_file: JSON.stringify(keep), keep_hash: SyncEngine.computeKeepHash(keep, branch) };
+    }
+    async pushSecrets() { return { status: 'success' }; }
     async getDecryptData() {
       return agreeingDecryptData(JSON.parse(readFileSync(join(ROOT, 'keep.lock'), 'utf-8')), 'production');
     }
@@ -62,6 +67,7 @@ afterEach(() => {
 import { mkdirSync, writeFileSync, rmSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
+import { SyncEngine } from '../../src/sync/syncEngine';
 import { agreeingDecryptData, fixedKeyResolver } from '../helpers/deployServer';
 import { deployCommand, deployRemove } from '../../src/commands/deployCommand';
 import { mergeManagedValuesBlock } from '../../src/deploy/dokployApi';

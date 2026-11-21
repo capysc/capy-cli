@@ -112,7 +112,10 @@ capy run -- npm run dev           # run with decrypted secrets
 capy deploy                       # ship to prod
 ```
 
-That's the whole loop. Edit a secret, run `capy` and it all just works.
+On first setup, choose the folder containing your app. From an agent, use its project folder or pass `capy --folder <path>`.
+
+- **Set up this folder only** *(default)*. When teammates set up their own copy of the app, they’ll need to choose this project in Capy to get its secrets.
+- **Share the setup through Git**. Capy commits `keep.lock` so copies of the same code point to the same Capy project and secret versions (this is useful for keeping larger teams or more complex projects in sync).
 
 ## Demo
 
@@ -127,7 +130,7 @@ https://github.com/user-attachments/assets/60800e68-6101-4f1a-9176-6b2d58a6fd61
 - **We hold ciphertext. You hold keys. A subpoena gets us nothing.** Our service stores membership records and ciphertext. We don't hold your master key, your project keys, or any plaintext. Compromise of our service OR your local values yields nothing useful.
 - **Revocation is cryptographic, not a database flag.** `capy kick` makes the kicked user's local `key.enc` cryptographically inert. Remaining users keep using the same keys; no rotation cascade.
 - **Your code stays vanilla `process.env`.** No SDK to import, no daemon to run, no dashboard to maintain. `capy run` injects decrypted values into Node, Python, Go, Ruby, or any process that reads env vars.
-- **Branches that match git.** Capy runs alongside git with its own branches and a committed `keep.lock` manifest. Each git branch pins to a Capy branch, so secrets travel with your code.
+- **Optional Git sharing.** Each folder remembers its Capy project and secret versions. Teams can share those pointers with the code by tracking `keep.lock` in Git.
 - **Source-available CLI.** AGPL-3.0. Code is auditable on GitHub. ([What AGPL means for your team in practice.](https://docs.capy.sc/using/license))
 
 ## How it works
@@ -238,15 +241,15 @@ the event itself is one complete JSON line emitted before polling begins.
 
 ## Syncing
 
-`capy` is a three-way diff between your local `.env`, the last pinned snapshot in `keep.lock`, and the latest on the service. Conflicts open an interactive resolver. See [docs.capy.sc/using/syncing-secrets](https://docs.capy.sc/using/syncing-secrets).
+`capy` compares the values in your folder with the latest on the service. A Git-shared setup also compares the versions pinned in `keep.lock`. Conflicts open an interactive resolver. See [docs.capy.sc/using/syncing-secrets](https://docs.capy.sc/using/syncing-secrets).
 
 ### Conflicts and agents
 
 No command overwrites a value someone else changed since you last saw it. Every command that writes from a folder (`capy edit`, `add`, `remove`, `connect`, `rotate`, `push`, `deploy`, `org`, and `checkout` of an existing branch) runs a plain `capy` first. It repeats until your folder and Capy agree on every variable. If you cancel, nothing is written. Only then does the command apply its own change on top of Capy's latest. Every difference blocks the write, including ones unrelated to the variable you are changing. Exceptions: `capy checkout -b`, `capy decrypt` (and checkout while recovering from a seed phrase), new projects, and the org system store.
 
-For each difference you choose one of four: `pinned` (the folder's `keep.lock`), `local` (your `.env`), `remote` (Capy's latest), or `delete`.
+In a folder-only setup, choose `local` to keep your folder’s version or `remote` to use Capy’s version. If one side has removed the variable, choosing that side removes it. In a Git-shared setup the choices are `pinned` (the folder's `keep.lock`), `local` (your `.env`), `remote` (Capy's latest), or `delete`.
 
-Off a terminal (`--non-tty`, `--json`, an agent, CI) nobody can be asked. The command writes nothing, exits **3**, and prints JSON on stdout with `"code": "SECRETS_CONFLICT"`, a `conflict_id`, and one row per difference (name, project, branch, and fingerprints of the pinned, local and remote values, never the values). Ask the person, then rerun the same command once with `--resolve NAME=pinned|local|remote|delete` for every row and `--conflict <conflict_id>`. A Dokploy platform value is answered as `NAME@TARGET=local|remote`. If anything moved in between, the command exits 3 again with `SECRETS_CONFLICT_STALE` and the fresh rows. There is no resolve-all, and an answer naming a source that has no value for that row is refused (only `delete` deletes).
+Off a terminal (`--non-tty`, `--json`, an agent, CI) nobody can be asked. The command writes nothing, exits **3**, and prints JSON on stdout with `"code": "SECRETS_CONFLICT"`, a `conflict_id`, and one row per difference (name, project, branch, and fingerprints of the available sources). Ask the person, then rerun the same command once with `--resolve NAME=pinned|local|remote|delete` using the choices available for each row and `--conflict <conflict_id>`. A Dokploy platform value is answered as `NAME@TARGET=local|remote`. If anything moved in between, the command exits 3 again with `SECRETS_CONFLICT_STALE` and the fresh rows. Git-shared conflicts use `delete` for an explicit removal.
 
 ```bash
 capy push --non-tty                                        # exit 3: SECRETS_CONFLICT, conflict_id c_...
@@ -273,11 +276,11 @@ The `capy secrets` edit screens and `capy secrets set` do the same check against
 
 ## Branches
 
-Capy is a version control system for secrets that runs alongside git. You commit code, you sync secrets. Both have branches, both have a committed manifest (`.git/`, `keep.lock`), both pull and push to a remote. The difference: git's remote sees your code, Capy's remote only sees ciphertext.
+Capy tracks versions on the service in both setup modes. A folder-only setup keeps its `keep.lock` locally and ignores it in Git.
 
 A **Capy branch** is to your secrets what a git branch is to your code: a parallel state with its own values and its own access list. Switching branches changes which values `capy run` injects. As an example setup, you might keep a `development` branch open to every user while gating a `production` branch to only admins.
 
-Because Capy branches are independent of git branches, each git branch pins to a Capy branch via the committed `keep.lock` file. Branch names are yours to choose, just like in git: a common pattern is sharing one shared dev branch across feature work and pinning `release-*` git branches to a separate staging or production branch.
+With **Share the setup through Git**, the committed `keep.lock` pins the project and secret versions for that copy of the code. Branch names are yours to choose, just like in git: a common pattern is sharing one shared dev branch across feature work and pinning `release-*` git branches to a separate staging or production branch.
 
 For the full state model and protected-branch role enforcement, see [docs.capy.sc/using/branches/overview](https://docs.capy.sc/using/branches/overview).
 

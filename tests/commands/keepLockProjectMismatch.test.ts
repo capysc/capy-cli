@@ -36,6 +36,7 @@ function fakes(baseFile: string | null) {
     createPull: mock(async () => ok({ url: 'https://github.com/acme/app/pull/1' })),
   } satisfies Record<keyof GithubApi, unknown>;
   const deps: KeepLockPrDeps = {
+    tracksKeepLock: () => true,
     hasTerminal: () => false,
     confirm: mock(async () => true),
     pickBase: mock(async (branches: readonly string[]) => branches[0]),
