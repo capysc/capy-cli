@@ -99,14 +99,15 @@ export function accountMatches(grant: Pick<PendingPairGrant, 'expectedEmail'>, u
 
 const EMAIL_QUESTION = 'Which email will approve this pairing?'; // COPY-FLAG
 
-function emailForm(bin: string): ElicitationForm {
+/** The form that asks for the email. Its rerun repeats the flags that were typed (`--force`), so the answer keeps the run's meaning. */
+function emailForm(bin: string, options: PairAgentOptions): ElicitationForm {
   return {
     kind: 'form',
     question: EMAIL_QUESTION,
     details: {},
     display: pairEmailDisplay(),
     fields: [{ name: 'email', type: 'string', pattern: EMAIL_PATTERN, question: EMAIL_QUESTION }],
-    answer: { rerun: `${bin} pair --email <email> --json` },
+    answer: { rerun: `${bin} pair --email <email>${options.force === true ? ' --force' : ''} --json` },
   };
 }
 
@@ -205,7 +206,7 @@ async function startRun(options: PairAgentOptions, deps: PairAgentDeps): Promise
         code: ERROR_CODES.PAIR_EMAIL_REQUIRED,
         message: 'An email is needed to pair.', // COPY-FLAG
         exitCode: EXIT_NEEDS_INPUT,
-        extra: { elicitation: emailForm(bin) },
+        extra: { elicitation: emailForm(bin, options) },
       },
     };
   }

@@ -242,6 +242,19 @@ describe('capy pair, agent mode', () => {
       expect(ran.json.elicitation.answer).toEqual({ rerun: `${BIN} pair --email <email> --json` });
     });
 
+    test('--force is carried into the rerun, and running that rerun saves a grant with force', async () => {
+      const fetchMock = stubFetch([PENDING]);
+      const asked = await run({ json: true, force: true });
+      expect(asked.json.code).toBe(ERROR_CODES.PAIR_EMAIL_REQUIRED);
+      expect(asked.json.elicitation.answer).toEqual({ rerun: `${BIN} pair --email <email> --force --json` });
+      expect(fetchMock).not.toHaveBeenCalled();
+      // What an agent does with the rerun: fill in the email and run it with the flags it names.
+      const rerun = asked.json.elicitation.answer.rerun as string;
+      const started = await run({ json: true, email: 'mike@example.com', force: rerun.includes(' --force') });
+      expect(started.exit).toBe(3);
+      expect(JSON.parse(pendingRaw()).force).toBe(true);
+    });
+
     test('an empty or blank --email is the same as none', async () => {
       const fetchMock = stubFetch([PENDING]);
       const ran = await run({ email: '   ' });
