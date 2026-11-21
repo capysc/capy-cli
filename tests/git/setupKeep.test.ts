@@ -3,7 +3,7 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { FileManager } from '../../src/files/fileManager';
 import { ProjectManager } from '../../src/core/projectManager';
-import { tracksKeepLock } from '../../src/git/keepTracking';
+import { keepLockTracking, tracksKeepLock } from '../../src/git/keepTracking';
 import { commitInitialKeep, configureSetupTracking } from '../../src/git/setupKeep';
 import { git, makeRepo, makeRoot } from '../helpers/keepLockGit';
 
@@ -14,7 +14,9 @@ describe('effective tracking for a folder', () => {
   test('a plain folder can be initialized before Git exists', () => {
     const plain = join(root, 'plain');
     mkdirSync(plain);
+    expect(keepLockTracking(plain)).toBe('unknown');
     configureSetupTracking(plain, false);
+    expect(keepLockTracking(plain)).toBe('local');
     expect(tracksKeepLock(plain)).toBe(false);
     expect(readFileSync(join(plain, '.gitignore'), 'utf8').split('\n')).toContain('/keep.lock');
     git(plain, ['init', '-q']);

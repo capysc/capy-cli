@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 
 function hasGitDirectory(folder: string): boolean {
@@ -22,9 +22,16 @@ export function keepLockTracking(cwd: string, relativePath = 'keep.lock'): 'git'
   }).status;
   if (status === 0) return 'local';
   if (status === 1) return 'git';
-  // A real plain folder needs no Git installation. If Git is unavailable or
-  // fails inside a checkout, preserve its existing lockfile and Git config.
-  return existsSync(cwd) && !process.env.GIT_DIR && !hasGitDirectory(resolve(cwd)) ? 'local' : 'unknown';
+  // Without Git, only an explicit folder-only setup authorizes refreshing
+  // the root. Keep older unmarked folders' original marker behavior. A Git
+  // error inside a checkout must never be interpreted as a local opt-in.
+  const ignoreFile = join(cwd, '.gitignore');
+  if (!existsSync(ignoreFile) || process.env.GIT_DIR || hasGitDirectory(resolve(cwd))) return 'unknown';
+  try {
+    return readFileSync(ignoreFile, 'utf8').split(/\r?\n/).includes('/keep.lock') ? 'local' : 'unknown';
+  } catch {
+    return 'unknown';
+  }
 }
 
 export function tracksKeepLock(cwd: string, relativePath = 'keep.lock'): boolean {
