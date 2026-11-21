@@ -1916,7 +1916,7 @@ export function describeDeployRoute(
   stops: DeployPlanConfirmStop[];
   unanswered: string[];
   problem?:
-    | { code: ErrorCode; activeBranch: string; targetBranch: string }
+    | { code: ErrorCode; activeBranch: string | null; targetBranch: string }
     | { code: ErrorCode; target: string; targetBranch: string; removed: readonly string[] };
 } {
   const saved = nameArg ? getTarget(cwd, nameArg) : null;
@@ -1928,7 +1928,7 @@ export function describeDeployRoute(
   // from a run `--json` will never actually make. Cheap and local — same
   // "only refuse when the active branch is KNOWN" rule as the real check.
   const activeBranch = new ProjectManager(cwd).deriveActiveBranch();
-  const branchProblem = saved && activeBranch ? branchPushProblem(activeBranch, saved.branch) : null;
+  const branchProblem = saved && (activeBranch || !tracksPins) ? branchPushProblem(activeBranch, saved.branch) : null;
   const savedAdapter = saved ? getAdapter(saved.kind) : null;
   // `--target <id>` builds an ad-hoc target that is never written to disk,
   // so the naming question does not happen rather than going unanswered.
@@ -1940,7 +1940,7 @@ export function describeDeployRoute(
           platform: stripAnsiText(savedAdapter?.label ?? saved.kind),
           branch: saved.branch,
           variables: `${saved.vars.length} ${saved.vars.length === 1 ? 'variable' : 'variables'}`,
-          delivery: !tracksPins && savedAdapter?.ciOnly ? 'Provider settings' : (savedAdapter?.ciOnly ? 'ci' : saved.mode ?? 'direct') === 'ci' ? 'CI' : 'Direct',
+          delivery: savedAdapter?.ciOnly || saved.mode === 'ci' ? (tracksPins ? 'CI' : 'Provider settings') : 'Direct',
           name: saved.name,
           ...(Object.keys(saved.options).length > 0 ? { settings: 'saved' } : {}),
         }
@@ -1968,7 +1968,7 @@ export function describeDeployRoute(
     stops,
     unanswered: unansweredDeployStops(stops),
     ...(branchProblem
-      ? { problem: { code: branchProblem.code, activeBranch: branchProblem.activeBranch!, targetBranch: saved!.branch } }
+      ? { problem: { code: branchProblem.code, activeBranch: branchProblem.activeBranch, targetBranch: branchProblem.targetBranch } }
       : {}),
     ...(varProblem && saved
       ? {
@@ -2388,6 +2388,10 @@ async function resolveTarget(
     }
     return stepOk(target);
   }
+  if (!options.dryRun && !tracksKeepLock(cwd) && (options.yes || !process.stdin.isTTY)) {
+    console.error('Choose a saved target with capy deploy <name> so the Capy project, branch and destination are explicit. Run capy deploy in a terminal to set one up.');
+    return stepStop(1);
+  }
   if (options.target) return resolveTargetById(cwd, keep, options.target, options);
   return resolveTargetInteractively(cwd, keep, options);
 }
@@ -2534,7 +2538,7 @@ async function confirmOrEdit(
     // Reuses the SAME resolvedApiKey from above: it was resolved once
     // for this command, and an edit here changes vars/branch/mode, never
     // the Dokploy token source.
-    const recheck = await adapter.preflight(edited, { cwd, ...adapterCallCtx });
+    const recheck = await adapter.preflight(effectivePreflightTarget(edited, tracksKeepLock(cwd)), { cwd, ...adapterCallCtx });
     if (!recheck.ok) {
       console.error(`${RED('✗')} preflight: ${recheck.reason}`);
       if (recheck.hint) console.error('\n' + recheck.hint);
@@ -2548,6 +2552,25 @@ async function confirmOrEdit(
 }
 
 // ── Main: capy deploy [name] ───────────────────────────────────────────────
+
+function validDeploySource(cwd: string, target: TargetConfig, tracksPins: boolean): boolean {
+  const activeBranch = new ProjectManager(cwd).deriveActiveBranch();
+  const problem = activeBranch || !tracksPins ? branchPushProblem(activeBranch, target.branch) : null;
+  if (problem) {
+    console.error(`${RED('✗')} ${describeBranchProblem(problem)}`);
+    console.error(`Run capy checkout ${target.branch} first, or edit the target with capy deploy --edit.`);
+    return false;
+  }
+  if (!tracksPins && target.mode === 'ci' && (target.kind === 'cf-pages' || target.kind === 'cf-worker')) {
+    console.error(`Target ${target.name} requires a deploy PR. Run capy deploy --edit to configure direct delivery for this folder.`);
+    return false;
+  }
+  return true;
+}
+
+function effectivePreflightTarget(target: TargetConfig, tracksPins: boolean): TargetConfig {
+  return !tracksPins && target.mode === 'ci' ? { ...target, mode: 'direct' } : target;
+}
 
 export async function deployCommand(
   nameArg?: string,
@@ -2595,34 +2618,8 @@ export async function deployCommand(
     return 1;
   }
 
-  // ── Branch check (CAP-679) ────────────────────────────────────────────────
-  // Deploy reads values from `.env` but files the result under
-  // `target.branch` — refuse when the two disagree, rather than shipping
-  // branch A's secrets under branch B's name. Only refuses when the active
-  // branch is actually KNOWN (`ProjectManager.deriveActiveBranch`, e.g. the
-  // `.env` header) — a project with no such signal (a plaintext `.env` with
-  // several keep.lock branches, common in tests and some early setups) stays
-  // silent here exactly as it did before this check existed.
-  {
-    const activeBranch = new ProjectManager(cwd).deriveActiveBranch();
-    // Unknown is deliberately NOT refused here (unlike `pushKeepTransform`'s
-    // stricter guard at the actual write point). A KNOWN mismatch is always refused.
-    const branchProblem = activeBranch ? branchPushProblem(activeBranch, resolved.value.branch) : null;
-    if (branchProblem) {
-      console.error(`${RED('✗')} ${describeBranchProblem(branchProblem)}`);
-      console.error(
-        `\nRun \`capy checkout ${resolved.value.branch}\` first, or edit the target with \`capy deploy --edit\`.`,
-      );
-      return 1;
-    }
-  }
-
-  // Heal Vercel Preview targets saved before options.gitBranch existed.
   const tracksPins = tracksKeepLock(cwd);
-  if (!tracksPins && resolved.value.mode === 'ci' && (adapter.id === 'cf-pages' || adapter.id === 'cf-worker')) {
-    console.error(`Target ${resolved.value.name} requires a deploy PR. Run capy deploy --edit to configure direct delivery for this folder.`);
-    return 1;
-  }
+  if (!validDeploySource(cwd, resolved.value, tracksPins)) return 1;
   const healed = await healVercelGitBranch(cwd, resolved.value, options);
   if (!healed.ok) return healed.code;
 
@@ -2640,7 +2637,7 @@ export async function deployCommand(
   // CI-only adapters (Vercel) always take the CI/PR path, even if a legacy or
   // ad-hoc target carries a stale 'direct' mode — capy never runs their CLI.
   const mode: DeployMode = tracksPins && (adapter.ciOnly || reconciled.value.mode === 'ci') ? 'ci' : 'direct';
-  const settingsOnly = !tracksPins && (adapter.ciOnly === true || reconciled.value.mode === 'ci');
+
 
   // Dokploy only: resolve the org system store's API key ONCE for this whole
   // command and reuse it across preflight, the edit-loop's re-preflight, and
@@ -2675,7 +2672,7 @@ export async function deployCommand(
   const preflightOrEdit = async (
     t: TargetConfig,
   ): Promise<{ ok: true; target: TargetConfig; preflight: PreflightResult } | { ok: false }> => {
-    const deployment = !tracksPins && t.mode === 'ci' ? { ...t, mode: 'direct' as const } : t;
+    const deployment = effectivePreflightTarget(t, tracksPins);
     const result = await adapter.preflight(deployment, { cwd, ...adapterCallCtx });
     if (result.ok) return { ok: true, target: t, preflight: result };
     console.error(`${RED('✗')} preflight: ${result.reason}`);
@@ -2716,6 +2713,8 @@ export async function deployCommand(
       : { ok: true, value: preflightOutcome.target };
   if (!confirmed.ok) return confirmed.code;
   const target = confirmed.value;
+  if (!validDeploySource(cwd, target, tracksPins)) return 1;
+  const settingsOnly = !tracksPins && (adapter.ciOnly === true || target.mode === 'ci');
 
   const msg = `chore(deploy): ${target.name} → ${target.branch} (${target.kind})`;
   const baseBranch = target.gitBaseBranch ?? 'main';
@@ -2867,6 +2866,7 @@ export async function deployCommand(
     dryRun: !!options.dryRun,
     secretsOnly: mode === 'ci',
     noDeploy: settingsOnly || !!options.noDeploy,
+    manualRelease: settingsOnly,
     cwd,
     ...(adapter.id === 'vercel' ? placeholderDeliveryContext(cwd, target, adapter, options) : {}),
     ...adapterCallCtx,

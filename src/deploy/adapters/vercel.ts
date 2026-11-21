@@ -576,7 +576,7 @@ async function legacyDeploy(config: TargetConfig, ctx: DeployContext): Promise<D
         {
           label: 'set Vercel env',
           status: 'skip',
-          detail: `dry-run — would push ${pushNames.length} var(s) to ${scope}${ctx.noDeploy ? '' : ', then open the deploy PR'}`,
+          detail: `dry-run — would push ${pushNames.length} var(s) to ${scope}${ctx.manualRelease ? '' : ', then open the deploy PR'}`,
         },
         ...keptSteps(kept),
       ],
@@ -635,7 +635,7 @@ async function legacyDeploy(config: TargetConfig, ctx: DeployContext): Promise<D
       {
         label: 'vercel build + deploy',
         status: 'skip',
-        detail: ctx.noDeploy ? 'Redeploy in Vercel to apply the updated settings.' : 'CI mode — Vercel builds and deploys when the deploy PR merges',
+        detail: ctx.manualRelease ? 'Redeploy in Vercel to apply the updated settings.' : 'CI mode — Vercel builds and deploys when the deploy PR merges',
       },
     ],
     ...(kept.length > 0 ? { skipped: kept } : {}),
@@ -805,7 +805,7 @@ export function createVercelAdapter(deps: VercelAdapterDeps = {}): DeployAdapter
             `dry-run — would push ${pushNames.length} var(s) to ${describeScope(scope.scope)}: ` +
             `create ${plan.create.length}${names(plan.create)}, ` +
             `update ${plan.update.length}${names(plan.update)}, ` +
-            `split from a shared record ${plan.split.length}${names(plan.split)}${ctx.noDeploy ? '' : '; then open the deploy PR'}`,
+            `split from a shared record ${plan.split.length}${names(plan.split)}${ctx.manualRelease ? '' : '; then open the deploy PR'}`,
         },
         ...keptSteps(kept),
         ...(needsConfirmation.length > 0
@@ -901,7 +901,7 @@ export function createVercelAdapter(deps: VercelAdapterDeps = {}): DeployAdapter
     const buildStep: DeployStep = {
       label: 'vercel build + deploy',
       status: 'skip',
-      detail: ctx.noDeploy ? 'Redeploy in Vercel to apply the updated settings.' : 'CI mode — Vercel builds and deploys when the deploy PR merges',
+      detail: ctx.manualRelease ? 'Redeploy in Vercel to apply the updated settings.' : 'CI mode — Vercel builds and deploys when the deploy PR merges',
     };
     return vStep.status === 'fail'
       ? { ok: false, steps: [writeStep, vStep] }

@@ -803,7 +803,11 @@ function reportNoPr(req: KeepLockPrRequest, deps: KeepLockPrDeps): KeepLockRepor
 
 async function runStep(req: KeepLockPrRequest, deps: KeepLockPrDeps): Promise<KeepLockPrOutcome> {
   if (req.records.length === 0) return { keep_lock: { changed: false } };
-  if (!deps.tracksKeepLock(req.cwd)) return { keep_lock: { changed: true, committed: false } };
+  if (!deps.tracksKeepLock(req.cwd)) {
+    return { keep_lock: req.flags.pr && !deps.isGitRepo(req.cwd)
+      ? errorReport(ERROR_CODES.KEEP_PR_NOT_GIT_REPO)
+      : { changed: true, committed: false } };
+  }
   const interactive = deps.hasTerminal() && !req.json && req.nonTty !== true;
   const notCommitted: KeepLockReport = { changed: true, committed: false };
 
@@ -854,7 +858,11 @@ export async function previewKeepLockPrStep(
   },
   deps: KeepLockPrDeps = defaultDeps,
 ): Promise<KeepLockPreviewOutcome> {
-  if (!deps.tracksKeepLock(req.cwd)) return { keep_lock: { changed: req.changed, committed: false, would_pr: null } };
+  if (!deps.tracksKeepLock(req.cwd)) {
+    const would_pr = req.changed && req.flags.pr && !deps.isGitRepo(req.cwd)
+      ? { base: null, error: { code: ERROR_CODES.KEEP_PR_NOT_GIT_REPO } } : null;
+    return { keep_lock: { changed: req.changed, committed: false, would_pr } };
+  }
   const none: KeepLockPreview = { changed: wouldChangeFile(req, deps), committed: false, would_pr: null };
   if (!req.changed || req.flags.noPr === true) return { keep_lock: none };
   if (req.flags.pr !== true) return { keep_lock: none, unanswered: unansweredStops(req.flags) };

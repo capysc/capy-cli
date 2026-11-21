@@ -142,6 +142,16 @@ describe('capy deploy — branch check (CAP-679)', () => {
     });
   });
 
+  test('a folder-only deployment with --yes requires a named target before provider access', async () => {
+    await withHarness(async (h) => {
+      syncedProject(h, { header: '# capy:branch=production', branchFile: 'production' });
+      const result = await h.run(['deploy', '--target', 'dokploy', '--yes']);
+      expect(result.code).toBe(1);
+      expect(result.stderr).toContain('Choose a saved target');
+      expect(h.pushCount()).toBe(0);
+    });
+  });
+
   test('active branch matches target.branch → passes the check (fails later, at Dokploy auth)', async () => {
     await withHarness(async (h) => {
       syncedProject(h, { header: '# capy:branch=production', branchFile: 'production' });
@@ -323,14 +333,14 @@ describe('capy deploy --json — branch-mismatch as coded JSON, not only stderr 
     expect(parsed.problem).toBeUndefined();
   });
 
-  test('an unknown active branch has no `problem` field (unknown is never guessed as a mismatch)', () => {
+  test('a plain folder with an unknown active branch asks for a branch before delivery', () => {
     writeKeep(ROOT); // two branches — deriveActiveBranch cannot pick one
     writeDeployConfig(ROOT, [dokployTarget('production')]);
     writeFileSync(join(ROOT, '.env'), 'DATABASE_URL=x\n');
 
     const r = capy(['deploy', 'dokploy-target', '--json']);
     const parsed = JSON.parse(r.stdout);
-    expect(parsed.problem).toBeUndefined();
+    expect(parsed.problem).toEqual({ code: 'DEPLOY_BRANCH_UNKNOWN', activeBranch: null, targetBranch: 'production' });
   });
 });
 
