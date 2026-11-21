@@ -48,7 +48,7 @@ capy edit [name] [options]
 | `--pr` | create a PR with the keep.lock change (answers the prompt) |  |
 | `--no-pr` | do not create a PR with the keep.lock change |  |
 | `--pr-base <branch>` | base branch for the PR (answers the prompt) |  |
-| `--resolve <NAME=pinned|local|remote|delete>` | answer a difference from Capy: pinned, local, remote or delete; NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict) | `[]` |
+| `--resolve <NAME=pinned|local|remote|delete>` | choose a source: local or remote for a folder-only setup, also pinned or delete for a Git-tracked lock; NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict) | `[]` |
 | `--conflict <conflict_id>` | the conflict_id a conflict returned: binds --resolve to what was seen |  |
 
 JSON support: yes (`--json`)
@@ -87,7 +87,7 @@ capy checkout <branch> [options]
 | `--no-protected` | Create it open to the project |  |
 | `--json` | emit machine-readable JSON instead of the human UI |  |
 | `--non-tty` | treat stdin as not a terminal; differences from Capy stop the checkout with the conflict_id (agents/CI) |  |
-| `--resolve <NAME=pinned|local|remote|delete>` | answer a difference from Capy: pinned, local, remote or delete; NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict) | `[]` |
+| `--resolve <NAME=pinned|local|remote|delete>` | choose a source: local or remote for a folder-only setup, also pinned or delete for a Git-tracked lock; NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict) | `[]` |
 | `--conflict <conflict_id>` | the conflict_id a conflict returned: binds --resolve to what was seen |  |
 
 JSON support: yes (`--json`)
@@ -103,7 +103,7 @@ capy push [options]
 | Option | Description | Default |
 |---|---|---|
 | `--non-tty` | treat stdin as not a terminal; differences from Capy stop the push with the conflict_id (agents/CI) |  |
-| `--resolve <NAME=pinned|local|remote|delete>` | answer a difference from Capy: pinned, local, remote or delete; NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict) | `[]` |
+| `--resolve <NAME=pinned|local|remote|delete>` | choose a source: local or remote for a folder-only setup, also pinned or delete for a Git-tracked lock; NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict) | `[]` |
 | `--conflict <conflict_id>` | the conflict_id a conflict returned: binds --resolve to what was seen |  |
 
 JSON support: no
@@ -135,7 +135,7 @@ capy deploy [target] [options]
 | `--plan <file>` | dokploy/vercel --discover: the plan file to check (see schemas.deploy_dokploy_plan and schemas.deploy_vercel_plan in `capy help --json`) |  |
 | `--confirm <plan_id>` | dokploy/vercel --discover: write the plan that --dry-run printed (one PR per repo) |  |
 | `--base-url <url>` | dokploy --discover: the Dokploy dashboard URL (else the org system variable _CONNECTOR_DOKPLOY_BASE_URL) |  |
-| `--resolve <NAME=pinned|local|remote|delete>` | answer a difference from Capy: pinned, local, remote or delete; NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict) | `[]` |
+| `--resolve <NAME=pinned|local|remote|delete>` | choose a source: local or remote for a folder-only setup, also pinned or delete for a Git-tracked lock; NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict) | `[]` |
 | `--conflict <conflict_id>` | the conflict_id a conflict returned: binds --resolve to what was seen |  |
 
 JSON support: yes (`--json`)
@@ -162,7 +162,7 @@ capy deploy revoke <deployId> [options]
 | Option | Description | Default |
 |---|---|---|
 | `--non-tty` | treat stdin as not a terminal; differences from Capy stop the revoke with the conflict_id (agents/CI) |  |
-| `--resolve <NAME=pinned|local|remote|delete>` | answer a difference from Capy: pinned, local, remote or delete; NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict) | `[]` |
+| `--resolve <NAME=pinned|local|remote|delete>` | choose a source: local or remote for a folder-only setup, also pinned or delete for a Git-tracked lock; NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict) | `[]` |
 | `--conflict <conflict_id>` | the conflict_id a conflict returned: binds --resolve to what was seen |  |
 
 JSON support: no
@@ -203,7 +203,7 @@ capy deploy targets-remove <name> [options]
 |---|---|---|
 | `--no-deploy` | strip the config but skip the redeploy that would apply the revert |  |
 | `--non-tty` | treat stdin as not a terminal; differences from Capy stop the removal with the conflict_id (agents/CI) |  |
-| `--resolve <NAME=pinned|local|remote|delete>` | answer a difference from Capy: pinned, local, remote or delete; NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict) | `[]` |
+| `--resolve <NAME=pinned|local|remote|delete>` | choose a source: local or remote for a folder-only setup, also pinned or delete for a Git-tracked lock; NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict) | `[]` |
 | `--conflict <conflict_id>` | the conflict_id a conflict returned: binds --resolve to what was seen |  |
 
 JSON support: no
@@ -479,7 +479,7 @@ capy org [options]
 | Option | Description | Default |
 |---|---|---|
 | `--non-tty` | treat stdin as not a terminal; differences from Capy stop the switch with the conflict_id (agents/CI) |  |
-| `--resolve <NAME=pinned|local|remote|delete>` | answer a difference from Capy: pinned, local, remote or delete; NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict) | `[]` |
+| `--resolve <NAME=pinned|local|remote|delete>` | choose a source: local or remote for a folder-only setup, also pinned or delete for a Git-tracked lock; NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict) | `[]` |
 | `--conflict <conflict_id>` | the conflict_id a conflict returned: binds --resolve to what was seen |  |
 
 JSON support: no
@@ -665,7 +665,7 @@ capy secrets set <name> [options]
 | `--no-pr` | do not open any PR |  |
 | `--pr-repo <project_id=owner/name[/folder]>` | the repo a project's PR goes to, when the project is linked to more than one (repeatable) | `[]` |
 | `--confirm <plan_id>` | run the plan that --dry-run printed (required for a real run) |  |
-| `--resolve <NAME=pinned|local|remote|delete>` | answer a difference from Capy: pinned, local, remote or delete; NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict) | `[]` |
+| `--resolve <NAME=pinned|local|remote|delete>` | choose a source: local or remote for a folder-only setup, also pinned or delete for a Git-tracked lock; NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict) | `[]` |
 | `--conflict <conflict_id>` | the conflict_id a conflict returned: binds --resolve to what was seen |  |
 
 JSON support: yes (`--json`)
@@ -688,7 +688,7 @@ capy secrets deploy <names...> [options]
 | `--exclude <project:branch>` | leave this location out (repeatable) | `[]` |
 | `--pr-repo <project_id=owner/name[/folder]>` | the repo a project is deployed from and its PR goes to, when the project is linked to more than one (repeatable) | `[]` |
 | `--confirm <plan_id>` | run the plan that --dry-run printed (required for a real run) |  |
-| `--resolve <NAME=pinned|local|remote|delete>` | answer a difference from Capy: pinned, local, remote or delete; NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict) | `[]` |
+| `--resolve <NAME=pinned|local|remote|delete>` | choose a source: local or remote for a folder-only setup, also pinned or delete for a Git-tracked lock; NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict) | `[]` |
 | `--conflict <conflict_id>` | the conflict_id a conflict returned: binds --resolve to what was seen |  |
 
 JSON support: yes (`--json`)
@@ -772,7 +772,7 @@ capy add <vars...> [options]
 | `--pr` | create a PR with the keep.lock change (answers the prompt) |  |
 | `--no-pr` | do not create a PR with the keep.lock change |  |
 | `--pr-base <branch>` | base branch for the PR (answers the prompt) |  |
-| `--resolve <NAME=pinned|local|remote|delete>` | answer a difference from Capy: pinned, local, remote or delete; NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict) | `[]` |
+| `--resolve <NAME=pinned|local|remote|delete>` | choose a source: local or remote for a folder-only setup, also pinned or delete for a Git-tracked lock; NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict) | `[]` |
 | `--conflict <conflict_id>` | the conflict_id a conflict returned: binds --resolve to what was seen |  |
 
 JSON support: yes (`--json`)
@@ -795,7 +795,7 @@ capy remove <vars...> [options]
 | `--pr` | create a PR with the keep.lock change (answers the prompt) |  |
 | `--no-pr` | do not create a PR with the keep.lock change |  |
 | `--pr-base <branch>` | base branch for the PR (answers the prompt) |  |
-| `--resolve <NAME=pinned|local|remote|delete>` | answer a difference from Capy: pinned, local, remote or delete; NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict) | `[]` |
+| `--resolve <NAME=pinned|local|remote|delete>` | choose a source: local or remote for a folder-only setup, also pinned or delete for a Git-tracked lock; NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict) | `[]` |
 | `--conflict <conflict_id>` | the conflict_id a conflict returned: binds --resolve to what was seen |  |
 
 JSON support: yes (`--json`)
@@ -831,7 +831,7 @@ capy connect [provider] [options]
 | `--overwrite` | dokploy import: set the branch's vars to EXACTLY Dokploy's set — clear names not in Dokploy, replace differing values, import new ones |  |
 | `--environment <names>` | dokploy/vercel discover: restrict the plan to these environment names, comma-separated (e.g. staging,preview); vercel import: which Vercel environment to read (default: the current branch's name) |  |
 | `--import-environment <environment[=branch]>` | vercel discover: import only this environment, on a branch of the same name or on <branch> (repeatable; e.g. preview=staging) | `[]` |
-| `--resolve <NAME=pinned|local|remote|delete>` | answer a difference from Capy: pinned, local, remote or delete; NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict) | `[]` |
+| `--resolve <NAME=pinned|local|remote|delete>` | choose a source: local or remote for a folder-only setup, also pinned or delete for a Git-tracked lock; NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict) | `[]` |
 | `--conflict <conflict_id>` | the conflict_id a conflict returned: binds --resolve to what was seen |  |
 
 JSON support: yes (`--json`)
@@ -854,7 +854,7 @@ capy rotate [var] [options]
 | `--skip-prompts` | alias for --yes |  |
 | `--non-tty` | never prompt; resolve choices from flags or fail fast (agents/CI) |  |
 | `--provider <name>` | integration to promote an unmanaged var through (non-interactive) |  |
-| `--resolve <NAME=pinned|local|remote|delete>` | answer a difference from Capy: pinned, local, remote or delete; NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict) | `[]` |
+| `--resolve <NAME=pinned|local|remote|delete>` | choose a source: local or remote for a folder-only setup, also pinned or delete for a Git-tracked lock; NAME@TARGET=local|remote for a platform value (repeatable, needs --conflict) | `[]` |
 | `--conflict <conflict_id>` | the conflict_id a conflict returned: binds --resolve to what was seen |  |
 
 JSON support: no
