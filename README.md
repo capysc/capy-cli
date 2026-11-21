@@ -241,6 +241,7 @@ again whenever it exits 3 with `PAIR_STILL_WAITING`. That answer repeats the lin
 and only the PNG's file path, not `qr.text` or `qr.image.data_uri`. When the
 human approves, the account that approved is compared with the email you gave: a
 different account returns `PAIR_ACCOUNT_MISMATCH` and nothing is installed.
+When the keys are already on this machine, the pairing only signs in: the result says `"keys": "already_present"`.
 The PNG is removed when the pairing ends (approval, expiry, denial,
 `capy pair --cancel`, or a new `capy pair --email`). stdout is only ever one JSON
 object. `capy help --json` publishes the same instructions (`conventions.pairing`).

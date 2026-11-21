@@ -8,9 +8,12 @@
  * 3. Once approved, require confirmation of the returned account before
  *    installing the session the same way `capy` login does
  *    (`AuthService#installDeviceGrantSession`).
- * 4. `POST /device-pairings/pickup` with the new token, open the sealed
- *    payload with the key pair from step 1, and write `local.key` +
- *    `key.enc` for every entry whose `user_id` matches the logged-in user.
+ * 4. Unless the keys of the approving account are already on this machine for
+ *    the organization the session landed on (and `--force` was not given; then
+ *    pairing only signs in): `POST /device-pairings/pickup` with the new token,
+ *    open the sealed payload with the key pair from step 1, and write
+ *    `local.key` + `key.enc` for every entry whose `user_id` matches the
+ *    logged-in user.
  */
 import { confirmPairAccount } from './pairAccountConfirmation';
 import { resolveActiveUrl } from '../config/profileConfig';
@@ -19,7 +22,7 @@ import { generatePairKeyPair, openPairEnvelope, parsePairEnvelope, type PairKeyP
 import { authorizeDevice, pollDeviceToken, type DeviceTokenExchange } from '../auth/deviceGrant';
 import { AuthService } from '../auth/authService';
 import { ServiceClient } from '../service/serviceClient';
-import { readLocalRoot, saveLocalRoot, writeOrgKeyFileRaw } from '../config/globalConfig';
+import { hasOrgKey, readLocalRoot, saveLocalRoot, writeOrgKeyFileRaw } from '../config/globalConfig';
 import { renderTerminalQr, type RenderedTerminalQr } from '../ui/terminalQr';
 import { printMaskedLinkBlock, maskLink, type MaskedLinkPromptHandle } from '../ui/maskedLinkPrompt';
 import { isFullScreenQrEligible, startFullScreenQrView, printMaskedLinkFooter } from '../ui/fullScreenQr';
@@ -113,29 +116,47 @@ function printHumanPairBlock(deviceLink: string, qr: RenderedTerminalQr | null, 
   return prompt;
 }
 
+/** What `finishPairing` did with the keys: `picked_up` (fetched and written) or `already_present` (the machine already had them). */
+export type PairKeys = 'picked_up' | 'already_present';
+
+export interface PairResult {
+  /** The organizations whose keys were written. Empty when `keys` is `already_present`. */
+  readonly paired: readonly PairedOrg[];
+  readonly keys: PairKeys;
+}
+
+/** The session `installPairSession` put in place. */
+interface InstalledPairSession {
+  readonly authService: AuthService;
+  /** The organization the session landed on, or '' when none could be resolved. */
+  readonly organizationId: string;
+}
+
 /**
- * Everything after the approving account is accepted: install the device-grant session, pick up and open the sealed
- * payload, and write the key files. Shared by the terminal flow below and by `capy pair --wait`
- * (`pairAgentCommand.ts`); behaviour is the same in both.
+ * Installs the device-grant session. With no organization scoped by the device-grant token yet (a multi-org account),
+ * the session is resolved into one the same way every other org-context command does.
  */
-export async function finishPairing(
+async function installPairSession(exchange: DeviceTokenExchange, options: PairOptions): Promise<InstalledPairSession> {
+  const authService = new AuthService(options.apiUrl, options.devMode === true);
+  const installed = await authService.installDeviceGrantSession(exchange.token, exchange.user, exchange.organizations);
+  if (installed.organization_id) return { authService, organizationId: installed.organization_id };
+  const resolved = await authService.authenticateSilent();
+  return { authService, organizationId: resolved?.organization_id ?? '' };
+}
+
+/**
+ * Picks up the sealed payload for `deviceCode`, opens it with the one-time key pair, and writes `local.key` + `key.enc`
+ * for every entry that belongs to the approving account. Nothing waiting for this account is `PAIR_NO_KEYS`.
+ */
+async function pickUpPairedKeys(
+  session: InstalledPairSession,
   exchange: DeviceTokenExchange,
   keyPair: PairKeyPair,
   deviceCode: string,
   options: PairOptions,
-): Promise<{ readonly paired: readonly PairedOrg[] }> {
-  const force = options.force === true;
-  const devMode = options.devMode === true;
-  const authService = new AuthService(options.apiUrl, devMode);
-  const installed = await authService.installDeviceGrantSession(exchange.token, exchange.user, exchange.organizations);
-  if (!installed.organization_id) {
-    // Multi-org account with no org scoped by the device-grant token yet —
-    // resolve into one the same way every other org-context command does.
-    await authService.authenticateSilent();
-  }
-
-  const serviceClient = new ServiceClient(options.apiUrl, devMode);
-  serviceClient.setTokenProvider((rejected) => authService.getValidToken(rejected));
+): Promise<readonly PairedOrg[]> {
+  const serviceClient = new ServiceClient(options.apiUrl, options.devMode === true);
+  serviceClient.setTokenProvider((rejected) => session.authService.getValidToken(rejected));
 
   const { sealed } = await serviceClient.pickupDevicePairing(deviceCode);
   const envelope = parsePairEnvelope(sealed);
@@ -149,11 +170,45 @@ export async function finishPairing(
     );
   }
 
-  const paired: readonly PairedOrg[] = matching.map((entry) => {
-    writeEntry(entry, force);
+  return matching.map((entry) => {
+    writeEntry(entry, options.force === true);
     return { org_id: entry.org_id, user_id: entry.user_id };
   });
-  return { paired };
+}
+
+/**
+ * Sign-in-only pairing: the keys of the approving account are already on this machine for the organization the session
+ * landed on, and `--force` was not given. Then nothing is picked up and no key file is read, moved or rewritten.
+ */
+function keysAlreadyHere(session: InstalledPairSession, userId: string, force: boolean): boolean {
+  if (force) return false;
+  if (session.organizationId === '') return false;
+  return hasOrgKey(session.organizationId, userId);
+}
+
+/**
+ * Everything after the approving account is accepted: install the device-grant session, then either stop there (the
+ * keys are already here) or pick up and write the keys. Shared by the terminal flow below and by `capy pair --wait`
+ * (`pairAgentCommand.ts`); behaviour is the same in both.
+ */
+export async function finishPairing(
+  exchange: DeviceTokenExchange,
+  keyPair: PairKeyPair,
+  deviceCode: string,
+  options: PairOptions,
+): Promise<PairResult> {
+  const session = await installPairSession(exchange, options);
+  if (keysAlreadyHere(session, exchange.user.id, options.force === true)) {
+    return { paired: [], keys: 'already_present' };
+  }
+  const paired = await pickUpPairedKeys(session, exchange, keyPair, deviceCode, options);
+  return { paired, keys: 'picked_up' };
+}
+
+/** The one line the terminal flow prints when pairing ends. */
+function pairedSummary(paired: readonly PairedOrg[], keys: PairKeys): string {
+  if (keys === 'already_present') return '  This location is signed in. Its keys were already here.'; // COPY-FLAG
+  return `  Paired ${paired.length} organization${paired.length === 1 ? '' : 's'} to this machine.`; // COPY-FLAG
 }
 
 export async function pairCommand(options: PairOptions = {}): Promise<void> {
@@ -197,15 +252,15 @@ export async function pairCommand(options: PairOptions = {}): Promise<void> {
       );
     }
 
-    const { paired } = await finishPairing(exchange, keyPair, authorize.device_code, options);
+    const { paired, keys } = await finishPairing(exchange, keyPair, authorize.device_code, options);
 
     if (json) {
-      console.log(JSON.stringify({ ok: true, user_id: exchange.user.id, paired }, null, 2));
+      console.log(JSON.stringify({ ok: true, user_id: exchange.user.id, paired, keys }, null, 2));
       return;
     }
 
     console.log('');
-    console.log(`  Paired ${paired.length} organization${paired.length === 1 ? '' : 's'} to this machine.`); // COPY-FLAG
+    console.log(pairedSummary(paired, keys));
     console.log('');
   } catch (err) {
     refuseError(err, json);

@@ -13,8 +13,9 @@
  * a new start run replaces it. A poll error keeps it.
  *
  * The grant also names the temporary QR PNG made for its link (`qrFile`, absent in a file written before it existed).
- * That PNG is removed everywhere the grant is, and when a new start run replaces the grant. A file that is already
- * gone is not an error.
+ * That PNG is removed everywhere the grant is, and when a new start run replaces the grant. Removing it is best effort
+ * (`removePairingQrImage` never throws, and only touches its own file in the OS temp directory), and the pending file is
+ * deleted whether or not the PNG could be. A file that is already gone is not an error.
  *
  * Nothing here logs or prints the file's contents.
  */

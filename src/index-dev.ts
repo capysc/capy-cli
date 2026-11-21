@@ -477,13 +477,13 @@ program
 
 program
   .command('pair')
-  .description('Pair this device via Keep; requires interactive confirmation of the returned account before installing any session or keys')
+  .description('Pair this device via Keep; confirms the returned account before installing any session or keys: interactively in a terminal, and in agent mode the approving account must match --email') // COPY-FLAG
   .option('--json', 'emit machine-readable JSON instead of the human UI')
   .option('--force', 'overwrite a different local key already on this machine')
   .option('--email <email>', 'agent mode: the account that will approve; prints a link and exits 3 at once, then run --wait') // COPY-FLAG
   .option('--wait', 'agent mode: wait for the pending pairing to be approved (exits 3 with PAIR_STILL_WAITING after 30 seconds; run it again)') // COPY-FLAG
   .option('--cancel', 'agent mode: drop the pending pairing') // COPY-FLAG
-  .addHelpText('after', '\nIn a terminal, after browser approval: Enable this location as [email]? (y/N)\nAgents: ask the human which email will approve, run `capy pair --email <email>`, show the human the link and code, then run `capy pair --wait`. Never fill in the email yourself.\n') // COPY-FLAG
+  .addHelpText('after', '\nIn a terminal, after browser approval: Enable this location as [email]? (y/N)\nAgents: ask the human which email will approve, run `capy pair --email <email> --json`, show the human the url, code and expires_at, then run `capy pair --wait`. Never fill in the email yourself.\n') // COPY-FLAG
   .action(async (options) => {
     const { pairEntry } = await import('./commands/pairEntry');
     await pairEntry({ json: options.json === true, force: options.force === true, email: options.email, wait: options.wait === true, cancel: options.cancel === true, apiUrl: process.env.CAPY_API_URL, devMode: true });

@@ -1,7 +1,7 @@
 /**
  * `capy pair` in agent mode: short runs instead of one process held open.
  *
- * 1. Start run, `capy pair --email <email>`: asks for the grant, saves the pending grant
+ * 1. Start run, `capy pair --email <email> --json`: asks for the grant, saves the pending grant
  *    (`auth/pairing/pendingGrant.ts`), prints ONE refusal with a `link` elicitation and exits 3 at once. No polling.
  *    The link carries a QR of the approval URL (text, and a PNG file with the same bytes as a data URI). The PNG is a
  *    temp file recorded in the pending grant and removed wherever the grant is removed.
@@ -106,7 +106,7 @@ function emailForm(bin: string): ElicitationForm {
     details: {},
     display: pairEmailDisplay(),
     fields: [{ name: 'email', type: 'string', pattern: EMAIL_PATTERN, question: EMAIL_QUESTION }],
-    answer: { rerun: `${bin} pair --email <email>` },
+    answer: { rerun: `${bin} pair --email <email> --json` },
   };
 }
 
@@ -219,6 +219,8 @@ async function startRun(options: PairAgentOptions, deps: PairAgentDeps): Promise
     throw malformedAuthorize();
   }
   const deviceLink = `${resolveKeepOrigin()}/device?code=${encodeURIComponent(authorize.user_code)}`;
+  // Everything that can throw is settled before the PNG exists, so a refusal never leaves one behind.
+  const expiresAt = expiryOf(authorize, now());
   const previous = readPendingPairGrant();
   const image = await tryQrImage(deviceLink);
   const grant: PendingPairGrant = {
@@ -230,7 +232,7 @@ async function startRun(options: PairAgentOptions, deps: PairAgentDeps): Promise
     force: options.force === true,
     apiUrl,
     purpose: PAIR_DEFAULT_PURPOSE,
-    expiresAt: expiryOf(authorize, now()),
+    expiresAt,
     intervalSeconds: authorize.interval,
     ...(image ? { qrFile: image.file } : {}),
   };
@@ -319,13 +321,13 @@ async function completeApproved(grant: PendingPairGrant, exchange: DeviceTokenEx
       ERROR_CODES.PAIR_ACCOUNT_MISMATCH,
     );
   }
-  const { paired } = await finishPairing(exchange, grant.keyPair, grant.deviceCode, {
+  const { paired, keys } = await finishPairing(exchange, grant.keyPair, grant.deviceCode, {
     json: true,
     force: grant.force,
     apiUrl: grant.apiUrl,
     devMode: options.devMode === true,
   });
-  return { kind: 'done', body: { ok: true, user_id: exchange.user.id, paired } };
+  return { kind: 'done', body: { ok: true, user_id: exchange.user.id, paired, keys } };
 }
 
 async function waitRun(options: PairAgentOptions, deps: PairAgentDeps): Promise<Outcome> {

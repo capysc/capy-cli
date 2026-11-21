@@ -7,8 +7,9 @@
  * nothing really waits.
  */
 import { mock, jest, describe, test, expect, beforeEach, afterEach, afterAll, spyOn } from 'bun:test';
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync } from 'fs';
-import { join } from 'path';
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'fs';
+import { tmpdir } from 'os';
+import { dirname, join } from 'path';
 import jsQR from 'jsqr';
 import { PNG } from 'pngjs';
 import { webcrypto } from 'crypto';
@@ -36,6 +37,9 @@ mock.module('../../src/auth/authService', () => ({
   })),
 }));
 
+const mockConfirmPairAccount = jest.fn();
+mock.module('../../src/commands/pairAccountConfirmation', () => ({ confirmPairAccount: mockConfirmPairAccount }));
+
 const mockPickupDevicePairing = jest.fn();
 const realServiceClient = await import('../../src/service/serviceClient');
 mock.module('../../src/service/serviceClient', () => ({
@@ -47,11 +51,12 @@ mock.module('../../src/service/serviceClient', () => ({
 }));
 
 const { pairAgentCommand, accountMatches, normalizeEmail, PAIR_WAIT_CEILING_MS } = await import('../../src/commands/pairAgentCommand');
-const { getPairPendingPath, getGlobalCapyDir, getAuthSessionPath, getLocalRootPath, getOrgKeyPath, readLocalRoot, saveAuthSession, savePairPendingRaw } = await import('../../src/config/globalConfig');
-const { PAIR_DEFAULT_PURPOSE } = await import('../../src/commands/pairCommand');
+const { getPairPendingPath, getGlobalCapyDir, getAuthSessionPath, getLocalRootPath, getOrgKeyPath, readLocalRoot, saveAuthSession, saveLocalRoot, savePairPendingRaw, writeOrgKeyFileRaw } = await import('../../src/config/globalConfig');
+const { PAIR_DEFAULT_PURPOSE, pairCommand } = await import('../../src/commands/pairCommand');
 const { exportPairKeyPair, generatePairKeyPair, importPairKeyPair } = await import('../../src/crypto/pairCrypto');
 const { buildTerminalQr } = await import('../../src/ui/terminalQr');
 const { removePendingPairGrant } = await import('../../src/auth/pairing/pendingGrant');
+const { removePairingQrImage } = await import('../../src/ui/pairingPresentation');
 
 /** Thrown by the `process.exit` spy, so a refusal's exit code is a field, never message text. */
 class ExitSignal extends Error {
@@ -158,6 +163,30 @@ const pendingExists = (): boolean => existsSync(getPairPendingPath());
 const pendingRaw = (): string => readFileSync(getPairPendingPath(), 'utf8');
 const keysWritten = (): boolean => existsSync(getLocalRootPath('org-123', USER.id)) || existsSync(getOrgKeyPath('org-123', USER.id));
 
+const REAL_TMP = realpathSync(tmpdir());
+
+/** The directories in the OS temp folder that hold a QR PNG a pairing run made (a `capy-pair-` directory with a `pair.png` in it). */
+const qrDirs = (): readonly string[] => readdirSync(REAL_TMP).filter((name) => name.startsWith('capy-pair-') && existsSync(join(REAL_TMP, name, 'pair.png')));
+const newQrDirsSince = (before: readonly string[]): readonly string[] => qrDirs().filter((name) => !before.includes(name));
+/** What was already in the temp folder when this file started: leftovers of earlier runs are not this file's to judge. */
+const QR_DIRS_AT_START = qrDirs();
+
+/** A file's bytes and modification time, to prove it was not read-and-rewritten. */
+const fingerprint = (path: string): { readonly bytes: string; readonly mtimeMs: number; readonly ino: number } => ({
+  bytes: readFileSync(path).toString('base64'),
+  mtimeMs: statSync(path).mtimeMs,
+  ino: statSync(path).ino,
+});
+
+const EXISTING_K_LOCAL = Buffer.alloc(32, 7);
+const EXISTING_KEY_ENC = JSON.stringify({ version: '2.0', org_id: 'org-123', encrypted_master_key: 'already-here', wrapping_method: 'local_root', created_at: '2026-01-01T00:00:00.000Z' });
+
+/** The keys of `userId` for org-123, as a machine that was paired earlier holds them. */
+function placeKeysFor(userId: string): void {
+  saveLocalRoot('org-123', EXISTING_K_LOCAL, userId);
+  writeOrgKeyFileRaw('org-123', EXISTING_KEY_ENC, userId);
+}
+
 describe('capy pair, agent mode', () => {
   spyOn(process, 'exit').mockImplementation(((code?: number) => {
     throw new ExitSignal(code ?? 0);
@@ -183,6 +212,7 @@ describe('capy pair, agent mode', () => {
   });
 
   afterAll(() => {
+    expect(newQrDirsSince(QR_DIRS_AT_START)).toEqual([]);
     rmSync(tempHome, { recursive: true, force: true });
   });
 
@@ -197,7 +227,7 @@ describe('capy pair, agent mode', () => {
       expect(ran.json.code).toBe(ERROR_CODES.PAIR_EMAIL_REQUIRED);
       expect(ran.json.elicitation.kind).toBe('form');
       expect(ran.json.elicitation.fields.map((f: { name: string }) => f.name)).toEqual(['email']);
-      expect(ran.json.elicitation.answer).toEqual({ rerun: `${BIN} pair --email <email>` });
+      expect(ran.json.elicitation.answer).toEqual({ rerun: `${BIN} pair --email <email> --json` });
     });
 
     test('an empty or blank --email is the same as none', async () => {
@@ -278,7 +308,7 @@ describe('capy pair, agent mode', () => {
       const clock = fakeClock();
       const ran = await run({ wait: true }, clock);
       expect(ran.exit).toBe(0);
-      expect(ran.json).toEqual({ ok: true, user_id: USER.id, paired: [{ org_id: 'org-123', user_id: USER.id }] });
+      expect(ran.json).toEqual({ ok: true, user_id: USER.id, paired: [{ org_id: 'org-123', user_id: USER.id }], keys: 'picked_up' });
       expect(callsTo(fetchMock, '/auth/device/token')).toHaveLength(2);
       expect(clock.sleep).toHaveBeenCalledTimes(1);
       expect(clock.sleep).toHaveBeenCalledWith(5000);
@@ -452,12 +482,18 @@ describe('capy pair, agent mode', () => {
 
     test('a pending file that cannot be read is PAIR_NOT_PENDING and is removed', async () => {
       stubFetch([PENDING]);
-      await run({ email: 'mike@example.com' });
-      const { savePairPendingRaw } = await import('../../src/config/globalConfig');
-      savePairPendingRaw('{"v":1,"device_code":"x"}');
-      const ran = await run({ wait: true });
-      expect(ran.json.code).toBe(ERROR_CODES.PAIR_NOT_PENDING);
-      expect(pendingExists()).toBe(false);
+      const started = await run({ email: 'mike@example.com' });
+      // Overwriting the pending file by hand orphans its PNG: take that out afterwards.
+      const orphan = started.json.elicitation.qr.image.file as string;
+      try {
+        const { savePairPendingRaw } = await import('../../src/config/globalConfig');
+        savePairPendingRaw('{"v":1,"device_code":"x"}');
+        const ran = await run({ wait: true });
+        expect(ran.json.code).toBe(ERROR_CODES.PAIR_NOT_PENDING);
+        expect(pendingExists()).toBe(false);
+      } finally {
+        removePairingQrImage(orphan);
+      }
     });
 
     test('a service error while polling is coded, and the pending file stays so the agent can wait again', async () => {
@@ -652,11 +688,14 @@ describe('capy pair, agent mode', () => {
       ['an unparseable expires_at', { expires_at: 'tomorrow-ish' }],
       ['no user code', { user_code: '' }],
     ])('%s from the service: INVALID_FORMAT and nothing is saved', async (_name, patch) => {
+      const before = qrDirs();
       stubFetch([PENDING], { ...AUTHORIZE_BODY, ...patch });
       const ran = await run({ email: 'mike@example.com' });
       expect(ran.exit).toBe(1);
       expect(ran.json.code).toBe(ERROR_CODES.INVALID_FORMAT);
       expect(pendingExists()).toBe(false);
+      // No QR image is left behind in the temp folder.
+      expect(newQrDirsSince(before)).toEqual([]);
     });
 
     test('a valid expires_at from the service is kept as the grant\'s expiry', async () => {
@@ -727,11 +766,16 @@ describe('capy pair, agent mode', () => {
 
     test('still-waiting leaves qr out when the file is gone', async () => {
       const { file } = await started();
-      rmSync(file, { force: true });
-      stubFetch([PENDING]);
-      const ran = await run({ wait: true });
-      expect(ran.json.code).toBe(ERROR_CODES.PAIR_STILL_WAITING);
-      expect(ran.json.elicitation).not.toHaveProperty('qr');
+      try {
+        rmSync(file, { force: true });
+        stubFetch([PENDING]);
+        const ran = await run({ wait: true });
+        expect(ran.json.code).toBe(ERROR_CODES.PAIR_STILL_WAITING);
+        expect(ran.json.elicitation).not.toHaveProperty('qr');
+      } finally {
+        // Only the file was removed by hand: its directory goes too.
+        rmSync(dirname(file), { recursive: true, force: true });
+      }
     });
 
     test('a pending file written without qr_file still works: waiting has no qr, approval completes', async () => {
@@ -739,6 +783,8 @@ describe('capy pair, agent mode', () => {
       const { qr_file: qrFile, ...older } = JSON.parse(pendingRaw());
       savePairPendingRaw(JSON.stringify(older));
       rmSync(qrFile, { force: true });
+      // The pending file no longer names the directory, so it is removed here.
+      rmSync(dirname(qrFile), { recursive: true, force: true });
       stubFetch([PENDING]);
       const waiting = await run({ wait: true });
       expect(waiting.json.code).toBe(ERROR_CODES.PAIR_STILL_WAITING);
@@ -834,6 +880,249 @@ describe('capy pair, agent mode', () => {
       expect(URL_OF_GRANT()).toBe(ran.json.elicitation.url);
       expect(ran.json.elicitation.url).toContain('code=ABCD-EFGH');
       expect(ran.json.elicitation.url).not.toContain('device-1');
+    });
+  });
+
+  describe('a QR path that cannot be removed never keeps the pending grant', () => {
+    /** Starts a pairing, then points its pending file at a directory named like the PNG: the shape that used to make removal throw. */
+    async function startWithDirectoryForPng(): Promise<string> {
+      stubFetch([PENDING]);
+      const started = await run({ email: 'mike@example.com' });
+      removePairingQrImage(started.json.elicitation.qr.image.file as string);
+      const blocker = join(mkdtempSync(join(REAL_TMP, 'capy-pair-')), 'pair.png');
+      mkdirSync(blocker);
+      savePairPendingRaw(JSON.stringify({ ...JSON.parse(pendingRaw()), qr_file: blocker }));
+      return blocker;
+    }
+    const cleanUp = (blocker: string): void => rmSync(dirname(blocker), { recursive: true, force: true });
+
+    test('--cancel succeeds and the pending file is gone', async () => {
+      const blocker = await startWithDirectoryForPng();
+      try {
+        const ran = await run({ cancel: true });
+        expect(ran.exit).toBe(0);
+        expect(ran.json).toEqual({ ok: true, status: 'cancelled' });
+        expect(pendingExists()).toBe(false);
+        expect(lstatSync(blocker).isDirectory()).toBe(true);
+      } finally {
+        cleanUp(blocker);
+      }
+    });
+
+    test('--wait on an expired grant answers PAIR_EXPIRED and the pending file is gone', async () => {
+      const blocker = await startWithDirectoryForPng();
+      try {
+        stubFetch([APPROVED]);
+        const ran = await run({ wait: true }, fakeClock(Date.now() + 10_000_000));
+        expect(ran.exit).toBe(1);
+        expect(ran.json.code).toBe(ERROR_CODES.PAIR_EXPIRED);
+        expect(pendingExists()).toBe(false);
+      } finally {
+        cleanUp(blocker);
+      }
+    });
+
+    test('a new start run still starts, and its grant replaces the old one', async () => {
+      const blocker = await startWithDirectoryForPng();
+      try {
+        stubFetch([PENDING], { ...AUTHORIZE_BODY, device_code: 'device-new' });
+        const ran = await run({ email: 'mike@example.com' });
+        expect(ran.exit).toBe(3);
+        expect(ran.json.code).toBe(ERROR_CODES.PAIR_APPROVAL_PENDING);
+        expect(JSON.parse(pendingRaw()).device_code).toBe('device-new');
+        expect(lstatSync(blocker).isDirectory()).toBe(true);
+      } finally {
+        cleanUp(blocker);
+      }
+    });
+
+    test('a later run that sweeps the expired grant deletes it', async () => {
+      const blocker = await startWithDirectoryForPng();
+      try {
+        savePairPendingRaw(JSON.stringify({ ...JSON.parse(pendingRaw()), expires_at: new Date(Date.now() - 1000).toISOString() }));
+        await run({});
+        expect(pendingExists()).toBe(false);
+      } finally {
+        cleanUp(blocker);
+      }
+    });
+  });
+
+  describe('sign-in-only pairing, agent mode', () => {
+    /** Runs the start run, then swaps in the token responses for the wait run. */
+    async function startThenStub(email: string, tokens: readonly Wire[], extra: Parameters<typeof pairAgentCommand>[0] = {}) {
+      const startFetch = stubFetch([PENDING]);
+      await run({ email, ...extra });
+      const publicKey = sentPublicKey(startFetch);
+      mockPickupDevicePairing.mockImplementation(async () => ({ sealed: await sealAsBrowser(PAYLOAD, publicKey) }));
+      return stubFetch(tokens);
+    }
+    const ROOT = (userId: string): string => getLocalRootPath('org-123', userId);
+    const ENC = (userId: string): string => getOrgKeyPath('org-123', userId);
+
+    test('keys already here: no pickup, key files untouched, session installed, keys is already_present', async () => {
+      await startThenStub('mike@example.com', [APPROVED]);
+      placeKeysFor(USER.id);
+      const before = [fingerprint(ROOT(USER.id)), fingerprint(ENC(USER.id))];
+      const ran = await run({ wait: true });
+      expect(ran.exit).toBe(0);
+      expect(ran.json).toEqual({ ok: true, user_id: USER.id, paired: [], keys: 'already_present' });
+      expect(mockPickupDevicePairing).not.toHaveBeenCalled();
+      expect([fingerprint(ROOT(USER.id)), fingerprint(ENC(USER.id))]).toEqual(before);
+      expect(readLocalRoot('org-123', USER.id)?.equals(EXISTING_K_LOCAL)).toBe(true);
+      expect(mockInstallDeviceGrantSession).toHaveBeenCalledTimes(1);
+      expect(existsSync(getAuthSessionPath(USER.id))).toBe(true);
+      expect(pendingExists()).toBe(false);
+    });
+
+    test('keys absent: the pickup runs and keys is picked_up', async () => {
+      await startThenStub('mike@example.com', [APPROVED]);
+      const ran = await run({ wait: true });
+      expect(ran.exit).toBe(0);
+      expect(ran.json.keys).toBe('picked_up');
+      expect(ran.json.paired).toEqual([{ org_id: 'org-123', user_id: USER.id }]);
+      expect(mockPickupDevicePairing).toHaveBeenCalledTimes(1);
+      expect(readLocalRoot('org-123', USER.id)?.equals(Buffer.alloc(32, 5))).toBe(true);
+    });
+
+    test('--force with the keys already here picks them up and overwrites', async () => {
+      await startThenStub('mike@example.com', [APPROVED], { force: true });
+      placeKeysFor(USER.id);
+      const ran = await run({ wait: true });
+      expect(ran.exit).toBe(0);
+      expect(ran.json.keys).toBe('picked_up');
+      expect(mockPickupDevicePairing).toHaveBeenCalledTimes(1);
+      expect(readLocalRoot('org-123', USER.id)?.equals(Buffer.alloc(32, 5))).toBe(true);
+    });
+
+    test('keys of another account only: it is the pickup path, and the other account\'s files are untouched', async () => {
+      await startThenStub('mike@example.com', [APPROVED]);
+      placeKeysFor('someone-else');
+      const before = [fingerprint(ROOT('someone-else')), fingerprint(ENC('someone-else'))];
+      const ran = await run({ wait: true });
+      expect(ran.exit).toBe(0);
+      expect(ran.json.keys).toBe('picked_up');
+      expect(mockPickupDevicePairing).toHaveBeenCalledTimes(1);
+      expect(readLocalRoot('org-123', USER.id)?.equals(Buffer.alloc(32, 5))).toBe(true);
+      expect([fingerprint(ROOT('someone-else')), fingerprint(ENC('someone-else'))]).toEqual(before);
+    });
+
+    test('no organization resolved for the session: the keys cannot be matched to one, so the pickup is tried', async () => {
+      await startThenStub('mike@example.com', [APPROVED]);
+      placeKeysFor(USER.id);
+      mockInstallDeviceGrantSession.mockImplementation(async (_token: unknown, user: { id: string }) => ({ success: true, organization_id: '', user_id: user.id }));
+      mockAuthenticateSilent.mockResolvedValue({ success: false });
+      const ran = await run({ wait: true });
+      expect(mockPickupDevicePairing).toHaveBeenCalledTimes(1);
+      // The sealed local key differs from the one already here, so without --force the write is refused: the pickup really ran.
+      expect(ran.json.code).toBe(ERROR_CODES.PAIR_LOCAL_KEY_CONFLICT);
+    });
+
+    test.each([
+      ['keys present', true],
+      ['keys absent', false],
+    ])('a different approving account installs nothing and writes nothing (%s)', async (_name, present) => {
+      await startThenStub('someone.else@example.com', [APPROVED]);
+      if (present) placeKeysFor(USER.id);
+      const before = present ? [fingerprint(ROOT(USER.id)), fingerprint(ENC(USER.id))] : [];
+      const ran = await run({ wait: true });
+      expect(ran.exit).toBe(1);
+      expect(ran.json.code).toBe(ERROR_CODES.PAIR_ACCOUNT_MISMATCH);
+      expect(mockInstallDeviceGrantSession).not.toHaveBeenCalled();
+      expect(mockPickupDevicePairing).not.toHaveBeenCalled();
+      expect(existsSync(getAuthSessionPath(USER.id))).toBe(false);
+      expect(existsSync(getAuthSessionPath())).toBe(false);
+      expect(present ? [fingerprint(ROOT(USER.id)), fingerprint(ENC(USER.id))] : []).toEqual(before);
+      expect(keysWritten()).toBe(present);
+    });
+  });
+
+  describe('sign-in-only pairing, terminal flow', () => {
+    type Terminal = { readonly exit: number; readonly stdout: string };
+
+    async function runTerminal(options: Parameters<typeof pairCommand>[0]): Promise<Terminal> {
+      const log = spyOn(console, 'log').mockImplementation((() => {}) as any);
+      const err = spyOn(console, 'error').mockImplementation((() => {}) as any);
+      try {
+        const exit = await pairCommand(options).then(
+          () => 0,
+          (error: unknown) => {
+            if (error instanceof ExitSignal) return error.exitCode;
+            throw error;
+          },
+        );
+        return { exit, stdout: (log.mock.calls as unknown[][]).map((args) => args.join(' ')).join('\n') };
+      } finally {
+        log.mockRestore();
+        err.mockRestore();
+      }
+    }
+
+    /** The service side of one terminal pairing: authorize, an immediate approval, and a pickup sealed to the key the command sent. */
+    function approvedTerminalPairing(): void {
+      const fetchMock = stubFetch([APPROVED], { ...AUTHORIZE_BODY, interval: 0.001 });
+      mockPickupDevicePairing.mockImplementation(async () => ({ sealed: await sealAsBrowser(PAYLOAD, sentPublicKey(fetchMock)) }));
+    }
+    const ROOT = (userId: string): string => getLocalRootPath('org-123', userId);
+    const ENC = (userId: string): string => getOrgKeyPath('org-123', userId);
+
+    test('keys already here: no pickup, key files untouched, signed-in line instead of the paired one', async () => {
+      mockConfirmPairAccount.mockResolvedValue(true);
+      approvedTerminalPairing();
+      placeKeysFor(USER.id);
+      const before = [fingerprint(ROOT(USER.id)), fingerprint(ENC(USER.id))];
+      const ran = await runTerminal({});
+      expect(ran.exit).toBe(0);
+      expect(mockPickupDevicePairing).not.toHaveBeenCalled();
+      expect([fingerprint(ROOT(USER.id)), fingerprint(ENC(USER.id))]).toEqual(before);
+      expect(mockInstallDeviceGrantSession).toHaveBeenCalledTimes(1);
+      expect(existsSync(getAuthSessionPath(USER.id))).toBe(true);
+      expect(ran.stdout).toContain('signed in');
+      expect(ran.stdout).not.toContain('Paired');
+    });
+
+    test('keys absent: the pickup runs and the paired line is printed exactly as before', async () => {
+      mockConfirmPairAccount.mockResolvedValue(true);
+      approvedTerminalPairing();
+      const ran = await runTerminal({});
+      expect(ran.exit).toBe(0);
+      expect(mockPickupDevicePairing).toHaveBeenCalledTimes(1);
+      expect(readLocalRoot('org-123', USER.id)?.equals(Buffer.alloc(32, 5))).toBe(true);
+      expect(ran.stdout).toContain('Paired 1 organization to this machine.');
+    });
+
+    test('--force with the keys already here picks them up', async () => {
+      mockConfirmPairAccount.mockResolvedValue(true);
+      approvedTerminalPairing();
+      placeKeysFor(USER.id);
+      const ran = await runTerminal({ force: true });
+      expect(ran.exit).toBe(0);
+      expect(mockPickupDevicePairing).toHaveBeenCalledTimes(1);
+      expect(readLocalRoot('org-123', USER.id)?.equals(Buffer.alloc(32, 5))).toBe(true);
+      expect(ran.stdout).toContain('Paired 1 organization to this machine.');
+    });
+
+    test('keys of another account only: it is the pickup path', async () => {
+      mockConfirmPairAccount.mockResolvedValue(true);
+      approvedTerminalPairing();
+      placeKeysFor('someone-else');
+      const ran = await runTerminal({});
+      expect(ran.exit).toBe(0);
+      expect(mockPickupDevicePairing).toHaveBeenCalledTimes(1);
+      expect(readLocalRoot('org-123', USER.id)?.equals(Buffer.alloc(32, 5))).toBe(true);
+    });
+
+    test('a declined confirmation installs nothing, even with the keys already here', async () => {
+      mockConfirmPairAccount.mockResolvedValue(false);
+      approvedTerminalPairing();
+      placeKeysFor(USER.id);
+      const before = [fingerprint(ROOT(USER.id)), fingerprint(ENC(USER.id))];
+      const ran = await runTerminal({});
+      expect(ran.exit).toBe(1);
+      expect(mockInstallDeviceGrantSession).not.toHaveBeenCalled();
+      expect(mockPickupDevicePairing).not.toHaveBeenCalled();
+      expect(existsSync(getAuthSessionPath(USER.id))).toBe(false);
+      expect([fingerprint(ROOT(USER.id)), fingerprint(ENC(USER.id))]).toEqual(before);
     });
   });
 

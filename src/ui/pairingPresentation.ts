@@ -1,4 +1,4 @@
-import { rmSync, rmdirSync } from 'fs';
+import { lstatSync, realpathSync, rmdirSync, unlinkSync, type Stats } from 'fs';
 import { mkdtemp, rm, writeFile } from 'fs/promises';
 import { tmpdir } from 'os';
 import path from 'path';
@@ -23,6 +23,7 @@ export const PAIRING_PRESENTATION = {
     'If qr.image.file is inside a remote runtime, copy it to your display-accessible workspace. Alternatively decode qr.image.data_uri locally. Never send the pairing link to an external QR service.', // COPY-FLAG (adapted from an earlier sentence)
     'Then run `answer.wait` at once in the foreground, and run it again whenever it exits 3 with PAIR_STILL_WAITING. The wait response does not repeat `qr.text` or `qr.image.data_uri`.', // COPY-FLAG
     'If a different account approves, PAIR_ACCOUNT_MISMATCH is returned and nothing is installed.', // COPY-FLAG
+    'When the keys are already on this machine, the pairing only signs in: the result says `"keys": "already_present"`.', // COPY-FLAG
   ],
 } as const;
 
@@ -54,18 +55,83 @@ export async function createPairingQrImage(approvalUrl: string): Promise<Pairing
   return { mime_type: 'image/png', file, data_uri: `data:image/png;base64,${png.toString('base64')}` };
 }
 
+/** The real path of `target`, or null when it cannot be resolved. */
+function realPathOrNull(target: string): string | null {
+  try {
+    return realpathSync(target);
+  } catch {
+    return null;
+  }
+}
+
+/** The lstat of `target` (a symlink is reported as a symlink), or null when it is not there or cannot be read. */
+function lstatOrNull(target: string): Stats | null {
+  try {
+    return lstatSync(target);
+  } catch {
+    return null;
+  }
+}
+
 /**
- * Removes a PNG made by `createPairingQrImage` and its directory. A file that is already gone is not an error. The
- * path may come back from a file on disk, so anything that is not `<dir>/pair.png` with a `capy-pair-` directory is left
- * alone, and the directory is only removed when empty.
+ * The real directory `file` may be removed from, or null. Only what `createPairingQrImage` makes qualifies: an
+ * absolute path named `pair.png`, whose parent is a real directory (not a symlink) that is a direct child of the real OS
+ * temp directory and whose name starts with `capy-pair-`. The path may come back from a file on disk, so everything
+ * else (a relative path, another name, another place, a symlinked directory) is refused.
  */
-export function removePairingQrImage(file: string): void {
+function ownedQrDirectory(file: string): string | null {
+  if (!path.isAbsolute(file) || path.basename(file) !== QR_FILE_NAME) return null;
   const directory = path.dirname(file);
-  if (path.basename(file) !== QR_FILE_NAME || !path.basename(directory).startsWith(QR_DIR_PREFIX)) return;
-  rmSync(file, { force: true });
+  const stat = lstatOrNull(directory);
+  if (stat === null || !stat.isDirectory() || stat.isSymbolicLink()) return null;
+  const realDirectory = realPathOrNull(directory);
+  const realTemp = realPathOrNull(tmpdir());
+  if (realDirectory === null || realTemp === null) return null;
+  if (path.dirname(realDirectory) !== realTemp || !path.basename(realDirectory).startsWith(QR_DIR_PREFIX)) return null;
+  return realDirectory;
+}
+
+/** Whether `file` is, or was, a regular file: a missing one counts, a directory or a symlink does not. */
+function isRegularFileOrGone(file: string): boolean {
+  const stat = lstatOrNull(file);
+  return stat === null || (stat.isFile() && !stat.isSymbolicLink());
+}
+
+/** Unlinks `target`; whether it was removed. A file that is not there, or that cannot be removed, is false. */
+function unlinkQuietly(target: string): boolean {
+  try {
+    unlinkSync(target);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Removes `directory` when it is empty; anything else (not empty, already gone, no permission) leaves it. */
+function rmdirQuietly(directory: string): void {
   try {
     rmdirSync(directory);
   } catch {
-    // Already gone, or not empty: nothing more to remove.
+    // Not empty, or already gone: nothing more to remove.
+  }
+}
+
+/**
+ * Removes a PNG made by `createPairingQrImage` and its directory. Best effort: it never throws, and it returns
+ * whether it removed the file. A file that is already gone is not an error. Only a regular file named `pair.png` in a
+ * real `capy-pair-` directory directly under the real OS temp directory is removed (see `ownedQrDirectory`); anything
+ * else is left alone. The directory is only removed when empty.
+ */
+export function removePairingQrImage(file: string): boolean {
+  try {
+    const directory = ownedQrDirectory(file);
+    if (directory === null) return false;
+    const target = path.join(directory, QR_FILE_NAME);
+    if (!isRegularFileOrGone(target)) return false;
+    const removed = unlinkQuietly(target);
+    rmdirQuietly(directory);
+    return removed;
+  } catch {
+    return false;
   }
 }
