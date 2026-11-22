@@ -365,6 +365,7 @@ describe.each(['plain', 'ignored'] as const)('folder-only sync (%s)', (git) => {
 
   test.each(['local', 'remote'] as const)('use %s and verify pins and values on Capy and in the folder', async (choice) => {
     const w = setup({ ...OLD, X: 'x-mine' });
+    markSynced(w);
     const conflict = await pending();
     expect(conflict.conflicts).toEqual([{
       name: 'X', project: 'demo', branch: DEV, type: 'changed', local: hashValue('x-mine'), remote: hashValue('x-theirs'), choices: ['local', 'remote'],
@@ -377,6 +378,57 @@ describe.each(['plain', 'ignored'] as const)('folder-only sync (%s)', (git) => {
     expect(serverValues(w.server.state(), DEV, KEY)).toEqual(w.folder.env());
     expect(w.server.state().keep?.variables.X[0].value_hash).toBe(hashValue(expected));
     expect(w.server.pushSecrets.mock.calls).toHaveLength(choice === 'local' ? 1 : 0);
+  });
+
+  function markSynced(w: ReturnType<typeof world>) {
+    w.folder.fileManager.writeSyncState({
+      last_sync: '2026-01-01T00:00:00Z', synced_variables: Object.keys(OLD),
+      keep_hash: { [DEV]: SyncEngine.computeKeepHash(w.folder.keep(), DEV) },
+    });
+  }
+
+  test('one-sided adds, edits and deletes sync together without asking in either direction', async () => {
+    const w = world({ X: 'my-edit', Y: OLD.Y, LOCAL: '' }, { X: OLD.X, REMOTE: 'theirs' }, {}, git);
+    markSynced(w);
+    expect((await sync({ protocol: true })).outcome).toBe('changed');
+    const expected = { X: 'my-edit', LOCAL: '', REMOTE: 'theirs' };
+    expect(w.folder.env()).toEqual(expected);
+    expect(serverValues(w.server.state(), DEV, KEY)).toEqual(expected);
+    expect((await sync()).outcome).toBe('up-to-date');
+    expect(asked).not.toHaveBeenCalled();
+    expect(w.server.pushSecrets).toHaveBeenCalledTimes(1);
+  });
+
+  test('a remote-only update pulls without uploading or prompting', async () => {
+    const w = setup();
+    markSynced(w);
+    expect((await sync()).outcome).toBe('changed');
+    expect(w.folder.env().X).toBe('x-theirs');
+    expect(w.folder.pin('X')).toBe(hashValue('x-theirs'));
+    expect(w.server.pushSecrets).not.toHaveBeenCalled();
+    expect(asked).not.toHaveBeenCalled();
+  });
+
+  test('only a divergent name is offered and unrelated changes wait for the decision', async () => {
+    const w = world({ X: 'mine' }, { ...OLD, X: 'theirs', REMOTE: 'added' }, {}, git);
+    markSynced(w);
+    const refusal = await pending();
+    expect(refusal.conflicts.map(({ name }) => name)).toEqual(['X']);
+    expect(w.server.pushSecrets).not.toHaveBeenCalled();
+    expect(w.folder.env()).toEqual({ X: 'mine' });
+    await sync({ protocol: true, conflictFlags: { resolve: ['X=remote'], conflict: refusal.conflict_id } });
+    const expected = { X: 'theirs', REMOTE: 'added' };
+    expect(w.folder.env()).toEqual(expected);
+    expect(serverValues(w.server.state(), DEV, KEY)).toEqual(expected);
+    expect(w.server.pushSecrets).toHaveBeenCalledTimes(1);
+  });
+
+  test('a first attachment or mismatched receipt never treats current server pins as a shared baseline', async () => {
+    const w = world({ X: 'mine' }, OLD, {}, git);
+    expect((await pending()).conflicts.map(({ name }) => name)).toEqual(['X', 'Y']);
+    w.folder.fileManager.writeSyncState({ last_sync: '', synced_variables: [], keep_hash: { [DEV]: 'outdated' } });
+    expect((await pending()).conflicts.map(({ name }) => name)).toEqual(['X', 'Y']);
+    expect(w.server.pushSecrets).not.toHaveBeenCalled();
   });
 
   test('a missing environment file retrieves the latest, including empty values; nothing is sent', async () => {
