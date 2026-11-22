@@ -1043,6 +1043,7 @@ Every refusal carries a stable `code` — branch on it, never on message text.
 - `NO_ENV_FILE`
 - `NO_KEEP_FILE`
 - `PERMISSION_DENIED`
+- `GITIGNORE_NOT_IN_CHECKOUT`
 - `MEMBERSHIP_REVOKED`
 - `NETWORK_ERROR`
 - `ENCRYPTION_ERROR`
