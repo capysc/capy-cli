@@ -19,6 +19,7 @@
   "files": [
     "dist/index.js",
     "dist/index.d.ts",
+    "dist/build-info.json",
     "dist/**/*.js",
     "dist/**/*.d.ts",
     "!dist/index-dev.*",
@@ -26,7 +27,7 @@
     "THIRD-PARTY-NOTICES.md"
   ],
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && node scripts/build-info.mjs",
     "build:deploy-assets": "node scripts/build-deploy-assets.mjs",
     "build:screens": "node scripts/build-screen-assets.mjs",
     "check:screens": "node scripts/check-screens.mjs",

@@ -199,7 +199,7 @@ export function buildCliHelpDoc(program: Command): CliHelpDoc {
   return {
     ok: true,
     name: program.name(),
-    version: program.version() ?? '',
+    version: (program.version() ?? '').split('+')[0],
     root: { description: ROOT_DESCRIPTION, options: bareSetupOptions().map(optionDoc), supportsJson: true },
     commands,
     schemas: { ...HELP_SCHEMAS },

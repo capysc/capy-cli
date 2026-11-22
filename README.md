@@ -83,6 +83,8 @@ Invoke-Expression $installer
 capy --version
 ```
 
+`capy --version` includes a UTC build number and, for builds from a Git checkout, the first eight characters of the source commit.
+
 ### Install a specific version <!-- COPY-FLAG -->
 
 Each release publishes its own `install.sh` and `install.ps1` with that version's checksums. To pin a version, run the installer with `CAPY_VERSION`: <!-- COPY-FLAG -->

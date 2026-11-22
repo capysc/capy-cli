@@ -88,7 +88,7 @@ function Install-Capy {
         Expand-Archive -LiteralPath $archive -DestinationPath $extracted
         $candidate = Join-Path $extracted 'capy.exe'
         $reportedVersion = & $candidate --version
-        if ($LASTEXITCODE -ne 0 -or ($reportedVersion -join "`n").Trim() -ne $version) {
+        if ($LASTEXITCODE -ne 0 -or (($reportedVersion -join "`n").Trim() -split '\+', 2)[0] -ne $version) {
             throw 'The downloaded Capy executable did not pass its version check.'
         }
 

@@ -134,4 +134,4 @@ jobs:
             -e TAG="${{ steps.version.outputs.tag }}" \
             -e VERSION="${{ steps.version.outputs.version }}" \
             alpine:3 \
-            sh -c 'set -eu && wget -qO- "https://github.com/capysc/capy-cli/releases/download/$TAG/install.sh" | sh && test "$(capy --version)" = "$VERSION"'
+            sh -c 'set -eu && wget -qO- "https://github.com/capysc/capy-cli/releases/download/$TAG/install.sh" | sh && installed=$(capy --version) && test "${installed%%+*}" = "$VERSION"'
