@@ -6,7 +6,7 @@ import { Command, Option } from 'commander';
 import { CapyCommand } from './commands/capyCommand';
 import { CliOptions } from './types/index';
 import { assertNotLocalOnly } from './core/localGate';
-import { version as CLI_VERSION } from '../package.json';
+import { cliVersion } from './cliVersion';
 import { refuseWebMode } from './core/webModeRemoved';
 import { ACCENT } from './ui/colors';
 import { conflictOption, rawConflictFlagsOf, resolveOption } from './sync/conflicts';
@@ -68,7 +68,7 @@ program
   // their own name in --help/usage instead of the hardcoded "capy".
   .name(process.env.CAPY_BIN_NAME || 'capy')
   .description('Capy CLI - SecretOps for the AI age')
-  .version(CLI_VERSION)
+  .version(cliVersion)
   .option('--env-path <path>', 'specify custom .env file location')
   .option('-v, --verbose', 'enable detailed logging')
   .option('-f, --force', 're-encrypt existing variables')

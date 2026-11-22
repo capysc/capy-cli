@@ -149,7 +149,7 @@ main() {
   tar -xzf "$tmp_dir/archive.tar.gz" -C "$tmp_dir"
   chmod 755 "$tmp_dir/capy"
   installed_version=$("$tmp_dir/capy" --version)
-  if [ "$installed_version" != "$version" ]; then
+  if [ "${installed_version%%+*}" != "$version" ]; then
     printf 'Unexpected binary version: %s\n' "$installed_version" >&2; exit 1
   fi
   mkdir -p "$install_dir"

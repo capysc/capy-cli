@@ -185,7 +185,7 @@ export function buildCliHelpDoc(program: Command): CliHelpDoc {
   return {
     ok: true,
     name: program.name(),
-    version: program.version() ?? '',
+    version: (program.version() ?? '').split('+')[0],
     commands,
     schemas: { ...HELP_SCHEMAS },
     errorCodes: Object.values(ERROR_CODES),

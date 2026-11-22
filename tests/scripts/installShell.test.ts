@@ -194,6 +194,17 @@ describe('generated install.sh', () => {
     });
   });
 
+  test.each([[version, 0], ['8.0.0', 1]] as const)('checks release %s even with build metadata', (release, expected) => {
+    withSandbox((dir) => {
+      const home = join(dir, 'home');
+      mkdirSync(join(home, 'tmp'), { recursive: true });
+      const archive = makeTarball(dir, 'stamped', release + '+20261122150500123.abcdef01');
+      const installer = generateInstaller(dir, sha256(archive));
+      const tools = makeToolBin(dir, { servedTarball: archive, hashTool: hostTool('sha256sum') ? 'sha256sum' : 'shasum' });
+      expect(runInstaller(installer, home, [tools]).status).toBe(expected);
+    });
+  });
+
   test('a checksum mismatch installs nothing', () => {
     withSandbox((dir) => {
       const { home, installer } = prepare(dir);

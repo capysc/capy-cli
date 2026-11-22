@@ -9,7 +9,7 @@ import { resolve } from 'path';
 import { Command, Option } from 'commander';
 import { CapyCommand } from './commands/capyCommand';
 import { CliOptions } from './types/index';
-import { version as CLI_VERSION } from '../package.json';
+import { cliVersion } from './cliVersion';
 import { conflictOption, rawConflictFlagsOf, resolveOption } from './sync/conflicts';
 import { answersByProtocol } from './sync/gate';
 import { refuseWebMode } from './core/webModeRemoved';
@@ -83,7 +83,7 @@ const program = new Command();
 program
   .name('capy-dev')
   .description('Capy CLI (DEV MODE - mock auth enabled)')
-  .version(CLI_VERSION)
+  .version(cliVersion)
   .option('--env-path <path>', 'specify custom .env file location')
   .option('-v, --verbose', 'enable detailed logging')
   .option('-f, --force', 're-encrypt existing variables')
