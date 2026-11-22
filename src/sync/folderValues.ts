@@ -1,7 +1,6 @@
-/** Sync a folder whose keep.lock is local to this machine. Pins remain the internal baseline.
- * A user chooses the folder or Capy, including an explicit choice of the side where a name is absent. */
+/** Reconcile a folder with Capy using its last synchronized pins as the common baseline. */
 import inquirer from 'inquirer';
-import { CapyError, ERROR_CODES } from '../types/index';
+import { CapyError, ERROR_CODES, getSyncKeepHash } from '../types/index';
 import { SyncEngine } from './syncEngine';
 import { hashValue } from './compareSecrets';
 import { baseHashOf, commitFolder, pinnedHashes, type Changes, type FolderContext, type Snapshot } from './commit';
@@ -63,9 +62,14 @@ export async function syncFolderValues(input: FolderSyncInput): Promise<'changed
 
   const remote = Object.fromEntries(Object.entries(snapshot.entries).flatMap(([name, entry]) =>
     entry.plaintext === undefined ? [] : [[name, entry.plaintext] as const]));
-  const baseline = pinnedHashes(folder.keep, branch);
+  // Setup can seed keep.lock from Capy before this folder has ever synced. Those pins
+  // cannot tell us who edited a value. Only trust a lock matching this branch's sync receipt.
+  const savedLock = folder.pm.readKeepFile();
+  const hasBaseline = savedLock != null &&
+    getSyncKeepHash(folder.pm.readSyncState(), branch) === SyncEngine.computeKeepHash(savedLock, branch);
+  const baseline = pinnedHashes(savedLock, branch);
   const names = [...new Set([...Object.keys(localPlaintext), ...Object.keys(remote)])];
-  const rows: readonly SourceConflict[] = names.flatMap((name) => {
+  const differences: readonly SourceConflict[] = names.flatMap((name) => {
     const localHash = present(localPlaintext, name) ? hashValue(localPlaintext[name]) : null;
     const remoteHash = present(remote, name) ? hashValue(remote[name]) : null;
     if (localHash === remoteHash) return [];
@@ -76,6 +80,15 @@ export async function syncFolderValues(input: FolderSyncInput): Promise<'changed
     }];
   });
 
+  const automaticChoice = (row: SourceConflict): Choice | undefined => {
+    if (!hasEnv) return 'remote';
+    if (!hasBaseline) return undefined;
+    const previous = present(baseline, row.name) ? baseline[row.name] : null;
+    if (row.local === previous) return 'remote';
+    if (row.remote === previous) return 'local';
+    return undefined;
+  };
+  const rows = differences.filter((row) => automaticChoice(row) === undefined);
   const scope: ConflictScope = {
     project: folder.keep.project_name, branch, serverKeepHash: baseHashOf(snapshot, branch), conflicts: rows,
     folderIdentity: [folder.orgId, folder.projectId, hasEnv] as const,
@@ -84,14 +97,12 @@ export async function syncFolderValues(input: FolderSyncInput): Promise<'changed
   const hasSourceAnswers = Object.keys(sourceAnswers).length > 0;
   if (rows.length === 0 && hasSourceAnswers) throw conflictRefusalFor(ERROR_CODES.SECRETS_CONFLICT_STALE, [scope]);
 
-  // A missing file offers no local state to publish. Always pull latest into that path, including on a new machine.
-  // A file that exists, including an intentionally empty one, retains the ordinary decision protocol.
-  const answers = rows.length === 0 || (!hasEnv && !hasSourceAnswers && !dryRun) ? {}
+  const answers = rows.length === 0 ? {}
     : input.protocol || dryRun ? gateConflicts(flags, [scope], { dryRun }) : await ask(rows);
   if (answers === undefined) return 'stopped';
   if (dryRun) return 'up-to-date';
 
-  const useLocal = rows.filter(({ name }) => answers[name] === 'local');
+  const useLocal = differences.filter((row) => (automaticChoice(row) ?? answers[row.name]) === 'local');
   const changes: Changes = {
     set: Object.fromEntries(useLocal.filter(({ name }) => present(localPlaintext, name)).map(({ name }) => [name, localPlaintext[name]])),
     remove: useLocal.filter(({ name }) => !present(localPlaintext, name)).map(({ name }) => name),
@@ -104,5 +115,5 @@ export async function syncFolderValues(input: FolderSyncInput): Promise<'changed
     ? { ...folder, keep: SyncEngine.spliceKeepBranch(folder.keep, { ...folder.keep, variables: {} }, branch) }
     : folder;
   await commitFolder(currentFolder, changes, { seen: snapshot, envPath: input.envPath });
-  return rows.length === 0 && hasEnv ? 'up-to-date' : 'changed';
+  return differences.length === 0 && hasEnv ? 'up-to-date' : 'changed';
 }
