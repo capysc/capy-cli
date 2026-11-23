@@ -34,7 +34,7 @@ import { generatePairKeyPair, openPairEnvelope, parsePairEnvelope, type PairKeyP
 import { authorizeDevice, pollDeviceToken, type DeviceTokenExchange, type PairingIntent } from '../auth/deviceGrant';
 import { pairApprovalLink, resolvePairScope, type PairScope } from '../auth/pairing/pairScope';
 import { pairKeyFingerprint } from '../crypto/pairFingerprint';
-import { AuthService } from '../auth/authService';
+import { AuthService, silentAuthFailureMessage } from '../auth/authService';
 import { ServiceClient } from '../service/serviceClient';
 import { hasUsableOrgKeys, readLocalRoot, saveLocalRoot, writeOrgKeyFileRaw } from '../config/globalConfig';
 import { renderTerminalQr, type RenderedTerminalQr } from '../ui/terminalQr';
@@ -73,8 +73,8 @@ interface PairedOrg {
   readonly user_id: string;
 }
 
-/** Writes one entry's `local.key` + `key.enc`, honoring the local.key conflict guard. Returns whether it was written or skipped (--force not needed, values matched). */
-function writeEntry(entry: PairingEntry, force: boolean): 'written' {
+/** Refuses an entry whose `local.key` would overwrite a different one on this machine (unless `--force`). */
+function assertEntryCompatible(entry: PairingEntry, force: boolean): void {
   const newKLocal = Buffer.from(entry.k_local, 'base64url');
   const existing = readLocalRoot(entry.org_id, entry.user_id);
   if (existing && !existing.equals(newKLocal) && !force) {
@@ -84,7 +84,12 @@ function writeEntry(entry: PairingEntry, force: boolean): 'written' {
       { org_id: entry.org_id },
     );
   }
-  saveLocalRoot(entry.org_id, newKLocal, entry.user_id);
+}
+
+/** Writes one entry's `local.key` + `key.enc`, honoring the local.key conflict guard. */
+function writeEntry(entry: PairingEntry, force: boolean): 'written' {
+  assertEntryCompatible(entry, force);
+  saveLocalRoot(entry.org_id, Buffer.from(entry.k_local, 'base64url'), entry.user_id);
   writeOrgKeyFileRaw(entry.org_id, entry.key_enc, entry.user_id);
   return 'written';
 }
@@ -216,10 +221,24 @@ async function pickUpPairedKeys(
   }
 
   // A current Transport arrives bound to its transport id; verify it and rebind it to this installation before any write.
-  const prepared = await Promise.all(matching.map((entry) => prepareTransportCustody(entry, {
-    unwrap: async (orgId, ciphertext, transportId) => (await serviceClient.coDecrypt(orgId, ciphertext, undefined, transportId)).plaintext,
-    wrap: async (orgId, innerCiphertext) => (await serviceClient.wrapOuterLayer(orgId, innerCiphertext)).ciphertext,
-  })));
+  // One organization at a time: the session is scoped to each entry's organization and checked against the approving
+  // account before its Transport is opened, because the grant's default scope may differ and concurrent scope changes race.
+  const prepared: Readonly<PairingEntry>[] = [];
+  for (const entry of matching) {
+    prepared.push(await prepareTransportCustody(entry, {
+      unwrap: async (orgId, ciphertext, transportId) => {
+        const scoped = await session.authService.authenticateSilent(orgId);
+        if (!scoped.success) throw new CapyError(silentAuthFailureMessage(scoped), ERROR_CODES.AUTH_FAILED);
+        if (scoped.user_id !== exchange.user.id || scoped.organization_id !== orgId) {
+          throw new CapyError('The selected Transport account or organization could not be verified.', ERROR_CODES.AUTH_FAILED);
+        }
+        return (await serviceClient.coDecrypt(orgId, ciphertext, undefined, transportId)).plaintext;
+      },
+      wrap: async (orgId, innerCiphertext) => (await serviceClient.wrapOuterLayer(orgId, innerCiphertext)).ciphertext,
+    }));
+  }
+  // Every organization is checked before the first write, so a conflict in a later one leaves no keys half-installed.
+  for (const entry of prepared) assertEntryCompatible(entry, options.force === true);
   return prepared.map((entry) => {
     writeEntry(entry, options.force === true);
     return { org_id: entry.org_id, user_id: entry.user_id };
