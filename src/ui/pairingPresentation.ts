@@ -22,6 +22,7 @@ export const PAIRING_PRESENTATION = {
     'Otherwise say plainly that the QR cannot be shown here.', // COPY-FLAG
     'If qr.image.file is inside a remote runtime, copy it to your display-accessible workspace. Alternatively decode qr.image.data_uri locally. Never send the pairing link to an external QR service.', // COPY-FLAG (adapted from an earlier sentence)
     'Then run `answer.wait` at once in the foreground, and run it again whenever it exits 3 with PAIR_STILL_WAITING. The wait response does not repeat `qr.text` or `qr.image.data_uri`.', // COPY-FLAG
+    'After the human approves, Keep shows them a one-time code and the wait exits 3 with PAIR_CODE_REQUIRED and a form with one `code` field: ask the human for that code and run `answer.rerun` (`capy pair --wait --code <code>`). Never fill in the code yourself; only the person who approved can see it. A wrong code returns PAIR_CODE_MISMATCH with the form again.', // COPY-FLAG
     'If a different account approves, PAIR_ACCOUNT_MISMATCH is returned and nothing is installed.', // COPY-FLAG
     'When the keys are already on this machine, the pairing only signs in: the result says `"keys": "already_present"`.', // COPY-FLAG
   ],

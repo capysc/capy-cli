@@ -748,6 +748,12 @@ export const ERROR_CODES = {
   PAIR_TRANSPORT_REQUIRED: 'PAIR_TRANSPORT_REQUIRED',
   /** `capy pair`: the org (sign-in) or project (`--transport`) to pair into is not known here: run it in a project, pass `--org`, or use `--signup`. */
   PAIR_SCOPE_REQUIRED: 'PAIR_SCOPE_REQUIRED',
+  /** `capy pair`: approved in Keep; the one-time code Keep shows the approver is needed before anything is installed (agent mode: the refusal carries a form with a `code` field). */
+  PAIR_CODE_REQUIRED: 'PAIR_CODE_REQUIRED',
+  /** `capy pair --wait --code`: the code did not match the one Keep showed; the refusal carries the form again with `attempts_left`. */
+  PAIR_CODE_MISMATCH: 'PAIR_CODE_MISMATCH',
+  /** `capy pair`: too many wrong codes; the pairing was dropped. Nothing was installed. Start again. */
+  PAIR_CODE_FAILED: 'PAIR_CODE_FAILED',
   // --- capy remove (CAP-686) ---
   /** `capy remove NAME...`: one or more names given are not on the active branch. */
   VAR_NOT_FOUND: 'VAR_NOT_FOUND',
