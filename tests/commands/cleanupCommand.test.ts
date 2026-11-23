@@ -3,6 +3,7 @@ import { mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { execSync } from 'child_process';
+import { withoutSyncHookBlock } from '../../src/git/syncHooks';
 
 const TEST_DIR = join(tmpdir(), `capy-cleanup-test-${process.pid}`);
 const MARKER = '# --- capy auto-sync (do not remove) ---';
@@ -41,10 +42,7 @@ function runCleanup(hooksDir: string): string {
     const content = readFileSync(hookPath, 'utf-8');
     if (!content.includes(MARKER)) continue;
 
-    const escMarker = MARKER.replace(/[()]/g, '\\$&');
-    const escEnd = END_MARKER.replace(/[()]/g, '\\$&');
-    const re = new RegExp(`${escMarker}[\\s\\S]*?${escEnd}\\n?`);
-    const updated = content.replace(re, '').trim();
+    const updated = withoutSyncHookBlock(content).trim();
 
     if (!updated || /^#!.*sh$/.test(updated)) {
       rmSync(hookPath);
