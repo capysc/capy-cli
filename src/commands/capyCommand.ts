@@ -72,6 +72,14 @@ import { refuse, refusalFor, settle } from './projectLifecycleCommand';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
+/** What a brand-new project's setup asked before it created anything (see `askNewProjectQuestions`). */
+interface NewProjectAnswers {
+  readonly projectName: string;
+  readonly branchName: string;
+  /** This folder has a `.env` with variables and the person said to encrypt and push them. */
+  readonly pushLocalEnv: boolean;
+}
+
 /**
  * The org project listing's own core: "the lookup failed" and "this org has
  * none" both surface as an empty list, but `projectsUnavailable` says
@@ -675,15 +683,6 @@ export class CapyCommand {
 
     spinner.succeed(`Authenticated as ${authResult.user_email || authResult.user_first_name} (${authResult._auth_method || 'oauth'})`);
 
-    // Persist user ID to sync state immediately so the next `capy` run can find
-    // the user-scoped session file at ~/.capy/auth/sessions/{userId}.json.
-    // Without this, sync-state has no user_id, detectProjectState returns
-    // undefined, AuthService loads from the unscoped path and finds nothing,
-    // and the user is sent through OAuth again.
-    if (authResult.user_id) {
-      this.projectManager.writeSyncStateUserId(authResult.user_id);
-    }
-
     // Resolve organization
     const orgs = authResult.organizations || [];
     const refreshToken = authResult._refresh_token || this.authService.getToken()?.refresh_token;
@@ -693,6 +692,8 @@ export class CapyCommand {
     // and need to redeem their invite code to receive the shared master key.
     const orgKeyPresent = hasOrgKey(selectedOrg.id, authResult.user_id!);
     if (!orgKeyPresent) {
+      // This run ends here with an instruction to run `capy redeem`: remember the user first, as before.
+      this.rememberUserInFolder(authResult.user_id);
       throw new CapyError(orgKeyMissingMessage(selectedOrg.name), ERROR_CODES.AUTH_FAILED);
     }
 
@@ -721,14 +722,12 @@ export class CapyCommand {
       return;
     }
 
-    // Prompt for project name (`--name` answers it)
-    const defaultName = this.projectManager.getDefaultProjectName();
-    const projectName = this.options.setup?.name ?? await this.resolveProjectName(defaultName);
-
-    // Defense in depth: the prompt validators above already refuse
-    // "_system" (CAP-664), but this is the actual choke point before the
-    // service is asked to create anything, so it's checked again here.
-    assertProjectNameAllowed(projectName);
+    // Every question setup asks is asked here, before anything is created on the service or written to this
+    // folder: stopping at any of them (Ctrl+C, or declining the .env push) leaves nothing behind.
+    const answers = await this.askNewProjectQuestions(selectedOrg);
+    if (answers === undefined) return;
+    const { projectName, branchName: initialBranchName } = answers;
+    this.rememberUserInFolder(authResult.user_id);
 
     // Initialize project on service
     const initSpinner = ora('Creating project...').start();
@@ -736,7 +735,8 @@ export class CapyCommand {
       projectName,
       selectedOrg.id
     );
-    initSpinner.succeed(`Project created: ${projectName} (development)`);
+    // No branch is named here: it does not exist until it is created below, and that line says its name.
+    initSpinner.succeed(`Project created: ${projectName}`); // COPY-FLAG
 
     const keySpinner = ora('Generating encryption keys...').start();
 
@@ -761,12 +761,10 @@ export class CapyCommand {
 
     keySpinner.succeed('keep.lock created (0 secrets)');
 
-    // Create the initial branch. `POST /projects` no longer auto-creates
-    // one, so pick the name: default 'development', or a custom name the
-    // user enters. Protection isn't asked here - branches are unprotected
+    // Create the initial branch the person chose above. `POST /projects` no longer auto-creates
+    // one. Protection isn't asked here - branches are unprotected
     // by default and can be protected later via a dedicated action.
-    // `--branch` answers the branch question and `--protected` / `--no-protected` the protection (never asked here).
-    const initialBranchName = this.options.setup?.branch ?? await this.resolveInitialBranchName();
+    // `--protected` / `--no-protected` answer the protection (never asked here).
     const initialBranchProtected = this.options.setup?.protectedAnswer === 'yes';
 
     const branchSpinner = ora(`Creating branch ${initialBranchName}...`).start();
@@ -796,84 +794,109 @@ export class CapyCommand {
     // Stage keep.lock in git so collaborators don't hit "untracked file" errors on pull
     this.stageKeepLock();
 
-    // Check if there's an existing .env file with variables to sync
-    const localEnvPath = this.projectManager.getEnvPath(this.options.envPath);
-    const hasLocalEnv = existsSync(localEnvPath);
-
-    if (hasLocalEnv) {
-      const rawLocalEnv = this.fileManager.readEnvFile(this.options.envPath);
-      const localVarCount = Object.keys(rawLocalEnv).length;
-
-      if (localVarCount > 0) {
-        // Cross-org exfiltration guard — throws a CapyError if any encrypted
-        // entry can't be read with this project's key.
-        const decryptedLocalEnv = this.resolveDecryptedLocalEnv(rawLocalEnv, encryptionKey);
-
-        // Show found variables (max 5 names, "etc." for 6+)
-        const varNames = Object.keys(decryptedLocalEnv);
-        const displayNames = varNames.length > 5
-          ? varNames.slice(0, 5).join(', ') + ', etc.'
-          : varNames.join(', ');
-        console.log(`\nFound .env with ${localVarCount} secrets:`);
-        console.log(`  ${displayNames}`);
-
-        // The user already chose their initial branch above — push the
-        // existing .env to that branch. (Previously we re-prompted for a
-        // commit target here, but now that project init explicitly sets
-        // the initial branch, asking again was redundant + could create a
-        // second branch the user didn't ask for.)
-        const initBranch = initialBranchName;
-
-        // Confirm before encrypting + pushing — user may not be in the
-        // right project on first setup. After this step .env is rewritten
-        // with ciphertext, so getting it wrong is painful to recover from.
-        const confirmEncrypt = await this.resolveConfirmEncrypt(
-          localVarCount, projectName, selectedOrg.name, initBranch,
-        );
-
-        if (!confirmEncrypt) {
-          console.log(`\nSkipped. Your .env was not modified.`);
-          console.log(`Run ${B('capy')} again from the correct project directory, or run ${B('capy push')} when ready.`);
-          return;
-        }
-
-        const syncSpinner = ora('Syncing local variables...').start();
-        const syncResult = await this.pushAndEncryptLocalEnv(
-          decryptedLocalEnv, encryptionKey, initBranch, keep, projectResult, authResult,
-        );
-
-        if (syncResult.ok) {
-          syncSpinner.succeed(`keep.lock created (pinned to ${initBranch}, ${localVarCount} secrets)`);
-
-          // The pins were written after the first staging above — stage again so the staged copy carries them
-          this.stageKeepLock();
-
-          // Install git hooks
-          this.installGitHooks();
-
-          console.log(`\nYour .env is now encrypted. To run your app with decrypted secrets,`);
-          console.log(`prefix your command with ${B('capy run')} (e.g. ${B('capy run -- npm start')}).`);
-          console.log(`See: https://docs.capy.sc/using/running-your-app`);
-          console.log(`\nRun ${B('capy push')} to share your secrets with teammates.`);
-        } else {
-          const syncError: any = syncResult.error;
-          syncSpinner.fail(`Failed to sync variables: ${syncError.message}`);
-          console.log(`You can run ${B('capy')} again to retry syncing`);
-        }
-      } else {
-        console.log(`\nNo .env file found. Add secrets to .env, then run ${B('capy push')}`);
-        console.log('to share them with your team.');
-
-        // Install git hooks
-        this.installGitHooks();
-      }
-    } else {
+    if (!answers.pushLocalEnv) {
       console.log(`\nNo .env file found. Add secrets to .env, then run ${B('capy push')}`);
       console.log('to share them with your team.');
 
       // Install git hooks
       this.installGitHooks();
+      return;
     }
+
+    // The person already said yes to pushing the existing .env (asked above, before anything was created).
+    const rawLocalEnv = this.fileManager.readEnvFile(this.options.envPath);
+    const localVarCount = Object.keys(rawLocalEnv).length;
+
+    // Cross-org exfiltration guard — throws a CapyError if any encrypted
+    // entry can't be read with this project's key. It needs the project's key, so it can only run now.
+    const decryptedLocalEnv = this.resolveDecryptedLocalEnv(rawLocalEnv, encryptionKey);
+
+    const syncSpinner = ora('Syncing local variables...').start();
+    const syncResult = await this.pushAndEncryptLocalEnv(
+      decryptedLocalEnv, encryptionKey, initialBranchName, keep, projectResult, authResult,
+    );
+
+    if (syncResult.ok) {
+      syncSpinner.succeed(`keep.lock created (pinned to ${initialBranchName}, ${localVarCount} secrets)`);
+
+      // The pins were written after the first staging above — stage again so the staged copy carries them
+      this.stageKeepLock();
+
+      // Install git hooks
+      this.installGitHooks();
+
+      console.log(`\nYour .env is now encrypted. To run your app with decrypted secrets,`);
+      console.log(`prefix your command with ${B('capy run')} (e.g. ${B('capy run -- npm start')}).`);
+      console.log(`See: https://docs.capy.sc/using/running-your-app`);
+      console.log(`\nRun ${B('capy push')} to share your secrets with teammates.`);
+    } else {
+      const syncError: any = syncResult.error;
+      syncSpinner.fail(`Failed to sync variables: ${syncError.message}`);
+      console.log(`You can run ${B('capy')} again to retry syncing`);
+    }
+  }
+
+  /**
+   * Everything a brand-new project's setup asks, in the order it asks it: the project's name, its first branch, and,
+   * when this folder already has a `.env` with variables, whether to encrypt and push them. Asked before the service
+   * creates anything and before anything is written here, so stopping at any question leaves nothing behind.
+   * `undefined`: the person declined the `.env` push, so setup ends here, having created nothing.
+   */
+  private async askNewProjectQuestions(selectedOrg: Organization): Promise<NewProjectAnswers | undefined> {
+    // Prompt for project name (`--name` answers it)
+    const defaultName = this.projectManager.getDefaultProjectName();
+    const projectName = this.options.setup?.name ?? await this.resolveProjectName(defaultName);
+
+    // Defense in depth: the prompt validators above already refuse
+    // "_system" (CAP-664), but this is the actual choke point before the
+    // service is asked to create anything, so it's checked again here.
+    assertProjectNameAllowed(projectName);
+
+    // The first branch: default 'development', or a custom name the user enters. `--branch` answers it.
+    const branchName = this.options.setup?.branch ?? await this.resolveInitialBranchName();
+
+    // Check if there's an existing .env file with variables to sync
+    const localVarNames = this.localEnvVariableNames();
+    if (localVarNames.length === 0) {
+      return { projectName, branchName, pushLocalEnv: false };
+    }
+
+    // Show found variables (max 5 names, "etc." for 6+)
+    const displayNames = localVarNames.length > 5
+      ? localVarNames.slice(0, 5).join(', ') + ', etc.'
+      : localVarNames.join(', ');
+    console.log(`\nFound .env with ${localVarNames.length} secrets:`);
+    console.log(`  ${displayNames}`);
+
+    // Confirm before encrypting + pushing — user may not be in the
+    // right project on first setup. After this step .env is rewritten
+    // with ciphertext, so getting it wrong is painful to recover from.
+    const confirmEncrypt = await this.resolveConfirmEncrypt(
+      localVarNames.length, projectName, selectedOrg.name, branchName,
+    );
+    if (!confirmEncrypt) {
+      console.log(`\nSkipped. Nothing was created and your .env was not modified.`); // COPY-FLAG
+      console.log(`Run ${B('capy')} again from the correct project directory when ready.`); // COPY-FLAG
+      return undefined;
+    }
+    return { projectName, branchName, pushLocalEnv: true };
+  }
+
+  /**
+   * Persist the user ID to sync state so the next `capy` run can find the user-scoped session file at
+   * ~/.capy/auth/sessions/{userId}.json. Without it, sync-state has no user_id, detectProjectState returns
+   * undefined, AuthService loads from the unscoped path and finds nothing, and the user is sent through OAuth again.
+   * It writes `.capy/`, so setup does it only once the person has answered every question: stopping at one leaves
+   * the folder as it was found.
+   */
+  private rememberUserInFolder(userId: string | undefined): void {
+    if (userId) this.projectManager.writeSyncStateUserId(userId);
+  }
+
+  /** The names of the variables in this folder's `.env`; empty when there is no `.env`. */
+  private localEnvVariableNames(): readonly string[] {
+    const localEnvPath = this.projectManager.getEnvPath(this.options.envPath);
+    return existsSync(localEnvPath) ? Object.keys(this.fileManager.readEnvFile(this.options.envPath)) : [];
   }
 
   /**
@@ -1128,6 +1151,7 @@ export class CapyCommand {
     userId: string,
   ): Promise<void> {
     const branch = await this.resolveBootstrapBranch(project);
+    this.rememberUserInFolder(userId);
     const encryptionKey = await resolveProjectKey(orgId, project.id, userId, this.keyServiceOps());
 
     const fetchSpinner = ora(`Pulling ${project.name} (${branch})...`).start();
