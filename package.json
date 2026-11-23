@@ -42,6 +42,7 @@
     "release:publish": "node scripts/npm-remote.mjs publish",
     "typecheck": "tsc --noEmit",
     "typecheck:install": "tsc -p scripts/install/tsconfig.json",
+    "typecheck:windows": "tsc -p scripts/windows/tsconfig.json",
     "test:install": "bun test tests/scripts/installScripts.test.ts tests/scripts/installShell.test.ts",
     "test:e2e": "bun test tests/e2e/",
     "test:plugins": "bash tests/plugins/run-plugin-tests.sh",
@@ -77,7 +78,9 @@
     "@yao-pkg/pkg": "^6.22.0",
     "esbuild": "^0.25.8",
     "jsqr": "1.4.0",
+    "pe-library": "^2.0.3",
     "pngjs": "5.0.0",
+    "resedit": "^3.1.1",
     "typescript": "^5.0.0"
   },
   "overrides": {

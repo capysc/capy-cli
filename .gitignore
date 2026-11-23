@@ -10,3 +10,5 @@ bin-pkg
 .capy-token
 *.env
 .capy
+.pkg-cache-win
+build-win
