@@ -1,9 +1,8 @@
 import { randomBytes, createCipheriv, hkdfSync } from 'crypto';
-import { deriveInnerKey, aesEncrypt, aesDecrypt } from './inviteCrypto';
 
 const DEPLOY_ID_LENGTH = 32;
-const DT_LENGTH = 32;
-const DEPLOY_HKDF_INFO = 'capy:deploy';
+const DEPLOY_KEY_LENGTH = 32;
+const INNER_SECRET_LENGTH = 32;
 const IV_LENGTH = 12;
 const AUTH_TAG_LENGTH = 16;
 
@@ -15,55 +14,21 @@ export function generateDeployId(): Buffer {
 }
 
 /**
- * Generates a random 32-byte derivation token (DT).
+ * Generates the random per-deploy key. This, and not the project key, is what
+ * a deploy target holds: it decrypts exactly one deploy's blob, and only while
+ * the service still answers for that deploy.
  */
-export function generateDerivationToken(): Buffer {
-  return randomBytes(DT_LENGTH);
+export function generateDeployKey(): Buffer {
+  return randomBytes(DEPLOY_KEY_LENGTH);
 }
 
 /**
- * Inner-wraps the project key PK.
- * IK = HKDF(DT, salt=projectId, info="capy:deploy")
- * Returns base64(iv + ciphertext + authTag).
+ * Generates the inner blob a deploy registers with the service: 32 random
+ * bytes, base64. The service KMS-wraps it and treats it as opaque; it carries
+ * no key material of anyone's and wraps nothing.
  */
-export function deployInnerWrap(projectKey: Buffer, dt: Buffer, projectId: string): string {
-  const innerKey = deriveInnerKey(dt, projectId, DEPLOY_HKDF_INFO);
-  return aesEncrypt(projectKey, innerKey);
-}
-
-/**
- * Strips the inner layer using DT. Returns the project key PK.
- */
-export function deployInnerUnwrap(innerBlob: string, dt: Buffer, projectId: string): Buffer {
-  const innerKey = deriveInnerKey(dt, projectId, DEPLOY_HKDF_INFO);
-  return aesDecrypt(innerBlob, innerKey);
-}
-
-/**
- * Builds a deploy code: base64(deployId[32] + DT[32] + outerBlob[rest])
- * Fixed-offset binary encoding, same technique as invite redeemCode.
- */
-export function buildDeployCode(deployId: Buffer, dt: Buffer, outerBlob: string): string {
-  const outerBuf = Buffer.from(outerBlob, 'base64');
-  return Buffer.concat([deployId, dt, outerBuf]).toString('base64');
-}
-
-/**
- * Parses a deploy code into its components by byte offset.
- */
-export function parseDeployCode(deployCode: string): {
-  deployId: Buffer;
-  dt: Buffer;
-  outerBlob: string;
-} {
-  const buf = Buffer.from(deployCode, 'base64');
-  if (buf.length <= DEPLOY_ID_LENGTH + DT_LENGTH) {
-    throw new Error('Invalid deploy code: too short');
-  }
-  const deployId = buf.subarray(0, DEPLOY_ID_LENGTH);
-  const dt = buf.subarray(DEPLOY_ID_LENGTH, DEPLOY_ID_LENGTH + DT_LENGTH);
-  const outerBlob = buf.subarray(DEPLOY_ID_LENGTH + DT_LENGTH).toString('base64');
-  return { deployId, dt, outerBlob };
+export function generateInnerSecret(): string {
+  return randomBytes(INNER_SECRET_LENGTH).toString('base64');
 }
 
 /**
@@ -71,7 +36,7 @@ export function parseDeployCode(deployCode: string): {
  *
  * Zero-trust derivation:
  *   service_key = HKDF-SHA256(innerBlob, salt=projectId+hex(deployId), info="capy:deploy:service-key", 32)
- *   DECRYPT_KEY = HKDF-SHA256(projectKey || service_key, salt=deployId, info="capy:deploy:decrypt", 32)
+ *   DECRYPT_KEY = HKDF-SHA256(deployKey || service_key, salt=deployId, info="capy:deploy:decrypt", 32)
  *
  * Encrypted with AES-256-GCM(envBlob, DECRYPT_KEY) where envBlob is a JSON
  * object of { KEY: value } pairs. JSON is used (rather than KEY=value\n lines)
@@ -81,19 +46,22 @@ export function parseDeployCode(deployCode: string): {
  * `decryptSecretsBlob` still accepts the legacy line format for blobs minted by
  * older CLI versions.
  *
+ * `deployKey` is the random per-deploy key (`generateDeployKey`), never the
+ * project key: the project key does not take part in this derivation and must
+ * not leave the developer's machine.
+ *
  * IMPORTANT: innerBlob MUST be the exact base64 string that was sent to the
- * service for KMS-wrapping. Do not recompute innerBlob here — deployInnerWrap
- * uses a random IV, so a fresh call would produce different bytes, yielding a
- * different service_key and breaking decryption round-trip.
+ * service for KMS-wrapping. Do not regenerate it here — a fresh random inner
+ * blob would yield a different service_key and break the decryption round-trip.
  *
  * At decrypt time the consumer fetches service_key from the server (which
  * recovers the same innerBlob via KMS-unwrap) and reconstructs DECRYPT_KEY.
- * Zero-trust holds: projectKey alone is insufficient; revocation gates the
- * server's willingness to return service_key.
+ * deployKey alone is insufficient; revocation gates the server's willingness
+ * to return service_key.
  */
 export function encryptEnvBlob(
   envVars: Record<string, string>,
-  projectKey: Buffer,
+  deployKey: Buffer,
   innerBlob: string,
   projectId: string,
   deployId: Buffer,
@@ -106,7 +74,7 @@ export function encryptEnvBlob(
   );
 
   // DECRYPT_KEY derivation matches deployRuntime.decryptSecretsBlob
-  const combined = Buffer.concat([projectKey, serviceKey]);
+  const combined = Buffer.concat([deployKey, serviceKey]);
   const decryptKey = Buffer.from(
     hkdfSync('sha256', combined, deployId, 'capy:deploy:decrypt', 32),
   );
@@ -117,7 +85,7 @@ export function encryptEnvBlob(
   const plaintext = Buffer.from(JSON.stringify(envVars), 'utf-8');
 
   const iv = randomBytes(IV_LENGTH);
-  // No setAAD: decryptKey = HKDF(projectKey||serviceKey, salt=deployId,
+  // No setAAD: decryptKey = HKDF(deployKey||serviceKey, salt=deployId,
   // info="capy:deploy:decrypt") already binds the deploy/project context, so the
   // blob can't be replayed under a different deploy. AAD would be redundant.
   const cipher = createCipheriv('aes-256-gcm', decryptKey, iv, {

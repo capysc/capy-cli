@@ -403,10 +403,11 @@ deploy
 deploy
   .command('list')
   .description('List deploy tokens for this project')
-  .action(async (_options, command) => {
+  .option('--json', 'emit machine-readable JSON instead of the human UI')
+  .action(async (options, command) => {
     const { DeployListCommand } = await import('./commands/deployTokenCommand');
     const cmd = new DeployListCommand(process.env.CAPY_API_URL, true);
-    await cmd.execute();
+    await cmd.execute({ json: options.json });
   });
 
 // `targets` / `targets-remove` exist on the production binary and were missing

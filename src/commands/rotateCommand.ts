@@ -136,7 +136,7 @@ function describeDeploy(t: TargetConfig): string {
       venv === 'preview' ? `preview · branch=${t.branch}` : venv === 'production' ? 'production' : (venv ?? '?');
     const prBit =
       mode === 'ci' ? ` + open deploy PR${t.gitBaseBranch ? ` against ${t.gitBaseBranch}` : ''}` : '';
-    return `push SECRETS_BLOB + PROJECT_KEY to Vercel ${scope}${prBit}`;
+    return `push _SECRETS_BLOB + _DEPLOY_KEY to Vercel ${scope}${prBit}`;
   }
   if (mode === 'ci') {
     const base = t.gitBaseBranch ? ` against ${t.gitBaseBranch}` : '';

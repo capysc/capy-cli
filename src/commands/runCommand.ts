@@ -7,6 +7,7 @@ import { getShellPinnedEnv } from '../config/prodPins';
 import { resolveActiveUrl } from '../config/profileConfig';
 import type { ParsedSecretsBlob } from '../crypto/deployRuntime';
 import { ERROR_CODES } from '../types/index';
+import { DEPLOY_KEY_RUNTIME_PAIR, RUNTIME_PAIR, OLD_RUNTIME_PAIR } from '../deploy/dokployApi';
 import { planComposeForwardDetailed, OVERRIDE_FD, type ComposePlan } from './composeForward';
 
 /**
@@ -137,20 +138,20 @@ interface DeployRuntimeCrypto {
   fetchServiceKey: (apiUrl: string, deployId: string, outerBlob: string) => Promise<string>;
   decryptSecretsBlob: (
     encryptedVars: Buffer,
-    projectKeyHex: string,
+    keyHex: string,
     serviceKeyHex: string,
     deployId: Buffer,
   ) => Record<string, string>;
 }
 
 /**
- * Parses + decrypts a deployed-mode SECRETS_BLOB into a plaintext env map.
+ * Parses + decrypts a deployed-mode secrets blob into a plaintext env map.
  * Returns a Result instead of throwing so the caller can report the failure
  * as a clean `capy run:` line and exit 1, without a try/catch-assigned local.
  */
 async function resolveDeployedEnvMap(
   secretsBlob: string,
-  projectKey: string,
+  keyHex: string,
   crypto: DeployRuntimeCrypto,
 ): Promise<Result<Record<string, string>>> {
   try {
@@ -167,7 +168,7 @@ async function resolveDeployedEnvMap(
       deployId.toString('hex'),
       outerBlob.toString('base64'),
     );
-    const value = crypto.decryptSecretsBlob(encryptedVars, projectKey, serviceKey, deployId);
+    const value = crypto.decryptSecretsBlob(encryptedVars, keyHex, serviceKey, deployId);
     return { ok: true, value };
   } catch (err: any) {
     return { ok: false, message: err.message };
@@ -260,11 +261,11 @@ async function resolveLocalModeProjectKey(
 // every one in the file, not only Capy's — to the container with literal
 // quote characters still attached (see `deploy/adapters/dokploy.ts`'s
 // `DOKPLOY_STACK_QUOTES` warning). Stripping ONE layer of surrounding quotes
-// from `_SECRETS_BLOB`/`_PROJECT_KEY` — and ONLY those two, and ONLY one
-// layer — lets `capy run` still parse them correctly once the container's
-// own `capy` is new enough. Every other env var, and the OLD
-// `SECRETS_BLOB`/`PROJECT_KEY` pair, is left byte-for-byte as today: this is
-// new behavior for the new pair only, never a general env-parsing change.
+// from `_SECRETS_BLOB`/`_DEPLOY_KEY` and `_SECRETS_BLOB`/`_PROJECT_KEY`
+// — and ONLY those, and ONLY one layer — lets `capy run` still parse them
+// correctly once the container's own `capy` is new enough. Every other env
+// var, and the OLD `SECRETS_BLOB`/`PROJECT_KEY` pair, is left byte-for-byte as
+// today: this is never a general env-parsing change.
 
 /**
  * Strips exactly one surrounding pair of matching quotes (`"…"` or `'…'`)
@@ -295,45 +296,136 @@ type QuoteCheckedValue =
   | { readonly ok: true; readonly value: string }
   | { readonly ok: false; readonly code: string; readonly message: string };
 
-/** `_SECRETS_BLOB`: strip one quote layer, then validate as base64 — same shape the old pair is trusted to have, just checked explicitly here since stripping could otherwise turn a genuinely-bad value into something that merely LOOKS parseable. */
-function checkedNewSecretsBlob(raw: string): QuoteCheckedValue {
+/** A quote-stripped blob variable: strip one quote layer, then validate as base64 — same shape the old pair is trusted to have, just checked explicitly here since stripping could otherwise turn a genuinely-bad value into something that merely LOOKS parseable. */
+function checkedSecretsBlob(raw: string, name: string): QuoteCheckedValue {
   const stripped = stripOuterQuotePair(raw);
   if (!isValidBase64(stripped)) {
     return {
       ok: false,
       code: ERROR_CODES.RUN_SECRETS_BLOB_INVALID,
       // COPY-FLAG: minimal neutral wording.
-      message: '_SECRETS_BLOB is not valid base64 (checked after removing one layer of surrounding quotes, if present).',
+      message: `${name} is not valid base64 (checked after removing one layer of surrounding quotes, if present).`,
     };
   }
   return { ok: true, value: stripped };
 }
 
-/** `_PROJECT_KEY`: strip one quote layer, then validate as exactly 64 hex characters. */
-function checkedNewProjectKey(raw: string): QuoteCheckedValue {
+/** A key variable: strip one quote layer, then validate as exactly 64 hex characters. */
+function checkedHexKey(raw: string, name: string, code: string): QuoteCheckedValue {
   const stripped = stripOuterQuotePair(raw);
   if (!HEX64_RE.test(stripped)) {
     return {
       ok: false,
-      code: ERROR_CODES.RUN_PROJECT_KEY_INVALID,
+      code,
       // COPY-FLAG: minimal neutral wording.
-      message: '_PROJECT_KEY is not 64 hex characters (checked after removing one layer of surrounding quotes, if present).',
+      message: `${name} is not 64 hex characters (checked after removing one layer of surrounding quotes, if present).`,
     };
   }
   return { ok: true, value: stripped };
 }
 
-type NewRuntimePairResult =
-  | { readonly ok: true; readonly secretsBlob: string; readonly projectKey: string }
+type QuotedPairResult =
+  | { readonly ok: true; readonly secretsBlob: string; readonly key: string }
   | { readonly ok: false; readonly code: string; readonly message: string };
 
-/** Both new-pair values, stripped and validated together — short-circuits on the blob first, same order they're declared in. */
-function resolveNewRuntimePair(rawBlob: string, rawKey: string): NewRuntimePairResult {
-  const blob = checkedNewSecretsBlob(rawBlob);
+/** Both values of a quote-tolerant pair, stripped and validated together — short-circuits on the blob first, same order they're declared in. */
+function resolveQuotedPair(
+  raw: { readonly blob: string; readonly key: string },
+  names: { readonly blob: string; readonly key: string; readonly keyCode: string },
+): QuotedPairResult {
+  const blob = checkedSecretsBlob(raw.blob, names.blob);
   if (!blob.ok) return blob;
-  const key = checkedNewProjectKey(rawKey);
+  const key = checkedHexKey(raw.key, names.key, names.keyCode);
   if (!key.ok) return key;
-  return { ok: true, secretsBlob: blob.value, projectKey: key.value };
+  return { ok: true, secretsBlob: blob.value, key: key.value };
+}
+
+interface RawPair {
+  readonly blob: string;
+  readonly key: string;
+}
+
+/** Which runtime pair `capy run` reads — decided by variable NAME alone, never by value shape and never by trial decryption. */
+export type RuntimePairSelection =
+  | { readonly kind: 'local' }
+  | { readonly kind: 'refused'; readonly message: string }
+  /** `_SECRETS_BLOB` with `_DEPLOY_KEY` (a per-deploy key) or, failing that, `_PROJECT_KEY`. */
+  | { readonly kind: 'underscore'; readonly keySource: 'deploy' | 'project'; readonly raw: RawPair }
+  | { readonly kind: 'older'; readonly raw: RawPair };
+
+const [UNDERSCORE_BLOB, UNDERSCORE_PROJECT_KEY] = RUNTIME_PAIR;
+const [, UNDERSCORE_DEPLOY_KEY] = DEPLOY_KEY_RUNTIME_PAIR;
+const [OLDER_BLOB, OLDER_KEY] = OLD_RUNTIME_PAIR;
+
+const halfPairMessage = (blobName: string, keyNames: string): string =>
+  `capy run: ${blobName} and ${keyNames} must both be set, or neither. ` +
+  'Got only one — refusing to guess which mode you meant.';
+
+/** The refusal for a half-set underscore group, or null when it is whole or absent. */
+function underscoreHalfMessage(env: NodeJS.ProcessEnv): string | null {
+  const blob = Boolean(env[UNDERSCORE_BLOB]);
+  const deployKey = Boolean(env[UNDERSCORE_DEPLOY_KEY]);
+  const projectKey = Boolean(env[UNDERSCORE_PROJECT_KEY]);
+  if (blob === (deployKey || projectKey)) return null;
+  // A key without the blob: the message each key has always had (or, for `_DEPLOY_KEY`, its own).
+  if (!blob) {
+    return projectKey
+      ? halfPairMessage(UNDERSCORE_BLOB, UNDERSCORE_PROJECT_KEY)
+      : halfPairMessage(UNDERSCORE_BLOB, UNDERSCORE_DEPLOY_KEY);
+  }
+  // The blob without any key: names both keys it would accept.
+  // COPY-FLAG: minimal neutral wording.
+  return halfPairMessage(UNDERSCORE_BLOB, `${UNDERSCORE_DEPLOY_KEY} (or ${UNDERSCORE_PROJECT_KEY})`);
+}
+
+/**
+ * Picks the deployed-mode pair from the environment, by name. The newer names
+ * are read first and win; no combination of complete pairs is an error.
+ *   1. a half-set underscore group refuses, and so does a half-set older pair;
+ *   2. underscore group complete: `_SECRETS_BLOB` with `_DEPLOY_KEY` if set,
+ *      else `_PROJECT_KEY`;
+ *   3. else the older pair, else local mode.
+ */
+export function selectRuntimePair(env: NodeJS.ProcessEnv): RuntimePairSelection {
+  const underscoreHalf = underscoreHalfMessage(env);
+  if (underscoreHalf !== null) return { kind: 'refused', message: underscoreHalf };
+
+  const olderBlob = env[OLDER_BLOB];
+  const olderKey = env[OLDER_KEY];
+  if (Boolean(olderBlob) !== Boolean(olderKey)) {
+    return { kind: 'refused', message: halfPairMessage(OLDER_BLOB, OLDER_KEY) };
+  }
+
+  const blob = env[UNDERSCORE_BLOB];
+  const deployKey = env[UNDERSCORE_DEPLOY_KEY];
+  const projectKey = env[UNDERSCORE_PROJECT_KEY];
+  if (blob && deployKey) return { kind: 'underscore', keySource: 'deploy', raw: { blob, key: deployKey } };
+  if (blob && projectKey) return { kind: 'underscore', keySource: 'project', raw: { blob, key: projectKey } };
+  if (olderBlob && olderKey) return { kind: 'older', raw: { blob: olderBlob, key: olderKey } };
+  return { kind: 'local' };
+}
+
+type DeployedPairResolution =
+  | { readonly ok: true; readonly secretsBlob: string; readonly keyHex: string; readonly decryptedWins: boolean }
+  | { readonly ok: false; readonly message: string };
+
+/**
+ * The blob and key to decrypt with, and which side wins on a name clash.
+ * The underscore group goes through the quote-stripping check and lets
+ * decrypted values win; the older pair is used exactly as it always was.
+ */
+function resolveDeployedPair(selection: Exclude<RuntimePairSelection, { kind: 'local' | 'refused' }>): DeployedPairResolution {
+  if (selection.kind === 'older') {
+    return { ok: true, secretsBlob: selection.raw.blob, keyHex: selection.raw.key, decryptedWins: false };
+  }
+  const fromDeployKey = selection.keySource === 'deploy';
+  const resolved = resolveQuotedPair(selection.raw, {
+    blob: UNDERSCORE_BLOB,
+    key: fromDeployKey ? UNDERSCORE_DEPLOY_KEY : UNDERSCORE_PROJECT_KEY,
+    keyCode: fromDeployKey ? ERROR_CODES.RUN_DEPLOY_KEY_INVALID : ERROR_CODES.RUN_PROJECT_KEY_INVALID,
+  });
+  if (!resolved.ok) return { ok: false, message: `capy run: [${resolved.code}] ${resolved.message}` };
+  return { ok: true, secretsBlob: resolved.secretsBlob, keyHex: resolved.key, decryptedWins: true };
 }
 
 export async function runCommand(args: string[], devMode: boolean = false): Promise<number> {
@@ -342,63 +434,36 @@ export async function runCommand(args: string[], devMode: boolean = false): Prom
     return 1;
   }
 
-  // Deployed mode reads a runtime pair from process.env. Two pairs are
-  // supported, additively:
+  // Deployed mode reads a runtime pair from process.env, chosen by NAME (see
+  // `selectRuntimePair`). Newer names are read first and win:
   //
-  //   _SECRETS_BLOB + _PROJECT_KEY  (new — decrypted values win, see below)
-  //   SECRETS_BLOB  + PROJECT_KEY   (old — unchanged behavior)
+  //   _SECRETS_BLOB + _DEPLOY_KEY   (a random per-deploy key, never the project
+  //                                  key; decrypted values win)
+  //   _SECRETS_BLOB + _PROJECT_KEY  (the project key; decrypted values win)
+  //   SECRETS_BLOB  + PROJECT_KEY   (older — unchanged behavior)
   //
-  // `_PROJECT_KEY` holds exactly the value `PROJECT_KEY` holds today (the hex
-  // project key) — same secret, new name, new precedence.
-  const newSecretsBlob = process.env._SECRETS_BLOB;
-  const newProjectKey = process.env._PROJECT_KEY;
-  const oldSecretsBlob = process.env.SECRETS_BLOB;
-  const oldProjectKey = process.env.PROJECT_KEY;
-
-  // Guard: both or neither, per pair, independently. Half-configured deploys
-  // fail loudly instead of silently falling back to local mode and picking
-  // up wrong secrets. Half of one pair refuses regardless of what the other
-  // pair holds.
-  const newPairHalfSet = Boolean(newSecretsBlob) !== Boolean(newProjectKey);
-  const oldPairHalfSet = Boolean(oldSecretsBlob) !== Boolean(oldProjectKey);
-
-  if (newPairHalfSet) {
-    console.error(
-      'capy run: _SECRETS_BLOB and _PROJECT_KEY must both be set, or neither. ' +
-        'Got only one — refusing to guess which mode you meant.',
-    );
+  // `_DEPLOY_KEY` is preferred over `_PROJECT_KEY` when both are set.
+  const selection = selectRuntimePair(process.env);
+  if (selection.kind === 'refused') {
+    console.error(selection.message);
     return 1;
   }
-  if (oldPairHalfSet) {
-    console.error(
-      'capy run: SECRETS_BLOB and PROJECT_KEY must both be set, or neither. ' +
-        'Got only one — refusing to guess which mode you meant.',
-    );
-    return 1;
-  }
-
-  const useNewPair = Boolean(newSecretsBlob && newProjectKey);
-  const useOldPair = Boolean(oldSecretsBlob && oldProjectKey);
 
   // Deployed mode: CI, serverless, Vercel builds, Dokploy applications, etc.
-  if (useNewPair || useOldPair) {
-    // Strip + validate ONLY the new pair (see the "Quoted runtime-pair
-    // values" section above) — the old pair is untouched, exactly as today.
-    const newPairResolved = useNewPair
-      ? resolveNewRuntimePair(newSecretsBlob as string, newProjectKey as string)
-      : null;
-    if (newPairResolved && !newPairResolved.ok) {
-      console.error(`capy run: [${newPairResolved.code}] ${newPairResolved.message}`);
+  if (selection.kind !== 'local') {
+    // Strip + validate the underscore group (see the "Quoted runtime-pair
+    // values" section above) — the older pair is untouched, exactly as today.
+    const pair = resolveDeployedPair(selection);
+    if (!pair.ok) {
+      console.error(pair.message);
       return 1;
     }
-    const secretsBlob = newPairResolved ? newPairResolved.secretsBlob : (oldSecretsBlob as string);
-    const projectKey = newPairResolved ? newPairResolved.projectKey : (oldProjectKey as string);
 
     const { parseSecretsBlob, fetchServiceKey, decryptSecretsBlob } = await import(
       '../crypto/deployRuntime'
     );
 
-    const envMapResult = await resolveDeployedEnvMap(secretsBlob, projectKey, {
+    const envMapResult = await resolveDeployedEnvMap(pair.secretsBlob, pair.keyHex, {
       parseSecretsBlob,
       fetchServiceKey,
       decryptSecretsBlob,
@@ -419,14 +484,15 @@ export async function runCommand(args: string[], devMode: boolean = false): Prom
 
     // Precedence differs by pair, on purpose:
     //
-    // Old pair (SECRETS_BLOB/PROJECT_KEY): dotenv precedence — pre-existing
+    // Older pair (SECRETS_BLOB/PROJECT_KEY): dotenv precedence — pre-existing
     // process.env wins over the decrypted values. Shell overrides stay
     // sovereign. Unchanged from prior behavior.
     //
-    // New pair (_SECRETS_BLOB/_PROJECT_KEY): decrypted values win. Capy
-    // deploys are meant to be reversible — Capy adds its two runtime vars to
-    // a platform without deleting the user's old plaintext copies of the
-    // same-named vars, so those stale copies must not beat the blob at boot.
+    // Underscore group (_SECRETS_BLOB with _DEPLOY_KEY or _PROJECT_KEY):
+    // decrypted values win. Capy deploys are meant to be reversible — Capy
+    // adds its two runtime vars to a platform without deleting the user's old
+    // plaintext copies of the same-named vars, so those stale copies must not
+    // beat the blob at boot.
     //
     // getShellPinnedEnv() re-supplies the CAPY_* vars the prod entrypoint
     // stripped for itself (config/prodPins.ts), at exactly the precedence they
@@ -434,7 +500,7 @@ export async function runCommand(args: string[], devMode: boolean = false): Prom
     // is a different program and may well want them — capy-mcp reads
     // CAPY_API_URL by design. The runtime pair vars themselves stay in
     // process.env either way, so they reach the child exactly as today.
-    const childEnv = useNewPair
+    const childEnv = pair.decryptedWins
       ? { ...process.env, ...getShellPinnedEnv(), ...envMap }
       : { ...envMap, ...process.env, ...getShellPinnedEnv() };
     return spawnChild(args, childEnv);

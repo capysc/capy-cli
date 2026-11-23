@@ -3,11 +3,8 @@ import { readFileSync } from 'fs';
 import { join } from 'path';
 import {
   generateDeployId,
-  generateDerivationToken,
-  deployInnerWrap,
-  deployInnerUnwrap,
-  buildDeployCode,
-  parseDeployCode,
+  generateDeployKey,
+  generateInnerSecret,
   encryptEnvBlob,
   buildSecretsBlob,
 } from '../../src/crypto/deployCrypto';
@@ -48,7 +45,6 @@ function encryptPlaintextBlob(plaintext: string, decryptKey: Buffer): Buffer {
 }
 
 describe('deployCrypto', () => {
-  const projectKey = randomBytes(32);
   const projectId = 'test-project-456';
 
   describe('generateDeployId', () => {
@@ -65,33 +61,19 @@ describe('deployCrypto', () => {
     });
   });
 
-  describe('generateDerivationToken', () => {
-    it('generates a 32-byte token', () => {
-      const dt = generateDerivationToken();
-      expect(dt).toBeInstanceOf(Buffer);
-      expect(dt.length).toBe(32);
-    });
-  });
-
-  describe('deployInnerWrap / deployInnerUnwrap', () => {
-    it('round-trips project key', () => {
-      const dt = generateDerivationToken();
-      const wrapped = deployInnerWrap(projectKey, dt, projectId);
-      const unwrapped = deployInnerUnwrap(wrapped, dt, projectId);
-      expect(unwrapped.equals(projectKey)).toBe(true);
+  describe('generateDeployKey / generateInnerSecret', () => {
+    it('generates a 32-byte per-deploy key, different every time', () => {
+      const a = generateDeployKey();
+      expect(a).toBeInstanceOf(Buffer);
+      expect(a.length).toBe(32);
+      expect(a.equals(generateDeployKey())).toBe(false);
     });
 
-    it('fails with wrong DT', () => {
-      const dt = generateDerivationToken();
-      const wrongDt = generateDerivationToken();
-      const wrapped = deployInnerWrap(projectKey, dt, projectId);
-      expect(() => deployInnerUnwrap(wrapped, wrongDt, projectId)).toThrow();
-    });
-
-    it('fails with wrong projectId', () => {
-      const dt = generateDerivationToken();
-      const wrapped = deployInnerWrap(projectKey, dt, projectId);
-      expect(() => deployInnerUnwrap(wrapped, dt, 'wrong-project')).toThrow();
+    it('generates a base64 inner secret of 32 random bytes, different every time', () => {
+      const a = generateInnerSecret();
+      expect(Buffer.from(a, 'base64').length).toBe(32);
+      expect(Buffer.from(a, 'base64').toString('base64')).toBe(a);
+      expect(generateInnerSecret()).not.toBe(a);
     });
   });
 
@@ -105,76 +87,9 @@ describe('deployCrypto', () => {
     });
   });
 
-  describe('buildDeployCode / parseDeployCode', () => {
-    it('round-trips deploy ID, DT, and outer blob', () => {
-      const deployId = generateDeployId();
-      const dt = generateDerivationToken();
-      const outerBlob = randomBytes(96).toString('base64');
-
-      const code = buildDeployCode(deployId, dt, outerBlob);
-      const parsed = parseDeployCode(code);
-
-      expect(parsed.deployId.equals(deployId)).toBe(true);
-      expect(parsed.dt.equals(dt)).toBe(true);
-      expect(parsed.outerBlob).toBe(outerBlob);
-    });
-
-    it('throws on too-short deploy code', () => {
-      const shortCode = randomBytes(32).toString('base64');
-      expect(() => parseDeployCode(shortCode)).toThrow(/too short/);
-    });
-
-    it('throws on exactly 64 bytes (no outer blob)', () => {
-      const exactCode = randomBytes(64).toString('base64');
-      expect(() => parseDeployCode(exactCode)).toThrow(/too short/);
-    });
-  });
-
-  describe('full deploy roundtrip', () => {
-    it('simulates setup -> KMS wrap -> CI decrypt -> SDK key', () => {
-      // 1. Setup: generate deploy ID, DT, inner-wrap PK
-      const deployId = generateDeployId();
-      const dt = generateDerivationToken();
-      const innerBlob = deployInnerWrap(projectKey, dt, projectId);
-
-      // 2. Simulate KMS outer wrap (local dev: simple AES)
-      const { createCipheriv, createDecipheriv } = require('crypto');
-      const kmsKey = randomBytes(32);
-      const iv = randomBytes(12);
-      const cipher = createCipheriv('aes-256-gcm', kmsKey, iv, { authTagLength: 16 });
-      const enc = Buffer.concat([cipher.update(Buffer.from(innerBlob, 'base64')), cipher.final()]);
-      const tag = cipher.getAuthTag();
-      const outerBlob = Buffer.concat([iv, enc, tag]).toString('base64');
-
-      // 3. Build deploy code
-      const code = buildDeployCode(deployId, dt, outerBlob);
-
-      // 4. CI parses deploy code
-      const parsed = parseDeployCode(code);
-
-      // 5. Service KMS-unwraps outer blob
-      const outerCombined = Buffer.from(parsed.outerBlob, 'base64');
-      const oIv = outerCombined.subarray(0, 12);
-      const oTag = outerCombined.subarray(outerCombined.length - 16);
-      const oEnc = outerCombined.subarray(12, outerCombined.length - 16);
-      const decipher = createDecipheriv('aes-256-gcm', kmsKey, oIv, { authTagLength: 16 });
-      decipher.setAuthTag(oTag);
-      const recoveredInnerBlob = Buffer.concat([decipher.update(oEnc), decipher.final()]).toString('base64');
-
-      // 6. CI unwraps inner layer with DT
-      const recoveredPK = deployInnerUnwrap(recoveredInnerBlob, parsed.dt, projectId);
-      expect(recoveredPK.equals(projectKey)).toBe(true);
-
-      // 7. Verify the recovered key is a valid hex CAPY_KEY
-      const pkHex = recoveredPK.toString('hex');
-      expect(pkHex).toMatch(/^[0-9a-f]{64}$/);
-    });
-  });
-
   describe('encryptEnvBlob / decryptSecretsBlob round-trip (zero-trust)', () => {
     it('mint-side encrypt round-trips with consumer-side decrypt via service_key', () => {
       const pk = randomBytes(32);
-      const dt = generateDerivationToken();
       const deployId = generateDeployId();
       const envVars = {
         DATABASE_URL: 'postgres://u:p@h/d',
@@ -183,7 +98,7 @@ describe('deployCrypto', () => {
       };
 
       // Mint side: exactly what capy deploy does.
-      const innerBlob = deployInnerWrap(pk, dt, projectId);
+      const innerBlob = generateInnerSecret();
       const encryptedVars = encryptEnvBlob(envVars, pk, innerBlob, projectId, deployId);
 
       // Simulate the server's service_key derivation. In production, the server
@@ -205,16 +120,15 @@ describe('deployCrypto', () => {
       expect(decrypted).toEqual(envVars);
     });
 
-    it('projectKey alone cannot decrypt (zero-trust property)', () => {
+    it('the key alone cannot decrypt without the service key (zero-trust property)', () => {
       const pk = randomBytes(32);
-      const dt = generateDerivationToken();
       const deployId = generateDeployId();
       const envVars = { SECRET: 'leaked' };
 
-      const innerBlob = deployInnerWrap(pk, dt, projectId);
+      const innerBlob = generateInnerSecret();
       const encryptedVars = encryptEnvBlob(envVars, pk, innerBlob, projectId, deployId);
 
-      // An attacker with just pk (no service_key) should not be able to decrypt.
+      // An attacker with just the key (no service_key) should not be able to decrypt.
       // Using a zero-filled service_key yields a wrong DECRYPT_KEY → auth fail.
       const fakeServiceKey = Buffer.alloc(32).toString('hex');
       expect(() =>
@@ -224,11 +138,10 @@ describe('deployCrypto', () => {
 
     it('wrong service_key cannot decrypt', () => {
       const pk = randomBytes(32);
-      const dt = generateDerivationToken();
       const deployId = generateDeployId();
       const envVars = { SECRET: 'value' };
 
-      const innerBlob = deployInnerWrap(pk, dt, projectId);
+      const innerBlob = generateInnerSecret();
       const encryptedVars = encryptEnvBlob(envVars, pk, innerBlob, projectId, deployId);
 
       const otherServiceKey = randomBytes(32).toString('hex');
@@ -239,12 +152,11 @@ describe('deployCrypto', () => {
 
     it('SECRETS_BLOB end-to-end: buildSecretsBlob + parseSecretsBlob + decryptSecretsBlob', () => {
       const pk = randomBytes(32);
-      const dt = generateDerivationToken();
       const deployId = generateDeployId();
       const envVars = { API_KEY: 'val', DB: 'url' };
 
       // Mint
-      const innerBlob = deployInnerWrap(pk, dt, projectId);
+      const innerBlob = generateInnerSecret();
       const outerBlob = innerBlob; // skip KMS; just round-trip through the container format
       const encryptedVars = encryptEnvBlob(envVars, pk, innerBlob, projectId, deployId);
       const secretsBlobStr = buildSecretsBlob(deployId, outerBlob, encryptedVars);
@@ -276,9 +188,8 @@ describe('deployCrypto', () => {
   describe('multi-line and special-character values (CAP-55)', () => {
     function deployRoundtrip(envVars: Record<string, string>): Record<string, string> {
       const pk = randomBytes(32);
-      const dt = generateDerivationToken();
       const deployId = generateDeployId();
-      const innerBlob = deployInnerWrap(pk, dt, projectId);
+      const innerBlob = generateInnerSecret();
       const encryptedVars = encryptEnvBlob(envVars, pk, innerBlob, projectId, deployId);
       return decryptSecretsBlob(
         encryptedVars,
@@ -307,9 +218,8 @@ describe('deployCrypto', () => {
 
     it('decrypts a legacy KEY=value\\n blob minted by an older CLI (backward compat)', () => {
       const pk = randomBytes(32);
-      const dt = generateDerivationToken();
       const deployId = generateDeployId();
-      const innerBlob = deployInnerWrap(pk, dt, projectId);
+      const innerBlob = generateInnerSecret();
       const decryptKey = deriveDecryptKey(pk, innerBlob, projectId, deployId);
 
       // Mint with the OLD serialization the bug-era CLI produced.

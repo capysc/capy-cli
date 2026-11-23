@@ -6,8 +6,7 @@ import { createCipheriv, createHash, randomBytes, hkdfSync } from 'crypto';
 import { createServer, Server } from 'http';
 import {
   generateDeployId,
-  generateDerivationToken,
-  deployInnerWrap,
+  generateInnerSecret,
   encryptEnvBlob,
   buildSecretsBlob,
 } from '../../src/crypto/deployCrypto';
@@ -177,10 +176,9 @@ describe('capy run', () => {
 function buildDeployedFixture(envVars: Record<string, string>) {
   const projectId = 'test-proj-' + randomBytes(4).toString('hex');
   const pk = randomBytes(32);
-  const dt = generateDerivationToken();
   const deployId = generateDeployId();
 
-  const innerBlob = deployInnerWrap(pk, dt, projectId);
+  const innerBlob = generateInnerSecret();
   const encryptedVars = encryptEnvBlob(envVars, pk, innerBlob, projectId, deployId);
   // Simulate KMS outer wrap as a passthrough (local dev KMS fallback path).
   // The fake server uses the same innerBlob bytes to derive service_key so

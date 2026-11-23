@@ -329,7 +329,7 @@ async function decryptCurrentBranch(
 }
 
 /**
- * Mint the SECRETS_BLOB + PROJECT_KEY pair for build-time injection (what
+ * Mint the _SECRETS_BLOB + _DEPLOY_KEY pair for build-time injection (what
  * `capy run` consumes). Same devMode-aware auth as decryptCurrentBranch — so
  * under capy-dev it talks to the dev service, not prod. The bundle carries
  * only `vars` — the target's selection — never the whole `.env`.
@@ -347,7 +347,7 @@ async function mintForDeploy(
   cwd: string,
   vars: readonly string[],
   devMode: boolean = false,
-): Promise<{ secretsBlob: string; projectKey: string; deployId: string; valueHashes: Record<string, string> }> {
+): Promise<{ secretsBlob: string; deployKey: string; deployId: string; valueHashes: Record<string, string> }> {
   const keep = readKeep(cwd);
   if (!keep) throw new Error('no keep.lock — run `capy` to sync first.');
 
@@ -372,7 +372,7 @@ async function mintForDeploy(
   });
   return {
     secretsBlob: minted.secretsBlob,
-    projectKey: minted.projectKey,
+    deployKey: minted.deployKey,
     deployId: minted.deployId,
     valueHashes: minted.valueHashes,
   };
@@ -381,7 +381,7 @@ async function mintForDeploy(
 /** What the deploy hands its adapter, or `null` once the failure is printed. */
 interface DeploySecrets {
   env: Record<string, string>;
-  deployToken?: { secretsBlob: string; projectKey: string; deployId: string };
+  deployToken?: { secretsBlob: string; deployKey: string; deployId: string };
   /**
    * sha256(value).slice(0,16) per variable actually delivered (CAP-679) —
    * from the minted bundle's own plaintext for a token adapter, or hashed

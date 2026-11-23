@@ -460,11 +460,12 @@ deploy
 deploy
   .command('list')
   .description('List deploy tokens for this project')
-  .action(async (_options, command) => {
+  .option('--json', 'emit machine-readable JSON instead of the human UI')
+  .action(async (options, command) => {
     assertNotLocalOnly('deploy list');
     const { DeployListCommand } = await import('./commands/deployTokenCommand');
     const cmd = new DeployListCommand();
-    await cmd.execute();
+    await cmd.execute({ json: options.json });
   });
 
 deploy

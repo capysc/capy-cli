@@ -3,6 +3,7 @@ import {
   MANAGED_BEGIN,
   MANAGED_END,
   OLD_RUNTIME_PAIR,
+  DEPLOY_KEY_RUNTIME_PAIR,
   RUNTIME_PAIR,
   createDokployClient,
   listImportableEntries,
@@ -138,15 +139,20 @@ describe('dokployApi — listImportableEntries', () => {
     ]);
   });
 
-  test('excludes both runtime pairs — never offered as an "importable" project var', () => {
+  test('excludes every runtime pair — never offered as an "importable" project var', () => {
     const env = [
+      `${DEPLOY_KEY_RUNTIME_PAIR[1]}=y`,
+      'CAPY_API_URL=http://app-owned',
       `${RUNTIME_PAIR[0]}=x`,
       `${RUNTIME_PAIR[1]}=y`,
       `${OLD_RUNTIME_PAIR[0]}=x`,
       `${OLD_RUNTIME_PAIR[1]}=y`,
       'REAL_VAR=z',
     ].join('\n');
-    expect(listImportableEntries(env)).toEqual([{ name: 'REAL_VAR', value: 'z' }]);
+    expect(listImportableEntries(env)).toEqual([
+      { name: 'CAPY_API_URL', value: 'http://app-owned' },
+      { name: 'REAL_VAR', value: 'z' },
+    ]);
   });
 
   test('excludes names inside the Capy block itself', () => {

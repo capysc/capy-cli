@@ -551,6 +551,8 @@ export const ERROR_CODES = {
   SNAPSHOT_NOT_FOUND: 'SNAPSHOT_NOT_FOUND',
   NO_SECRETS: 'NO_SECRETS',
   DEPLOY_TOKEN_NOT_FOUND: 'DEPLOY_TOKEN_NOT_FOUND',
+  // The service refused a `credential_generation` that is neither `deploy_key` nor `project_key` (HTTP 400).
+  INVALID_CREDENTIAL_GENERATION: 'INVALID_CREDENTIAL_GENERATION',
   ORG_NOT_FOUND: 'ORG_NOT_FOUND',
   LOCAL_KEY_BACKEND_ERROR: 'LOCAL_KEY_BACKEND_ERROR',
   // Local-state refusals: the command cannot start because this directory,
@@ -647,10 +649,12 @@ export const ERROR_CODES = {
   DOKPLOY_STACK_QUOTES: 'DOKPLOY_STACK_QUOTES',
   /** Couldn't read the Dokploy instance's version to check for the stack quoting issue above — warn rather than guess either way. */
   DOKPLOY_VERSION_UNKNOWN: 'DOKPLOY_VERSION_UNKNOWN',
-  /** `_SECRETS_BLOB` (the new runtime pair) is not valid base64 after stripping one layer of surrounding quotes. */
+  /** `_SECRETS_BLOB` (the underscore runtime group) is not valid base64 after stripping one layer of surrounding quotes. */
   RUN_SECRETS_BLOB_INVALID: 'RUN_SECRETS_BLOB_INVALID',
-  /** `_PROJECT_KEY` (the new runtime pair) is not 64 hex characters after stripping one layer of surrounding quotes. */
+  /** `_PROJECT_KEY` (the underscore runtime group) is not 64 hex characters after stripping one layer of surrounding quotes. */
   RUN_PROJECT_KEY_INVALID: 'RUN_PROJECT_KEY_INVALID',
+  /** `_DEPLOY_KEY` (the per-deploy key) is not 64 hex characters after stripping one layer of surrounding quotes. */
+  RUN_DEPLOY_KEY_INVALID: 'RUN_DEPLOY_KEY_INVALID',
   // --- Dokploy plaintext delivery (CAP-682) ---
   /**
    * A value Capy needs to deliver plaintext to Dokploy cannot be rendered as

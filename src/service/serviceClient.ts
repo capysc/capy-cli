@@ -35,6 +35,8 @@ const SERVER_CODES = new Set<string>([
   ERROR_CODES.NO_SECRETS,
   ERROR_CODES.ORG_NOT_FOUND,
   ERROR_CODES.DEPLOY_TOKEN_NOT_FOUND,
+  // `POST /orgs/:orgId/deploy` and `GET /deploy/instructions/:platform` with a `credential_generation` that is neither value: HTTP 400.
+  ERROR_CODES.INVALID_CREDENTIAL_GENERATION,
   // CAP-684 basic pairing — device-pairings pickup refusals. INVALID_FORMAT
   // is real here too: pickup's own `sendError` 400 for a missing/empty
   // `device_code` (service/src/routes/devicePairings.ts) — without it in
@@ -125,6 +127,22 @@ export type TransportStatusResult =
   | { readonly kind: 'redeemed' }
   | { readonly kind: 'expired' }
   | { readonly kind: 'unknown' };
+
+/**
+ * What a deploy target holds: `deploy_key` is a random per-deploy key, `project_key` is the project key
+ * itself (every token minted before per-deploy keys existed). A service that does not report it means `project_key`.
+ */
+export type CredentialGeneration = 'deploy_key' | 'project_key';
+
+/** One row of `GET /orgs/:orgId/projects/:projectId/deploy-tokens`. `credential_generation` is absent from an older service. */
+export interface DeployTokenInfo {
+  deploy_id: string;
+  label: string | null;
+  created_by: string;
+  created_at: string;
+  revoked_at: string | null;
+  credential_generation?: CredentialGeneration;
+}
 
 /** CAP-729: an unrevoked deploy token, as the project delete lists it. Never carries a secret. */
 export interface LiveDeployTokenInfo {
@@ -1015,8 +1033,24 @@ export class ServiceClient {
     await this.request('DELETE', `/orgs/${orgId}/members/${encodeURIComponent(membershipId)}`);
   }
 
-  async createDeployToken(orgId: string, deployId: string, projectId: string, innerBlob: string): Promise<{ outer_blob: string }> {
-    return this.request('POST', `/orgs/${orgId}/deploy`, { deploy_id: deployId, project_id: projectId, inner_blob: innerBlob });
+  /**
+   * Registers a deploy token. `credentialGeneration` says what the target
+   * will hold: `deploy_key` (a random per-deploy key) or `project_key` (the
+   * project key itself, what every token minted before this was).
+   */
+  async createDeployToken(
+    orgId: string,
+    deployId: string,
+    projectId: string,
+    innerBlob: string,
+    credentialGeneration: CredentialGeneration,
+  ): Promise<{ outer_blob: string }> {
+    return this.request('POST', `/orgs/${orgId}/deploy`, {
+      deploy_id: deployId,
+      project_id: projectId,
+      inner_blob: innerBlob,
+      credential_generation: credentialGeneration,
+    });
   }
 
   /**
@@ -1063,23 +1097,23 @@ export class ServiceClient {
   /**
    * Fetch platform-specific deploy instructions (unauthenticated).
    */
-  async fetchDeployInstructions(platform: string): Promise<{ platform: string; markdown: string }> {
+  async fetchDeployInstructions(
+    platform: string,
+    credentialGeneration?: CredentialGeneration,
+  ): Promise<{ platform: string; markdown: string }> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 15000);
+    const query = credentialGeneration === undefined ? '' : `?credential_generation=${encodeURIComponent(credentialGeneration)}`;
+    const names = credentialGeneration === 'deploy_key' ? '_SECRETS_BLOB and _DEPLOY_KEY' : 'SECRETS_BLOB and PROJECT_KEY';
+    const fallback = { platform, markdown: `Set ${names} as environment variables in your deployment platform.` };
 
-    let res: Response;
-    try {
-      res = await fetch(`${this.apiUrl}/deploy/instructions/${encodeURIComponent(platform)}`, {
-        signal: controller.signal,
-      });
-    } catch {
-      clearTimeout(timeout);
-      return { platform, markdown: `Set SECRETS_BLOB and PROJECT_KEY as environment variables in your deployment platform.` };
-    }
+    const res = await fetch(`${this.apiUrl}/deploy/instructions/${encodeURIComponent(platform)}${query}`, {
+      signal: controller.signal,
+    }).catch(() => null);
     clearTimeout(timeout);
 
-    if (!res.ok) {
-      return { platform, markdown: `Set SECRETS_BLOB and PROJECT_KEY as environment variables in your deployment platform.` };
+    if (res === null || !res.ok) {
+      return fallback;
     }
 
     return res.json() as Promise<{ platform: string; markdown: string }>;
@@ -1089,7 +1123,7 @@ export class ServiceClient {
     await this.request('DELETE', `/deploy/${encodeURIComponent(deployId)}`);
   }
 
-  async listDeployTokens(orgId: string, projectId: string): Promise<{ tokens: Array<{ deploy_id: string; label: string | null; created_by: string; created_at: string; revoked_at: string | null }> }> {
+  async listDeployTokens(orgId: string, projectId: string): Promise<{ tokens: DeployTokenInfo[] }> {
     return this.request('GET', `/orgs/${orgId}/projects/${encodeURIComponent(projectId)}/deploy-tokens`);
   }
 

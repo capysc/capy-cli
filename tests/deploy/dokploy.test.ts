@@ -21,6 +21,7 @@ import {
 } from '../../src/deploy/adapters/dokploy';
 import { DeployContext, RemoveOfferContext, TargetConfig } from '../../src/deploy/adapter';
 import { getAdapter } from '../../src/deploy/registry';
+import { DEPLOY_KEY_RUNTIME_PAIR, RESERVED_RUNTIME_NAMES } from '../../src/deploy/dokployApi';
 
 // ── Scripted Dokploy ───────────────────────────────────────────────────────
 //
@@ -289,6 +290,18 @@ describe('dokploy — env merge (reserved names)', () => {
       code: 'reserved_outside_block',
       names: [...OLD_RUNTIME_PAIR],
     });
+  });
+
+  test('_DEPLOY_KEY (the per-deploy key) is refused outside the block too, by exact name', () => {
+    expect(DEPLOY_KEY_RUNTIME_PAIR).toEqual(['_SECRETS_BLOB', '_DEPLOY_KEY']);
+    expect(envProblems('_DEPLOY_KEY=old')).toEqual({ code: 'reserved_outside_block', names: ['_DEPLOY_KEY'] });
+    expect(RESERVED_RUNTIME_NAMES.toSorted()).toEqual(
+      ['PROJECT_KEY', 'SECRETS_BLOB', '_DEPLOY_KEY', '_PROJECT_KEY', '_SECRETS_BLOB'],
+    );
+  });
+
+  test('reservation is by exact name: an app\'s own CAPY_* variables are not reserved', () => {
+    expect(envProblems('CAPY_API_URL=http://x\nCAPY_OTHER=a')).toBeNull();
   });
 
   test('an edited or duplicated block is refused rather than guessed at', () => {

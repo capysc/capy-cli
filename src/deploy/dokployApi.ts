@@ -865,14 +865,11 @@ export const MANAGED_BEGIN = '# capy:managed:begin — written by `capy deploy`,
 export const MANAGED_END = '# capy:managed:end';
 
 /**
- * The two names `capy run` reads FIRST in deployed mode, and what `capy
- * deploy` writes today. Chosen so a stale plaintext var of the same NAME the
- * user already had on the platform never wins over the decrypted value —
- * see `capy run`'s precedence rules in `runCommand.ts`.
- *
- * NOT `_DEPLOY_KEY`: that name is reserved for the OIDC design's per-deploy
- * key (`<deployId>.<K_deploy>`, see `docs/oidc-ci-auth-spec.md`, CAP-54).
- * This variable holds the project key, so it is `_PROJECT_KEY`.
+ * The pair `capy run` reads in deployed mode for the project-key flow. Chosen
+ * so a stale plaintext var of the same NAME the user already had on the
+ * platform never wins over the decrypted value — see `capy run`'s precedence
+ * rules in `runCommand.ts`. This variable holds the project key, so it is
+ * `_PROJECT_KEY`. The blob variable is shared with `_DEPLOY_KEY` below.
  */
 export const RUNTIME_PAIR = ['_SECRETS_BLOB', '_PROJECT_KEY'] as const;
 
@@ -880,9 +877,26 @@ export const RUNTIME_PAIR = ['_SECRETS_BLOB', '_PROJECT_KEY'] as const;
  * The pair `capy run` still reads for back-compat, in the platform's own
  * env-wins-over-blob precedence. No adapter writes these names anymore, but
  * a leftover pair from an older deploy is still a name Capy must never
- * silently collide with.
+ * silently collide with. (A platform whose variable names must start with a
+ * letter is also delivered this pair, see `LETTER_FIRST_NAME_PLATFORMS`.)
  */
 export const OLD_RUNTIME_PAIR = ['SECRETS_BLOB', 'PROJECT_KEY'] as const;
+
+/**
+ * The pair a newly minted deploy token ships: the blob, and `_DEPLOY_KEY`, the
+ * RANDOM per-deploy key (never the project key) that opens only that blob
+ * while the service still answers for the deploy. `_DEPLOY_KEY` is the
+ * per-deploy key of this static path. `capy run` reads it ahead of
+ * `_PROJECT_KEY` when both are set.
+ */
+export const DEPLOY_KEY_RUNTIME_PAIR = ['_SECRETS_BLOB', '_DEPLOY_KEY'] as const;
+
+/** Every runtime-pair name, by exact name: an app variable must never collide with one. */
+export const RESERVED_RUNTIME_NAMES: readonly string[] = [
+  ...RUNTIME_PAIR,
+  DEPLOY_KEY_RUNTIME_PAIR[1],
+  ...OLD_RUNTIME_PAIR,
+];
 
 const KEY_VALUE_LINE = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$/;
 
@@ -1024,7 +1038,7 @@ function outsideText(split: EnvSplit): string {
 
 /**
  * Everything that must stop a deploy before anything is minted or written: an
- * edited/duplicated block, or a runtime pair (old or new name) that Capy did
+ * edited/duplicated block, or a runtime pair (any generation's name) that Capy did
  * not write sitting outside the block — an unknown pair would be silently
  * replaced or would shadow ours.
  */
@@ -1032,7 +1046,7 @@ export function envProblems(env: string | null): EnvMergeProblem | null {
   const split = splitManagedBlock(env);
   if ('code' in split) return split;
   const keys = new Set(envKeys(outsideLines(split)));
-  const reserved = [...RUNTIME_PAIR, ...OLD_RUNTIME_PAIR].filter((k) => keys.has(k));
+  const reserved = RESERVED_RUNTIME_NAMES.filter((k) => keys.has(k));
   return reserved.length > 0 ? { code: 'reserved_outside_block', names: reserved } : null;
 }
 
@@ -1752,7 +1766,7 @@ function classifyImportValue(name: string, value: string): ImportableEnvEntry {
 export function listImportableEntries(env: string | null): readonly ImportableEnvEntry[] {
   const split = splitManagedBlock(env);
   if ('code' in split) return [];
-  const reserved = new Set<string>([...RUNTIME_PAIR, ...OLD_RUNTIME_PAIR]);
+  const reserved = new Set<string>(RESERVED_RUNTIME_NAMES);
   const parsed = parseDotenv(outsideText(split));
   return Object.entries(parsed)
     .filter(([name]) => !reserved.has(name))

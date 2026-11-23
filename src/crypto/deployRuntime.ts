@@ -57,16 +57,14 @@ export async function fetchServiceKey(
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 30000);
 
-  let res: globalThis.Response;
-  try {
-    res = await fetch(`${apiUrl}/deploy/${encodeURIComponent(deployId)}/decrypt`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ciphertext: outerBlob }),
-      signal: controller.signal,
-    });
-  } catch {
-    clearTimeout(timeout);
+  const res = await fetch(`${apiUrl}/deploy/${encodeURIComponent(deployId)}/decrypt`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ciphertext: outerBlob }),
+    signal: controller.signal,
+  }).catch(() => null);
+  clearTimeout(timeout);
+  if (res === null) {
     throw new Error(
       `Cannot reach Capy service for deploy decrypt at ${apiUrl}. ` +
         'This token has to be redeemed against the service that minted it — prod capy ' +
@@ -75,7 +73,6 @@ export async function fetchServiceKey(
         'it with the capy-dev / capy-staging build that minted it.',
     );
   }
-  clearTimeout(timeout);
 
   if (res.status === 404) {
     throw new Error(
@@ -107,48 +104,51 @@ export async function fetchServiceKey(
  * so a legacy blob (which starts with a key name) never collides with JSON.
  */
 export function parseEnvPlaintext(text: string): Record<string, string> {
-  if (text.trimStart().startsWith('{')) {
-    try {
-      const obj = JSON.parse(text);
-      if (obj && typeof obj === 'object' && !Array.isArray(obj)) {
-        const result: Record<string, string> = {};
-        for (const [k, v] of Object.entries(obj)) {
-          result[k] = typeof v === 'string' ? v : String(v);
-        }
-        return result;
-      }
-    } catch {
-      // Not valid JSON after all — fall through to legacy line parsing.
-    }
-  }
+  const fromJson = parseJsonEnv(text);
+  if (fromJson !== null) return fromJson;
+  return Object.fromEntries(
+    text.split('\n').flatMap((line): Array<[string, string]> => {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('#')) return [];
+      const eqIdx = trimmed.indexOf('=');
+      if (eqIdx === -1) return [];
+      return [[trimmed.substring(0, eqIdx), trimmed.substring(eqIdx + 1)]];
+    }),
+  );
+}
 
-  const result: Record<string, string> = {};
-  for (const line of text.split('\n')) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith('#')) continue;
-    const eqIdx = trimmed.indexOf('=');
-    if (eqIdx === -1) continue;
-    result[trimmed.substring(0, eqIdx)] = trimmed.substring(eqIdx + 1);
+/** The JSON-object form of an env plaintext, or null when it is not one (so the legacy line form applies). */
+function parseJsonEnv(text: string): Record<string, string> | null {
+  if (!text.trimStart().startsWith('{')) return null;
+  try {
+    const obj = JSON.parse(text);
+    if (obj && typeof obj === 'object' && !Array.isArray(obj)) {
+      return Object.fromEntries(Object.entries(obj).map(([k, v]) => [k, typeof v === 'string' ? v : String(v)]));
+    }
+  } catch {
+    // Not valid JSON after all — fall through to legacy line parsing.
   }
-  return result;
+  return null;
 }
 
 /**
- * Derives the DECRYPT_KEY = HKDF(PROJECT_KEY || SERVICE_KEY, salt=deployId,
+ * Derives the DECRYPT_KEY = HKDF(KEY || SERVICE_KEY, salt=deployId,
  * info="capy:deploy:decrypt") and decrypts the env var blob with AES-256-GCM.
+ * KEY is the per-deploy key for a blob minted with `_DEPLOY_KEY`, or the
+ * project key for a blob minted by an older CLI.
  *
  * Returns a record of KEY=value pairs parsed from the decrypted plaintext
  * (JSON object, or legacy `KEY=value\n` lines — see {@link parseEnvPlaintext}).
  */
 export function decryptSecretsBlob(
   encryptedVars: Buffer,
-  projectKeyHex: string,
+  keyHex: string,
   serviceKeyHex: string,
   deployId: Buffer,
 ): Record<string, string> {
-  const projectKey = Buffer.from(projectKeyHex, 'hex');
+  const key = Buffer.from(keyHex, 'hex');
   const serviceKey = Buffer.from(serviceKeyHex, 'hex');
-  const combined = Buffer.concat([projectKey, serviceKey]);
+  const combined = Buffer.concat([key, serviceKey]);
 
   const derived = hkdfSync('sha256', combined, deployId, 'capy:deploy:decrypt', 32);
   const decryptKey = Buffer.from(derived);
