@@ -1,4 +1,4 @@
-import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
+import { describe, test, expect, beforeEach, afterEach, mock } from 'bun:test';
 import { mkdirSync, mkdtempSync, writeFileSync, rmSync, existsSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
@@ -6,8 +6,7 @@ import { randomBytes, hkdfSync } from 'crypto';
 import { createServer, Server } from 'http';
 import {
   generateDeployId,
-  generateDerivationToken,
-  deployInnerWrap,
+  generateInnerSecret,
   encryptEnvBlob,
   buildSecretsBlob,
 } from '../../src/crypto/deployCrypto';
@@ -81,10 +80,9 @@ afterEach(() => {
 function buildDeployedFixture(envVars: Record<string, string>) {
   const projectId = 'test-proj-' + randomBytes(4).toString('hex');
   const pk = randomBytes(32);
-  const dt = generateDerivationToken();
   const deployId = generateDeployId();
 
-  const innerBlob = deployInnerWrap(pk, dt, projectId);
+  const innerBlob = generateInnerSecret();
   const encryptedVars = encryptEnvBlob(envVars, pk, innerBlob, projectId, deployId);
   // Simulate KMS outer wrap as a passthrough (local dev KMS fallback path).
   const outerBlob = innerBlob;
@@ -355,5 +353,186 @@ describe('capy run (deployed mode: _SECRETS_BLOB/_PROJECT_KEY vs SECRETS_BLOB/PR
       expect(result.stderr).not.toContain('RUN_SECRETS_BLOB_INVALID');
       expect(result.stderr).not.toContain('RUN_PROJECT_KEY_INVALID');
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// `_SECRETS_BLOB` + `_DEPLOY_KEY`: a random per-deploy key (never the project
+// key). It shares its blob variable with the `_PROJECT_KEY` pair, is read
+// ahead of `_PROJECT_KEY` when both are set, and no combination of complete
+// pairs is an error. Decrypted values win, as for `_PROJECT_KEY`.
+// ---------------------------------------------------------------------------
+describe('capy run (deployed mode: _SECRETS_BLOB + _DEPLOY_KEY)', () => {
+  /** A fake service that also counts how many decrypt requests reached it. */
+  async function startCountingService(serviceKeyHex: string) {
+    const decryptRequest = mock(() => undefined);
+    const server = createServer((req, res) => {
+      if (req.method === 'POST' && /^\/deploy\/[0-9a-f]+\/decrypt$/.test(req.url ?? '')) {
+        decryptRequest();
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ service_key: serviceKeyHex }));
+      } else {
+        res.writeHead(404);
+        res.end();
+      }
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const addr = server.address();
+    if (!addr || typeof addr === 'string') throw new Error('server failed to bind');
+    return { url: `http://127.0.0.1:${addr.port}`, close: () => server.close(), hits: () => decryptRequest.mock.calls.length };
+  }
+
+  /** Runs `body` against a counting fake service, and always closes it. */
+  async function withService<T>(
+    serviceKeyHex: string,
+    body: (svc: { url: string; hits: () => number }) => Promise<T>,
+  ): Promise<T> {
+    const svc = await startCountingService(serviceKeyHex);
+    return body(svc).finally(() => svc.close());
+  }
+
+  const PRINT_WHICH = ['--', 'node', '-e', 'console.log(process.env.WHICH)'];
+
+  test('decrypts, and the decrypted value wins over a same-name env var', async () => {
+    const { pk, secretsBlob, serviceKeyHex } = buildDeployedFixture({ WHICH: 'from-blob' });
+    const result = await withService(serviceKeyHex, (svc) =>
+      capy(PRINT_WHICH, {
+        env: {
+          _SECRETS_BLOB: secretsBlob,
+          _DEPLOY_KEY: pk.toString('hex'),
+          CAPY_API_URL: svc.url,
+          WHICH: 'from-shell',
+        },
+      }),
+    );
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.trim()).toBe('from-blob');
+  });
+
+  test('one layer of surrounding quotes is stripped', async () => {
+    const { pk, secretsBlob, serviceKeyHex } = buildDeployedFixture({ WHICH: 'quoted-ok' });
+    const result = await withService(serviceKeyHex, (svc) =>
+      capy(PRINT_WHICH, {
+        env: {
+          _SECRETS_BLOB: `"${secretsBlob}"`,
+          _DEPLOY_KEY: `'${pk.toString('hex')}'`,
+          CAPY_API_URL: svc.url,
+        },
+      }),
+    );
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.trim()).toBe('quoted-ok');
+  });
+
+  test('a wrong deploy key fails to decrypt (exit 1), it does not fall back to anything', async () => {
+    const { secretsBlob, serviceKeyHex } = buildDeployedFixture({ WHICH: 'must-not-print' });
+    const result = await withService(serviceKeyHex, (svc) =>
+      capy(PRINT_WHICH, {
+        env: {
+          _SECRETS_BLOB: secretsBlob,
+          _DEPLOY_KEY: randomBytes(32).toString('hex'),
+          CAPY_API_URL: svc.url,
+        },
+      }),
+    );
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout).not.toContain('must-not-print');
+  });
+
+  test('with both keys set, _DEPLOY_KEY is the one used (a wrong _PROJECT_KEY beside it is ignored)', async () => {
+    const { pk, secretsBlob, serviceKeyHex } = buildDeployedFixture({ WHICH: 'deploy-key-won' });
+    const result = await withService(serviceKeyHex, (svc) =>
+      capy(PRINT_WHICH, {
+        env: {
+          _SECRETS_BLOB: secretsBlob,
+          _DEPLOY_KEY: pk.toString('hex'),
+          _PROJECT_KEY: randomBytes(32).toString('hex'),
+          CAPY_API_URL: svc.url,
+        },
+      }),
+    );
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.trim()).toBe('deploy-key-won');
+  });
+
+  test('the underscore group next to a complete older pair is used, never an error', async () => {
+    const underscore = buildDeployedFixture({ WHICH: 'underscore-group' });
+    const older = buildDeployedFixture({ WHICH: 'older-pair' });
+    // One service answers both deploys, keyed by deploy id.
+    const server = createServer((req, res) => {
+      const match = /^\/deploy\/([0-9a-f]+)\/decrypt$/.exec(req.url ?? '');
+      if (req.method === 'POST' && match) {
+        const key = match[1] === underscore.deployId.toString('hex') ? underscore.serviceKeyHex : older.serviceKeyHex;
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ service_key: key }));
+      } else {
+        res.writeHead(404);
+        res.end();
+      }
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const addr = server.address();
+    if (!addr || typeof addr === 'string') throw new Error('server failed to bind');
+    const result = await capy(PRINT_WHICH, {
+      env: {
+        _SECRETS_BLOB: underscore.secretsBlob,
+        _DEPLOY_KEY: underscore.pk.toString('hex'),
+        SECRETS_BLOB: older.secretsBlob,
+        PROJECT_KEY: older.pk.toString('hex'),
+        CAPY_API_URL: `http://127.0.0.1:${addr.port}`,
+      },
+    }).finally(() => server.close());
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.trim()).toBe('underscore-group');
+  });
+
+  test('_DEPLOY_KEY without the blob refuses', async () => {
+    const result = await capy(['--', 'echo', 'unreached'], {
+      env: { _DEPLOY_KEY: 'a'.repeat(64), _SECRETS_BLOB: undefined as any },
+    });
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toMatch(/must both be set/);
+    expect(result.stderr).toContain('_SECRETS_BLOB');
+    expect(result.stderr).toContain('_DEPLOY_KEY');
+  });
+
+  test('the blob with no key at all refuses, naming both keys it accepts', async () => {
+    const result = await capy(['--', 'echo', 'unreached'], {
+      env: { _SECRETS_BLOB: 'anything', _DEPLOY_KEY: undefined as any, _PROJECT_KEY: undefined as any },
+    });
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toMatch(/must both be set/);
+    expect(result.stderr).toContain('_DEPLOY_KEY');
+    expect(result.stderr).toContain('_PROJECT_KEY');
+  });
+
+  test('a deploy key that is not 64 hex characters is refused with RUN_DEPLOY_KEY_INVALID', async () => {
+    const { secretsBlob } = buildDeployedFixture({ X: 'y' });
+    const result = await capy(['--', 'echo', 'unreached'], {
+      env: { _SECRETS_BLOB: secretsBlob, _DEPLOY_KEY: '"not-hex"' },
+    });
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain('RUN_DEPLOY_KEY_INVALID');
+    expect(result.stderr).toContain('_DEPLOY_KEY');
+    expect(result.stderr).not.toContain('RUN_PROJECT_KEY_INVALID');
+  });
+
+  test('a _PROJECT_KEY that is not hex still reports RUN_PROJECT_KEY_INVALID (the key came from _PROJECT_KEY)', async () => {
+    const { secretsBlob } = buildDeployedFixture({ X: 'y' });
+    const result = await capy(['--', 'echo', 'unreached'], {
+      env: { _SECRETS_BLOB: secretsBlob, _PROJECT_KEY: 'not-hex' },
+    });
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain('RUN_PROJECT_KEY_INVALID');
+    expect(result.stderr).not.toContain('RUN_DEPLOY_KEY_INVALID');
+  });
+
+  test('a blob that is not base64 is refused with RUN_SECRETS_BLOB_INVALID naming _SECRETS_BLOB', async () => {
+    const result = await capy(['--', 'echo', 'unreached'], {
+      env: { _SECRETS_BLOB: 'not valid base64!!', _DEPLOY_KEY: 'a'.repeat(64) },
+    });
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain('RUN_SECRETS_BLOB_INVALID');
+    expect(result.stderr).toContain('_SECRETS_BLOB');
   });
 });

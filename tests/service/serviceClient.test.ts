@@ -533,3 +533,51 @@ describe('ServiceClient.getSecretIndex', () => {
     expect(urlOfLastCall()).toBe('http://localhost:3002/orgs/org1/secrets?project_id=p%2F1%20%26x');
   });
 });
+
+describe('ServiceClient deploy tokens: credential generation', () => {
+  const client = () => new ServiceClient('http://localhost:3002');
+  const lastCall = () => mockFetch.mock.calls[mockFetch.mock.calls.length - 1];
+
+  test('createDeployToken sends credential_generation in the POST body', async () => {
+    mockFetch.mockResolvedValueOnce(mockFetchResponse({ outer_blob: 'ob' }));
+    const r = await client().createDeployToken('org1', 'dep1', 'proj1', 'inner', 'deploy_key');
+    expect(r).toEqual({ outer_blob: 'ob' });
+    expect(lastCall()[0]).toBe('http://localhost:3002/orgs/org1/deploy');
+    expect((lastCall()[1] as any).method).toBe('POST');
+    expect(JSON.parse((lastCall()[1] as any).body)).toEqual({
+      deploy_id: 'dep1',
+      project_id: 'proj1',
+      inner_blob: 'inner',
+      credential_generation: 'deploy_key',
+    });
+  });
+
+  test('instructions: the query is sent for a deploy_key mint and omitted entirely otherwise', async () => {
+    mockFetch.mockResolvedValueOnce(mockFetchResponse({ platform: 'vercel', markdown: 'md' }));
+    await client().fetchDeployInstructions('vercel', 'deploy_key');
+    expect(lastCall()[0]).toBe('http://localhost:3002/deploy/instructions/vercel?credential_generation=deploy_key');
+
+    mockFetch.mockResolvedValueOnce(mockFetchResponse({ platform: 'vercel', markdown: 'md' }));
+    await client().fetchDeployInstructions('vercel');
+    expect(lastCall()[0]).toBe('http://localhost:3002/deploy/instructions/vercel');
+  });
+
+  test('instructions: when the service cannot be reached the fallback names the variables of the requested generation', async () => {
+    mockFetch.mockRejectedValueOnce(new Error('offline'));
+    const scoped = await client().fetchDeployInstructions('vercel', 'deploy_key');
+    expect(scoped.markdown).toContain('_SECRETS_BLOB');
+    expect(scoped.markdown).toContain('_DEPLOY_KEY');
+
+    mockFetch.mockResolvedValueOnce(mockFetchResponse({ error: 'x' }, false, 500));
+    const legacy = await client().fetchDeployInstructions('vercel');
+    expect(legacy.markdown).toContain('SECRETS_BLOB and PROJECT_KEY');
+    expect(legacy.markdown).not.toContain('_DEPLOY_KEY');
+  });
+
+  test('the new error code is in the registry, so a service answer carrying it is recognised', () => {
+    expect(ERROR_CODES.INVALID_CREDENTIAL_GENERATION).toBe('INVALID_CREDENTIAL_GENERATION');
+    expect(classifyResponse(400, { code: 'INVALID_CREDENTIAL_GENERATION' }, 'whatever')).toBe(
+      ERROR_CODES.INVALID_CREDENTIAL_GENERATION,
+    );
+  });
+});

@@ -2,14 +2,14 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import { createServer } from 'http';
 import { AuthService } from '../auth/authService';
-import { ServiceClient } from '../service/serviceClient';
+import { ServiceClient, type CredentialGeneration, type DeployTokenInfo } from '../service/serviceClient';
 import { ProjectManager } from '../core/projectManager';
 import { FileManager } from '../files/fileManager';
 import { resolveProjectKey, KeyServiceOps } from '../crypto/keyResolver';
 import {
   generateDeployId,
-  generateDerivationToken,
-  deployInnerWrap,
+  generateDeployKey,
+  generateInnerSecret,
   encryptEnvBlob,
   buildSecretsBlob,
 } from '../crypto/deployCrypto';
@@ -24,6 +24,7 @@ import { ERROR_CODES } from '../types/index';
 import type { ProjectState } from '../types/index';
 import { gateFirst } from '../sync/gate';
 import { conflictFlagsOrExit, type RawConflictFlags } from '../sync/conflicts';
+import { DEPLOY_KEY_RUNTIME_PAIR, OLD_RUNTIME_PAIR } from '../deploy/dokployApi';
 
 /**
  * `deploy revoke <id>` (CAP-679): strip every `targets` element carrying
@@ -163,12 +164,68 @@ function decorateChoices(
 
 const BLOB_SIZE_WARN_THRESHOLD = 32 * 1024; // 32KB
 
+/**
+ * Platforms whose environment variable names must start with a letter, so a
+ * name led by an underscore cannot be set there. Netlify documents this rule:
+ * a key's first character must be a letter, and its own example of an invalid
+ * key is `_KEY1`. These platforms are delivered the same random per-deploy
+ * key under the older names `SECRETS_BLOB` + `PROJECT_KEY`, which every
+ * `capy run` still reads.
+ */
+export const LETTER_FIRST_NAME_PLATFORMS: readonly string[] = ['netlify'];
+
+/** What a walkthrough shows a platform: the two variable names, and which wording of the instructions to ask the service for. */
+export interface DeliveryPlan {
+  readonly blobName: string;
+  readonly keyName: string;
+  /** The `credential_generation` to request instructions for; `undefined` means no query (the older names). */
+  readonly instructionsGeneration: CredentialGeneration | undefined;
+}
+
+/** The names a platform's walkthrough delivers under. The key itself is a per-deploy key either way. */
+export function deliveryPlanFor(platform: string): DeliveryPlan {
+  if (LETTER_FIRST_NAME_PLATFORMS.includes(platform)) {
+    return { blobName: OLD_RUNTIME_PAIR[0], keyName: OLD_RUNTIME_PAIR[1], instructionsGeneration: undefined };
+  }
+  return { blobName: DEPLOY_KEY_RUNTIME_PAIR[0], keyName: DEPLOY_KEY_RUNTIME_PAIR[1], instructionsGeneration: 'deploy_key' };
+}
+
+/** The platform's instructions, worded for the names its walkthrough delivers. */
+export function fetchDeliveryInstructions(
+  serviceClient: Pick<ServiceClient, 'fetchDeployInstructions'>,
+  platform: string,
+  plan: DeliveryPlan = deliveryPlanFor(platform),
+): Promise<{ platform: string; markdown: string }> {
+  return serviceClient.fetchDeployInstructions(platform, plan.instructionsGeneration);
+}
+
+/** The terminal fallback when the instructions page cannot be served: each value under its name. */
+export function terminalDeliveryLines(
+  plan: DeliveryPlan,
+  secretsBlob: string,
+  deployKey: string,
+  platformLabel: string,
+): readonly string[] {
+  return [
+    '',
+    `  ${plan.blobName}:`,
+    `  ${secretsBlob}`,
+    '',
+    `  ${plan.keyName}:`,
+    `  ${deployKey}`,
+    '',
+    `  Set these as environment variables in ${platformLabel}.`,
+  ];
+}
+
 /** Result of one full deploy-token mint. Shared by the token+docs flow and the
- * github-actions connector — both want the same SECRETS_BLOB / PROJECT_KEY
- * pair, they just deliver it differently. */
+ * github-actions connector — both want the same `_SECRETS_BLOB` /
+ * `_DEPLOY_KEY` pair, they just deliver it differently. The key is a
+ * random per-deploy key; the project key is never part of a mint's output. */
 export interface MintedDeployToken {
   secretsBlob: string;
-  projectKey: string;
+  /** 64 hex characters: the random per-deploy key. */
+  deployKey: string;
   deployId: string;
   secretCount: number;
   blobBytes: number;
@@ -228,8 +285,13 @@ function selectEnv(
 }
 
 /**
- * Resolve the project key, mint a deploy id, KMS-wrap, and produce the
- * SECRETS_BLOB + PROJECT_KEY pair the deployed app feeds into `capy run`.
+ * Resolve the project key (only to open `capy:` values from `.env`), mint a
+ * deploy id, KMS-wrap, and produce the `_SECRETS_BLOB` +
+ * `_DEPLOY_KEY` pair the deployed app feeds into `capy run`.
+ *
+ * The deploy target gets a RANDOM per-deploy key, never the project key: the
+ * project key stays on this machine, and revoking the token makes a leaked
+ * artifact useless.
  *
  * Pure-ish: the caller owns auth and progress UI. This function reads
  * `.env`, talks to the service for KMS wrap + co-decrypt, and returns the
@@ -247,17 +309,17 @@ export async function mintDeployToken(deps: MintDeployTokenDeps): Promise<Minted
     wrapOuterLayer: (oid, pt) => serviceClient.wrapOuterLayer(oid, pt).then(r => r.ciphertext),
   };
   const pkHex = await resolveProjectKey(orgId, projectId, userId, keyOps);
-  const pk = Buffer.from(pkHex, 'hex');
 
   const deployId = generateDeployId();
-  const dt = generateDerivationToken();
-  const innerBlob = deployInnerWrap(pk, dt, projectId);
+  const deployKey = generateDeployKey();
+  const innerBlob = generateInnerSecret();
 
   const { outer_blob: outerBlob } = await serviceClient.createDeployToken(
     orgId,
     deployId.toString('hex'),
     projectId,
     innerBlob,
+    'deploy_key',
   );
 
   const plaintextEnv: Record<string, string> = Object.fromEntries(
@@ -267,11 +329,12 @@ export async function mintDeployToken(deps: MintDeployTokenDeps): Promise<Minted
     ]),
   );
 
-  // Encrypt env vars with DECRYPT_KEY derived from pk + service_key, where
-  // service_key is derived deterministically from innerBlob. projectKey
-  // alone is insufficient to decrypt — the server's KMS-gated service_key
-  // is required, preserving zero-trust.
-  const encryptedVars = encryptEnvBlob(plaintextEnv, pk, innerBlob, projectId, deployId);
+  // Encrypt env vars with DECRYPT_KEY derived from the per-deploy key +
+  // service_key, where service_key is derived deterministically from
+  // innerBlob. The deploy key alone is insufficient to decrypt — the
+  // server's KMS-gated service_key is required, so revoking the token
+  // makes the artifact useless. The project key plays no part in this.
+  const encryptedVars = encryptEnvBlob(plaintextEnv, deployKey, innerBlob, projectId, deployId);
   const secretsBlob = buildSecretsBlob(deployId, outerBlob, encryptedVars);
   const blobBytes = Buffer.from(secretsBlob, 'base64').length;
   const valueHashes = Object.fromEntries(
@@ -280,7 +343,7 @@ export async function mintDeployToken(deps: MintDeployTokenDeps): Promise<Minted
 
   return {
     secretsBlob,
-    projectKey: pkHex,
+    deployKey: deployKey.toString('hex'),
     deployId: deployId.toString('hex'),
     secretCount: Object.keys(plaintextEnv).length,
     blobBytes,
@@ -452,7 +515,7 @@ export class DeployCommand {
   private async resolveMode(platform: string, isGhActions: boolean): Promise<'connector' | 'token'> {
     if (this.options.mode) return this.options.mode;
     const connectorChoice = isGhActions
-      ? 'Push SECRETS_BLOB + PROJECT_KEY to GitHub secrets via gh'
+      ? `Push ${DEPLOY_KEY_RUNTIME_PAIR[0]} + ${DEPLOY_KEY_RUNTIME_PAIR[1]} to GitHub secrets via gh`
       : 'Deploy now via direct target deploy (push secrets + ship code)';
     const r = await inquirer.prompt([{
       type: 'list',
@@ -474,12 +537,12 @@ export class DeployCommand {
   }
 
   /** Mints the deploy credentials behind a spinner; any failure exits 1. */
-  private async mintWithSpinner(deps: MintDeployTokenDeps): Promise<MintedDeployToken> {
+  private async mintWithSpinner(deps: MintDeployTokenDeps, blobName: string): Promise<MintedDeployToken> {
     const spinner = ora('Generating deploy credentials...').start();
     try {
       const minted = await mintDeployToken(deps);
       if (minted.blobBytes > BLOB_SIZE_WARN_THRESHOLD) {
-        spinner.warn(`SECRETS_BLOB is ${Math.round(minted.blobBytes / 1024)}KB — some platforms have 32-64KB env var limits. Consider splitting into multiple projects.`);
+        spinner.warn(`${blobName} is ${Math.round(minted.blobBytes / 1024)}KB — some platforms have 32-64KB env var limits. Consider splitting into multiple projects.`);
       } else {
         spinner.succeed(`Deploy credentials generated (${minted.secretCount} secrets)`);
       }
@@ -545,7 +608,7 @@ export class DeployCommand {
       if (connectorId) {
         // gh-actions is structurally different from cf-worker / vercel:
         // GitHub Actions is a CI vehicle, not a runtime target. The
-        // connector pushes SECRETS_BLOB + PROJECT_KEY into GitHub repo or
+        // connector pushes _SECRETS_BLOB + _DEPLOY_KEY into GitHub repo or
         // environment secrets via the `gh` CLI; the workflow itself wraps
         // its deploy step with `capy run`. So the prompt copy differs and
         // dispatch goes to a dedicated connector instead of through
@@ -580,25 +643,20 @@ export class DeployCommand {
       const platformLabel = PLATFORMS.find(p => p.value === platform)?.name || platform;
 
       // Step 2: Generate credentials
-      const { secretsBlob, projectKey } = await this.mintWithSpinner({ serviceClient, fm, orgId, projectId, userId });
+      const plan = deliveryPlanFor(platform);
+      const { secretsBlob, deployKey } = await this.mintWithSpinner({ serviceClient, fm, orgId, projectId, userId }, plan.blobName);
 
-      // Step 3: Fetch instructions and serve HTML page
-      const { markdown } = await serviceClient.fetchDeployInstructions(platform);
-      const html = generateDeployHtml(secretsBlob, projectKey, platformLabel, platform, markdown);
+      // Step 3: Fetch instructions and serve HTML page. The instructions are
+      // worded for the names this walkthrough delivers (see `deliveryPlanFor`).
+      const { markdown } = await fetchDeliveryInstructions(serviceClient, platform, plan);
+      const html = generateDeployHtml(secretsBlob, deployKey, platformLabel, platform, markdown, [plan.blobName, plan.keyName]);
 
       // Try to serve via localhost (needed for clipboard API)
       const serverStarted = await serveDeployInstructions(html);
 
       if (!serverStarted) {
         // Fallback: print values to terminal
-        console.log('');
-        console.log('  SECRETS_BLOB:');
-        console.log(`  ${secretsBlob}`);
-        console.log('');
-        console.log('  PROJECT_KEY:');
-        console.log(`  ${projectKey}`);
-        console.log('');
-        console.log(`  Set these as environment variables in ${platformLabel}.`);
+        terminalDeliveryLines(plan, secretsBlob, deployKey, platformLabel).forEach((line) => console.log(line));
       }
 
       console.log('');
@@ -663,6 +721,48 @@ export class DeployRevokeCommand {
   }
 }
 
+/**
+ * A listed token with its credential generation always present: a service
+ * that predates the field means `project_key`, the only kind it could mint.
+ */
+export function withCredentialGeneration(
+  token: DeployTokenInfo,
+): DeployTokenInfo & { readonly credential_generation: CredentialGeneration } {
+  return { ...token, credential_generation: token.credential_generation ?? 'project_key' };
+}
+
+/** How one token's credential generation reads in the human list. `project_key` is a legacy token that still carries the project key. */
+function describeGeneration(generation: CredentialGeneration): string {
+  // COPY-FLAG: minimal neutral wording.
+  return generation === 'project_key' ? 'project key (legacy)' : 'deploy key';
+}
+
+/**
+ * The lines `capy deploy list` prints. With `json`, exactly one JSON document
+ * (every token carries `credential_generation`); otherwise the human list.
+ */
+export function renderDeployTokenList(
+  tokens: readonly DeployTokenInfo[],
+  projectName: string | undefined,
+  json: boolean,
+): readonly string[] {
+  const listed = tokens.map(withCredentialGeneration);
+  if (json) return [JSON.stringify({ tokens: listed }, null, 2)];
+  if (listed.length === 0) return ['  No deploy tokens for this project.'];
+  return [
+    '',
+    `  Deploy tokens for "${projectName}":`,
+    '',
+    ...listed.map((t) => {
+      const status = t.revoked_at ? '\x1b[31mrevoked\x1b[0m' : '\x1b[32mactive\x1b[0m';
+      const label = t.label ? ` (${t.label})` : '';
+      const created = new Date(t.created_at).toLocaleDateString();
+      return `  ${t.deploy_id.slice(0, 12)}...${label}  ${status}  ${describeGeneration(t.credential_generation)}  created ${created}`;
+    }),
+    '',
+  ];
+}
+
 export class DeployListCommand {
   private apiUrl?: string;
   private devMode: boolean;
@@ -672,7 +772,7 @@ export class DeployListCommand {
     this.devMode = devMode;
   }
 
-  async execute(): Promise<void> {
+  async execute(options: { readonly json?: boolean } = {}): Promise<void> {
     try {
       const pm = new ProjectManager();
       const projectState = await pm.detectProjectState();
@@ -696,21 +796,7 @@ export class DeployListCommand {
 
       const { tokens } = await serviceClient.listDeployTokens(orgId, projectId);
 
-      if (tokens.length === 0) {
-        console.log('  No deploy tokens for this project.');
-        return;
-      }
-
-      console.log('');
-      console.log(`  Deploy tokens for "${projectState.projectName}":`);
-      console.log('');
-      for (const t of tokens) {
-        const status = t.revoked_at ? '\x1b[31mrevoked\x1b[0m' : '\x1b[32mactive\x1b[0m';
-        const label = t.label ? ` (${t.label})` : '';
-        const created = new Date(t.created_at).toLocaleDateString();
-        console.log(`  ${t.deploy_id.slice(0, 12)}...${label}  ${status}  created ${created}`);
-      }
-      console.log('');
+      renderDeployTokenList(tokens, projectState.projectName, options.json === true).forEach((line) => console.log(line));
     } catch (error) {
       const { displayErrorAndExit } = await import('../ui/errorScreen');
       await displayErrorAndExit(error);

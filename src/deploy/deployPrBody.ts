@@ -16,17 +16,17 @@ export function buildDeployPrBody(target: TargetConfig): string {
     : '';
 
   // Secret-delivery wording depends on the adapter. Blob adapters (Vercel) push
-  // SECRETS_BLOB + PROJECT_KEY and let the build decrypt via `capy run`; others
+  // _SECRETS_BLOB + _DEPLOY_KEY and let the build decrypt via `capy run`; others
   // push the individual secrets into the vendor's store.
   const varsSection = adapter?.needsDeployToken
     ? [
-        `Delivered to ${adapterLabel} as \`SECRETS_BLOB\` + \`PROJECT_KEY\` **before** this`,
+        `Delivered to ${adapterLabel} as \`_SECRETS_BLOB\` + \`_DEPLOY_KEY\` **before** this`,
         `PR was opened — the encrypted bundle of your secrets plus its build-time`,
         `key. Your individual secret values stay encrypted in the bundle and never`,
         `appear in git history; the build decrypts them with \`capy run\`:`,
         ``,
-        `- \`SECRETS_BLOB\``,
-        `- \`PROJECT_KEY\``,
+        `- \`_SECRETS_BLOB\``,
+        `- \`_DEPLOY_KEY\``,
       ].join('\n')
     : [
         `Already delivered to the vendor's secret store **before** this PR was`,

@@ -7,8 +7,7 @@ import { createServer } from 'http';
 import { spawn } from 'child_process';
 import {
   generateDeployId,
-  generateDerivationToken,
-  deployInnerWrap,
+  generateInnerSecret,
   encryptEnvBlob,
   buildSecretsBlob,
 } from '../../src/crypto/deployCrypto';
@@ -57,7 +56,7 @@ function deployedFixture(envVars: Record<string, string>) {
   const projectId = 'test-proj-' + randomBytes(4).toString('hex');
   const pk = randomBytes(32);
   const deployId = generateDeployId();
-  const innerBlob = deployInnerWrap(pk, generateDerivationToken(), projectId);
+  const innerBlob = generateInnerSecret();
   const secretsBlob = buildSecretsBlob(deployId, innerBlob, encryptEnvBlob(envVars, pk, innerBlob, projectId, deployId));
   const salt = projectId + deployId.toString('hex');
   const serviceKeyHex = Buffer.from(

@@ -1,18 +1,24 @@
 /**
  * GitHub Actions connector.
  *
- * Pushes SECRETS_BLOB + PROJECT_KEY into the repo's GitHub Actions secret
- * store (repo-scoped or environment-scoped) so workflows can call
+ * Pushes _SECRETS_BLOB + _DEPLOY_KEY into the repo's GitHub Actions
+ * secret store (repo-scoped or environment-scoped) so workflows can call
  * `capy run -- <deploy command>` without manual copy-paste.
  *
  * Auth model: `gh` CLI handoff. We never see a PAT — `gh auth status`
  * must already be green. No custom OAuth app, no device flow, no token
  * prompts. Per CAP-9, this is intentional for v1.
  *
- * Trust model: SECRETS_BLOB + PROJECT_KEY land in GitHub as long-lived
- * secrets. Revocation runs through `capy deploy revoke <deployId>` which
- * invalidates the project key server-side; once revoked, the GitHub-stored
- * blob is inert.
+ * Trust model: the deploy key is a random per-deploy key, not the project
+ * key; the project key never leaves the developer's machine. Both secrets
+ * land in GitHub as long-lived secrets. Revocation runs through
+ * `capy deploy revoke <deployId>`, which stops the service answering for the
+ * deploy: once revoked, the GitHub-stored blob and key are inert.
+ *
+ * Nothing is ever deleted: a re-deploy writes `_SECRETS_BLOB` + `_DEPLOY_KEY`
+ * and leaves any other secret alone. The connector only PRINTS the workflow
+ * patch, so removing the secrets an existing workflow still reads would leave
+ * it running with empty values.
  */
 import { spawnSync } from 'child_process';
 import { resolveGh, ghInstalled } from '../utils/gh';
@@ -22,7 +28,8 @@ import inquirer from 'inquirer';
 import ora from '../ui/spinner';
 import { ServiceClient } from '../service/serviceClient';
 import { FileManager } from '../files/fileManager';
-import { mintDeployToken, EmptyEnvError } from './deployTokenCommand';
+import { DEPLOY_KEY_RUNTIME_PAIR } from '../deploy/dokployApi';
+import { mintDeployToken, EmptyEnvError, type MintedDeployToken } from './deployTokenCommand';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 const DIM = (s: string) => `\x1b[90m${s}\x1b[0m`;
@@ -119,19 +126,54 @@ function createEnvironment(repo: string, name: string): boolean {
   return r.status === 0;
 }
 
-function setSecret(name: string, value: string, env: string | null): { ok: boolean; stderr: string } {
-  const args = ['secret', 'set', name, '--body', value];
-  if (env) args.push('--env', env);
-  const gh = resolveGh();
-  if (!gh) return { ok: false, stderr: 'gh CLI not found' };
-  const r = spawnSync(gh, args, { encoding: 'utf-8' });
-  return { ok: r.status === 0, stderr: r.stderr ?? '' };
+/** What the connector needs from `gh`: writing a secret. It has no way to delete one. */
+export interface SecretIo {
+  set(name: string, value: string, env: string | null): { ok: boolean; stderr: string };
+}
+
+const GH_MISSING = { ok: false, stderr: 'gh CLI not found' } as const;
+
+/** The real `gh secret set`. Never reached from a test: tests pass their own `SecretIo`. */
+const ghSecretIo: SecretIo = {
+  set(name, value, env) {
+    const args = ['secret', 'set', name, '--body', value, ...(env ? ['--env', env] : [])];
+    const gh = resolveGh();
+    if (!gh) return GH_MISSING;
+    const r = spawnSync(gh, args, { encoding: 'utf-8' });
+    return { ok: r.status === 0, stderr: r.stderr ?? '' };
+  },
+};
+
+/** The last two lines of a `gh` failure, for a one-line report. */
+const tailOf = (stderr: string): string => stderr.trim().split('\n').slice(-2).join(' | ');
+
+export type PushResult =
+  | { readonly ok: true }
+  | { readonly ok: false; readonly name: string; readonly stderr: string };
+
+/**
+ * Writes `_SECRETS_BLOB` then `_DEPLOY_KEY`. Exported for tests so the
+ * names that land on the target, and what is pushed under each, can be pinned
+ * without a real `gh`.
+ */
+export function pushRuntimePair(
+  io: SecretIo,
+  minted: Pick<MintedDeployToken, 'secretsBlob' | 'deployKey'>,
+  envName: string | null,
+): PushResult {
+  const [blobName, keyName] = DEPLOY_KEY_RUNTIME_PAIR;
+  const blobR = io.set(blobName, minted.secretsBlob, envName);
+  if (!blobR.ok) return { ok: false, name: blobName, stderr: blobR.stderr };
+  const keyR = io.set(keyName, minted.deployKey, envName);
+  if (!keyR.ok) return { ok: false, name: keyName, stderr: keyR.stderr };
+  return { ok: true };
 }
 
 /** Render the YAML patch the user pastes into their workflow. Exported
  * for tests so we can pin both shapes (repo vs environment) without
  * spinning up a full connector run. */
 export function renderYamlPatch(version: string, env: string | null): string {
+  const [blobName, keyName] = DEPLOY_KEY_RUNTIME_PAIR;
   const envHint = env
     ? `\n# Your deploy job must pin to environment: ${env}\n#   jobs:\n#     deploy:\n#       environment: ${env}\n`
     : '';
@@ -143,9 +185,166 @@ export function renderYamlPatch(version: string, env: string | null): string {
 - name: Deploy
   run: capy run -- <your existing deploy command>
   env:
-    SECRETS_BLOB: \${{ secrets.SECRETS_BLOB }}
-    PROJECT_KEY:  \${{ secrets.PROJECT_KEY }}
+    ${blobName}: \${{ secrets.${blobName} }}
+    ${keyName}:  \${{ secrets.${keyName} }}
 `;
+}
+
+/** Repo secrets, or one GitHub Actions environment's: the option, else the picker. */
+async function resolveScope(options: GithubActionsConnectorOptions): Promise<'repo' | 'env'> {
+  if (options.scope) return options.scope;
+  const r = await inquirer.prompt([{
+    type: 'list',
+    name: 'scope',
+    message: 'Where should the secrets live in GitHub?',
+    choices: [
+      {
+        name: 'Repository secrets  (every workflow + every environment sees them)',
+        value: 'repo',
+        short: 'repo',
+      },
+      {
+        name: 'Environment secrets (scoped to one GitHub Actions environment)',
+        value: 'env',
+        short: 'environment',
+      },
+    ],
+    default: 'repo',
+  }]);
+  return r.scope;
+}
+
+type EnvResolution =
+  | { readonly ok: true; readonly envName: string }
+  | { readonly ok: false };
+
+/** The environment to write to (created if missing): the option, else a pick or a new name. Prints its own failures. */
+async function resolveEnvironment(repo: string, options: GithubActionsConnectorOptions): Promise<EnvResolution> {
+  if (options.envName) {
+    // Non-interactive: ensure the requested env exists. PUT is idempotent
+    // so this is a no-op if it already does.
+    const created = createEnvironment(repo, options.envName);
+    if (!created) {
+      console.error('');
+      console.error(`  Failed to create or verify environment "${options.envName}".`);
+      console.error('  Your gh token may lack the `repo` scope. Try `gh auth refresh -s repo`.');
+      console.error('');
+      return { ok: false };
+    }
+    return { ok: true, envName: options.envName };
+  }
+  const envs = listEnvironments(repo);
+  if (envs === null) {
+    console.error('');
+    console.error('  Could not list environments. Your gh token may lack the');
+    console.error('  `repo` scope. Try `gh auth refresh -s repo`.');
+    console.error('');
+    return { ok: false };
+  }
+  const choices: Array<{ name: string; value: string }> = [
+    ...envs.map((e) => ({ name: e.name, value: e.name })),
+    { name: DIM('— create new environment —'), value: '__new__' },
+  ];
+  const { pick } = await inquirer.prompt([{
+    type: 'list',
+    name: 'pick',
+    message: envs.length === 0
+      ? 'No environments exist yet. Create one?'
+      : 'Pick an environment:',
+    choices,
+  }]);
+  if (pick !== '__new__') return { ok: true, envName: pick };
+  const { newName } = await inquirer.prompt([{
+    type: 'input',
+    name: 'newName',
+    message: 'New environment name:',
+    default: 'production',
+    validate: (v: string) => v.trim().length > 0 || 'name required',
+  }]);
+  const created = createEnvironment(repo, newName.trim());
+  if (!created) {
+    console.error('');
+    console.error(`  Failed to create environment "${newName}".`);
+    console.error('');
+    return { ok: false };
+  }
+  return { ok: true, envName: newName.trim() };
+}
+
+/** Names of the secrets already set in the chosen scope, or null when `gh` cannot say. */
+function existingSecretNames(envName: string | null): ReadonlySet<string> | null {
+  const ghBin = resolveGh();
+  if (!ghBin) return null;
+  const listArgs = ['secret', 'list', '--json', 'name', ...(envName ? ['--env', envName] : [])];
+  const listR = spawnSync(ghBin, listArgs, { encoding: 'utf-8' });
+  if (listR.status !== 0) return null;
+  try {
+    const existing = JSON.parse(listR.stdout) as Array<{ name: string }>;
+    return new Set(existing.map((e) => e.name));
+  } catch {
+    // Non-fatal: if we can't parse, skip the overwrite prompt and let
+    // `gh secret set` overwrite silently (its native behavior).
+    return null;
+  }
+}
+
+/** The confirmation question, asked of the user; rejects if the prompt is aborted (Ctrl+C). */
+export type AskOverwrite = (message: string) => Promise<boolean>;
+
+const askWithInquirer: AskOverwrite = async (message) => {
+  const { ok } = await inquirer.prompt([{ type: 'confirm', name: 'ok', message, default: true }]);
+  return ok;
+};
+
+/**
+ * Before minting: if `_SECRETS_BLOB` or `_DEPLOY_KEY` already exists in the
+ * chosen scope, confirm overwriting it. Returns whether to go on. An aborted
+ * prompt (Ctrl+C) rejects, so it never falls through to mint and push.
+ */
+export async function confirmOverwrite(
+  names: ReadonlySet<string> | null,
+  envName: string | null,
+  options: Pick<GithubActionsConnectorOptions, 'yes'>,
+  ask: AskOverwrite = askWithInquirer,
+): Promise<boolean> {
+  if (names === null) return true;
+  const clash = DEPLOY_KEY_RUNTIME_PAIR.filter((n) => names.has(n));
+  if (clash.length === 0) return true;
+  const where = envName ? `environment "${envName}"` : 'repo secrets';
+  if (options.yes) {
+    console.log(`  ${clash.join(' + ')} already set in ${where} — overwriting (--yes).`);
+    return true;
+  }
+  const ok = await ask(`${clash.join(' + ')} already set in ${where}. Overwrite?`);
+  if (!ok) {
+    console.log('');
+    console.log('  Cancelled. No secrets pushed.');
+    console.log('');
+  }
+  return ok;
+}
+
+/** Mints the pair behind a spinner; null once the failure is printed. */
+async function mintWithSpinner(deps: GithubActionsConnectorDeps): Promise<MintedDeployToken | null> {
+  const spinner = ora('Generating deploy credentials...').start();
+  try {
+    const minted = await mintDeployToken({
+      serviceClient: deps.serviceClient,
+      fm: deps.fm,
+      orgId: deps.orgId,
+      projectId: deps.projectId,
+      userId: deps.userId,
+    });
+    spinner.succeed(`Deploy credentials generated (${minted.secretCount} secrets)`);
+    return minted;
+  } catch (err: any) {
+    if (err instanceof EmptyEnvError) {
+      spinner.fail(err.message);
+    } else {
+      spinner.fail(err?.message ?? 'Failed to generate deploy credentials');
+    }
+    return null;
+  }
 }
 
 /**
@@ -211,147 +410,19 @@ export async function runGithubActionsConnector(
   console.log('');
 
   // 3. Resolve scope: option wins; otherwise prompt.
-  let scope: 'repo' | 'env';
-  if (options.scope) {
-    scope = options.scope;
-  } else {
-    const r = await inquirer.prompt([{
-      type: 'list',
-      name: 'scope',
-      message: 'Where should the secrets live in GitHub?',
-      choices: [
-        {
-          name: 'Repository secrets  (every workflow + every environment sees them)',
-          value: 'repo',
-          short: 'repo',
-        },
-        {
-          name: 'Environment secrets (scoped to one GitHub Actions environment)',
-          value: 'env',
-          short: 'environment',
-        },
-      ],
-      default: 'repo',
-    }]);
-    scope = r.scope;
-  }
-
-  let envName: string | null = null;
-  if (scope === 'env') {
-    if (options.envName) {
-      // Non-interactive: ensure the requested env exists. PUT is idempotent
-      // so this is a no-op if it already does.
-      const created = createEnvironment(repo, options.envName);
-      if (!created) {
-        console.error('');
-        console.error(`  Failed to create or verify environment "${options.envName}".`);
-        console.error('  Your gh token may lack the `repo` scope. Try `gh auth refresh -s repo`.');
-        console.error('');
-        return 1;
-      }
-      envName = options.envName;
-    } else {
-      const envs = listEnvironments(repo);
-      if (envs === null) {
-        console.error('');
-        console.error('  Could not list environments. Your gh token may lack the');
-        console.error('  `repo` scope. Try `gh auth refresh -s repo`.');
-        console.error('');
-        return 1;
-      }
-      const choices: Array<{ name: string; value: string }> = envs.map((e) => ({
-        name: e.name,
-        value: e.name,
-      }));
-      choices.push({ name: DIM('— create new environment —'), value: '__new__' });
-      const { pick } = await inquirer.prompt([{
-        type: 'list',
-        name: 'pick',
-        message: envs.length === 0
-          ? 'No environments exist yet. Create one?'
-          : 'Pick an environment:',
-        choices,
-      }]);
-      if (pick === '__new__') {
-        const { newName } = await inquirer.prompt([{
-          type: 'input',
-          name: 'newName',
-          message: 'New environment name:',
-          default: 'production',
-          validate: (v: string) => v.trim().length > 0 || 'name required',
-        }]);
-        const created = createEnvironment(repo, newName.trim());
-        if (!created) {
-          console.error('');
-          console.error(`  Failed to create environment "${newName}".`);
-          console.error('');
-          return 1;
-        }
-        envName = newName.trim();
-      } else {
-        envName = pick;
-      }
-    }
-  }
+  const scope = await resolveScope(options);
+  const envResolution = scope === 'env' ? await resolveEnvironment(repo, options) : null;
+  if (envResolution !== null && !envResolution.ok) return 1;
+  const envName = envResolution === null ? null : envResolution.envName;
 
   // 4. Overwrite-confirmation if either secret already exists in the chosen scope.
   // gh exits non-zero if the secret doesn't exist, so we list to check.
-  const listArgs = ['secret', 'list', '--json', 'name'];
-  if (envName) listArgs.push('--env', envName);
-  const ghBin = resolveGh();
-  const listR = ghBin
-    ? spawnSync(ghBin, listArgs, { encoding: 'utf-8' })
-    : null;
-  if (listR && listR.status === 0) {
-    try {
-      const existing = JSON.parse(listR.stdout) as Array<{ name: string }>;
-      const names = new Set(existing.map((e) => e.name));
-      const clash = ['SECRETS_BLOB', 'PROJECT_KEY'].filter((n) => names.has(n));
-      if (clash.length > 0) {
-        const where = envName ? `environment "${envName}"` : 'repo secrets';
-        if (options.yes) {
-          console.log(`  ${clash.join(' + ')} already set in ${where} — overwriting (--yes).`);
-        } else {
-          const { ok } = await inquirer.prompt([{
-            type: 'confirm',
-            name: 'ok',
-            message: `${clash.join(' + ')} already set in ${where}. Overwrite?`,
-            default: true,
-          }]);
-          if (!ok) {
-            console.log('');
-            console.log('  Cancelled. No secrets pushed.');
-            console.log('');
-            return 0;
-          }
-        }
-      }
-    } catch {
-      // Non-fatal: if we can't parse, skip the overwrite prompt and let
-      // `gh secret set` overwrite silently (its native behavior).
-    }
-  }
+  const existing = existingSecretNames(envName);
+  if (!(await confirmOverwrite(existing, envName, options))) return 0;
 
-  // 5. Mint SECRETS_BLOB + PROJECT_KEY.
-  const spinner = ora('Generating deploy credentials...').start();
-  let minted;
-  try {
-    minted = await mintDeployToken({
-      serviceClient: deps.serviceClient,
-      fm: deps.fm,
-      orgId: deps.orgId,
-      projectId: deps.projectId,
-      userId: deps.userId,
-    });
-  } catch (err: any) {
-    if (err instanceof EmptyEnvError) {
-      spinner.fail(err.message);
-    } else {
-      spinner.fail(err?.message ?? 'Failed to generate deploy credentials');
-    }
-    return 1;
-  }
-  spinner.succeed(`Deploy credentials generated (${minted.secretCount} secrets)`);
+  // 5. Mint _SECRETS_BLOB + _DEPLOY_KEY.
+  const minted = await mintWithSpinner(deps);
+  if (minted === null) return 1;
 
   // 6. Push to GitHub.
   const push = ora(
@@ -359,14 +430,9 @@ export async function runGithubActionsConnector(
       ? `Pushing secrets to ${repo} → env:${envName}`
       : `Pushing secrets to ${repo}`,
   ).start();
-  const blobR = setSecret('SECRETS_BLOB', minted.secretsBlob, envName);
-  if (!blobR.ok) {
-    push.fail(`SECRETS_BLOB push failed: ${blobR.stderr.trim().split('\n').slice(-2).join(' | ')}`);
-    return 1;
-  }
-  const pkR = setSecret('PROJECT_KEY', minted.projectKey, envName);
-  if (!pkR.ok) {
-    push.fail(`PROJECT_KEY push failed: ${pkR.stderr.trim().split('\n').slice(-2).join(' | ')}`);
+  const pushed = pushRuntimePair(ghSecretIo, minted, envName);
+  if (!pushed.ok) {
+    push.fail(`${pushed.name} push failed: ${tailOf(pushed.stderr)}`);
     return 1;
   }
   push.succeed('Secrets pushed to GitHub.');

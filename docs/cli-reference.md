@@ -193,12 +193,14 @@ JSON support: no
 List deploy tokens for this project
 
 ```
-capy deploy list
+capy deploy list [options]
 ```
 
-_No options._
+| Option | Description | Default |
+|---|---|---|
+| `--json` | emit machine-readable JSON instead of the human UI |  |
 
-JSON support: no
+JSON support: yes (`--json`)
 
 ### `capy deploy targets`
 
@@ -1062,6 +1064,7 @@ Every refusal carries a stable `code` — branch on it, never on message text.
 - `SNAPSHOT_NOT_FOUND`
 - `NO_SECRETS`
 - `DEPLOY_TOKEN_NOT_FOUND`
+- `INVALID_CREDENTIAL_GENERATION`
 - `ORG_NOT_FOUND`
 - `LOCAL_KEY_BACKEND_ERROR`
 - `NO_MANAGED_KEYS`
@@ -1090,6 +1093,7 @@ Every refusal carries a stable `code` — branch on it, never on message text.
 - `DOKPLOY_VERSION_UNKNOWN`
 - `RUN_SECRETS_BLOB_INVALID`
 - `RUN_PROJECT_KEY_INVALID`
+- `RUN_DEPLOY_KEY_INVALID`
 - `DOKPLOY_VALUE_UNREPRESENTABLE`
 - `DOKPLOY_VALUE_HAS_REFERENCE`
 - `DOKPLOY_VALUE_INVALID`

@@ -361,7 +361,7 @@ Not currently. The service component is closed. If self-hosting matters for your
 <details>
 <summary><strong>Does it work in CI?</strong></summary>
 
-Yes. `capy deploy` generates `SECRETS_BLOB` and `PROJECT_KEY` to set as CI env vars; `capy run` in your build/test step does the rest. `capy deploy --yes` in CI exits 3 instead of proceeding if the folder and Capy differ on any variable; see [Conflicts and agents](#conflicts-and-agents). See the GitHub Actions guide at [docs.capy.sc/using/deploying/github-actions](https://docs.capy.sc/using/deploying/github-actions).
+Yes. `capy deploy` generates `_SECRETS_BLOB` and `_DEPLOY_KEY` (a random per-deploy key, not your project key) to set as CI env vars; `capy run` in your build/test step does the rest. `capy deploy --yes` in CI exits 3 instead of proceeding if the folder and Capy differ on any variable; see [Conflicts and agents](#conflicts-and-agents). See the GitHub Actions guide at [docs.capy.sc/using/deploying/github-actions](https://docs.capy.sc/using/deploying/github-actions).
 </details>
 
 ## Supply chain
