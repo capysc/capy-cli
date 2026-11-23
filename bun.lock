@@ -25,7 +25,9 @@
         "@yao-pkg/pkg": "^6.22.0",
         "esbuild": "^0.25.8",
         "jsqr": "1.4.0",
+        "pe-library": "^2.0.3",
         "pngjs": "5.0.0",
+        "resedit": "^3.1.1",
         "typescript": "^5.0.0",
       },
     },
@@ -329,6 +331,8 @@
 
     "path-parse": ["path-parse@1.0.7", "", {}, "sha512-LDJzPVEEEPR+y48z93A0Ed0yXb8pAByGWo/k5YYdYgpY2/2EsOsksJrq7lOHxryrVOn1ejG6oAp8ahvOIQD8sw=="],
 
+    "pe-library": ["pe-library@2.0.3", "", {}, "sha512-+iR+uRyBpBfhnxgP2ia1hh1rQ2Gu+TzCV75E0nSql/pWGQw/BwY2QUaOWX8/qIsrQiqVdYaOIIYRfrBuRu4PXw=="],
+
     "picocolors": ["picocolors@1.1.1", "", {}, "sha512-xceH2snhtb5M9liqDsmEw56le376mTZkEX/jEb/RxNFyegNul7eNslCXP9FDj/Lcu0X8KEyMceP2ntpaHrDEVA=="],
 
     "picomatch": ["picomatch@4.0.7", "", {}, "sha512-qcJu88Q2IWqJsDD529JKMdwGm/dvInW4HvQnRwiH9JtihJvzGOscDtHE3x1pBKeUOTysQ8kVmLnJ2kJu7yhcGA=="],
@@ -358,6 +362,8 @@
     "require-directory": ["require-directory@2.1.1", "", {}, "sha512-fGxEI7+wsG9xrvdjsrlmL22OMTTiHRwAMroiEeMgq8gzoLC/PQr7RsRDSTLUg/bZAZtF+TVIkHc6/4RIKrui+Q=="],
 
     "require-main-filename": ["require-main-filename@2.0.0", "", {}, "sha512-NKN5kMDylKuldxYLSUfrbo5Tuzh4hd+2E8NPPX02mZtn1VuREQToYe/ZdlJy+J3uCpfaiGF05e7B8W0iXbQHmg=="],
+
+    "resedit": ["resedit@3.1.1", "", { "dependencies": { "pe-library": "^2.0.3" } }, "sha512-YP6HNcXm2VIZN9Fl2iq8En3RpEfBFtKY2lKd1HLpnwjokr6nk39pnTO5Eby8OeQVjhRI4qZeUt4brWf43K/EGg=="],
 
     "resolve": ["resolve@1.22.14", "", { "dependencies": { "es-errors": "^1.3.0", "is-core-module": "^2.18.0", "path-parse": "^1.0.7", "supports-preserve-symlinks-flag": "^1.0.0" }, "bin": { "resolve": "bin/resolve" } }, "sha512-1ZjYvR9sbkiwC5+9QHetqW5HmA2pHRMaoupD01t2HlYnV/vydC2zPwLixhsMieSWVZt0JJRg5LVIk0Ow1D/TrA=="],
 

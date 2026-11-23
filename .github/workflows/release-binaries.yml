@@ -19,6 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      actions: read # SignPath reads this job and downloads the unsigned artifact
     steps:
       - name: Resolve tag + version
         id: version
@@ -62,6 +63,13 @@ jobs:
       - name: Bundle CLI with esbuild
         run: bun run bundle
 
+      # pkg builds capy.exe on top of Node's node.exe, which says "Node.js" in
+      # its Windows version info. Write a copy that says Capy and this
+      # version into a private pkg cache, used only for the Windows target.
+      # See scripts/windows/prepare-node-base.ts.
+      - name: Brand the Windows Node base
+        run: bun scripts/windows/prepare-node-base.ts --version "${{ steps.version.outputs.version }}" --cache .pkg-cache-win
+
       - name: Build cross-platform binaries
         working-directory: build
         run: |
@@ -72,7 +80,49 @@ jobs:
           $PKG . --public-packages "*" --public --target node22-macos-arm64      --output ../bin-pkg/capy-darwin-arm64/capy
           $PKG . --public-packages "*" --public --target node22-linuxstatic-x64  --output ../bin-pkg/capy-linux-x64/capy
           $PKG . --public-packages "*" --public --target node22-linuxstatic-arm64 --output ../bin-pkg/capy-linux-arm64/capy
+          PKG_CACHE_PATH=../.pkg-cache-win \
           $PKG . --public-packages "*" --public --target node22-win-x64          --output ../bin-pkg/capy-win-x64/capy.exe
+
+      # Code signing through the SignPath Foundation. Off until the SignPath
+      # organization is set up: set the repository variables
+      # SIGNPATH_ORGANIZATION_ID, SIGNPATH_PROJECT_SLUG, SIGNPATH_POLICY_SLUG
+      # (and optionally SIGNPATH_ARTIFACT_CONFIGURATION_SLUG) plus the secret
+      # SIGNPATH_API_TOKEN. Every request waits for a person to approve it in
+      # SignPath (Foundation rule), so this step blocks until then. Signing
+      # happens before the zip and checksums are made, so both cover the
+      # signed exe.
+      - name: Upload unsigned capy.exe for signing
+        id: unsigned-exe
+        if: vars.SIGNPATH_ORGANIZATION_ID != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: capy-win-x64-unsigned
+          path: bin-pkg/capy-win-x64/capy.exe
+          if-no-files-found: error
+
+      - name: Sign capy.exe with SignPath (waits for approval)
+        if: vars.SIGNPATH_ORGANIZATION_ID != ''
+        # Pinned to a commit: this action receives SIGNPATH_API_TOKEN.
+        uses: signpath/github-action-submit-signing-request@c92b958760219087e01f8d67a1669ed57afe2627 # v2
+        with:
+          connector-url: ${{ vars.SIGNPATH_CONNECTOR_URL || 'https://githubactions.connector.signpath.io' }}
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_POLICY_SLUG }}
+          artifact-configuration-slug: ${{ vars.SIGNPATH_ARTIFACT_CONFIGURATION_SLUG }}
+          github-artifact-id: ${{ steps.unsigned-exe.outputs.artifact-id }}
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: 18000
+          output-artifact-directory: bin-pkg/capy-win-x64-signed
+
+      - name: Use the signed capy.exe
+        if: vars.SIGNPATH_ORGANIZATION_ID != ''
+        run: |
+          set -euo pipefail
+          test -s bin-pkg/capy-win-x64-signed/capy.exe
+          mv -f bin-pkg/capy-win-x64-signed/capy.exe bin-pkg/capy-win-x64/capy.exe
+          rm -rf bin-pkg/capy-win-x64-signed
 
       - name: Package archives + checksums
         run: |
@@ -135,3 +185,53 @@ jobs:
             -e VERSION="${{ steps.version.outputs.version }}" \
             alpine:3 \
             sh -c 'set -eu && wget -qO- "https://github.com/capysc/capy-cli/releases/download/$TAG/install.sh" | sh && test "$(capy --version)" = "$VERSION"'
+
+  # Installs this release on a real Windows machine with Windows PowerShell 5.1
+  # (the version built into Windows), the way a user would, and checks the exe
+  # runs, says Capy in its version info, and is signed once signing is on.
+  smoke-windows:
+    needs: build-binaries
+    runs-on: windows-latest
+    permissions: {} # downloads only public release assets
+    steps:
+      - name: Install with Windows PowerShell 5.1 and run capy
+        shell: powershell
+        env:
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+          EXPECT_SIGNED: ${{ vars.SIGNPATH_ORGANIZATION_ID != '' }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = $env:TAG.TrimStart('v')
+          Invoke-RestMethod "https://github.com/capysc/capy-cli/releases/download/$env:TAG/install.ps1" | Invoke-Expression
+          $exe = Join-Path $env:LOCALAPPDATA 'Programs\Capy\bin\capy.exe'
+          $printed = (& $exe --version | Out-String).Trim()
+          if ($printed -ne $version) { throw "capy --version printed '$printed', expected '$version'" }
+          $info = (Get-Item -LiteralPath $exe).VersionInfo
+          if ($info.ProductName -ne 'Capy' -or $info.ProductVersion -ne $version) {
+            throw "capy.exe version info says '$($info.ProductName) $($info.ProductVersion)', expected 'Capy $version'"
+          }
+          $signature = Get-AuthenticodeSignature -LiteralPath $exe
+          Write-Host "Signature: $($signature.Status) $($signature.SignerCertificate.Subject)"
+          if ($env:EXPECT_SIGNED -eq 'true' -and $signature.Status -ne 'Valid') {
+            throw "capy.exe signature is $($signature.Status), expected Valid"
+          }
+
+  # Opens the winget-pkgs update PR for this release. Off until the first
+  # version is in winget (submitted by hand, see docs/windows-release.md):
+  # set the repository variable WINGET_IDENTIFIER and the secret WINGET_TOKEN
+  # (classic token with public_repo, owner of a winget-pkgs fork).
+  winget:
+    needs: smoke-windows
+    if: vars.WINGET_IDENTIFIER != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read # reads this release; the winget PR uses WINGET_TOKEN
+    steps:
+      # Pinned to a commit: this third-party action receives WINGET_TOKEN.
+      - uses: vedantmgoyal9/winget-releaser@b7370d4d152efdce803a26cc6ca9eee58cb2ad54 # v2
+        with:
+          identifier: ${{ vars.WINGET_IDENTIFIER }}
+          release-tag: ${{ github.event.release.tag_name || inputs.tag }}
+          installers-regex: '-win-x64-[0-9.]+\.zip$'
+          fork-user: ${{ vars.WINGET_FORK_USER || github.repository_owner }}
+          token: ${{ secrets.WINGET_TOKEN }}

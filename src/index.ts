@@ -9,6 +9,7 @@ import { assertNotLocalOnly } from './core/localGate';
 import { version as CLI_VERSION } from '../package.json';
 import { refuseWebMode } from './core/webModeRemoved';
 import { ACCENT } from './ui/colors';
+import { SYNC_HOOK_MARKER, withoutSyncHookBlock } from './git/syncHooks';
 import { conflictOption, rawConflictFlagsOf, resolveOption } from './sync/conflicts';
 import { answersByProtocol } from './sync/gate';
 
@@ -572,8 +573,6 @@ program
     }
 
     const hooksDir = `${gitDir}/hooks`;
-    const MARKER = '# --- capy auto-sync (do not remove) ---';
-    const END_MARKER = '# --- end capy ---';
     const hookNames = ['post-checkout', 'post-merge', 'pre-push'];
     let removed = false;
 
@@ -582,12 +581,9 @@ program
       if (!existsSync(hookPath)) continue;
 
       const content = readFileSync(hookPath, 'utf-8');
-      if (!content.includes(MARKER)) continue;
+      if (!content.includes(SYNC_HOOK_MARKER)) continue;
 
-      const escMarker = MARKER.replace(/[()]/g, '\\$&');
-      const escEnd = END_MARKER.replace(/[()]/g, '\\$&');
-      const re = new RegExp(`${escMarker}[\\s\\S]*?${escEnd}\\n?`);
-      const updated = content.replace(re, '').trim();
+      const updated = withoutSyncHookBlock(content).trim();
 
       if (!updated || /^#!.*sh$/.test(updated)) {
         unlinkSync(hookPath);

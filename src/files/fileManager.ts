@@ -5,6 +5,7 @@ import { parse as parseDotenv } from 'dotenv';
 import { Encryptor } from '../crypto/encryptor';
 import { deriveResourceId } from '../crypto/resourceId';
 import { debug } from '../ui/debug';
+import { healPreview, snippetWithEncryption } from './valuePreview';
 import { upsertEnvText, EnvHeader, type EnvNotes } from './envUpsert';
 import { placeholderEnvNote, placeholderEnvNoteVariants, placeholdersOnBranch } from '../core/placeholder';
 import { installKeepLockMergeDriver } from '../git/keepLockMergeInstall';
@@ -247,11 +248,11 @@ export class FileManager {
               { variable: key }
             );
           }
-          return value;
+          return healPreview(value);
         }
         // Encrypt the plain text value
         const encrypted = Encryptor.encrypt(value, encryptionKey);
-        const snippetValue = this.createSnippetWithEncryption(value, encrypted);
+        const snippetValue = snippetWithEncryption(value, encrypted);
         const resourceId = deriveResourceId(branch || '', key);
         return `capy:${resourceId}:${snippetValue}`;
       };
@@ -556,41 +557,6 @@ export class FileManager {
     this.updateGitignore(['.env.pre-capy.old']);
     console.log(`Saved plaintext backup to ${oldPath}`);
     return true;
-  }
-
-  /**
-   * Creates a snippet-enhanced encrypted value for better usability
-   */
-  private createSnippetWithEncryption(originalValue: string, encryptedValue: string): string {
-    // The snippet pieces are a cosmetic plaintext preview spliced around the
-    // ciphertext. They MUST stay newline-free: a newline in a leading snippet
-    // would land in the .env line before the ciphertext, and dotenv truncates a
-    // value at the first newline — corrupting decryption of any multi-line
-    // secret (e.g. a PEM key whose first bytes include a newline). Collapse all
-    // whitespace runs to a single space so the preview is always one line.
-    const snippetSource = originalValue.replace(/\s+/g, ' ');
-    const valueLength = snippetSource.length;
-
-    if (valueLength <= 4) {
-      const snippet = snippetSource.slice(-1);
-      return `${encryptedValue}...${snippet}`;
-    } else if (valueLength <= 8) {
-      const firstSnippet = snippetSource.slice(0, 1);
-      const lastSnippet = snippetSource.slice(-1);
-      return `${firstSnippet}...${encryptedValue}...${lastSnippet}`;
-    } else if (valueLength <= 16) {
-      const firstSnippet = snippetSource.slice(0, 1);
-      const lastSnippet = snippetSource.slice(-3);
-      return `${firstSnippet}...${encryptedValue}...${lastSnippet}`;
-    } else if (valueLength <= 24) {
-      const firstSnippet = snippetSource.slice(0, 2);
-      const lastSnippet = snippetSource.slice(-6);
-      return `${firstSnippet}...${encryptedValue}...${lastSnippet}`;
-    } else {
-      const firstSnippet = snippetSource.slice(0, 4);
-      const lastSnippet = snippetSource.slice(-6);
-      return `${firstSnippet}...${encryptedValue}...${lastSnippet}`;
-    }
   }
 
   /**
