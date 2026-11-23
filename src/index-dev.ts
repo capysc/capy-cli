@@ -485,12 +485,17 @@ program
   .option('--email <email>', 'agent mode: the account that will approve; prints a link and exits 3 at once, then run --wait') // COPY-FLAG
   .option('--wait', 'agent mode: wait for the pending pairing to be approved (exits 3 with PAIR_STILL_WAITING after 30 seconds; run it again)') // COPY-FLAG
   .option('--cancel', 'agent mode: drop the pending pairing') // COPY-FLAG
+  .option('--transport', 'receive this project\'s keys from Keep (/transport/pair); once per machine. Without it, pair only signs in a machine that already has its keys (/pair)') // COPY-FLAG
+  .option('--signup', 'a new project: the approver creates the organization in Keep and this machine gets its first keys') // COPY-FLAG
+  .option('--org <id>', 'prefer this organization when your account has several and the folder does not say (no keep.lock); the organization you approve in Keep decides') // COPY-FLAG
+  .option('--title <text>', 'short summary of why you are pairing, shown as the Keep pairing heading (max 120 chars)') // COPY-FLAG
+  .option('--description <text>', 'what you will do once paired, shown under it on the Keep pairing page (max 600 chars)') // COPY-FLAG
   .addHelpText('after', '\nIn a terminal, after browser approval: Enable this location as [email]? (y/N)\nAgents: ask the human which email will approve, run `capy pair --email <email> --json`, show the human the url, code and expires_at, then run `capy pair --wait`. Never fill in the email yourself.\n') // COPY-FLAG
   .action(async (options, command) => {
     const { pairEntry } = await import('./commands/pairEntry');
     // Read from the merged view: the program's `-f/--force` takes that flag before this command sees it.
     const merged = command.optsWithGlobals();
-    await pairEntry({ json: options.json === true, force: merged.force === true, email: options.email, wait: options.wait === true, cancel: options.cancel === true, apiUrl: process.env.CAPY_API_URL, devMode: true });
+    await pairEntry({ json: options.json === true, force: merged.force === true, email: options.email, wait: options.wait === true, cancel: options.cancel === true, transport: options.transport === true, signup: options.signup === true, org: options.org, title: options.title, description: options.description, apiUrl: process.env.CAPY_API_URL, devMode: true });
   });
 
 program

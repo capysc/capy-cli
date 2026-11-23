@@ -54,10 +54,28 @@ const SUCCESS_BODY = {
   organizations: [{ id: 'org_1', workos_org_id: 'wo_1', name: 'Acme' }],
 };
 
+const SESSION = { mode: 'session', orgId: null, projectId: null, signup: false } as const;
+
 describe('authorizeDevice', () => {
+  test('sends the mode, and the org/project hints and signup flag only when present', async () => {
+    const bodies: unknown[] = [];
+    globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
+      bodies.push(JSON.parse(String(init?.body)));
+      return { ok: true, status: 200, json: async () => ({ device_code: 'dc', user_code: 'U', verification_uri: 'v', expires_in: 600, interval: 5 }) } as Response;
+    }) as typeof fetch;
+    await authorizeDevice('https://api.example', 'pubkey', SESSION);
+    await authorizeDevice('https://api.example', 'pubkey', { mode: 'transport', orgId: 'org_1', projectId: 'proj_1', signup: false });
+    await authorizeDevice('https://api.example', 'pubkey', { mode: 'transport', orgId: null, projectId: null, signup: true });
+    expect(bodies).toEqual([
+      { public_key: 'pubkey', mode: 'session' },
+      { public_key: 'pubkey', mode: 'transport', org_id: 'org_1', project_id: 'proj_1' },
+      { public_key: 'pubkey', mode: 'transport', is_signup: true },
+    ]);
+  });
+
   test('returns the authorize response on success', async () => {
     mockFetchSequence([{ status: 200, body: { device_code: 'dc', user_code: 'ABCD-EFGH', verification_uri: 'https://x/verify', expires_in: 600, interval: 5 } }]);
-    const result = await authorizeDevice('https://api.example', 'pubkey');
+    const result = await authorizeDevice('https://api.example', 'pubkey', SESSION);
     expect(result.device_code).toBe('dc');
     expect(result.user_code).toBe('ABCD-EFGH');
   });
@@ -65,7 +83,7 @@ describe('authorizeDevice', () => {
   test('surfaces the service INVALID_FORMAT code rather than a generic one', async () => {
     mockFetchSequence([{ status: 400, body: { error: 'public_key must be a base64url-encoded raw uncompressed P-256 point', code: 'INVALID_FORMAT' } }]);
     try {
-      await authorizeDevice('https://api.example', 'not-a-key');
+      await authorizeDevice('https://api.example', 'not-a-key', SESSION);
       throw new Error('should have thrown');
     } catch (err: any) {
       expect(err).toBeInstanceOf(CapyError);
@@ -76,7 +94,7 @@ describe('authorizeDevice', () => {
   test('falls back to AUTH_FAILED for a code outside the known set', async () => {
     mockFetchSequence([{ status: 502, body: { error: 'Failed to start device authorization', code: 'SOME_UNKNOWN_CODE' } }]);
     try {
-      await authorizeDevice('https://api.example', 'pubkey');
+      await authorizeDevice('https://api.example', 'pubkey', SESSION);
       throw new Error('should have thrown');
     } catch (err: any) {
       expect(err).toBeInstanceOf(CapyError);
@@ -87,7 +105,7 @@ describe('authorizeDevice', () => {
   test('falls back to AUTH_FAILED with no code at all', async () => {
     mockFetchSequence([{ status: 502, body: { error: 'boom' } }]);
     try {
-      await authorizeDevice('https://api.example', 'pubkey');
+      await authorizeDevice('https://api.example', 'pubkey', SESSION);
       throw new Error('should have thrown');
     } catch (err: any) {
       expect(err).toBeInstanceOf(CapyError);
@@ -97,6 +115,18 @@ describe('authorizeDevice', () => {
 });
 
 describe('pollDeviceTokenOnce', () => {
+  test('carries the org Keep bound the pairing to (paired_org_id), null when absent', async () => {
+    mockFetchSequence([{ status: 200, body: { ...SUCCESS_BODY, paired_org_id: 'org_1' } }]);
+    expect(await pollDeviceTokenOnce('https://api.example', 'dc')).toMatchObject({ status: 'success', pairedOrgId: 'org_1' });
+    mockFetchSequence([{ status: 200, body: SUCCESS_BODY }]);
+    expect(await pollDeviceTokenOnce('https://api.example', 'dc')).toMatchObject({ status: 'success', pairedOrgId: null });
+  });
+
+  test('maps {status:"denied", code:"pairing_access_denied"} (HTTP 400) to forbidden', async () => {
+    mockFetchSequence([{ status: 400, body: { status: 'denied', code: 'pairing_access_denied' } }]);
+    expect(await pollDeviceTokenOnce('https://api.example', 'dc')).toEqual({ status: 'forbidden' });
+  });
+
   test('maps {status:"pending", code:"authorization_pending"} (HTTP 200)', async () => {
     mockFetchSequence([{ status: 200, body: { status: 'pending', code: 'authorization_pending' } }]);
     const result = await pollDeviceTokenOnce('https://api.example', 'dc');

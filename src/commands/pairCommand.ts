@@ -1,7 +1,19 @@
 /**
- * `capy pair` (CAP-684, docs/basic-pair.md) — brings this machine into an
- * org by pulling `local.key` + `key.enc` from a browser already signed into
- * Keep, via a WorkOS RFC 8628 device-grant login.
+ * `capy pair` (CAP-684, docs/basic-pair.md) — signs this machine in through
+ * Keep, via a WorkOS RFC 8628 device-grant login. Two modes
+ * (`auth/pairing/pairScope.ts`):
+ *
+ *  - `capy pair`: sign-in only, Keep `/pair`, for a machine that already has
+ *    its keys. Nothing is picked up; a machine without usable keys for the org
+ *    is refused before anything is installed (PAIR_TRANSPORT_REQUIRED).
+ *  - `capy pair --transport` (or `--signup` for a fresh project): Keep
+ *    `/transport/pair` seals `local.key` + `key.enc` to this run's key, and they
+ *    are picked up as described below. Meant to happen once per runtime.
+ *
+ * The approver's Keep session decides the org (checked against their WorkOS
+ * membership); this folder's keep.lock org is only a hint. The service hands
+ * the session only to the account that approved in Keep (else
+ * PAIR_ACCESS_DENIED), and says which org it was bound to.
  *
  * 1. Mint a one-time P-256 ECDH key pair and `POST /auth/device/authorize`.
  * 2. Print a QR code + link, then poll `/auth/device/token` (RFC 8628).
@@ -17,9 +29,10 @@
  */
 import { confirmPairAccount } from './pairAccountConfirmation';
 import { resolveActiveUrl } from '../config/profileConfig';
-import { resolveKeepOrigin } from '../config/keepOrigin';
 import { generatePairKeyPair, openPairEnvelope, parsePairEnvelope, type PairKeyPair } from '../crypto/pairCrypto';
-import { authorizeDevice, pollDeviceToken, type DeviceTokenExchange } from '../auth/deviceGrant';
+import { authorizeDevice, pollDeviceToken, type DeviceTokenExchange, type PairingIntent } from '../auth/deviceGrant';
+import { pairApprovalLink, resolvePairScope, type PairScope } from '../auth/pairing/pairScope';
+import { pairKeyFingerprint } from '../crypto/pairFingerprint';
 import { AuthService } from '../auth/authService';
 import { ServiceClient } from '../service/serviceClient';
 import { hasUsableOrgKeys, readLocalRoot, saveLocalRoot, writeOrgKeyFileRaw } from '../config/globalConfig';
@@ -35,6 +48,23 @@ export interface PairOptions {
   readonly force?: boolean;
   readonly apiUrl?: string;
   readonly devMode?: boolean;
+  /** `--transport`: hand keys over to this machine (Keep `/transport/pair`), for the project in this folder. */
+  readonly transport?: boolean;
+  /** `--signup`: a fresh project; the approver creates the org in Keep. */
+  readonly signup?: boolean;
+  /** `--org <id>`: an org hint for a multi-org account, when this folder does not give one. */
+  readonly org?: string;
+  /** `--title`: the agent's short reason for pairing; Keep's pairing heading. Display only. */
+  readonly title?: string;
+  /** `--description`: what the agent will do once paired; shown under the heading. Display only. */
+  readonly description?: string;
+}
+
+/** The trimmed, non-empty `--title`/`--description`, as sent to the service. */
+export function pairIntent(options: Pick<PairOptions, 'title' | 'description'>): PairingIntent {
+  const title = options.title?.trim();
+  const description = options.description?.trim();
+  return { ...(title ? { title } : {}), ...(description ? { description } : {}) };
 }
 
 interface PairedOrg {
@@ -61,6 +91,15 @@ function writeEntry(entry: PairingEntry, force: boolean): 'written' {
 /** What a link elicitation says the pairing is for. Display text for the agent. */
 export const PAIR_DEFAULT_PURPOSE = 'Sign in or sign up in Keep, prepare Transport, and pair this CLI.'; // COPY-FLAG
 
+/** What a link elicitation says the pairing is for: the agent's own words when given, else what each kind of pairing does. */
+export function pairPurpose(scope: { readonly mode: 'session' | 'transport'; readonly signup: boolean }, intent: PairingIntent = {}): string {
+  if (intent.description ?? intent.title) return (intent.description ?? intent.title)!;
+  if (scope.signup) return PAIR_DEFAULT_PURPOSE;
+  return scope.mode === 'session'
+    ? 'Sign this machine in with Keep. Its keys are already here; none are sent.' // COPY-FLAG
+    : 'Send this project\'s keys to this machine from Keep, and sign it in.'; // COPY-FLAG
+}
+
 const PAIR_LINK_LABEL = 'Approve on your other device:'; // COPY-FLAG
 
 
@@ -79,8 +118,9 @@ const PAIR_LINK_LABEL = 'Approve on your other device:'; // COPY-FLAG
  * `stop()` once the poll settles whether or not the user ever pressed a
  * key — same contract `startMaskedLinkPrompt` has always had.
  */
-function printHumanPairBlock(deviceLink: string, qr: RenderedTerminalQr | null, userCode: string): MaskedLinkPromptHandle | null {
+function printHumanPairBlock(deviceLink: string, qr: RenderedTerminalQr | null, userCode: string, fingerprint: string): MaskedLinkPromptHandle | null {
   const masked = maskLink(deviceLink, 'query');
+  const keyLine = `Key fingerprint: ${fingerprint} (Keep shows the same)`; // COPY-FLAG
 
   if (isFullScreenQrEligible(false) && qr) {
     const view = startFullScreenQrView({
@@ -88,7 +128,7 @@ function printHumanPairBlock(deviceLink: string, qr: RenderedTerminalQr | null, 
       maskedUrl: masked,
       label: PAIR_LINK_LABEL,
       qr,
-      extraFooterLines: [`Code: ${userCode}`], // COPY-FLAG (same text as the non-full-screen path below)
+      extraFooterLines: [`Code: ${userCode}`, keyLine], // COPY-FLAG (same text as the non-full-screen path below)
     });
     // Whenever the view closes — the user pressed q, or the surrounding
     // poll's `finally { prompt?.stop() }` closed it for them — the masked
@@ -99,7 +139,7 @@ function printHumanPairBlock(deviceLink: string, qr: RenderedTerminalQr | null, 
         fullUrl: deviceLink,
         maskedUrl: masked,
         label: PAIR_LINK_LABEL,
-        extraLines: [`Code: ${userCode}`], // COPY-FLAG (same text as the non-full-screen path below)
+        extraLines: [`Code: ${userCode}`, keyLine], // COPY-FLAG (same text as the non-full-screen path below)
       });
     });
     return view;
@@ -112,6 +152,7 @@ function printHumanPairBlock(deviceLink: string, qr: RenderedTerminalQr | null, 
   }
   const prompt = printMaskedLinkBlock({ fullUrl: deviceLink, kind: 'query', label: PAIR_LINK_LABEL });
   console.log(`  Code: ${userCode}`); // COPY-FLAG
+  console.log(`  ${keyLine}`);
   console.log('');
   return prompt;
 }
@@ -162,7 +203,10 @@ async function pickUpPairedKeys(
   const envelope = parsePairEnvelope(sealed);
   const payload = openPairEnvelope(envelope, keyPair);
 
-  const matching = payload.entries.filter((e) => e.user_id === exchange.user.id);
+  // Only the org Keep bound this pairing to (the approver's session org) may receive keys here. Keep seals only that
+  // org's keys; anything else in the envelope is ignored rather than trusted.
+  const matching = payload.entries.filter((e) => e.user_id === exchange.user.id
+    && (exchange.pairedOrgId === null || e.org_id === exchange.pairedOrgId));
   if (matching.length === 0) {
     throw new CapyError(
       'No keys were waiting for this account — run `capy transport` on a machine that already has them, then try again.', // COPY-FLAG
@@ -192,7 +236,22 @@ function keysAlreadyHere(session: InstalledPairSession, exchange: DeviceTokenExc
 }
 
 /**
- * Everything after the approving account is accepted: install the device-grant session, then either stop there (the
+ * Sign-in only: the machine must already hold usable keys of the approving account for the org Keep bound the pairing
+ * to (the approver's session org, as the service reports it). Checked before anything is installed, so a refusal
+ * leaves the machine exactly as it was.
+ */
+function requireKeysForSignIn(exchange: DeviceTokenExchange): void {
+  const userId = typeof exchange.user.id === 'string' && exchange.user.id !== '' ? exchange.user.id : null;
+  if (exchange.pairedOrgId && userId && hasUsableOrgKeys(exchange.pairedOrgId, userId)) return;
+  throw new CapyError(
+    'This machine has no keys for that organization yet. Run capy pair --transport in the project to receive them. Nothing was installed.', // COPY-FLAG
+    ERROR_CODES.PAIR_TRANSPORT_REQUIRED,
+  );
+}
+
+/**
+ * Everything after the approving account is accepted. Sign-in only (`session`): check the keys are here, then install
+ * the session and stop. Key handover (`transport`): install the device-grant session, then either stop there (the
  * keys are already here) or pick up and write the keys. Shared by the terminal flow below and by `capy pair --wait`
  * (`pairAgentCommand.ts`); behaviour is the same in both.
  */
@@ -201,7 +260,13 @@ export async function finishPairing(
   keyPair: PairKeyPair,
   deviceCode: string,
   options: PairOptions,
+  scope: Pick<PairScope, 'mode'>,
 ): Promise<PairResult> {
+  if (scope.mode === 'session') {
+    requireKeysForSignIn(exchange);
+    await installPairSession(exchange, options);
+    return { paired: [], keys: 'already_present' };
+  }
   const session = await installPairSession(exchange, options);
   if (keysAlreadyHere(session, exchange, options.force === true)) {
     return { paired: [], keys: 'already_present' };
@@ -224,15 +289,16 @@ export async function pairCommand(options: PairOptions = {}): Promise<void> {
     // wins, otherwise the profile chain (CAPY_API_URL → profile → default).
     const apiUrl = options.apiUrl || resolveActiveUrl(devMode);
 
+    const scope = resolvePairScope(options);
     const keyPair = generatePairKeyPair();
-    const authorize = await authorizeDevice(apiUrl, keyPair.publicKey);
+    const authorize = await authorizeDevice(apiUrl, keyPair.publicKey, scope, pairIntent(options));
 
     // The QR always encodes the FULL deviceLink (fragment/query and all) —
     // only the TEXT link below is ever masked.
-    const deviceLink = `${resolveKeepOrigin()}/device?code=${encodeURIComponent(authorize.user_code)}`;
+    const deviceLink = pairApprovalLink(scope, authorize.user_code);
     const qr = json ? null : renderTerminalQr(deviceLink);
 
-    const prompt = json ? null : printHumanPairBlock(deviceLink, qr, authorize.user_code);
+    const prompt = json ? null : printHumanPairBlock(deviceLink, qr, authorize.user_code, pairKeyFingerprint(keyPair.publicKey));
 
     // The poll and the masked-link key listener (`c`/`r`/`q`) run
     // CONCURRENTLY — the listener is event-driven (stdin 'data'), never a
@@ -257,7 +323,7 @@ export async function pairCommand(options: PairOptions = {}): Promise<void> {
       );
     }
 
-    const { paired, keys } = await finishPairing(exchange, keyPair, authorize.device_code, options);
+    const { paired, keys } = await finishPairing(exchange, keyPair, authorize.device_code, options, scope);
 
     if (json) {
       console.log(JSON.stringify({ ok: true, user_id: exchange.user.id, paired, keys }, null, 2));

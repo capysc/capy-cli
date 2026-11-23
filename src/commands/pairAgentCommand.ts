@@ -18,7 +18,7 @@
  * agent mode here (`json`, no terminal, or one of the new flags).
  */
 import { existsSync } from 'fs';
-import { authorizeDevice, pollDeviceTokenOnce, type DeviceAuthorizeResult, type DeviceTokenExchange, type DeviceTokenPoll } from '../auth/deviceGrant';
+import { authorizeDevice, pairAccessDenied, pollDeviceTokenOnce, type DeviceAuthorizeResult, type DeviceTokenExchange, type DeviceTokenPoll } from '../auth/deviceGrant';
 import {
   readPendingPairGrant,
   removePendingPairGrant,
@@ -26,7 +26,8 @@ import {
   sweepExpiredPendingPairGrant,
   type PendingPairGrant,
 } from '../auth/pairing/pendingGrant';
-import { resolveKeepOrigin } from '../config/keepOrigin';
+import { pairApprovalLink, resolvePairScope } from '../auth/pairing/pairScope';
+import { pairKeyFingerprint } from '../crypto/pairFingerprint';
 import { resolveActiveUrl } from '../config/profileConfig';
 import { generatePairKeyPair } from '../crypto/pairCrypto';
 import { CapyError, ERROR_CODES } from '../types/index';
@@ -36,7 +37,7 @@ import { EXIT_NEEDS_INPUT } from '../ui/interactive';
 import { createPairingQrImage, removePairingQrImage, type PairingQrImage } from '../ui/pairingPresentation';
 import { buildTerminalQr } from '../ui/terminalQr';
 import { binName } from './binName';
-import { PAIR_DEFAULT_PURPOSE, finishPairing, type PairOptions } from './pairCommand';
+import { finishPairing, pairIntent, pairPurpose, type PairOptions } from './pairCommand';
 import { refuseError } from './pairingRefusal';
 import { refuse, settle, type Refusal } from './refusal';
 
@@ -95,6 +96,18 @@ export function accountMatches(grant: Pick<PendingPairGrant, 'expectedEmail'>, u
 
 const EMAIL_QUESTION = 'Which email will approve this pairing?'; // COPY-FLAG
 
+/** POSIX single-quoting, so typed text reaches the rerun exactly as typed. */
+function shellQuote(value: string): string {
+  return /^[A-Za-z0-9_./:@%+=-]+$/.test(value) ? value : `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+/** The scope and intent flags that were typed, repeated on a rerun so the answer keeps the run's meaning. */
+function scopeFlags(options: PairAgentOptions): string {
+  const intent = pairIntent(options);
+  return `${options.transport === true ? ' --transport' : ''}${options.signup === true ? ' --signup' : ''}${options.org ? ` --org ${shellQuote(options.org)}` : ''}`
+    + `${intent.title ? ` --title ${shellQuote(intent.title)}` : ''}${intent.description ? ` --description ${shellQuote(intent.description)}` : ''}`;
+}
+
 /** The form that asks for the email. Its rerun repeats the flags that were typed (`--force`), so the answer keeps the run's meaning. */
 function emailForm(bin: string, options: PairAgentOptions): ElicitationForm {
   return {
@@ -103,7 +116,7 @@ function emailForm(bin: string, options: PairAgentOptions): ElicitationForm {
     details: {},
     display: pairEmailDisplay(),
     fields: [{ name: 'email', type: 'string', pattern: EMAIL_PATTERN, question: EMAIL_QUESTION }],
-    answer: { rerun: `${bin} pair --email <email>${options.force === true ? ' --force' : ''} --json` },
+    answer: { rerun: `${bin} pair --email <email>${scopeFlags(options)}${options.force === true ? ' --force' : ''} --json` },
   };
 }
 
@@ -112,6 +125,7 @@ function linkElicitation(grant: PendingPairGrant, bin: string, qr: ElicitationLi
     kind: 'link',
     url: grant.deviceLink,
     code: grant.userCode,
+    fingerprint: pairKeyFingerprint(grant.keyPair.publicKey),
     purpose: grant.purpose,
     expires_at: grant.expiresAt,
     ...(qr ? { qr } : {}),
@@ -211,15 +225,17 @@ async function startRun(options: PairAgentOptions, deps: PairAgentDeps): Promise
   }
   const now = deps.now ?? Date.now;
   const apiUrl = options.apiUrl || resolveActiveUrl(devMode);
+  const scope = resolvePairScope(options);
   const keyPair = generatePairKeyPair();
-  const authorize = await authorizeDevice(apiUrl, keyPair.publicKey);
+  const intent = pairIntent(options);
+  const authorize = await authorizeDevice(apiUrl, keyPair.publicKey, scope, intent);
   const authorizedAt = now();
   if (typeof authorize.device_code !== 'string' || !authorize.device_code
     || typeof authorize.user_code !== 'string' || !authorize.user_code
     || !isPositiveNumber(authorize.interval)) {
     throw malformedAuthorize();
   }
-  const deviceLink = `${resolveKeepOrigin()}/device?code=${encodeURIComponent(authorize.user_code)}`;
+  const deviceLink = pairApprovalLink(scope, authorize.user_code);
   // Everything that can throw is settled before the PNG exists, so a refusal never leaves one behind.
   const expiresAt = expiryOf(authorize, authorizedAt);
   const previous = readPendingPairGrant();
@@ -232,12 +248,13 @@ async function startRun(options: PairAgentOptions, deps: PairAgentDeps): Promise
     expectedEmail: expected,
     force: options.force === true,
     apiUrl,
-    purpose: PAIR_DEFAULT_PURPOSE,
+    purpose: pairPurpose(scope, intent),
     expiresAt,
     intervalSeconds: authorize.interval,
     // Like the terminal flow, the first "approved yet?" check waits one interval after the authorization.
     nextPollAt: authorizedAt + authorize.interval * 1000,
     ...(image ? { qrFile: image.file } : {}),
+    mode: scope.mode,
   };
   saveOrDiscardQr(grant);
   // The new grant replaced the old one: the old one's QR file goes with it.
@@ -252,6 +269,7 @@ type WaitStep =
   | { readonly kind: 'approved'; readonly exchange: DeviceTokenExchange }
   | { readonly kind: 'expired' }
   | { readonly kind: 'denied' }
+  | { readonly kind: 'forbidden' }
   | { readonly kind: 'waiting'; readonly intervalMs: number; readonly nextPollAt: number };
 
 type Clock = Required<Pick<PairAgentDeps, 'sleep' | 'now'>>;
@@ -308,6 +326,8 @@ async function pollUntil(grant: PendingPairGrant, ceilingMs: number, pollTimeout
         return { kind: 'expired' };
       case 'denied':
         return { kind: 'denied' };
+      case 'forbidden':
+        return { kind: 'forbidden' };
       case 'slow_down':
         return schedule(intervalMs + 5000, clock.now() + intervalMs + 5000);
       case 'pending':
@@ -331,7 +351,7 @@ async function completeApproved(grant: PendingPairGrant, exchange: DeviceTokenEx
     force: grant.force,
     apiUrl: grant.apiUrl,
     devMode: options.devMode === true,
-  });
+  }, grant);
   return { kind: 'done', body: { ok: true, user_id: exchange.user.id, paired, keys } };
 }
 
@@ -351,6 +371,9 @@ async function waitRun(options: PairAgentOptions, deps: PairAgentDeps): Promise<
     case 'denied':
       removePendingPairGrant();
       throw new CapyError('Device pairing was denied', ERROR_CODES.PAIR_DENIED); // COPY-FLAG
+    case 'forbidden':
+      removePendingPairGrant();
+      throw pairAccessDenied();
     case 'waiting': {
       const kept: PendingPairGrant = { ...grant, intervalSeconds: step.intervalMs / 1000, nextPollAt: step.nextPollAt };
       savePendingPairGrant(kept);

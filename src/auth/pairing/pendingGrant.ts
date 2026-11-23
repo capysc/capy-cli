@@ -22,6 +22,7 @@
 import { deletePairPending, readPairPendingRaw, savePairPendingRaw } from '../../config/globalConfig';
 import { exportPairKeyPair, importPairKeyPair, type PairKeyPair } from '../../crypto/pairCrypto';
 import { removePairingQrImage } from '../../ui/pairingPresentation';
+import type { PairMode } from './pairScope';
 
 export interface PendingPairGrant {
   readonly deviceCode: string;
@@ -41,6 +42,8 @@ export interface PendingPairGrant {
   readonly nextPollAt?: number;
   /** Path of the QR PNG made for `deviceLink`. Absent when none was made. It encodes the link only. */
   readonly qrFile?: string;
+  /** Sign-in only (`session`) or key handover (`transport`). A file from before the split has none: `transport`, as it always was. */
+  readonly mode: PairMode;
 }
 
 const FILE_VERSION = 1;
@@ -79,6 +82,7 @@ function parsePending(raw: string): PendingPairGrant | null {
   const expectedEmail = str(data.expected_email);
   const qrFile = str(data.qr_file);
   const nextPollAt = typeof data.next_poll_at === 'number' && Number.isFinite(data.next_poll_at) ? data.next_poll_at : undefined;
+  const mode: PairMode = data.mode === 'session' ? 'session' : 'transport';
   if (!deviceCode || !privateKey || !publicKey || !userCode || !deviceLink || !apiUrl || !purpose || !expiresAt) return null;
   if (typeof interval !== 'number' || !Number.isFinite(interval) || interval <= 0) return null;
   if (Number.isNaN(Date.parse(expiresAt))) return null;
@@ -104,6 +108,7 @@ function parsePending(raw: string): PendingPairGrant | null {
     intervalSeconds: interval,
     ...(nextPollAt !== undefined ? { nextPollAt } : {}),
     ...(qrFile !== undefined ? { qrFile } : {}),
+    mode,
   };
 }
 
@@ -125,6 +130,7 @@ export function savePendingPairGrant(grant: PendingPairGrant): void {
     interval_seconds: grant.intervalSeconds,
     ...(grant.nextPollAt !== undefined ? { next_poll_at: grant.nextPollAt } : {}),
     ...(grant.qrFile !== undefined ? { qr_file: grant.qrFile } : {}),
+    mode: grant.mode,
   }));
 }
 
