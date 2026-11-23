@@ -58,6 +58,11 @@ export function resolvePairScope(options: PairScopeOptions, cwd: string = proces
   return { mode: 'session', orgId: org, projectId: null, signup: false };
 }
 
+/** Whether this folder belongs to a Capy project (has a readable keep.lock). `--signup` is offered only outside one. */
+export function folderHasProject(cwd: string = process.cwd(), deps: { readonly readProject?: typeof readKeep } = {}): boolean {
+  return Boolean((deps.readProject ?? readKeep)(cwd));
+}
+
 /** The Keep page that approves this pairing. */
 export function pairApprovalLink(scope: PairScope, userCode: string): string {
   const path = scope.mode === 'session' ? '/pair' : '/transport/pair';

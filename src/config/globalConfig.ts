@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync, rmSync } from 'fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync, rmSync } from 'fs';
 import { homedir } from 'os';
 import { join } from 'path';
 import type { KeepFile, SyncState } from '../types/index';
@@ -184,6 +184,27 @@ export function hasUsableOrgKeys(orgId: string, userId?: string): boolean {
   } catch {
     return false;
   }
+}
+
+/** The names of the subdirectories of `dir`, or none when it cannot be read. */
+function subdirectories(dir: string): string[] {
+  try {
+    return readdirSync(dir, { withFileTypes: true }).filter((entry) => entry.isDirectory()).map((entry) => entry.name);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Whether this machine holds usable keys (see {@link hasUsableOrgKeys}) of any user for `orgId`, or for any org when
+ * `orgId` is null. Read before anyone has signed in, so it cannot know whose keys they are: it only tells a machine
+ * that was never given keys from one that was.
+ */
+export function hasAnyUsableOrgKeys(orgId: string | null): boolean {
+  const orgsDir = join(getGlobalCapyDir(), 'orgs');
+  const orgIds = orgId === null ? subdirectories(orgsDir) : [orgId];
+  return orgIds.some((id) => hasUsableOrgKeys(id)
+    || subdirectories(join(orgsDir, id, 'users')).some((userId) => hasUsableOrgKeys(id, userId)));
 }
 
 /**
