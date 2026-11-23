@@ -69,9 +69,31 @@ function codeOrFallback(data: { code?: unknown }, fallback: string): string {
   return typeof data.code === 'string' && KNOWN_DEVICE_GRANT_CODES.has(data.code) ? data.code : fallback;
 }
 
-/** `POST /auth/device/authorize {public_key}` — step 1 of `capy pair`. */
-export async function authorizeDevice(apiUrl: string, publicKey: string): Promise<DeviceAuthorizeResult> {
-  const { ok, status, data } = await postJson<DeviceAuthorizeResult>(`${apiUrl}/auth/device/authorize`, { public_key: publicKey });
+/** What the pairing asks for (`auth/pairing/pairScope.ts`). `orgId`/`projectId` are hints: the approver's Keep session org decides. */
+export interface DeviceAuthorizeScope {
+  readonly mode: 'session' | 'transport';
+  readonly orgId: string | null;
+  readonly projectId: string | null;
+  readonly signup: boolean;
+}
+
+/** The agent's display-only reason for pairing, shown on Keep's pairing page (title as heading, description below). */
+export interface PairingIntent {
+  readonly title?: string;
+  readonly description?: string;
+}
+
+/** `POST /auth/device/authorize {public_key, mode, org_id?, project_id?, is_signup?, intent_title?, intent_description?}` — step 1 of `capy pair`. */
+export async function authorizeDevice(apiUrl: string, publicKey: string, scope: DeviceAuthorizeScope, intent: PairingIntent = {}): Promise<DeviceAuthorizeResult> {
+  const { ok, status, data } = await postJson<DeviceAuthorizeResult>(`${apiUrl}/auth/device/authorize`, {
+    public_key: publicKey,
+    ...(intent.title ? { intent_title: intent.title } : {}),
+    ...(intent.description ? { intent_description: intent.description } : {}),
+    mode: scope.mode,
+    ...(scope.orgId ? { org_id: scope.orgId } : {}),
+    ...(scope.projectId ? { project_id: scope.projectId } : {}),
+    ...(scope.signup ? { is_signup: true } : {}),
+  });
   if (!ok) {
     throw new CapyError(
       typeof data.error === 'string' ? data.error : 'Failed to start device pairing',
@@ -86,6 +108,8 @@ export interface DeviceTokenExchange {
   token: { access_token: string | null; refresh_token: string; expires_in: number };
   user: { id: string; email: string; first_name: string | null; last_name: string | null };
   organizations: Organization[];
+  /** The org Keep bound this pairing to: the approver's session org. Null from a service from before the binding. */
+  pairedOrgId: string | null;
 }
 
 export type DeviceTokenPoll =
@@ -93,6 +117,8 @@ export type DeviceTokenPoll =
   | { status: 'slow_down' }
   | { status: 'expired' }
   | { status: 'denied' }
+  /** The account WorkOS approved is not the Keep approver, or not a member of the bound org: no session was handed over. */
+  | { status: 'forbidden' }
   | ({ status: 'success' } & DeviceTokenExchange);
 
 /** The RFC 8628 wire codes this module branches on — see file header. */
@@ -101,6 +127,8 @@ const RFC8628_ERROR = {
   SLOW_DOWN: 'slow_down',
   EXPIRED: 'expired_token',
   DENIED: 'access_denied',
+  /** Capy's own, not RFC 8628's: the service refused the approving account for this pairing. */
+  FORBIDDEN: 'pairing_access_denied',
 } as const;
 
 /**
@@ -116,6 +144,7 @@ interface DeviceTokenResponseBody {
   token?: DeviceTokenExchange['token'];
   user?: DeviceTokenExchange['user'];
   organizations?: Organization[];
+  paired_org_id?: unknown;
 }
 
 /**
@@ -128,19 +157,25 @@ export async function pollDeviceTokenOnce(apiUrl: string, deviceCode: string, op
   // Success is a STRUCTURAL fact, never inferred from the HTTP status alone
   // (pending is ALSO 200): no `status` field, and a token actually arrived.
   if (data.status === undefined && data.token && data.user) {
-    return { status: 'success', token: data.token, user: data.user, organizations: data.organizations ?? [] };
+    return { status: 'success', token: data.token, user: data.user, organizations: data.organizations ?? [], pairedOrgId: typeof data.paired_org_id === 'string' && data.paired_org_id !== '' ? data.paired_org_id : null };
   }
 
   if (data.status === 'pending' && data.code === RFC8628_ERROR.PENDING) return { status: 'pending' };
   if (data.status === 'pending' && data.code === RFC8628_ERROR.SLOW_DOWN) return { status: 'slow_down' };
   if (data.status === 'denied' && data.code === RFC8628_ERROR.EXPIRED) return { status: 'expired' };
   if (data.status === 'denied' && data.code === RFC8628_ERROR.DENIED) return { status: 'denied' };
+  if (data.status === 'denied' && data.code === RFC8628_ERROR.FORBIDDEN) return { status: 'forbidden' };
 
   throw new CapyError(
     typeof data.error === 'string' ? data.error : 'Device token exchange failed',
     codeOrFallback(data, ERROR_CODES.AUTH_FAILED),
     { status: httpStatus, code: data.code },
   );
+}
+
+/** The service refused the approving account for this pairing. Nothing was handed over or installed. */
+export function pairAccessDenied(): CapyError {
+  return new CapyError('This pairing was not approved in Keep by the account that signed in, or that account is no longer a member of the organization. No session or keys were installed.', ERROR_CODES.PAIR_ACCESS_DENIED); // COPY-FLAG
 }
 
 export interface DevicePollOptions {
@@ -183,6 +218,8 @@ export async function pollDeviceToken(apiUrl: string, deviceCode: string, opts: 
         throw new CapyError('Device pairing expired before it was approved', ERROR_CODES.AUTH_FAILED, { reason: RFC8628_ERROR.EXPIRED });
       case 'denied':
         throw new CapyError('Device pairing was denied', ERROR_CODES.AUTH_FAILED, { reason: RFC8628_ERROR.DENIED });
+      case 'forbidden':
+        throw pairAccessDenied();
     }
   };
 
