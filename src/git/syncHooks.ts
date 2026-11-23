@@ -54,6 +54,11 @@ export function syncHookBlocks(cmd: string): Readonly<Record<string, string>> {
   };
 }
 
+/** `content` with Capy's hook block (markers included) removed. */
+export function withoutSyncHookBlock(content: string): string {
+  return content.replace(BLOCK_RE, '');
+}
+
 /** New content for a hook file, or null when it is already up to date. */
 export function nextHookContent(existing: string | null, block: string): string | null {
   if (existing === null) return `#!/bin/sh\n${block}\n`;
@@ -79,7 +84,7 @@ export function installSyncHooks(gitDir: string, cmd: string): void {
   const prePushPath = join(hooksDir, 'pre-push');
   if (existsSync(prePushPath)) {
     const prePush = readFileSync(prePushPath, 'utf-8');
-    if (prePush.includes(SYNC_HOOK_MARKER)) writeFileSync(prePushPath, prePush.replace(BLOCK_RE, ''), 'utf-8');
+    if (prePush.includes(SYNC_HOOK_MARKER)) writeFileSync(prePushPath, withoutSyncHookBlock(prePush), 'utf-8');
   }
 
   for (const [hookName, block] of Object.entries(syncHookBlocks(cmd))) {
