@@ -8,6 +8,7 @@
  */
 import { describe, test, expect } from 'bun:test';
 import { join } from 'path';
+import { version } from '../../package.json';
 import { spawnSync } from 'child_process';
 
 const PROD_CLI = join(__dirname, '../../dist/index.js');
@@ -17,6 +18,16 @@ function run(cliPath: string, args: string[]): { stdout: string; stderr: string;
   const r = spawnSync('node', [cliPath, ...args], { encoding: 'utf-8' });
   return { stdout: r.stdout ?? '', stderr: r.stderr ?? '', code: r.status ?? 1 };
 }
+
+test('the built entry points report the same stamped build and help keeps its release version', () => {
+  const production = run(PROD_CLI, ['--version']);
+  expect(production.code).toBe(0);
+  const [release, build] = production.stdout.trim().split('+');
+  expect(release).toBe(version);
+  expect(build).toMatch(/^\d{17}(?:\.[0-9a-f]{8})?$/);
+  expect(run(DEV_CLI, ['--version']).stdout).toBe(production.stdout);
+  expect(JSON.parse(run(PROD_CLI, ['help', '--json']).stdout).version).toBe(version);
+});
 
 describe('capy help --json', () => {
   test('prod: valid JSON, includes the known-load-bearing commands', () => {

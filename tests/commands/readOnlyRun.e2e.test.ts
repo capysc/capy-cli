@@ -1,4 +1,5 @@
 import { mock, spyOn, describe, test, expect, beforeEach, afterEach, afterAll } from 'bun:test';
+import { execFileSync } from 'node:child_process';
 import { mkdtempSync, rmSync, readFileSync, existsSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
@@ -166,7 +167,9 @@ describe('CAP-303: read-only run cannot rewrite keep.lock (e2e, real FS)', () =>
 
   test('run + quit on development leaves keep.lock byte-identical despite a main-flavored server keep', async () => {
     // Machine B's real on-disk state: committed keep.lock with dev pins.
+    execFileSync('git', ['init', '--quiet', dir]);
     new FileManager(dir).writeKeepFile(LOCAL_KEEP);
+    execFileSync('git', ['-C', dir, 'add', '--', 'keep.lock']);
     new ProjectManager(dir).writeActiveBranch('development');
     const bytesBefore = readFileSync(join(dir, 'keep.lock'), 'utf-8');
 

@@ -19,7 +19,9 @@ import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { spawnSync } from 'child_process';
-import { withHarness, ORG_ID, PROJECT_ID, type Harness } from '../helpers/pipedHarness';
+import { Encryptor } from '../../src/crypto/encryptor';
+import { SyncEngine } from '../../src/sync/syncEngine';
+import { trackFixtureKeep, withHarness, ORG_ID, PROJECT_ID, type Harness } from '../helpers/pipedHarness';
 import { hashValue } from '../../src/sync/compareSecrets';
 
 const CLI = join(__dirname, '../../dist/index.js');
@@ -118,12 +120,24 @@ const dokployTarget = (branch: string) => ({
  * A project in `h` that bare `capy` (the first step of every `capy deploy`) finds in sync: `keep.lock` pins the hash of
  * every value, and `.env` holds those values. The branch checks below are `deploy`'s own, behind that first step.
  */
-function syncedProject(h: Harness, opts: { header?: string; branches?: string[]; branchFile?: string | null }): void {
+function syncedProject(h: Harness, opts: { header?: string; branches?: string[]; branchFile?: string | null; folderOnly?: boolean }): void {
   const branches = opts.branches ?? ['development', 'production'];
   const variables = {
     DATABASE_URL: branches.map((b) => ({ resource_id: 'rid' + b[0], branch: b, value_hash: hashValue('x') })),
   };
-  writeFileSync(join(h.project, 'keep.lock'), JSON.stringify({ version: '3.0', org_id: ORG_ID, project_id: PROJECT_ID, project_name: 'test', variables }, null, 2));
+  const keep = { version: '3.0', org_id: ORG_ID, project_id: PROJECT_ID, project_name: 'test', variables };
+  writeFileSync(join(h.project, 'keep.lock'), JSON.stringify(keep, null, 2));
+  if (opts.folderOnly) {
+    writeFileSync(join(h.project, '.gitignore'), '/keep.lock\n');
+    for (const entry of variables.DATABASE_URL) {
+      h.setBranchData(PROJECT_ID, entry.branch, {
+        keep_file: JSON.stringify(keep), keep_hash: SyncEngine.computeKeepHash(keep, entry.branch),
+        env_file: `DATABASE_URL=capy:${entry.resource_id}:${Encryptor.encrypt('x', h.projectKey)}`, permissions: ['*'],
+      });
+    }
+  } else {
+    trackFixtureKeep(h.project);
+  }
   writeDeployConfig(h.project, [dokployTarget('production')]);
   writeFileSync(join(h.project, '.env'), `${opts.header === undefined ? '' : `${opts.header}\n`}DATABASE_URL=x\n`);
   if (opts.branchFile === null) rmSync(join(h.project, '.capy', 'branch'), { force: true });
@@ -139,6 +153,16 @@ describe('capy deploy — branch check (CAP-679)', () => {
       expect(r.stderr).toContain('DEPLOY_BRANCH_MISMATCH');
       expect(r.stderr).toContain('development');
       expect(r.stderr).toContain('production');
+    });
+  });
+
+  test('a folder-only deployment with --yes requires a named target before provider access', async () => {
+    await withHarness(async (h) => {
+      syncedProject(h, { header: '# capy:branch=production', branchFile: 'production', folderOnly: true });
+      const result = await h.run(['deploy', '--target', 'dokploy', '--yes']);
+      expect(result.code).toBe(1);
+      expect(result.stderr).toContain('Choose a saved target');
+      expect(h.pushCount()).toBe(0);
     });
   });
 
@@ -201,6 +225,7 @@ function targetsProject(h: Harness, opts: { header?: string; branchFile?: string
     })),
   };
   writeFileSync(join(h.project, 'keep.lock'), JSON.stringify({ version: '3.0', org_id: ORG_ID, project_id: PROJECT_ID, project_name: 'test', variables }, null, 2));
+  trackFixtureKeep(h.project);
   writeDeployConfig(h.project, [dokployTarget('production')]);
   writeFileSync(join(h.project, '.env'), `${opts.header === undefined ? '' : `${opts.header}\n`}DATABASE_URL=x\n`);
   if (opts.branchFile === null) rmSync(join(h.project, '.capy', 'branch'), { force: true });
@@ -323,14 +348,14 @@ describe('capy deploy --json — branch-mismatch as coded JSON, not only stderr 
     expect(parsed.problem).toBeUndefined();
   });
 
-  test('an unknown active branch has no `problem` field (unknown is never guessed as a mismatch)', () => {
+  test('a plain folder with an unknown active branch asks for a branch before delivery', () => {
     writeKeep(ROOT); // two branches — deriveActiveBranch cannot pick one
     writeDeployConfig(ROOT, [dokployTarget('production')]);
     writeFileSync(join(ROOT, '.env'), 'DATABASE_URL=x\n');
 
     const r = capy(['deploy', 'dokploy-target', '--json']);
     const parsed = JSON.parse(r.stdout);
-    expect(parsed.problem).toBeUndefined();
+    expect(parsed.problem).toEqual({ code: 'DEPLOY_BRANCH_UNKNOWN', activeBranch: null, targetBranch: 'production' });
   });
 });
 

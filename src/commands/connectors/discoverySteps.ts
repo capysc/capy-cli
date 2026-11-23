@@ -27,6 +27,7 @@ import { assertProjectNameAllowed, isReservedProjectName, PROJECT_NAME_RESERVED_
 import { findDirtyBranchIssue } from '../checkoutCommand';
 import { listOrgProjectsOrUnavailable } from '../capyCommand';
 import { resolveJoinBranch } from '../../core/joinBranch';
+import { tracksKeepLock } from '../../git/keepTracking';
 import { commitDiscoveryChanges, isValidDiscoveryCommitBranchName } from '../../git/discoveryCommit';
 import type { FolderSync, GateOptions } from '../../sync/gate';
 import { isConflictRefusal } from '../../sync/conflicts';
@@ -191,6 +192,10 @@ export function discoveryCommitPathsFor(folder: string): readonly string[] {
   return [`${prefix}keep.lock`, `${prefix}.gitignore`];
 }
 
+export function tracksDiscoveryFolder(folder: { readonly repoDir: string; readonly folder: string }): boolean {
+  return tracksKeepLock(folder.repoDir, join(folder.folder, 'keep.lock'));
+}
+
 /**
  * Every REPO the plan touches, and the branch/files a real run WOULD commit
  * for it — dry-run preview only, never runs a git-mutating command (see
@@ -212,9 +217,10 @@ export function commitPreviewForFolders(
   /** The commit subject. */
   commitMessage?: string,
 ): readonly DiscoveryRepoCommitResult[] {
-  const repoDirs = [...new Set(folders.map((f) => f.repoDir))];
+  const tracked = folders.filter(tracksDiscoveryFolder);
+  const repoDirs = [...new Set(tracked.map((f) => f.repoDir))];
   return repoDirs.map((repoDir) => {
-    const paths = [...new Set(folders.filter((f) => f.repoDir === repoDir).flatMap((f) => discoveryCommitPathsFor(f.folder)))];
+    const paths = [...new Set(tracked.filter((f) => f.repoDir === repoDir).flatMap((f) => discoveryCommitPathsFor(f.folder)))];
     const outcome = commitDiscoveryChanges(repoDir, paths, new Set(), { branchName, dryRun: true, summaryLines: [], codes, ...(commitMessage ? { commitMessage } : {}) });
     return { repoDir, ...outcome };
   });
@@ -238,7 +244,7 @@ export function commitForAppliedRepos(
 ): readonly DiscoveryRepoCommitResult[] {
   const repoDirs = [...new Set(applied.map((f) => f.repoDir))];
   return repoDirs.flatMap((repoDir) => {
-    const okFolders = applied.filter((f) => f.repoDir === repoDir && f.ok);
+    const okFolders = applied.filter((f) => f.repoDir === repoDir && f.ok && tracksDiscoveryFolder(f));
     if (okFolders.length === 0) return [];
     const paths = okFolders.flatMap((f) => discoveryCommitPathsFor(f.folder));
     const summaryLines = okFolders.map((f) => `- ${f.folder || '.'}: ${(f as Extract<DiscoveryFolderResult, { ok: true }>).activeBranch}`);

@@ -30,7 +30,8 @@ import { mkdirSync, readFileSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { ERROR_CODES } from '../types/index';
 import { getGlobalCapyDir } from '../config/globalConfig';
-import { isGitRepo, originRemoteUrl, repoRelPath } from '../deploy/git';
+import { tracksKeepLock } from '../git/keepTracking';
+import { originRemoteUrl, repoRelPath } from '../deploy/git';
 import { RepoRef, RemoteRef, parseRemote, parseRepoId, repoIdArgs } from '../deploy/githubApi';
 import { resolveGh } from '../utils/gh';
 import { isReservedProjectName } from '../system/reservedProjectName';
@@ -328,7 +329,7 @@ function ghRepoId(repo: RepoRef): Promise<number | undefined> {
 }
 
 export const realDeps: RepoLinkDeps = {
-  isGitRepo,
+  isGitRepo: tracksKeepLock,
   originUrl: originRemoteUrl,
   showPrefix: (cwd) => repoRelPath(cwd, ''),
   githubRepoId: ghRepoId,

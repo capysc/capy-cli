@@ -7,7 +7,7 @@
  * checkout (tests/helpers). Needs `bun run build` first. Names only: no secret value is asserted on or printed.
  */
 import { describe, test, expect } from 'bun:test';
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHarness, BRANCH, type CliResult, type Harness } from '../helpers/pipedHarness';
 import { gitEnv, git } from '../helpers/keepLockGit';
@@ -264,5 +264,25 @@ describe('planTrackedKeepLock', () => {
       const nothing = [{ branch: 'dev', entries: [{ variable: 'NOT_THERE', entry: null }] }];
       expect(planTrackedKeepLock({ cwd: h.project, records: nothing, localKeep: keep('proj_test_piped') }, inGit)).toEqual({ kind: 'unchanged' });
     });
+  });
+});
+
+test('folder-only setup uploads the change without publishing the ignored pins, even with --pr', async () => {
+  await withWorld(async (h) => {
+    gitInit(h.project, 'git@github.com:Acme/solo.git');
+    writeFileSync(join(h.project, '.gitignore'), '/keep.lock\n/.capy/\n.env\n');
+    const preview = await h.run(['add', NAME, '--dry-run', '--json', '--pr'], 'local-only-test-value\n');
+    expect(preview.code).toBe(0);
+    expect(json(preview).unanswered).toBeUndefined();
+    expect(json(preview).keep_lock).toMatchObject({ would_pr: null });
+    const added = await h.run(['add', NAME, '--json', '--pr'], 'local-only-test-value\n');
+    expect(added.code).toBe(0);
+    expect(h.pushCount()).toBe(1);
+    expect(json(added).keep_lock).toEqual({ changed: true, committed: false });
+    expect(json(added).unanswered).toBeUndefined();
+    expect(JSON.parse(h.keepLockText()).variables[NAME]).toBeDefined();
+    expect(readFileSync(join(h.project, '.capy', 'keep.lock'), 'utf8')).toBe(h.keepLockText());
+    expect(h.envValue(NAME)).toBe('local-only-test-value');
+    expect(gitIn(h, ['ls-files', '--', 'keep.lock']).stdout).toBe('');
   });
 });

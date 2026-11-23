@@ -17,11 +17,12 @@
  * `mock.module()` is process-wide: this file runs isolated (tests/run-tests.sh).
  */
 import { describe, test, expect, beforeAll, afterAll, afterEach, mock, spyOn } from 'bun:test';
-import { rmSync } from 'fs';
+import { existsSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { getGlobalCapyDir } from '../../src/config/globalConfig';
 import { FIXED_PROJECT_KEY } from '../helpers/deployServer';
-import { fakeCapyServer, pushOf, seedServer, serverValues } from '../helpers/fakeCapyServer';
+import { EMPTY_SERVER, fakeCapyServer, pushOf, seedServer, serverValues } from '../helpers/fakeCapyServer';
 import { makeFolder, removeFolder, type Folder } from '../helpers/folderWorld';
+import { ConflictRefusal } from '../../src/sync/conflicts';
 import { hashValue } from '../../src/sync/compareSecrets';
 import { SyncEngine } from '../../src/sync/syncEngine';
 import { ensureInSync } from '../../src/sync/gate';
@@ -35,7 +36,7 @@ const DEV = 'development';
 /** The server this test talks to: one `mock` returning it, so the module mocks below can reach the per-test value. */
 const serverOf = mock((): ReturnType<typeof fakeCapyServer> | undefined => undefined);
 const asked = mock((_questions: unknown) => undefined);
-const answer = mock((): { action: string } => ({ action: 'skip' }));
+const answer = mock((): { action?: string; choice?: string } => ({ action: 'skip' }));
 
 mock.module('../../src/auth/authService', () => ({
   AuthService: class {
@@ -63,6 +64,9 @@ mock.module('../../src/service/serviceClient', () => ({
     }
     pushSecrets(...args: unknown[]) {
       return serverOf()!.pushSecrets(...(args as Parameters<ReturnType<typeof fakeCapyServer>['pushSecrets']>));
+    }
+    async listProjects() {
+      return [{ id: 'proj', organization_id: 'org', name: 'demo' }];
     }
     async listBranches() {
       return [];
@@ -110,11 +114,11 @@ afterEach(() => {
 const OLD = { X: 'x-old', Y: 'y-old' } as const;
 
 /** A folder pinned to OLD holding `local`, and a server holding `remote`. */
-function world(local: Record<string, string>, remote: Record<string, string>, opts: Parameters<typeof fakeCapyServer>[0] = {}) {
+function world(local: Record<string, string>, remote: Record<string, string>, opts: Parameters<typeof fakeCapyServer>[0] = {}, git: 'tracked' | 'ignored' | 'plain' = 'tracked') {
   const seed = seedServer({ projectKey: KEY, values: { [DEV]: OLD } });
   const server = fakeCapyServer({ initial: seedServer({ projectKey: KEY, values: { [DEV]: remote } }), ...opts });
   serverOf.mockReturnValue(server);
-  const folder = makeFolder({ projectKey: KEY, branch: DEV, keep: seed.keep as KeepFile, env: local, client: server.client });
+  const folder = makeFolder({ git: git === 'plain' ? undefined : git, projectKey: KEY, branch: DEV, keep: seed.keep as KeepFile, env: local, client: server.client });
   made(folder);
   process.chdir(folder.dir);
   return { server, folder };
@@ -347,5 +351,194 @@ describe('Oct 2: a stale folder (pinned to an old snapshot, a teammate saved a n
     await removeAndSync(after(w), ['Y']);
     expect(serverValues(w.server.state(), DEV, KEY).Y).toBeUndefined();
     expectTeammateSurvives(w, ['Y']);
+  });
+});
+
+describe.each(['plain', 'ignored'] as const)('folder-only sync (%s)', (git) => {
+  const setup = (local = OLD as Readonly<Record<string, string>>, remote = { ...OLD, X: 'x-theirs' }) =>
+    world({ ...local }, remote, {}, git);
+  const pending = async () => {
+    const refusal = await sync({ protocol: true }).then(() => undefined, (error: unknown) => error);
+    if (!(refusal instanceof ConflictRefusal)) throw new Error('expected a conflict');
+    return refusal.payload;
+  };
+
+  test.each(['local', 'remote'] as const)('use %s and verify pins and values on Capy and in the folder', async (choice) => {
+    const w = setup({ ...OLD, X: 'x-mine' });
+    markSynced(w);
+    const conflict = await pending();
+    expect(conflict.conflicts).toEqual([{
+      name: 'X', project: 'demo', branch: DEV, type: 'changed', local: hashValue('x-mine'), remote: hashValue('x-theirs'), choices: ['local', 'remote'],
+    }]);
+    const outcome = await sync({ protocol: true, conflictFlags: { resolve: ['X=' + choice], conflict: conflict.conflict_id } });
+    expect(outcome.outcome).toBe('changed');
+    const expected = choice === 'local' ? 'x-mine' : 'x-theirs';
+    expect(w.folder.env()).toEqual({ ...OLD, X: expected });
+    expect(w.folder.pin('X')).toBe(hashValue(expected));
+    expect(serverValues(w.server.state(), DEV, KEY)).toEqual(w.folder.env());
+    expect(w.server.state().keep?.variables.X[0].value_hash).toBe(hashValue(expected));
+    expect(w.server.pushSecrets.mock.calls).toHaveLength(choice === 'local' ? 1 : 0);
+  });
+
+  function markSynced(w: ReturnType<typeof world>) {
+    w.folder.fileManager.writeSyncState({
+      last_sync: '2026-01-01T00:00:00Z', synced_variables: Object.keys(OLD),
+      keep_hash: { [DEV]: SyncEngine.computeKeepHash(w.folder.keep(), DEV) },
+    });
+  }
+
+  test('one-sided adds, edits and deletes sync together without asking in either direction', async () => {
+    const w = world({ X: 'my-edit', Y: OLD.Y, LOCAL: '' }, { X: OLD.X, REMOTE: 'theirs' }, {}, git);
+    markSynced(w);
+    expect((await sync({ protocol: true })).outcome).toBe('changed');
+    const expected = { X: 'my-edit', LOCAL: '', REMOTE: 'theirs' };
+    expect(w.folder.env()).toEqual(expected);
+    expect(serverValues(w.server.state(), DEV, KEY)).toEqual(expected);
+    expect((await sync()).outcome).toBe('up-to-date');
+    expect(asked).not.toHaveBeenCalled();
+    expect(w.server.pushSecrets).toHaveBeenCalledTimes(1);
+  });
+
+  test('a remote-only update pulls without uploading or prompting', async () => {
+    const w = setup();
+    markSynced(w);
+    expect((await sync()).outcome).toBe('changed');
+    expect(w.folder.env().X).toBe('x-theirs');
+    expect(w.folder.pin('X')).toBe(hashValue('x-theirs'));
+    expect(w.server.pushSecrets).not.toHaveBeenCalled();
+    expect(asked).not.toHaveBeenCalled();
+  });
+
+  test('only a divergent name is offered and unrelated changes wait for the decision', async () => {
+    const w = world({ X: 'mine' }, { ...OLD, X: 'theirs', REMOTE: 'added' }, {}, git);
+    markSynced(w);
+    const refusal = await pending();
+    expect(refusal.conflicts.map(({ name }) => name)).toEqual(['X']);
+    expect(w.server.pushSecrets).not.toHaveBeenCalled();
+    expect(w.folder.env()).toEqual({ X: 'mine' });
+    await sync({ protocol: true, conflictFlags: { resolve: ['X=remote'], conflict: refusal.conflict_id } });
+    const expected = { X: 'theirs', REMOTE: 'added' };
+    expect(w.folder.env()).toEqual(expected);
+    expect(serverValues(w.server.state(), DEV, KEY)).toEqual(expected);
+    expect(w.server.pushSecrets).toHaveBeenCalledTimes(1);
+  });
+
+  test('a first attachment or mismatched receipt never treats current server pins as a shared baseline', async () => {
+    const w = world({ X: 'mine' }, OLD, {}, git);
+    expect((await pending()).conflicts.map(({ name }) => name)).toEqual(['X', 'Y']);
+    w.folder.fileManager.writeSyncState({ last_sync: '', synced_variables: [], keep_hash: { [DEV]: 'outdated' } });
+    expect((await pending()).conflicts.map(({ name }) => name)).toEqual(['X', 'Y']);
+    expect(w.server.pushSecrets).not.toHaveBeenCalled();
+  });
+
+  test('a missing environment file retrieves the latest, including empty values; nothing is sent', async () => {
+    const w = setup(OLD, { X: '', Y: 'new-latest' });
+    w.folder.pm.writeActiveBranch(DEV);
+    rmSync('.env');
+    const outcome = await sync({ protocol: true });
+    expect(outcome.outcome).toBe('changed');
+    expect(w.folder.env()).toEqual({ X: '', Y: 'new-latest' });
+    expect(w.folder.pin('Y')).toBe(hashValue('new-latest'));
+    expect(w.server.pushSecrets.mock.calls).toHaveLength(0);
+  });
+
+  test.each(['pinned', 'delete'])('reject %s even with a current id, without touching either copy', async (invalid) => {
+    const w = setup();
+    const before = readFileSync('.env');
+    const id = (await pending()).conflict_id;
+    await expect(sync({ protocol: true, conflictFlags: { resolve: ['X=' + invalid], conflict: id } })).rejects.toMatchObject({ code: ERROR_CODES.SECRETS_RESOLVE_INVALID });
+    expect(readFileSync('.env')).toEqual(before);
+    expect(w.server.pushSecrets.mock.calls).toHaveLength(0);
+  });
+
+  test('a teammate saves after the decision was displayed; the old answer changes nothing', async () => {
+    const w = setup({ ...OLD, X: 'my-edit' });
+    const id = (await pending()).conflict_id;
+    w.server.tape(pushOf({ projectKey: KEY, branch: DEV, values: { ...OLD, X: 'a-later-edit' } }));
+    await expect(sync({ protocol: true, conflictFlags: { resolve: ['X=local'], conflict: id } })).rejects.toMatchObject({ code: ERROR_CODES.SECRETS_CONFLICT_STALE });
+    expect(w.folder.env().X).toBe('my-edit');
+    expect(serverValues(w.server.state(), DEV, KEY).X).toBe('a-later-edit');
+    expect(w.server.pushSecrets.mock.calls).toHaveLength(0);
+    expect((await pending()).conflict_id).not.toBe(id);
+  });
+
+  test('a save between reading and pushing invalidates the answer before updating any file', async () => {
+    const teammate = pushOf({ projectKey: KEY, branch: DEV, values: { ...OLD, X: 'last-minute' } });
+    const w = world({ ...OLD, X: 'my-edit' }, OLD, { racing: (n) => n === 2 ? [teammate] : [] }, git);
+    const before = readFileSync('.env');
+    const id = (await pending()).conflict_id;
+    await expect(sync({ protocol: true, conflictFlags: { resolve: ['X=local'], conflict: id } })).rejects.toMatchObject({ code: ERROR_CODES.SECRETS_CONFLICT_STALE });
+    expect(readFileSync('.env')).toEqual(before);
+    expect(serverValues(w.server.state(), DEV, KEY).X).toBe('last-minute');
+    expect(w.folder.pm.readActiveBranch()).toBeNull();
+  });
+
+  test('cancel after one selection leaves the original folder and service untouched', async () => {
+    const w = world({ X: 'my-x', Y: 'my-y' }, OLD, {}, git);
+    const before = readFileSync('.env');
+    answer.mockImplementationOnce(() => ({ choice: 'local' })).mockImplementationOnce(() => ({ choice: 'stop' }));
+    expect((await sync()).outcome).toBe('stopped');
+    const questions = asked.mock.calls.map(([qs]) => (qs as readonly { choices: readonly { value: string }[] }[])[0]);
+    expect(questions).toHaveLength(2);
+    expect(questions[0].choices.map((choice) => choice.value)).toEqual(['local', 'remote', 'stop']);
+    expect(readFileSync('.env')).toEqual(before);
+    expect(w.server.pushSecrets.mock.calls).toHaveLength(0);
+    expect(w.folder.pm.readActiveBranch()).toBeNull();
+  });
+
+  test('confirmed empty on both sides clears obsolete local pins without uploading', async () => {
+    const w = world({}, {}, { initial: EMPTY_SERVER }, git);
+    expect((await sync({ protocol: true })).outcome).toBe('up-to-date');
+    expect(w.folder.keep().variables).toEqual({});
+    expect(w.server.pushSecrets.mock.calls).toHaveLength(0);
+  });
+
+  test('a mismatched environment identity is rejected before writing', async () => {
+    const w = setup();
+    const foreign = readFileSync('.env', 'utf8').replace('# capy:project_id=proj', '# capy:project_id=foreign');
+    writeFileSync('.env', foreign);
+    await expect(sync({ protocol: true })).rejects.toMatchObject({ code: ERROR_CODES.INVALID_FORMAT });
+    expect(readFileSync('.env', 'utf8')).toBe(foreign);
+    expect(w.server.pushSecrets.mock.calls).toHaveLength(0);
+  });
+
+  test('linked folder recovers the missing root and environment from the working identity', async () => {
+    const w = setup();
+    if (git === 'plain') writeFileSync('.gitignore', '/keep.lock\n');
+    w.folder.pm.writeActiveBranch(DEV);
+    rmSync('.env');
+    rmSync('keep.lock');
+    expect((await sync({ protocol: true })).outcome).toBe('changed');
+    expect(JSON.parse(readFileSync('keep.lock', 'utf8')).project_id).toBe('proj');
+    expect(w.folder.env()).toEqual({ ...OLD, X: 'x-theirs' });
+    expect(w.server.pushSecrets.mock.calls).toHaveLength(0);
+  });
+
+  test('a header is enough to recover the actual project name when both locks and remote values are missing', async () => {
+    const w = world({}, {}, { initial: EMPTY_SERVER }, git);
+    rmSync('keep.lock');
+    rmSync('.capy/keep.lock');
+    expect((await sync({ protocol: true })).outcome).toBe('up-to-date');
+    expect(w.folder.keep()).toMatchObject({ org_id: 'org', project_id: 'proj', project_name: 'demo', variables: {} });
+    expect(w.server.pushSecrets.mock.calls).toHaveLength(0);
+  });
+
+  test('a real local deletion can be chosen explicitly', async () => {
+    const w = setup({ Y: OLD.Y });
+    const id = (await pending()).conflict_id;
+    await sync({ protocol: true, conflictFlags: { resolve: ['X=local'], conflict: id } });
+    expect(w.folder.env()).toEqual({ Y: OLD.Y });
+    expect(serverValues(w.server.state(), DEV, KEY)).toEqual(w.folder.env());
+    expect(w.folder.pin('X')).toBeUndefined();
+  });
+
+  test('offline with no env file refuses the read and does not recreate or upload anything', async () => {
+    const w = setup();
+    w.folder.pm.writeActiveBranch(DEV);
+    rmSync('.env');
+    w.server.getDecryptData.mockRejectedValue(new Error('offline'));
+    await expect(sync({ protocol: true })).rejects.toThrow('offline');
+    expect(existsSync('.env')).toBe(false);
+    expect(w.server.pushSecrets.mock.calls).toHaveLength(0);
   });
 });

@@ -604,10 +604,11 @@ export class ServiceClient {
     timeoutMs?: number,
   ): Promise<DecryptResponse> {
     try {
-      const params: string[] = [];
-      if (branch) params.push(`branch=${encodeURIComponent(branch)}`);
-      if (keepHash) params.push(`keep_hash=${encodeURIComponent(keepHash)}`);
-      if (includeLatestHash) params.push('include_latest_hash=true');
+      const params = [
+        ...(branch ? [`branch=${encodeURIComponent(branch)}`] : []),
+        ...(keepHash ? [`keep_hash=${encodeURIComponent(keepHash)}`] : []),
+        ...(includeLatestHash ? ['include_latest_hash=true'] : []),
+      ];
       const query = params.length ? `?${params.join('&')}` : '';
       const data = await this.request<{
         env_file?: string;
@@ -635,12 +636,7 @@ export class ServiceClient {
       // told them apart on the way in, so this reads the verdict rather than
       // re-deriving it from the sentence.
       if (error instanceof CapyError && error.details?.status === 404) {
-        const PROPAGATE: string[] = [
-          ERROR_CODES.SNAPSHOT_NOT_FOUND, // pinned version missing — caller must handle
-          ERROR_CODES.PROJECT_NOT_FOUND,
-          ERROR_CODES.BRANCH_NOT_FOUND,
-        ];
-        if (PROPAGATE.includes(error.code)) throw error;
+        if (error.code !== ERROR_CODES.NO_SECRETS) throw error;
         return {
           env_content: '',
           decrypt_key: '', // Key is managed client-side via keyResolver

@@ -80,13 +80,13 @@ jobs:
           try {
             Invoke-Expression (Get-Content -LiteralPath $script -Raw)
             $installed = Join-Path $installDirectory 'capy.exe'
-            if ((& $installed --version) -ne $expectedVersion -or $LASTEXITCODE -ne 0) { throw 'Installed binary version mismatch' }
+            if (((& $installed --version) -split '\+', 2)[0] -ne $expectedVersion -or $LASTEXITCODE -ne 0) { throw 'Installed binary version mismatch' }
             if ((Get-Command capy).Source -ine $installed) { throw 'Capy is not available on the current PATH' }
             $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
             if (@($userPath -split ';' | Where-Object { $_ -ieq $installDirectory }).Count -ne 1) { throw 'User PATH missing Capy or contains duplicates' }
             Invoke-Expression (Get-Content -LiteralPath $script -Raw)
             if ([Environment]::GetEnvironmentVariable('Path', 'User') -cne $userPath) { throw 'Reinstall changed the user PATH' }
-            if ((capy --version) -ne $expectedVersion -or $LASTEXITCODE -ne 0) { throw 'Reinstalled binary failed' }
+            if (((capy --version) -split '\+', 2)[0] -ne $expectedVersion -or $LASTEXITCODE -ne 0) { throw 'Reinstalled binary failed' }
             if (-not (Test-Path (Join-Path $installDirectory 'capy-LICENSE'))) { throw 'Missing license' }
           } finally {
             [Environment]::SetEnvironmentVariable('Path', $originalUserPath, 'User')
@@ -112,7 +112,7 @@ jobs:
             $env:Path = "$existingFolder;$originalPath"
             $before = [Environment]::GetEnvironmentVariable('Path', 'User')
             Invoke-Expression (Get-Content -LiteralPath $script -Raw)
-            if ((& (Join-Path $existingFolder 'capy.exe') --version) -ne $expectedVersion -or $LASTEXITCODE -ne 0) { throw 'Existing capy was not updated' }
+            if (((& (Join-Path $existingFolder 'capy.exe') --version) -split '\+', 2)[0] -ne $expectedVersion -or $LASTEXITCODE -ne 0) { throw 'Existing capy was not updated' }
             if (Test-Path (Join-Path $env:LOCALAPPDATA 'Programs\Capy\bin\capy.exe')) { throw 'Installed to the default folder instead of updating in place' }
             if ([Environment]::GetEnvironmentVariable('Path', 'User') -cne $before) { throw 'In-place update changed the user PATH' }
           } finally {

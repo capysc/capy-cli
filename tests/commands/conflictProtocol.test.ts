@@ -28,7 +28,7 @@ import { deriveResourceId } from '../../src/crypto/resourceId';
 import { FileManager } from '../../src/files/fileManager';
 import { SyncEngine } from '../../src/sync/syncEngine';
 import type { KeepFile } from '../../src/types/index';
-import { createHarness, BRANCH, ORG_ID, PROJECT_ID, type CliResult, type Harness } from '../helpers/pipedHarness';
+import { createHarness as createFolderHarness, trackFixtureKeep, BRANCH, ORG_ID, PROJECT_ID, type CliResult, type Harness } from '../helpers/pipedHarness';
 
 const hash16 = (v: string): string => createHash('sha256').update(v).digest('hex').slice(0, 16);
 
@@ -39,6 +39,12 @@ const THEIRS = 'SENTINEL-x-theirs-c04f';
 const THEIRS_AGAIN = 'SENTINEL-x-theirs-AGAIN-88d1';
 const NEW_Z = 'SENTINEL-z-new-d2e8';
 const ALL_SENTINELS = [OLD.X, OLD.Y, MINE, THEIRS, THEIRS_AGAIN, NEW_Z];
+
+async function createHarness(): Promise<Harness> {
+  const harness = await createFolderHarness();
+  trackFixtureKeep(harness.project);
+  return harness;
+}
 
 const keepOf = (values: Readonly<Record<string, string>>): KeepFile => ({
   version: '3.0',

@@ -7,6 +7,7 @@ import { deriveResourceId } from '../crypto/resourceId';
 import { debug } from '../ui/debug';
 import { upsertEnvText, EnvHeader, type EnvNotes } from './envUpsert';
 import { placeholderEnvNote, placeholderEnvNoteVariants, placeholdersOnBranch } from '../core/placeholder';
+import { keepLockTracking } from '../git/keepTracking';
 import { installKeepLockMergeDriver } from '../git/keepLockMergeInstall';
 import { addToSparseCheckout, entriesMissingFrom, planMissingGitignore, restoreFromIndex } from './trackedGitignore';
 
@@ -292,29 +293,17 @@ export class FileManager {
   }
 
   /**
-   * Writes capy's own working copy of keep.lock, at `.capy/keep.lock` —
-   * untracked (`.capy/` is gitignored by `ensureCapyGitignore`) and safe for
-   * capy to rewrite on every sync/push/rotate/connect/edit without a commit.
-   *
-   * The TRACKED `<projectRoot>/keep.lock` is the project marker (`capy run`
-   * reads org_id/project_id from it; it's how capy detects "is this a Capy
-   * project"). It's written once, only when it doesn't exist yet (a brand
-   * new project / `capy` init) — and never touched again after that. Capy
-   * used to keep rewriting the tracked file on every pin change and
-   * auto-committing it on whatever branch the user happened to be on; that's
-   * what caused constant merge conflicts and made `git pull` refuse with
-   * "local changes would be overwritten" when the auto-commit didn't happen
-   * to run. Only an explicit action (or `capy deploy`, into its
-   * own isolated worktree) ever writes the tracked file now. The one other
-   * explicit action is `--no-pr` on `capy add`, `edit` and `remove`
-   * (`runKeepLockPrStep`): it writes the tracked file itself and leaves it
-   * uncommitted; this method is not involved.
+   * Refresh the working copy on every pin change. In a folder-only setup the
+   * root marker is also local, so refresh both copies together. In a Git-shared
+   * setup only seed the root marker. Subsequent updates to that file belong
+   * to explicit Git actions (setup, deploy, or the keep.lock PR step).
    */
   writeKeepFile(keep: KeepFile): void {
     const content = serializeKeep(keep);
 
+    const tracking = keepLockTracking(this.projectRoot);
     const trackedPath = join(this.projectRoot, 'keep.lock');
-    if (!existsSync(trackedPath)) {
+    if (!existsSync(trackedPath) || tracking === 'local') {
       this.writeKeepContentTo(trackedPath, content);
     }
 
@@ -324,7 +313,7 @@ export class FileManager {
 
     // Best-effort and never throws: lets a later `git merge` of this keep.lock
     // run capy's merge driver instead of conflicting on neighbouring lines.
-    installKeepLockMergeDriver(this.projectRoot);
+    if (tracking === 'git') installKeepLockMergeDriver(this.projectRoot);
   }
 
   /** The keep.lock copies that exist here: the tracked file at the project root, then the working copy under `.capy/`. */

@@ -14,6 +14,9 @@
  * replaces it (same provider + target). Not `deployed: false`: that means
  * "values pushed, release not triggered", and nothing was pushed here.
  */
+import { tracksKeepLock } from '../git/keepTracking';
+import { readFileSync } from 'node:fs';
+import { deployConfigPath } from './config';
 import type { TargetConfig } from './adapter';
 import type { KeepFile, KeepVariableEntry, TargetDelivery } from '../types/index';
 import { readFileAtRef, repoRelPath, resolveDefaultBranch } from './git';
@@ -25,6 +28,7 @@ const DEPLOY_CONFIG_REL = '.capy/deploy.json';
 /** The targets in `.capy/deploy.json` on `origin/<default branch>`; `[]` when there is no such file or it can't be read. */
 export function readDefaultBranchTargets(cwd: string): readonly TargetConfig[] {
   try {
+    if (!tracksKeepLock(cwd)) return parseTargets(readFileSync(deployConfigPath(cwd), 'utf8'));
     const defaultBranch = resolveDefaultBranch(cwd);
     if (!defaultBranch) return [];
     const raw = readFileAtRef(cwd, `origin/${defaultBranch}`, repoRelPath(cwd, DEPLOY_CONFIG_REL));
