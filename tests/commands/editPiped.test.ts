@@ -23,12 +23,6 @@ const PEM = [
 
 const FIXTURE_PEM = readFileSync(join(__dirname, '../fixtures/rsa_test_key.pem'), 'utf8');
 
-// Neither --pr nor --no-pr and no terminal: the PR step does not run and says which flags would answer it.
-const UNANSWERED = [
-  { id: 'create_pr', flag: '--pr' },
-  { id: 'pr_base', flag: '--pr-base' },
-];
-
 function parseJson(stdout: string): Record<string, unknown> {
   return JSON.parse(stdout) as Record<string, unknown>;
 }
@@ -52,12 +46,12 @@ describe('capy edit NAME < value (piped)', () => {
     const first = await h().run(['edit', 'SPEC3_TOKEN', '--json'], 'v\n');
     expect(first.code).toBe(0);
     expect(first.stderr).toBe('');
-    expect(parseJson(first.stdout)).toEqual({ ok: true, name: 'SPEC3_TOKEN', branch: BRANCH, action: 'created', pushed: true, keep_lock: { changed: true, committed: false }, unanswered: UNANSWERED });
+    expect(parseJson(first.stdout)).toEqual({ ok: true, name: 'SPEC3_TOKEN', branch: BRANCH, action: 'created', pushed: true, keep_lock: { changed: true, committed: false } });
     expect(h().envValue('SPEC3_TOKEN')).toBe('v');
     expect(h().pushCount()).toBe(1);
 
     const second = await h().run(['edit', 'SPEC3_TOKEN', '--json'], 'w\n');
-    expect(parseJson(second.stdout)).toEqual({ ok: true, name: 'SPEC3_TOKEN', branch: BRANCH, action: 'updated', pushed: true, keep_lock: { changed: true, committed: false }, unanswered: UNANSWERED });
+    expect(parseJson(second.stdout)).toEqual({ ok: true, name: 'SPEC3_TOKEN', branch: BRANCH, action: 'updated', pushed: true, keep_lock: { changed: true, committed: false } });
     expect(h().envValue('SPEC3_TOKEN')).toBe('w');
     expect(h().pushCount()).toBe(2);
 
@@ -282,10 +276,10 @@ describe('capy edit NAME < value (piped)', () => {
       expect(out.unanswered).toBeUndefined();
     });
 
-    test('--pr-base alone leaves only the create-PR question unanswered', async () => {
+    test('--pr-base alone asks no Git questions in a plain folder', async () => {
       const r = await h().run(['edit', 'PR_BASE_ONLY', '--pr-base', 'dev', '--json'], 'v\n');
       expect(r.code).toBe(0);
-      expect(parseJson(r.stdout).unanswered).toEqual([{ id: 'create_pr', flag: '--pr' }]);
+      expect(parseJson(r.stdout).unanswered).toBeUndefined();
     });
 
     test('the flags are in the built CLI help', async () => {

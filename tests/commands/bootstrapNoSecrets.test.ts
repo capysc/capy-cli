@@ -6,7 +6,7 @@
  * Isolated: `mock.module()` is process-wide (tests/run-tests.sh).
  */
 import { describe, test, expect, mock, beforeEach, afterEach, spyOn } from 'bun:test';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import * as realKeyResolver from '../../src/crypto/keyResolver';
@@ -18,6 +18,7 @@ mock.module('../../src/crypto/keyResolver', () => ({
 
 import inquirer from 'inquirer';
 import { CapyCommand } from '../../src/commands/capyCommand';
+import { FileManager } from '../../src/files/fileManager';
 import { ServiceClient } from '../../src/service/serviceClient';
 import { CapyError, ERROR_CODES } from '../../src/types/index';
 
@@ -41,8 +42,8 @@ afterEach(() => {
 
 /** A command whose service answers `getDecryptData` with `failure` (the one call the bootstrap makes before it decides). */
 function commandFailingWith(failure: unknown): CapyCommand {
-  spyOn(ServiceClient.prototype, 'listBranches').mockResolvedValue([{ id: 'b-1', name: 'development', project_id: PROJECT.id, is_protected: false }]);
-  spyOn(inquirer, 'prompt').mockResolvedValue({ selected: 'development' } as never);
+  spyOn(ServiceClient.prototype, 'listBranches').mockResolvedValue([{ id: 'b-1', name: 'team-dev', project_id: PROJECT.id, is_protected: false }]);
+  spyOn(inquirer, 'prompt').mockResolvedValue({ selected: 'team-dev' } as never);
   spyOn(ServiceClient.prototype, 'getDecryptData').mockRejectedValue(failure);
   return new CapyCommand({}, false);
 }
@@ -55,6 +56,7 @@ describe('bootstrapExistingProject: an empty project is decided by the code', ()
     const log = spyOn(console, 'log').mockImplementation(() => {});
     try {
       await bootstrap(commandFailingWith(new CapyError('This wording could be anything', ERROR_CODES.NO_SECRETS, { status: 404 })));
+      expect(readFileSync(join(process.cwd(), '.capy/branch'), 'utf8').trim()).toBe('team-dev');
       expect(existsSync(join(process.cwd(), 'keep.lock'))).toBe(true);
       expect(JSON.parse(readFileSync(join(process.cwd(), 'keep.lock'), 'utf-8'))).toMatchObject({ project_id: 'proj-1', variables: {} });
     } finally {
@@ -72,4 +74,26 @@ describe('bootstrapExistingProject: an empty project is decided by the code', ()
     const failure = new CapyError('x', ERROR_CODES.NO_SECRETS, { status: 500 });
     await expect(bootstrap(commandFailingWith(failure))).rejects.toBe(failure);
   });
+});
+
+test('attach resolves the selected branch and preserves a populated .env for the usual conflict decision', async () => {
+  const local = 'NAME=local-fixture\n';
+  writeFileSync('.env', local);
+  const branch = 'personal';
+  const keep = { version: '3.0', org_id: PROJECT.organization_id, project_id: PROJECT.id, project_name: PROJECT.name, variables: {} };
+  spyOn(ServiceClient.prototype, 'listBranches').mockResolvedValue([{ id: 'b', project_id: PROJECT.id, name: branch, is_protected: false }]);
+  const read = spyOn(ServiceClient.prototype, 'getDecryptData').mockResolvedValue({
+    keep_file: JSON.stringify(keep), env_content: 'NAME=capy:fixture:opaque', decrypt_key: '', expires_at: '',
+  });
+  spyOn(inquirer, 'prompt').mockResolvedValue({ selected: branch } as never);
+  const boundary = new CapyCommand();
+  const compare = spyOn(boundary as unknown as { syncProject: () => Promise<string> }, 'syncProject').mockImplementation(async () => {
+    expect(readFileSync('.env', 'utf8')).toBe(local);
+    expect(readFileSync('.capy/branch', 'utf8')).toBe(branch);
+    return 'stopped';
+  });
+  await bootstrap(boundary);
+  expect(compare).toHaveBeenCalledTimes(1);
+  expect(read).toHaveBeenCalledWith(PROJECT.id, branch, undefined, true);
+  expect(new FileManager().readEnvFile()).toEqual({ NAME: 'local-fixture' });
 });

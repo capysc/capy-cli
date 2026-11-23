@@ -2,6 +2,7 @@
 // Mirrors dotenvx's pattern: emit build/index.cjs + a stripped build/package.json
 // whose `pkg` block is what @yao-pkg/pkg actually consumes.
 import { build } from 'esbuild';
+import { buildInfo } from './scripts/build-info.mjs';
 import { mkdir, rm, stat, writeFile, readFile } from 'fs/promises';
 import { fileURLToPath, pathToFileURL } from 'url';
 import path from 'path';
@@ -42,7 +43,18 @@ async function main() {
 
   await emptyDir(outDir);
 
-  await build({ ...bundleOptions, outfile: outFile });
+  await build({
+    ...bundleOptions,
+    outfile: outFile,
+    plugins: [{
+      name: 'capy-build-info',
+      setup(context) {
+        context.onLoad({ filter: /[/\\]src[/\\]build-info\.json$/ }, () => ({
+          contents: JSON.stringify(buildInfo()), loader: 'json',
+        }));
+      },
+    }],
+  });
 
   await printSize(outFile);
 

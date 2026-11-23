@@ -43,6 +43,8 @@ import { CapyError, ERROR_CODES } from '../../src/types/index';
 import type { CliOptions, KeepFile, SetupOptions, SyncState } from '../../src/types/index';
 import { FileManager } from '../../src/files/fileManager';
 import { deriveResourceId } from '../../src/crypto/resourceId';
+import { hashValue } from '../../src/sync/compareSecrets';
+import { SyncEngine } from '../../src/sync/syncEngine';
 import { Encryptor } from '../../src/crypto/encryptor';
 
 const ORIGIN = process.cwd();
@@ -589,6 +591,18 @@ describe('the pending-setup marker', () => {
   });
 });
 
+function serveLinkedRemoteValue(): void {
+  const branch = 'development';
+  const resource_id = deriveResourceId(branch, 'API_KEY');
+  const keep = { ...JSON.parse(readFileSync(folder('keep.lock'), 'utf8')), variables: {
+    API_KEY: [{ branch, resource_id, value_hash: hashValue('remote-value') }],
+  } };
+  const line = 'API_KEY=capy:' + resource_id + ':' + Encryptor.encrypt('remote-value', 'a'.repeat(64));
+  spyOn(ServiceClient.prototype, 'getDecryptData').mockResolvedValue({
+    keep_hash: SyncEngine.computeKeepHash(keep, branch), keep_file: JSON.stringify(keep), env_content: line,
+  } as never);
+}
+
 describe('a normal sync does not carry the marker forward', () => {
   test('a setup finished by hand with bare capy leaves no marker behind', async () => {
     writeFileSync(folder('.env'), `API_KEY=${SENTINEL}\n`, 'utf-8');
@@ -600,16 +614,13 @@ describe('a normal sync does not carry the marker forward', () => {
     expect(readSyncStateFile().pending_setup).toEqual(MARKER);
     mock.restore();
 
-    const calls = fakeWorld();
+    fakeWorld();
     spyOn(AuthService.prototype, 'getToken').mockReturnValue('token');
-    const remoteLine = `API_KEY=capy:${deriveResourceId('development', 'API_KEY')}:${Encryptor.encrypt('remote-value', 'a'.repeat(64))}\n`;
-    spyOn(ServiceClient.prototype, 'getDecryptData').mockResolvedValue({ keep_hash: 'a'.repeat(64), env_content: remoteLine } as never);
+    serveLinkedRemoteValue();
     rmSync(folder('.env'), { force: true });
-    const asked = await run({});
-    expect(asked.json).toMatchObject({ ok: false, code: 'SECRETS_CONFLICT' });
-    expect(readSyncStateFile().pending_setup).toEqual(MARKER);
-
-    const out = await run({}, { conflictFlags: { resolve: ['API_KEY=remote'], conflict: asked.json!.conflict_id as string } });
+    const recovered = await run({});
+    expect(recovered.exitCode ?? 0).toBe(0);
+    expect(new FileManager(process.cwd()).decryptValue(new FileManager(process.cwd()).readEnvFile().API_KEY, 'a'.repeat(64))).toBe('remote-value');
     expect(readSyncStateFile().pending_setup).toBeUndefined();
   });
 });
@@ -627,9 +638,8 @@ describe('a normal sync from the menu does not carry the marker forward', () => 
 
     fakeWorld();
     spyOn(AuthService.prototype, 'getToken').mockReturnValue('token');
-    const remoteLine = `API_KEY=capy:${deriveResourceId('development', 'API_KEY')}:${Encryptor.encrypt('remote-value', 'a'.repeat(64))}\n`;
-    spyOn(ServiceClient.prototype, 'getDecryptData').mockResolvedValue({ keep_hash: 'a'.repeat(64), env_content: remoteLine } as never);
-    prompts.mockImplementation(() => Promise.resolve({ action: 'retrieve_remote' }));
+    serveLinkedRemoteValue();
+    prompts.mockImplementation(() => Promise.resolve({ choice: 'remote' }));
     const log = spyOn(console, 'log').mockImplementation(() => {});
     const err = spyOn(console, 'error').mockImplementation(() => {});
     const exit = spyOn(process, 'exit').mockImplementation(((code?: number) => { throw new ExitSignal(code); }) as never);

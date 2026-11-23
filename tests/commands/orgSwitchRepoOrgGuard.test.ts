@@ -10,6 +10,8 @@
 import { describe, test, expect, mock, afterEach, spyOn } from 'bun:test';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
+import { git } from '../helpers/keepLockGit';
+import * as interactive from '../../src/ui/interactive';
 import { join } from 'path';
 import * as realKeyResolver from '../../src/crypto/keyResolver';
 import * as realGate from '../../src/sync/gate';
@@ -21,6 +23,7 @@ const createOrganization = mock(async () => ({ id: 'org_new', name: 'Brand New' 
 mock.module('../../src/crypto/keyResolver', () => ({
   ...realKeyResolver,
   hasOrgKey: () => true,
+  resolveProjectKey: async () => 'a'.repeat(64),
 }));
 mock.module('../../src/sync/gate', () => ({
   ...realGate,
@@ -109,7 +112,7 @@ function fakes(picks: string) {
 }
 
 /** Runs `capy org` with `process.exit` trapped and the terminal captured. */
-async function runOrg(): Promise<{ exit: number | undefined; stderr: string; stdout: string }> {
+async function runOrg(nonTty = true): Promise<{ exit: number | undefined; stderr: string; stdout: string }> {
   const exit = spyOn(process, 'exit').mockImplementation(((c?: number) => {
     throw new ExitSignal(c);
   }) as never);
@@ -117,7 +120,7 @@ async function runOrg(): Promise<{ exit: number | undefined; stderr: string; std
   const err = spyOn(console, 'error').mockImplementation(() => {});
   const read = () => ({ stderr: err.mock.calls.flat().join('\n'), stdout: out.mock.calls.flat().join('\n') });
   try {
-    await new OrgCommand().execute({ nonTty: true });
+    await new OrgCommand().execute({ nonTty });
     return { exit: undefined, ...read() };
   } catch (thrown) {
     if (!(thrown instanceof ExitSignal)) throw thrown;
@@ -245,4 +248,40 @@ describe('a tracked keep.lock that names no organization (empty org_id)', () => 
     expect(f.refresh).toHaveBeenCalledTimes(1);
     expect(snapshot(dir)).toEqual(before);
   });
+});
+
+describe('creating the first project in this folder', () => {
+  for (const share of [false, true]) {
+    test(share ? 'Git sharing commits only the first lockfile' : 'the default leaves the lockfile local', async () => {
+      const dir = folder(undefined);
+      git(dir, ['init', '-q']);
+      git(dir, ['config', 'user.email', 'fixture@example.invalid']);
+      git(dir, ['config', 'user.name', 'Fixture']);
+      writeFileSync(join(dir, 'already-staged'), 'unrelated');
+      git(dir, ['add', '--', 'already-staged']);
+
+      const mocks = fakes(ORG_B.id);
+      mocks.listProjects.mockResolvedValue([]);
+      mocks.initializeProject.mockResolvedValue({ org_id: ORG_B.id, project_id: 'app-id', project_name: 'app', created: true });
+      const branch = spyOn(ServiceClient.prototype, 'createBranch').mockResolvedValue({ id: 'b', name: 'development', project_id: 'app-id', is_protected: false });
+      const choices = { orgId: ORG_B.id, confirmed: true, projectName: 'app', share } as const;
+      answers.mockImplementation(name => choices[name as keyof typeof choices]);
+      spyOn(interactive, 'isInteractive').mockImplementation(nonTty => !nonTty);
+      expect((await runOrg(!share)).exit).toBeUndefined();
+
+      expect(branch).toHaveBeenCalledWith('app-id', 'development', false);
+      expect(readFileSync(join(dir, '.capy', 'branch'), 'utf8').trim()).toBe('development');
+      const keep = readFileSync(join(dir, 'keep.lock'), 'utf8');
+      expect(readFileSync(join(dir, '.capy', 'keep.lock'), 'utf8')).toBe(keep);
+      expect(JSON.parse(keep)).toMatchObject({ org_id: ORG_B.id, project_id: 'app-id', variables: {} });
+      expect(git(dir, ['diff', '--cached', '--name-only']).stdout.trim()).toBe('already-staged');
+      if (share) {
+        expect(git(dir, ['show', 'HEAD:keep.lock']).stdout).toBe(keep);
+      } else {
+        expect(git(dir, ['check-ignore', '--quiet', 'keep.lock']).code).toBe(0);
+        expect(git(dir, ['ls-files', '--', 'keep.lock']).stdout).toBe('');
+        expect(existsSync(join(dir, '.gitattributes'))).toBe(false);
+      }
+    });
+  }
 });

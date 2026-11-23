@@ -19,6 +19,7 @@
  *
  * Never logs or throws a value: errors carry codes and variable NAMES.
  */
+import { createHash } from 'node:crypto';
 import { Encryptor } from '../crypto/encryptor';
 import { deriveResourceId } from '../crypto/resourceId';
 import { FileManager } from '../files/fileManager';
@@ -71,9 +72,9 @@ export function pinnedHashes(keep: Pick<KeepFile, 'variables'> | null | undefine
 
 const has = (record: object, name: string): boolean => Object.hasOwn(record, name);
 
-/** The keep hash for `branch` of a snapshot: the `base_keep_hash` of an upload built from it. `undefined` when the server holds no keep. */
-export const baseHashOf = (snapshot: Snapshot, branch: string): string | undefined =>
-  snapshot.keep === undefined ? undefined : SyncEngine.computeKeepHash(snapshot.keep, branch);
+/** A confirmed empty branch also has a base hash, so two concurrent first saves cannot erase one another. */
+export const baseHashOf = (snapshot: Snapshot, branch: string): string =>
+  snapshot.keep === undefined ? createHash('sha256').update('').digest('hex') : SyncEngine.computeKeepHash(snapshot.keep, branch);
 
 // ── Applying a change (pure) ────────────────────────────────────────────────
 
@@ -500,6 +501,7 @@ export interface FolderContext {
 }
 
 export interface FolderCommitOptions {
+  readonly envPath?: string;
   readonly transformKeep?: (keep: KeepFile) => KeepFile;
   readonly seen?: Snapshot;
 }
@@ -576,7 +578,7 @@ export async function commitFolder(ctx: FolderContext, changes: Changes, opts: F
 
   writeKeepCache(ctx.orgId, ctx.projectId, done.cacheHash, envBlobOf(done.lines));
   ctx.fileManager.writeKeepFile(done.adopted);
-  ctx.fileManager.writeEncryptedEnvFile({ ...done.env }, ctx.projectKey, undefined, done.adopted, ctx.branch, done.removed);
+  ctx.fileManager.writeEncryptedEnvFile({ ...done.env }, ctx.projectKey, opts.envPath, done.adopted, ctx.branch, done.removed);
 
   const existingSyncState = ctx.pm.readSyncState();
   ctx.fileManager.writeSyncState({

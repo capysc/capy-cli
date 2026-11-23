@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync, unlinkSync } from 'fs';
 import { join, basename } from 'path';
 import { ProjectState, KeepFile, SyncState, PendingSetup, CapyError, ERROR_CODES } from '../types/index';
+import { keepLockTracking } from '../git/keepTracking';
 import { branchesFromKeep, syncedBranchNames } from './branchResolver';
 import { isReservedProjectName } from '../system/reservedProjectName';
 
@@ -18,37 +19,28 @@ export class ProjectManager {
     const hasKeepFile = existsSync(keepPath);
     const hasEnvFile = existsSync(envPath);
 
-    let projectName: string | undefined;
-    let organizationId: string | undefined;
-    let projectId: string | undefined;
-
-    if (hasKeepFile) {
+    const recoverWorkingCopy = !hasKeepFile && existsSync(this.getWorkingKeepPath()) && keepLockTracking(this.projectRoot) === 'local';
+    const keep = (() => {
+      if (!hasKeepFile && !recoverWorkingCopy) return undefined;
+      const path = hasKeepFile ? keepPath : this.getWorkingKeepPath();
       try {
-        const keepContent = readFileSync(keepPath, 'utf-8');
-        const keep = this.parseKeepFile(JSON.parse(keepContent));
-        this.validateKeepFile(keep);
-        projectName = keep.project_name;
-        organizationId = keep.org_id;
-        projectId = keep.project_id;
+        const parsed = this.parseKeepFile(JSON.parse(readFileSync(path, 'utf-8')));
+        this.validateKeepFile(parsed);
+        return parsed;
       } catch (error) {
         if (error instanceof CapyError) throw error;
-        throw new CapyError(
-          'Invalid keep.lock file format',
-          ERROR_CODES.INVALID_FORMAT,
-          { error, path: keepPath }
-        );
+        throw new CapyError('Invalid keep.lock file format', ERROR_CODES.INVALID_FORMAT, { error, path });
       }
-    }
+    })();
 
     const syncState = this.readSyncState();
-
     return {
-      initialized: hasKeepFile,
+      initialized: keep !== undefined,
       hasKeepFile,
       hasEnvFile,
-      projectName,
-      organizationId,
-      projectId,
+      projectName: keep?.project_name,
+      organizationId: keep?.org_id,
+      projectId: keep?.project_id,
       activeBranch: this.deriveActiveBranch(),
       userId: syncState?.user_id,
     };

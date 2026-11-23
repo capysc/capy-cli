@@ -74,7 +74,7 @@ export interface AgentSetupDeps {
     project: ProjectInitResult,
     auth: AuthResult,
   ) => Promise<PushOutcome>;
-  readonly stageKeepLock: () => void;
+  readonly configureFolder: () => void;
   readonly installGitHooks: () => void;
 }
 
@@ -204,7 +204,7 @@ async function pushFolderEnv(
   if (!prepared.ok) return { ok: false, refusal: refusalFor(prepared.error) };
   const result = await deps.pushEnv(prepared.value, encryptionKey, branch, keep, project, ctx.auth);
   if (!result.ok) return { ok: false, refusal: refusalFor(result.error) };
-  deps.stageKeepLock();
+
   return { ok: true, pushed: Object.keys(prepared.value).length };
 }
 
@@ -228,6 +228,7 @@ const pendingOf = (project: ProjectInitResult, plan: NewProject): PendingSetup =
 
 /** Creates the project, links the folder, creates the first branch and pushes the `.env`, in that order. */
 async function createAndLink(deps: AgentSetupDeps, ctx: RunContext, plan: NewProject): Promise<AgentOutcome> {
+  deps.configureFolder();
   const created = await settle(() => deps.serviceClient.initializeProject(plan.name, ctx.org.id));
   if (!created.ok) return refusalOutcome(createRefusalFor(created.error));
   const project = created.value;
@@ -274,7 +275,7 @@ async function finishSetup(
   const local = await settle(async () => {
     deps.projectManager.writeActiveBranch(plan.branch);
     deps.fileManager.ensureCapyGitignore();
-    deps.stageKeepLock();
+
   });
   if (!local.ok) return withProject(refusalFor(local.error), ctx.org, ref);
 
@@ -310,6 +311,7 @@ async function finishSetup(
 
 /** The keep.lock of a project with no secrets yet; the folder is linked and nothing is pulled. */
 function linkEmptyProject(deps: AgentSetupDeps, ctx: RunContext, project: ProjectRef, branch: string): AgentOutcome {
+  deps.configureFolder();
   deps.fileManager.writeKeepFile({ version: '3.0', org_id: ctx.org.id, project_id: project.id, project_name: project.name, variables: {} });
   deps.projectManager.writeActiveBranch(branch);
   deps.fileManager.ensureCapyGitignore();
@@ -339,6 +341,7 @@ async function linkExisting(deps: AgentSetupDeps, ctx: RunContext, project: Proj
     // The folder's own plaintext variables are about to be replaced by the project's: keep a copy of them first.
     if (ctx.env.variables > 0) deps.fileManager.backupPlaintextEnv(deps.options.envPath, (line) => console.error(line));
     deps.projectManager.writeSyncStateUserId(ctx.userId);
+    deps.configureFolder();
     deps.fileManager.writeKeepFile(serverKeep);
     deps.projectManager.writeActiveBranch(branch);
     deps.fileManager.ensureCapyGitignore();
@@ -349,7 +352,7 @@ async function linkExisting(deps: AgentSetupDeps, ctx: RunContext, project: Proj
       user_id: ctx.userId,
       keep_hash: setSyncKeepHash(null, branch, SyncEngine.computeKeepHash(serverKeep, branch)),
     });
-    deps.stageKeepLock();
+
     deps.installGitHooks();
     return Object.keys(plaintext).length;
   });

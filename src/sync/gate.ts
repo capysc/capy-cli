@@ -122,16 +122,16 @@ const runBareCapy: SyncRunner = (opts, protocol) =>
     'up-to-date',
   );
 
-async function repeat(run: () => Promise<SyncOutcome>): Promise<GateResult> {
-  const outcome = await run();
+async function repeat(opts: GateOptions, runner: SyncRunner, protocol: boolean): Promise<GateResult> {
+  const outcome = await runner(opts, protocol);
   if (outcome === 'up-to-date') return 'in-sync';
   if (outcome === 'stopped') return 'stopped';
   // The sync changed something: compare again. Any difference left (e.g. after "Individually resolve") shows the menu again.
-  return repeat(run);
+  return repeat({ ...opts, conflictFlags: undefined }, runner, protocol);
 }
 
 /** Bare `capy` until the folder and Capy agree. A difference nobody can answer is thrown (a `ConflictRefusal`). */
-const syncUntilInSync = (opts: GateOptions, runner: SyncRunner): Promise<GateResult> => repeat(() => runner(opts, answersByProtocol(opts)));
+const syncUntilInSync = (opts: GateOptions, runner: SyncRunner): Promise<GateResult> => repeat(opts, runner, answersByProtocol(opts));
 
 /** The outcome of `work` as a value, so what follows it is not inside its own `catch`. */
 const outcomeOf = <T>(work: Promise<T>) =>
