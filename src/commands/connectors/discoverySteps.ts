@@ -26,6 +26,7 @@ import { SyncEngine } from '../../sync/syncEngine';
 import { assertProjectNameAllowed, isReservedProjectName, PROJECT_NAME_RESERVED_MESSAGE } from '../../system/reservedProjectName';
 import { findDirtyBranchIssue } from '../checkoutCommand';
 import { listOrgProjectsOrUnavailable } from '../capyCommand';
+import { resolveJoinBranch } from '../../core/joinBranch';
 import { commitDiscoveryChanges, isValidDiscoveryCommitBranchName } from '../../git/discoveryCommit';
 import type { FolderSync, GateOptions } from '../../sync/gate';
 import { isConflictRefusal } from '../../sync/conflicts';
@@ -342,6 +343,11 @@ export function computeSameRunNameCollisions(folders: readonly DiscoveryPlanFold
  * `codes.projectNameExists` code for whichever folder is the SECOND (or
  * later) occurrence in run order; the first occurrence proceeds normally.
  *
+ * Joining an existing project (the interactive pick above) puts the folder on one of the project's OWN branches, chosen by
+ * the same step bare `capy` uses (`resolveJoinBranchSafe`): the person is asked, even when there is one. With `--yes`
+ * nobody answers, so the folder is refused `NO_ACTIVE_BRANCH` with the branch names (`branches`) and nothing is read or
+ * written — unless the caller named the branch (`opts.joinBranch`). No branch name is ever assumed.
+ *
  * Deliberately NOT a call into `CapyCommand` itself: that class calls
  * `process.exit()` on several failure paths and always builds its own
  * `ProjectManager()`/`FileManager()` against `process.cwd()`, neither of
@@ -371,8 +377,10 @@ async function ensureProjectSafe(
     sameRunNameCollision: boolean;
     /** How this provider spells the refusals. */
     codes: DiscoveryCodes;
+    /** The branch the caller already named for joining an existing project: used as given when the project has it, and nobody is asked. */
+    joinBranch?: string;
   },
-): Promise<{ ok: true; projectId: string; created: boolean } | { ok: false; code: string; message: string }> {
+): Promise<{ ok: true; projectId: string; created: boolean } | { ok: false; code: string; message: string; branches?: readonly string[] }> {
   const path = folderPath(repoDir, folder);
   const pm = new ProjectManager(path);
   const existing = pm.readKeepFile();
@@ -428,8 +436,12 @@ async function ensureProjectSafe(
     if (!project) {
       return { ok: false, code: opts.codes.projectNotFound, message: `No project ${picked} in this org.` };
     }
+    // The branch comes from the project's own list, before anything is read or written: a refusal here leaves the folder untouched.
+    // `--yes` means nobody answers, so it is refused with the names like a run with no terminal.
+    const branch = await resolveJoinBranchSafe(ctx, project, { canAsk: !opts.yes, named: opts.joinBranch }, opts.codes);
+    if (!branch.ok) return branch;
     try {
-      await bootstrapExistingProjectSafe(ctx, pm, new FileManager(path), project);
+      await bootstrapExistingProjectSafe(ctx, pm, new FileManager(path), project, branch.branch);
       return { ok: true, projectId: project.id, created: false };
     } catch (err) {
       return { ok: false, code: opts.codes.initFailed, message: err instanceof Error ? err.message : String(err) };
@@ -507,22 +519,57 @@ function decryptableEntries(fm: FileManager, encrypted: Readonly<Record<string, 
   );
 }
 
+/** The branch names a typed refusal carries (`details.branches`), when it carries any. */
+function branchNamesOf(err: CapyError): readonly string[] | undefined {
+  const names = err.details?.branches;
+  return Array.isArray(names) && names.every((n): n is string => typeof n === 'string') ? names : undefined;
+}
+
 /**
- * Bootstrap an EXISTING project into (repoDir, folder) — mirrors
- * `capyCommand.ts#bootstrapExistingProject` exactly (pull `development`'s
- * keep.json + env blob, decrypt, write keep.lock + `.env`), scoped to one
- * folder's own `pm`/`fm` rather than `process.cwd()`, and — unlike the
- * original — branching on `err.details?.status === 404` alone rather than
- * ALSO matching a `/No secrets/i` message (Rule 5: never branch on
- * human-readable text; the status code alone already says "no snapshot").
+ * The branch an existing project is joined on, taken from the project's own branch list by the same step bare `capy`
+ * uses (`core/joinBranch.ts`): never an assumed name. With nobody to ask (`canAsk` false) and no branch named, this
+ * refuses with the typed code that step raised (`NO_ACTIVE_BRANCH`, `BRANCH_NOT_FOUND`, `FIRST_BRANCH_NEEDS_ADMIN`, …)
+ * and the branch names, never a guess. The decision reads the code, never the message. Reads and writes nothing in the folder.
+ */
+async function resolveJoinBranchSafe(
+  ctx: DiscoveryContext,
+  project: { id: string; name: string },
+  opts: { canAsk: boolean; named?: string },
+  codes: DiscoveryCodes,
+): Promise<{ ok: true; branch: string } | { ok: false; code: string; message: string; branches?: readonly string[] }> {
+  try {
+    const branch = await resolveJoinBranch({
+      project,
+      listBranches: () => ctx.serviceClient.listBranches(project.id),
+      createBranch: (name, isProtected) => ctx.serviceClient.createBranch(project.id, name, isProtected),
+      canAsk: opts.canAsk,
+      ...(opts.named === undefined ? {} : { named: opts.named }),
+    });
+    return { ok: true, branch };
+  } catch (err) {
+    if (!(err instanceof CapyError)) return { ok: false, code: codes.initFailed, message: err instanceof Error ? err.message : String(err) };
+    const branches = branchNamesOf(err);
+    return { ok: false, code: err.code, message: err.message, ...(branches === undefined ? {} : { branches }) };
+  }
+}
+
+/**
+ * Bootstrap an EXISTING project into (repoDir, folder) on `branch` — mirrors
+ * `capyCommand.ts#bootstrapExistingProject` (pull the branch's keep.json +
+ * env blob, decrypt, write keep.lock + `.env`), scoped to one folder's own
+ * `pm`/`fm` rather than `process.cwd()`, and — unlike the original —
+ * branching on `err.details?.status === 404` alone rather than ALSO
+ * matching a `/No secrets/i` message (Rule 5: never branch on human-readable
+ * text; the status code alone already says "no snapshot"). `branch` is one
+ * of the project's own branches (`resolveJoinBranchSafe`), never assumed here.
  */
 async function bootstrapExistingProjectSafe(
   ctx: DiscoveryContext,
   pm: ProjectManager,
   fm: FileManager,
   project: { id: string; name: string; organization_id: string },
+  branch: string,
 ): Promise<void> {
-  const branch = 'development';
   const keyOps = {
     coDecrypt: (oid: string, ct: string) => ctx.serviceClient.coDecrypt(oid, ct).then((r) => r.plaintext),
     wrapOuterLayer: (oid: string, pt: string) => ctx.serviceClient.wrapOuterLayer(oid, pt).then((r) => r.ciphertext),
@@ -864,6 +911,8 @@ export function buildRealDiscoverySequenceDeps(
      * shape as `existingProjectsSnapshot` above.
      */
     sameRunNameCollisions: ReadonlySet<string>;
+    /** The branch the caller already named for joining an existing project (see `ensureProjectSafe`). Not set by any CLI flag yet. */
+    joinBranch?: string;
   },
 ): DiscoverySequenceDeps {
   return {
@@ -877,6 +926,7 @@ export function buildRealDiscoverySequenceDeps(
         existingProjectsSnapshot: runOpts.existingProjectsSnapshot,
         sameRunNameCollision: runOpts.sameRunNameCollisions.has(sameRunFolderKey(repoDir, folder)),
         codes: runOpts.codes,
+        joinBranch: runOpts.joinBranch,
       }),
     checkFolderDirty: (repoDir, folder, projectId) => checkFolderDirtySafe(ctx, repoDir, folder, projectId, runOpts.codes),
     checkoutBranch: (repoDir, folder, projectId, branchName) => checkoutBranchSafe(ctx, repoDir, folder, projectId, branchName, runOpts.codes),
