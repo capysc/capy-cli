@@ -29,14 +29,13 @@ import {
   sweepExpiredPendingPairGrant,
   type PendingPairGrant,
 } from '../auth/pairing/pendingGrant';
-import { folderHasProject, pairApprovalLink, resolvePairScope, type PairScope } from '../auth/pairing/pairScope';
-import { hasAnyUsableOrgKeys } from '../config/globalConfig';
+import { pairApprovalLink, resolvePairScope } from '../auth/pairing/pairScope';
 import { pairKeyFingerprint } from '../crypto/pairFingerprint';
 import { resolveActiveUrl } from '../config/profileConfig';
 import { generatePairKeyPair } from '../crypto/pairCrypto';
 import { CapyError, ERROR_CODES } from '../types/index';
 import type { ElicitationForm, ElicitationLink, ElicitationLinkQr } from '../ui/elicitation';
-import { pairCodeDisplay, pairKeysDisplay } from '../ui/elicitationDisplay';
+import { pairCodeDisplay } from '../ui/elicitationDisplay';
 import { EXIT_NEEDS_INPUT } from '../ui/interactive';
 import { createPairingQrImage, removePairingQrImage, type PairingQrImage } from '../ui/pairingPresentation';
 import { buildTerminalQr } from '../ui/terminalQr';
@@ -71,18 +70,6 @@ export interface PairAgentDeps {
 
 const defaultSleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
-/** POSIX single-quoting, so typed text reaches the rerun exactly as typed. */
-function shellQuote(value: string): string {
-  return /^[A-Za-z0-9_./:@%+=-]+$/.test(value) ? value : `'${value.replace(/'/g, `'\\''`)}'`;
-}
-
-/** The scope and intent flags that were typed, repeated on a rerun so the answer keeps the run's meaning. */
-function scopeFlags(options: PairAgentOptions): string {
-  const intent = pairIntent(options);
-  return `${options.transport === true ? ' --transport' : ''}${options.signup === true ? ' --signup' : ''}${options.org ? ` --org ${shellQuote(options.org)}` : ''}`
-    + `${intent.title ? ` --title ${shellQuote(intent.title)}` : ''}${intent.description ? ` --description ${shellQuote(intent.description)}` : ''}`;
-}
-
 const CODE_QUESTION = 'What code does Keep show after you approve?'; // COPY-FLAG
 const CODE_DESCRIPTION = 'Keep shows a one-time code once you approve. Paste it here. Only you can see it.'; // COPY-FLAG
 /** What the code field accepts: the eight characters Keep shows, typed loosely (case, spaces and a dash are fine). */
@@ -98,42 +85,6 @@ function codeForm(bin: string, attemptsLeft: number | null): ElicitationForm {
     fields: [{ name: 'code', type: 'string', pattern: CODE_PATTERN, question: CODE_QUESTION, description: CODE_DESCRIPTION }],
     answer: { rerun: `${bin} pair --wait --code <code>` },
   };
-}
-
-const KEYS_QUESTION = 'This machine has no Capy keys yet. How should it get them?'; // COPY-FLAG
-const KEYS_TRANSPORT_LABEL = 'Pick up my organization\'s keys from Keep (I already use Capy)'; // COPY-FLAG
-const KEYS_SIGNUP_LABEL = 'Create a new Capy organization for this project (new to Capy)'; // COPY-FLAG
-
-/**
- * The form a sign-in-only start run answers with on a machine that has no keys for the org (any org, when the folder
- * names none). Sign-in only would be refused with PAIR_TRANSPORT_REQUIRED after the human approved, so the choice is
- * asked before any request is made. Picking up keys (`--transport`) is always offered; creating an org (`--signup`) only
- * outside a project folder. The rerun keeps every flag that was typed.
- */
-function keysForm(bin: string, options: PairAgentOptions, signupAllowed: boolean): ElicitationForm {
-  const choices = [
-    { value: 'transport', label: KEYS_TRANSPORT_LABEL },
-    ...(signupAllowed ? [{ value: 'signup', label: KEYS_SIGNUP_LABEL }] : []),
-  ];
-  return {
-    kind: 'form',
-    question: KEYS_QUESTION,
-    details: {},
-    display: pairKeysDisplay(),
-    fields: [{
-      name: 'keys',
-      type: 'string',
-      pattern: `^(${choices.map((choice) => choice.value).join('|')})$`,
-      question: KEYS_QUESTION,
-      options: choices,
-    }],
-    answer: { rerun: `${bin} pair --<keys>${scopeFlags(options)}${options.force === true ? ' --force' : ''} --json` },
-  };
-}
-
-/** Sign-in only on a machine that holds no keys for the org it would sign in to: refused before anything is sent. */
-function needsKeys(scope: PairScope): boolean {
-  return scope.mode === 'session' && !hasAnyUsableOrgKeys(scope.orgId);
 }
 
 function linkElicitation(grant: PendingPairGrant, bin: string, qr: ElicitationLinkQr | null): ElicitationLink {
@@ -230,17 +181,6 @@ async function startRun(options: PairAgentOptions, deps: PairAgentDeps): Promise
   const now = deps.now ?? Date.now;
   const apiUrl = options.apiUrl || resolveActiveUrl(devMode);
   const scope = resolvePairScope(options);
-  if (needsKeys(scope)) {
-    return {
-      kind: 'refusal',
-      refusal: {
-        code: ERROR_CODES.PAIR_TRANSPORT_REQUIRED,
-        message: 'This machine has no keys yet, so signing in alone would be refused. Nothing was sent.', // COPY-FLAG
-        exitCode: EXIT_NEEDS_INPUT,
-        extra: { elicitation: keysForm(bin, options, !folderHasProject()) },
-      },
-    };
-  }
   const keyPair = generatePairKeyPair();
   const intent = pairIntent(options);
   const authorize = await authorizeDevice(apiUrl, keyPair.publicKey, scope, intent);

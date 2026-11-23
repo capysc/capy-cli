@@ -585,25 +585,19 @@ describe('capy pair, agent mode', () => {
       expect(mockInstallDeviceGrantSession).not.toHaveBeenCalled();
     });
 
-    test('sign-in only on a machine with no keys: PAIR_TRANSPORT_REQUIRED and a keys form before anything is sent', async () => {
+    test('a machine with no keys asks nothing: one key-handover link, and Keep decides after sign-in', async () => {
       const fetchMock = stubFetch([PENDING]);
       const ran = await run({ transport: false, title: 'Ship it' });
       expect(ran.exit).toBe(3);
-      expect(ran.json.code).toBe(ERROR_CODES.PAIR_TRANSPORT_REQUIRED);
-      const form = ran.json.elicitation;
-      expect(form.kind).toBe('form');
-      expect(form.details).toEqual({});
-      expect(ran.stdout).not.toMatch(/email/i);
-      expect(form.fields).toHaveLength(1);
-      expect(form.fields[0].name).toBe('keys');
-      // This repo has no keep.lock, so creating an organization is offered next to picking up keys.
-      expect(form.fields[0].options.map((option: { value: string }) => option.value)).toEqual(['transport', 'signup']);
-      expect(new RegExp(form.fields[0].pattern).test('transport')).toBe(true);
-      expect(new RegExp(form.fields[0].pattern).test('force')).toBe(false);
-      expect(form.answer).toEqual({ rerun: `${BIN} pair --<keys> --title 'Ship it' --json` });
-      expect(form.display).toContain('none yet');
-      expect(fetchMock).not.toHaveBeenCalled();
-      expect(pendingExists()).toBe(false);
+      expect(ran.json.code).toBe(ERROR_CODES.PAIR_APPROVAL_PENDING);
+      expect(ran.json.elicitation.kind).toBe('link');
+      expect(ran.json.elicitation.url).toContain('/transport/pair?code=ABCD-EFGH');
+      expect(ran.stdout).not.toMatch(/email|signup|--transport/i);
+      const authorizeBody = JSON.parse(String((callsTo(fetchMock, '/auth/device/authorize')[0] as [unknown, RequestInit])[1].body));
+      // Not a signup request: Keep sends a new user through signup, and an existing one approves their org's keys.
+      expect(authorizeBody).toMatchObject({ mode: 'transport' });
+      expect(authorizeBody.is_signup).not.toBe(true);
+      expect(JSON.parse(pendingRaw()).mode).toBe('transport');
     });
 
     test('sign-in only: the link is Keep /pair, the rerun carries no --transport, and keys of an org other than the bound one are not enough', async () => {

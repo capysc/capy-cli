@@ -69,6 +69,8 @@ export interface Harness {
   readonly home: string;
   readonly project: string;
   readonly projectKey: string;
+  /** The mock service's base URL (the prod cli reads it from the seeded profile; pass it as CAPY_API_URL to the dev cli). */
+  readonly apiUrl: string;
   /** Every request the mock service has received so far. */
   requests(): readonly RecordedRequest[];
   /** Number of `POST /secrets/:project` calls so far (a push). */
@@ -261,6 +263,10 @@ async function startMockService(requestLog: string, failFlag: string, root: stri
       rmSync(join(root, `branch-${project}-${parsed.branch}.json`), { force: true });
       return send(200, { keep_hash: SyncEngine.computeKeepHash(keep, parsed.branch) });
     }
+    // `capy pair` start run: one pending device grant, like the real service.
+    if (path === '/auth/device/authorize' && req.method === 'POST') {
+      return send(200, { device_code: 'piped-device', user_code: 'PIPE-CODE', interval: 5, expires_in: 300 });
+    }
     return send(404, { error: 'unexpected request' });
   });
   server.listen(0, '127.0.0.1');
@@ -315,6 +321,7 @@ export async function createHarness(): Promise<Harness> {
   return {
     home,
     project,
+    apiUrl: mock.url,
     projectKey,
     requests,
     pushCount: () => requests().filter((r) => r.method === 'POST' && r.path.startsWith('/secrets/')).length,

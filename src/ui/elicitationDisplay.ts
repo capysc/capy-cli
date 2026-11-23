@@ -121,11 +121,6 @@ export function createProjectDisplay(input: CreateDisplayInput): string {
   return `${summary}\n\n${input.branchDescription}`;
 }
 
-/** The table for `capy pair` on a machine with no keys yet: how it gets them, still to choose. */
-export function pairKeysDisplay(): string {
-  return table(['', ''], [['Keys on this machine', 'none yet'], ['How to get them', TO_CHOOSE]]); // COPY-FLAG
-}
-
 /** The table for `capy pair --wait` once the human approved in Keep: the one-time code Keep shows, still to give. */
 export function pairCodeDisplay(attemptsLeft: number | null): string {
   return table(['', ''], [['Approved in Keep', 'yes'], ['Code shown in Keep', TO_CHOOSE], ...(attemptsLeft === null ? [] : [['Tries left', String(attemptsLeft)] as const])]); // COPY-FLAG
