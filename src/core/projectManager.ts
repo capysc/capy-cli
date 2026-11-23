@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync, unlinkSync } from 'fs';
 import { join, basename } from 'path';
-import { ProjectState, KeepFile, SyncState, CapyError, ERROR_CODES } from '../types/index';
+import { ProjectState, KeepFile, SyncState, PendingSetup, CapyError, ERROR_CODES } from '../types/index';
 import { branchesFromKeep, syncedBranchNames } from './branchResolver';
 import { isReservedProjectName } from '../system/reservedProjectName';
 
@@ -253,22 +253,34 @@ export class ProjectManager {
     }
   }
 
-  writeSyncStateUserId(userId: string): void {
+  /** Writes the sync state with `change` applied to what is stored (or to an empty state); the stored object is not modified. */
+  private writeSyncStateWith(change: (existing: SyncState) => SyncState): void {
     const syncStatePath = this.getSyncStatePath();
     const capyDir = this.getCapyDir();
     if (!existsSync(capyDir)) mkdirSync(capyDir, { recursive: true });
-    const existing = this.readSyncState() || { last_sync: '', synced_variables: [] };
-    existing.user_id = userId;
-    writeFileSync(syncStatePath, JSON.stringify(existing, null, 2), { encoding: 'utf-8', mode: 0o600 });
+    const next = change(this.readSyncState() || { last_sync: '', synced_variables: [] });
+    writeFileSync(syncStatePath, JSON.stringify(next, null, 2), { encoding: 'utf-8', mode: 0o600 });
+  }
+
+  writeSyncStateUserId(userId: string): void {
+    this.writeSyncStateWith((existing) => ({ ...existing, user_id: userId }));
   }
 
   writeSyncStateOrgId(orgId: string): void {
-    const syncStatePath = this.getSyncStatePath();
-    const capyDir = this.getCapyDir();
-    if (!existsSync(capyDir)) mkdirSync(capyDir, { recursive: true });
-    const existing = this.readSyncState() || { last_sync: '', synced_variables: [] };
-    existing.org_id = orgId;
-    writeFileSync(syncStatePath, JSON.stringify(existing, null, 2), { encoding: 'utf-8', mode: 0o600 });
+    this.writeSyncStateWith((existing) => ({ ...existing, org_id: orgId }));
+  }
+
+  /** Marks an agent-mode setup as unfinished (every other field of the sync state is kept). */
+  writePendingSetup(pending: PendingSetup): void {
+    this.writeSyncStateWith((existing) => ({ ...existing, pending_setup: pending }));
+  }
+
+  /** Setup is done: drops the marker. Nothing is written when there is none. */
+  clearPendingSetup(): void {
+    const existing = this.readSyncState();
+    if (existing === null || existing.pending_setup === undefined) return;
+    const { pending_setup: _done, ...rest } = existing;
+    this.writeSyncStateWith(() => rest);
   }
 
   /**
@@ -280,9 +292,8 @@ export class ProjectManager {
   clearSyncStateUserId(): boolean {
     const existing = this.readSyncState();
     if (!existing || existing.user_id === undefined) return false;
-    delete existing.user_id;
-    const syncStatePath = this.getSyncStatePath();
-    writeFileSync(syncStatePath, JSON.stringify(existing, null, 2), { encoding: 'utf-8', mode: 0o600 });
+    const { user_id: _dropped, ...rest } = existing;
+    writeFileSync(this.getSyncStatePath(), JSON.stringify(rest, null, 2), { encoding: 'utf-8', mode: 0o600 });
     return true;
   }
 

@@ -261,12 +261,25 @@ export interface ChangeSet {
   deletedLocal: EnvVariable[]; // Variables deleted locally (in sync state but not in local .env)
 }
 
+/**
+ * Agent-mode setup of a new project, from the moment the folder is linked to the project until the last step is done.
+ * Only a run that finds this (and finds it agrees with keep.lock and with the flags it was given) resumes a setup.
+ */
+export interface PendingSetup {
+  readonly org_id: string;
+  readonly project_id: string;
+  readonly branch: string;
+  readonly protected: boolean;
+}
+
 export interface SyncState {
   last_sync: string;
   synced_variables: string[];
   user_id?: string;
   org_id?: string;
   keep_hash?: string | Record<string, string>;
+  /** Present only while an agent-mode setup is unfinished. Absent from every state file written before it existed. */
+  pending_setup?: PendingSetup;
 }
 
 /** Read the keep_hash for a specific branch from sync-state (backwards compat with old string format). */
@@ -407,6 +420,32 @@ export interface SessionStore {
   sessions: Record<string, OrgSession>;
 }
 
+/**
+ * The answers bare `capy` takes as flags when this folder is not a project yet. Each one, when given, answers its
+ * prompt (terminal) or its question (agent mode), so that question is not asked.
+ */
+export interface SetupAnswers {
+  /** `--org`: an organization id or name. */
+  readonly org?: string;
+  /** `--project`: an existing project's id or name, or `new`. */
+  readonly project?: string;
+  /** `--name`: the name of a new project. */
+  readonly name?: string;
+  /** `--branch`: the first branch. */
+  readonly branch?: string;
+  /** `--protected` / `--no-protected` as typed, as `yes` or `no`; anything else is refused with BRANCH_PROTECTION_INVALID. */
+  readonly protectedAnswer?: string;
+}
+
+export interface SetupOptions extends SetupAnswers {
+  /** `--json` (or `--non-tty`, which means the same). */
+  readonly json: boolean;
+  /** `--non-tty`: treat stdin as not a terminal. */
+  readonly nonTty: boolean;
+  /** Nobody can answer a prompt: `--json`, `--non-tty`, or stdin that is not a terminal. Setup then never prompts and answers in JSON. */
+  readonly agentMode: boolean;
+}
+
 export interface CliOptions {
   envPath?: string;
   verbose?: boolean;
@@ -423,6 +462,8 @@ export interface CliOptions {
   quiet?: boolean;
   /** Never the browser sign-in: a command that runs the sync as its first step and has no one to sign in is told why instead. */
   silentAuthOnly?: boolean;
+  /** What bare `capy` was told about setting up a folder that is not a project yet (`core/bareSetupFlags.ts`). Absent: no flags, a terminal. */
+  setup?: SetupOptions;
   /**
    * Bare `capy` as a command's first step (sync/gate.ts), not typed by a person: what to do when `.capy/branch` and the
    * `.env` header name different, real branches (an interrupted checkout). Absent (a person ran `capy`): stop with the
@@ -483,6 +524,8 @@ export const ERROR_CODES = {
   NO_ENV_FILE: 'NO_ENV_FILE',
   NO_KEEP_FILE: 'NO_KEEP_FILE',
   PERMISSION_DENIED: 'PERMISSION_DENIED',
+  // A tracked .gitignore that git keeps off disk (sparse checkout) cannot be brought into the checkout.
+  GITIGNORE_NOT_IN_CHECKOUT: 'GITIGNORE_NOT_IN_CHECKOUT',
   MEMBERSHIP_REVOKED: 'MEMBERSHIP_REVOKED',
   NETWORK_ERROR: 'NETWORK_ERROR',
   ENCRYPTION_ERROR: 'ENCRYPTION_ERROR',
@@ -683,6 +726,20 @@ export const ERROR_CODES = {
   PAIR_NO_KEYS: 'PAIR_NO_KEYS',
   /** `capy pair`: an entry's `local.key` already exists on this machine with a DIFFERENT value — refused unless `--force`. */
   PAIR_LOCAL_KEY_CONFLICT: 'PAIR_LOCAL_KEY_CONFLICT',
+  /** `capy pair` (agent mode): no expected account is known yet; the refusal carries a form asking for the email. */
+  PAIR_EMAIL_REQUIRED: 'PAIR_EMAIL_REQUIRED',
+  /** `capy pair` (agent mode) start run: the grant is waiting for the human; the refusal carries a `link` elicitation. */
+  PAIR_APPROVAL_PENDING: 'PAIR_APPROVAL_PENDING',
+  /** `capy pair --wait`: the wait ceiling passed and the grant is still pending; the refusal carries the same `link` elicitation. */
+  PAIR_STILL_WAITING: 'PAIR_STILL_WAITING',
+  /** `capy pair --wait`: the approving account is not the expected one. Nothing was installed. */
+  PAIR_ACCOUNT_MISMATCH: 'PAIR_ACCOUNT_MISMATCH',
+  /** `capy pair --wait`: there is no pending pairing (never started, finished, cancelled or unreadable). Start again. */
+  PAIR_NOT_PENDING: 'PAIR_NOT_PENDING',
+  /** `capy pair --wait`: the grant expired before it was approved. */
+  PAIR_EXPIRED: 'PAIR_EXPIRED',
+  /** `capy pair --wait`: the human denied the grant. */
+  PAIR_DENIED: 'PAIR_DENIED',
   // --- capy remove (CAP-686) ---
   /** `capy remove NAME...`: one or more names given are not on the active branch. */
   VAR_NOT_FOUND: 'VAR_NOT_FOUND',
@@ -1006,6 +1063,16 @@ export const ERROR_CODES = {
   // --- A git repo belongs to one organization ---
   /** The folder's tracked keep.lock names organization A, and `capy redeem` or `capy org` was asked to bring organization B into it. Nothing in the folder was changed. Exit 1. */
   REPO_ORG_MISMATCH: 'REPO_ORG_MISMATCH',
+  // --- Bare `capy` in a folder that is not a project yet, with nobody to ask (agent mode) ---
+  /** Bare `capy` in an unlinked folder, in agent mode, has questions left to answer. The refusal carries one `elicitation` form with every unanswered question. Nothing was created or written. Exit 3. */
+  INIT_INPUT_REQUIRED: 'INIT_INPUT_REQUIRED',
+  /** Bare `capy` could not read the organization's projects (the lookup failed, which is not the same as "it has none"). Nothing was created. Exit 1. */
+  PROJECT_LOOKUP_FAILED: 'PROJECT_LOOKUP_FAILED',
+  /** Bare `capy` in a folder whose earlier setup did not finish, given answers (`--org`, `--name`, `--branch`, `--protected`) that differ from that setup's. Nothing was changed. Exit 1. */
+  SETUP_PENDING_MISMATCH: 'SETUP_PENDING_MISMATCH',
+  // --- `capy kick` in agent mode ---
+  /** `capy kick <email>`: no member of the organization has that email. Nothing was changed. Exit 1. */
+  MEMBER_NOT_FOUND: 'MEMBER_NOT_FOUND',
 } as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES];

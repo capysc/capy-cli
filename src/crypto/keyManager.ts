@@ -237,6 +237,13 @@ function gcmDecryptMasterKey(combined: Buffer, wrappingKey: Buffer, aad?: Buffer
   ]);
 }
 
+/** Current Transport custody requires its exact authenticated owner/org context. */
+export function decryptBoundMasterKey(encryptedBlob: string, wrappingKey: Buffer, aad: Buffer): Buffer {
+  const combined = Buffer.from(encryptedBlob, 'base64');
+  if (combined.length < IV_LENGTH + AUTH_TAG_LENGTH) throw new Error('Encrypted master key blob too short');
+  return gcmDecryptMasterKey(combined, wrappingKey, aad);
+}
+
 /**
  * Decrypts the master key M from its on-disk wrapped form.
  *

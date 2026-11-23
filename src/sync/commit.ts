@@ -28,6 +28,7 @@ import type { ServiceClient } from '../service/serviceClient';
 import { CapyError, ERROR_CODES, KeepFile, setSyncKeepHash } from '../types/index';
 import { hashValue } from './compareSecrets';
 import { placeholderOf } from '../core/placeholder';
+import { withoutPendingSetup } from '../core/pendingSetup';
 import { SyncEngine } from './syncEngine';
 import type { RateInfo } from '../utils/pool';
 
@@ -579,7 +580,7 @@ export async function commitFolder(ctx: FolderContext, changes: Changes, opts: F
 
   const existingSyncState = ctx.pm.readSyncState();
   ctx.fileManager.writeSyncState({
-    ...existingSyncState,
+    ...withoutPendingSetup(existingSyncState),
     last_sync: new Date().toISOString(),
     synced_variables: Object.keys(done.env),
     user_id: ctx.userId,

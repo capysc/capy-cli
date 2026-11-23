@@ -4,6 +4,27 @@
 
 Version `0.9.18`. Generated from `capy help --json`.
 
+## Bare `capy`
+
+Bare `capy` syncs a folder that is a Capy project. In a folder that is not one, in a terminal it asks how to set it up; with --json, --non-tty or no terminal it asks nothing: with questions left it refuses with INIT_INPUT_REQUIRED (exit 3) and one elicitation form, and when every answer is given as a flag it creates the project and first branch, links the folder (keep.lock) and pushes the .env.
+
+```
+capy [options]
+```
+
+| Option | Description | Default |
+|---|---|---|
+| `--org <id|name>` | the organization to set this folder up in (asked when you belong to more than one) |  |
+| `--project <id|name>` | link this folder to an existing project in the organization, or "new" to create one |  |
+| `--name <name>` | the name of a new project |  |
+| `--branch <name>` | the first branch; a Capy branch works like a git branch (offered by default: development) |  |
+| `--protected [yes|no]` | whether the first branch is protected (invite-only) |  |
+| `--no-protected` | Create it open to the project |  |
+| `--json` | emit machine-readable JSON instead of the human UI |  |
+| `--non-tty` | same as --json: never ask, and answer in JSON (agents/CI) |  |
+
+JSON support: yes (`--json`)
+
 ## Commands
 
 ## `capy run`
@@ -385,7 +406,7 @@ JSON support: yes (`--json`)
 
 ## `capy pair`
 
-Pair this device via Keep; requires interactive confirmation of the returned account before installing any session or keys
+Pair this device via Keep; confirms the returned account before installing any session or keys: interactively in a terminal, and in agent mode the approving account must match --email
 
 ```
 capy pair [options]
@@ -395,6 +416,9 @@ capy pair [options]
 |---|---|---|
 | `--json` | emit machine-readable JSON instead of the human UI |  |
 | `--force` | overwrite a different local key already on this machine |  |
+| `--email <email>` | agent mode: the account that will approve; prints a link and exits 3 at once, then run --wait |  |
+| `--wait` | agent mode: wait for the pending pairing to be approved (exits 3 with PAIR_STILL_WAITING after 30 seconds; run it again) |  |
+| `--cancel` | agent mode: drop the pending pairing |  |
 
 JSON support: yes (`--json`)
 
@@ -403,12 +427,16 @@ JSON support: yes (`--json`)
 Remove a teammate from this organization
 
 ```
-capy kick <email>
+capy kick <email> [options]
 ```
 
-_No options._
+| Option | Description | Default |
+|---|---|---|
+| `--yes` | skip the confirmation question |  |
+| `--non-tty` | same as --json: never ask, and answer in JSON (agents/CI) |  |
+| `--json` | emit machine-readable JSON instead of the human UI |  |
 
-JSON support: no
+JSON support: yes (`--json`)
 
 ## `capy system`
 
@@ -1015,6 +1043,7 @@ Every refusal carries a stable `code` — branch on it, never on message text.
 - `NO_ENV_FILE`
 - `NO_KEEP_FILE`
 - `PERMISSION_DENIED`
+- `GITIGNORE_NOT_IN_CHECKOUT`
 - `MEMBERSHIP_REVOKED`
 - `NETWORK_ERROR`
 - `ENCRYPTION_ERROR`
@@ -1077,6 +1106,13 @@ Every refusal carries a stable `code` — branch on it, never on message text.
 - `PAIRING_NOT_READY`
 - `PAIR_NO_KEYS`
 - `PAIR_LOCAL_KEY_CONFLICT`
+- `PAIR_EMAIL_REQUIRED`
+- `PAIR_APPROVAL_PENDING`
+- `PAIR_STILL_WAITING`
+- `PAIR_ACCOUNT_MISMATCH`
+- `PAIR_NOT_PENDING`
+- `PAIR_EXPIRED`
+- `PAIR_DENIED`
 - `VAR_NOT_FOUND`
 - `REMOVE_NEEDS_TTY`
 - `SECRETS_STALE_BASE`
@@ -1203,6 +1239,10 @@ Every refusal carries a stable `code` — branch on it, never on message text.
 - `SECRET_NOT_PERSISTED`
 - `KEEP_WRITE_CONFLICT`
 - `REPO_ORG_MISMATCH`
+- `INIT_INPUT_REQUIRED`
+- `PROJECT_LOOKUP_FAILED`
+- `SETUP_PENDING_MISMATCH`
+- `MEMBER_NOT_FOUND`
 
 ## Conventions
 
@@ -1210,4 +1250,4 @@ Every refusal carries a stable `code` — branch on it, never on message text.
 - **Codes**: Branch only on the machine-readable `code` field (from --json output or a CapyError), never on human-readable message text — messages may be reworded without notice.
 - **Conflicts**: Every command that writes from a folder (edit, add, remove, connect, rotate, push, checkout, org, deploy, deploy revoke, deploy targets-remove) runs bare `capy` first; `checkout -b` is the one exception (a new branch carries the uncommitted values of the folder). Off a terminal, if the folder and Capy differ on any variable, nothing is written, the exit code is 3, and stdout is {ok:false, code:"SECRETS_CONFLICT", conflict_id, conflicts:[{name, project, branch, type, pinned, local, remote}]} (fingerprints only, never values; a Dokploy value has {name, target, pinned, local, remote}). Ask the person, then rerun the same command with --resolve NAME=pinned|local|remote|delete for every row (NAME@TARGET=local|remote for a Dokploy value) and --conflict <conflict_id>. A state that moved since is SECRETS_CONFLICT_STALE with the fresh rows. There is no resolve-all. `secrets set` and `secrets deploy` take the same --resolve and --conflict for a location that changed since its row was listed.
 - **Organizations**: These commands work on an organization, not on a folder, and run with no project folder: users, grant-branch, revoke-branch, invite, kick, projects, projects rename --project-id, project create, project delete, project restore, secrets, secrets set, secrets deploy, system. The organization is the one in the keep.lock of the folder when it has one, else the only organization the account belongs to. With several organizations, no keep.lock and nobody to ask, `users --json`, `projects rename` and `project create|delete|restore` refuse with ORG_SELECTION_REQUIRED and `orgs:[{id, name}]`: show them to the person and stop.
-- **Elicitation**: A refusal with exit code 3 can carry an `elicitation` next to its `code`: a question for the human, never for you. Write `display` (a markdown table) in your reply exactly as given, without shortening or reordering it and never inside the question. Then ask the short `question` as an elicitation with your question tool: one question per field, using the field's own `question` followed by its `description` when it has them, and its `options` or `default` as the choices; without a question tool, end your reply with the `question` and the human answers in chat. kind "confirm" is a yes/no ({kind, question, details, display, answer:{yes}}): ask the human; on yes, run the command in `answer.yes`; on no, stop. kind "form" asks for values ({kind, question, details, display, fields:[{name, type, pattern, question?, default?, description?, options?:[{value, label}]}], answer:{rerun}}): ask the human for each field, then run `answer.rerun` with the values filled in. A field with `options` is a choice: the human picks a `label`, and you fill in its `value`. A field without `options` is typed in. With a `default`, offer exactly two choices, the `default` and "Cancel"; the human types any other answer in your question tool's own free-text answer. With no `default`, leave it out of the question tool: after the other questions, ask its `question` in chat and wait for the human to type the answer. On "Cancel", stop. `details` holds names and ids only, never a value. Today: `capy project restore` without --yes refuses with CONFIRMATION_REQUIRED and a confirm (details: {org:{id,name}, project:{id,name,deleted_at}}); `capy project delete` without --yes refuses with CONFIRMATION_REQUIRED and a confirm (details: {org:{id,name}, project:{id,name}, branches:[name], variables:[{name, branches:[name]}], live_deploy_tokens:[{deploy_id, label}], unavailable?:["branches"|"variables"]}); `capy project create` missing the name, `--branch` or `--protected` in agent mode refuses with PROJECT_NAME_REQUIRED, BRANCH_NAME_REQUIRED or BRANCH_PROTECTION_REQUIRED and a form (fields: name, branch, protected (options yes/no); details: {org:{id,name}}); `capy project delete` / `project restore` with a name several projects share refuses with PROJECT_AMBIGUOUS and a form with one `project` field whose options are the projects (details: {org:{id,name}, matches:[{id, name, created_at, variables}]}); `capy projects rename` with no name refuses with PROJECT_NAME_REQUIRED and a form with one `name` field (details: {org:{id,name}, project:{id,name}}); `capy secrets set` / `capy secrets deploy` with a project that is linked to more than one repo refuses with PR_REPO_AMBIGUOUS and a form with one field per such project whose options are its repos (details: {projects:[{id, name, repos:[owner/name[/folder]]}]}); pass the same `--pr-repo` again on the run with `--confirm`. Never answer it yourself and never add --yes on your own.
+- **Elicitation**: A refusal with exit code 3 can carry an `elicitation` next to its `code`: a question for the human, never for you. Write `display` (a markdown table) in your reply exactly as given, without shortening or reordering it and never inside the question. Then ask the short `question` as an elicitation with your question tool: one question per field, using the field's own `question` followed by its `description` when it has them, and its `options` or `default` as the choices; without a question tool, end your reply with the `question` and the human answers in chat. kind "confirm" is a yes/no ({kind, question, details, display, answer:{yes}}): ask the human; on yes, run the command in `answer.yes`; on no, stop. kind "form" asks for values ({kind, question, details, display, fields:[{name, type, pattern, question?, default?, description?, options?:[{value, label}]}], answer:{rerun}}): ask the human for each field, then run `answer.rerun` with the values filled in. A field with `options` is a choice: the human picks a `label`, and you fill in its `value`. A field without `options` is typed in. With a `default`, offer exactly two choices, the `default` and "Cancel"; the human types any other answer in your question tool's own free-text answer. With no `default`, leave it out of the question tool: after the other questions, ask its `question` in chat and wait for the human to type the answer. On "Cancel", stop. `details` holds names and ids only, never a value. Today: `capy project restore` without --yes refuses with CONFIRMATION_REQUIRED and a confirm (details: {org:{id,name}, project:{id,name,deleted_at}}); `capy project delete` without --yes refuses with CONFIRMATION_REQUIRED and a confirm (details: {org:{id,name}, project:{id,name}, branches:[name], variables:[{name, branches:[name]}], live_deploy_tokens:[{deploy_id, label}], unavailable?:["branches"|"variables"]}); `capy project create` missing the name, `--branch` or `--protected` in agent mode refuses with PROJECT_NAME_REQUIRED, BRANCH_NAME_REQUIRED or BRANCH_PROTECTION_REQUIRED and a form (fields: name, branch, protected (options yes/no); details: {org:{id,name}}); `capy project delete` / `project restore` with a name several projects share refuses with PROJECT_AMBIGUOUS and a form with one `project` field whose options are the projects (details: {org:{id,name}, matches:[{id, name, created_at, variables}]}); `capy kick <email>` without --yes refuses with CONFIRMATION_REQUIRED and a confirm (details: {org:{id,name}, member:{email}}); `capy projects rename` with no name refuses with PROJECT_NAME_REQUIRED and a form with one `name` field (details: {org:{id,name}, project:{id,name}}); `capy secrets set` / `capy secrets deploy` with a project that is linked to more than one repo refuses with PR_REPO_AMBIGUOUS and a form with one field per such project whose options are its repos (details: {projects:[{id, name, repos:[owner/name[/folder]]}]}); pass the same `--pr-repo` again on the run with `--confirm`. kind "link" hands the human a page to approve on ({kind, url, code, purpose, expires_at, qr?:{text?, image?:{mime_type, file, data_uri?}}, answer:{wait}}): show the human the `url`, the `code` and `expires_at` (and the `qr` as `conventions.pairing` says), then run `answer.wait` at once in the foreground, and run it again whenever it exits 3 with PAIR_STILL_WAITING. Today `capy pair` in agent mode refuses with PAIR_EMAIL_REQUIRED and a form (field: email), then PAIR_APPROVAL_PENDING and a link; never fill in the email yourself. Bare `capy` in a folder that is not a project, in agent mode, with questions left refuses with INIT_INPUT_REQUIRED and one form that asks only what is unanswered: org (options: the organizations; asked first and alone when there are several), project (options: the existing projects, and `new`), then for a new project name, branch and protected (options yes/no); its `display` is the whole summary, so after the human answers, run `answer.rerun` with no further confirmation (details: {org?, orgs?, projects?, new_project_fields?, variables}; `variables` is a count). Never answer it yourself and never add --yes on your own.

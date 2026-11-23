@@ -14,6 +14,7 @@ import { ERROR_CODES } from '../types/index';
 import { ELICITATION_HELP } from '../ui/elicitation';
 import { PAIRING_PRESENTATION } from '../ui/pairingPresentation';
 import { DEPLOY_DOKPLOY_PLAN_SCHEMA, DEPLOY_VERCEL_PLAN_SCHEMA } from '../commands/deployDiscover/schema';
+import { bareSetupOptions } from './bareSetupFlags';
 
 export interface CliArgumentDoc {
   name: string;
@@ -63,10 +64,19 @@ export interface CliCommandDoc {
   subcommands: CliCommandDoc[];
 }
 
+/** Bare `capy` (no subcommand): the flags only it takes. They are registered on the root only for a bare invocation, so they are listed here. */
+export interface CliRootDoc {
+  description: string;
+  options: CliOptionDoc[];
+  supportsJson: boolean;
+}
+
 export interface CliHelpDoc {
   ok: true;
   name: string;
   version: string;
+  /** What bare `capy` takes. Absent from docs made before it had flags. */
+  root?: CliRootDoc;
   commands: CliCommandDoc[];
   /** JSON Schemas of the files commands read, by name (`deploy_dokploy_plan`, `deploy_vercel_plan`). */
   schemas: Record<string, unknown>;
@@ -80,7 +90,7 @@ export interface CliHelpDoc {
     orgs?: string;
     /** What an `elicitation` in a refusal is and what to do with it (CAP-748). */
     elicitation?: string;
-    /** Pending pairing is a stderr event; stdout remains the final result. */
+    /** How an agent runs `capy pair` and shows its link step (the one agent pairing flow). */
     readonly pairing: typeof PAIRING_PRESENTATION;
   };
 }
@@ -178,6 +188,10 @@ function commandDoc(cmd: Command, parentPath: string): CliCommandDoc {
   };
 }
 
+// COPY-FLAG: minimal and neutral.
+const ROOT_DESCRIPTION =
+  'Bare `capy` syncs a folder that is a Capy project. In a folder that is not one, in a terminal it asks how to set it up; with --json, --non-tty or no terminal it asks nothing: with questions left it refuses with INIT_INPUT_REQUIRED (exit 3) and one elicitation form, and when every answer is given as a flag it creates the project and first branch, links the folder (keep.lock) and pushes the .env.';
+
 /** Pure: walks the fully-registered `program` tree into a stable JSON document. */
 export function buildCliHelpDoc(program: Command): CliHelpDoc {
   const commands = program.commands.filter((c) => !isHiddenCommand(c)).map((c) => commandDoc(c, ''));
@@ -186,6 +200,7 @@ export function buildCliHelpDoc(program: Command): CliHelpDoc {
     ok: true,
     name: program.name(),
     version: program.version() ?? '',
+    root: { description: ROOT_DESCRIPTION, options: bareSetupOptions().map(optionDoc), supportsJson: true },
     commands,
     schemas: { ...HELP_SCHEMAS },
     errorCodes: Object.values(ERROR_CODES),

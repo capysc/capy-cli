@@ -19,6 +19,7 @@ import {
   SyncState,
   AuthResult,
   ProjectInitResult,
+  SetupOptions,
   CapyError,
   ERROR_CODES,
   getSyncKeepHash,
@@ -62,6 +63,11 @@ import { ACCENT } from '../ui/colors';
 import { installSyncHooks } from '../git/syncHooks';
 import { initProjectQuestion } from '../ui/projectQuestions';
 import { reportRepoLinkForCommand } from '../core/repoLinkReporter';
+import { orgKeyMissingMessage } from '../core/orgKeyMissing';
+import { withoutPendingSetup } from '../core/pendingSetup';
+import { NEW_PROJECT, answerProblem, chooseOrg, chooseProject, orgChoiceProblem, projectChoiceProblem } from '../core/initPlan';
+import { agentResume, agentSetup, type AgentOutcome, type AgentSetupDeps, type LinkedStep } from './agentSetup';
+import { refuse, refusalFor, settle } from './projectLifecycleCommand';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -183,13 +189,18 @@ export class CapyCommand {
 
   /** What bare `capy` says: stdout for a person, stderr when stdout belongs to the protocol's payload. */
   private say(line: string): void {
-    if (this.protocol) console.error(line);
+    if (this.protocol || this.options.setup?.agentMode === true) console.error(line);
     else console.log(line);
   }
 
   async execute(): Promise<void> {
     // A bad --resolve / --conflict is refused before anything is read.
     conflictFlagsOrExit(this.options.conflictFlags ?? {}, false);
+    // Nobody to ask (`--json`, `--non-tty`, no terminal): setting up a folder asks nothing and answers in JSON.
+    const forAgent = await this.agentStep();
+    if (forAgent !== undefined && forAgent.kind !== 'sync') return this.endForAgent(forAgent);
+    // Setup flags typed on a folder that is already a project apply to nothing; the answer says so.
+    const ignoredFlags = forAgent?.ignoredFlags ?? [];
     try {
       const projectState = await this.detectOrRecoverProjectState();
 
@@ -205,6 +216,7 @@ export class CapyCommand {
       }
 
       await this.syncProject(projectState);
+      this.reportIgnoredFlags(ignoredFlags);
       // CAP-697: auth is established by now. Reporting never changes this command's output or exit code.
       if (!isLocalOnly() && projectState.organizationId && projectState.projectId) {
         await reportRepoLinkForCommand({
@@ -225,6 +237,55 @@ export class CapyCommand {
       const { displayErrorAndExit } = await import('../ui/errorScreen');
       await displayErrorAndExit(error);
     }
+  }
+
+  /**
+   * Agent mode only (`options.setup.agentMode`): the folder is not a project yet, or it is the rerun of a setup that
+   * stopped half way. A linked folder otherwise (and local-only mode, and any state that cannot be read) is left to
+   * the path below, exactly as it was. Whatever the setup steps read or write, a failure in agent mode ends as a
+   * refusal with a code, never as an uncoded error screen.
+   */
+  private async agentStep(): Promise<AgentOutcome | Extract<LinkedStep, { kind: 'sync' }> | undefined> {
+    const setup = this.options.setup;
+    if (setup === undefined || !setup.agentMode) return undefined;
+    const guarded = await settle(() => this.agentStepUnguarded(setup));
+    return guarded.ok ? guarded.value : { kind: 'refusal', refusal: refusalFor(guarded.error) };
+  }
+
+  private async agentStepUnguarded(setup: SetupOptions): Promise<LinkedStep | undefined> {
+    const detected = await settle(() => this.detectOrRecoverProjectState());
+    if (!detected.ok) return { kind: 'refusal', refusal: refusalFor(detected.error) };
+    if (detected.value === undefined) return isLocalOnly() ? undefined : agentSetup(this.agentSetupDeps(), setup);
+    return agentResume(this.agentSetupDeps(), setup, detected.value);
+  }
+
+  /** Agent mode: the setup flags that were typed and applied to nothing, as one JSON result. Nothing is printed when there are none. */
+  private reportIgnoredFlags(flags: readonly string[]): void {
+    if (flags.length === 0) return;
+    console.log(JSON.stringify({ ok: true, ignored_flags: flags }, null, 2));
+  }
+
+  /** Prints what agent-mode setup ended with: the result, or the coded refusal (exit code and all). */
+  private endForAgent(outcome: AgentOutcome): void {
+    if (outcome.kind === 'refusal') return refuse(true, outcome.refusal);
+    console.log(JSON.stringify(outcome.result, null, 2));
+  }
+
+  /** This command's own members, handed to agent-mode setup so it does not copy them. */
+  private agentSetupDeps(): AgentSetupDeps {
+    return {
+      options: this.options,
+      devMode: this.devMode,
+      authService: this.authService,
+      serviceClient: this.serviceClient,
+      projectManager: this.projectManager,
+      fileManager: this.fileManager,
+      keyServiceOps: this.keyServiceOps(),
+      decryptLocalEnv: (raw, key) => this.resolveDecryptedLocalEnv(raw, key),
+      pushEnv: (localEnv, key, branch, keep, project, auth) => this.pushAndEncryptLocalEnv(localEnv, key, branch, keep, project, auth),
+      stageKeepLock: () => this.stageKeepLock(),
+      installGitHooks: () => this.installGitHooks(),
+    };
   }
 
   /**
@@ -503,13 +564,14 @@ export class CapyCommand {
     const CREATE_NEW_ORG = '__create_new__';
     const currentOrgId = authResult.organization_id;
     const currentOrg = orgs.find(o => o.id === currentOrgId);
+    const typedOrgId = this.typedOrgId(orgs);
 
     if (orgs.length === 0) {
       console.log('\nNo organization found. Let\'s create one.');
       return this.createNewOrganization(refreshToken!, authResult.user_id!);
     }
 
-    const orgId = await this.resolveOrgIdChoice(orgs, currentOrgId, CREATE_NEW_ORG);
+    const orgId = typedOrgId ?? await this.resolveOrgIdChoice(orgs, currentOrgId, CREATE_NEW_ORG);
 
     if (orgId === CREATE_NEW_ORG) {
       return this.createNewOrganization(refreshToken!, authResult.user_id!);
@@ -522,6 +584,17 @@ export class CapyCommand {
     const target = orgs.find(o => o.id === orgId)!;
     await this.switchToOrganization(refreshToken!, target, authResult.user_id);
     return target;
+  }
+
+  /** The organization `--org` names, which answers the question of which one to use; undefined with no `--org`. An unknown or ambiguous one is a coded error. */
+  private typedOrgId(orgs: readonly Organization[]): string | undefined {
+    const typed = this.options.setup?.org;
+    if (typed === undefined) return undefined;
+    const choice = chooseOrg(orgs, typed);
+    if (choice.kind === 'picked') return choice.org.id;
+    if (choice.kind === 'ask') return undefined;
+    const problem = orgChoiceProblem(choice, orgs);
+    throw new CapyError(problem.message, problem.code, problem.extra);
   }
 
   /** Asks which org id was chosen. */
@@ -569,6 +642,9 @@ export class CapyCommand {
 
   private async runInitialization(): Promise<void> {
     this.debug('initializeProject start', { cwd: process.cwd() });
+    // A flag that breaks a rule is refused before anything is shown or sent.
+    const answerBroken = this.options.setup === undefined ? null : answerProblem(this.options.setup);
+    if (answerBroken !== null) throw new CapyError(answerBroken.message, answerBroken.code, answerBroken.extra);
     console.log('Welcome to Capy\n');
 
     // Check if sync-state has an org hint (e.g. from a recent `capy redeem`)
@@ -615,13 +691,7 @@ export class CapyCommand {
     // and need to redeem their invite code to receive the shared master key.
     const orgKeyPresent = hasOrgKey(selectedOrg.id, authResult.user_id!);
     if (!orgKeyPresent) {
-      throw new CapyError(
-        `You have access to "${selectedOrg.name}" but no encryption key on this device.\n\n` +
-        '  Ask your org owner for an invite code, then run:\n\n' +
-        '    capy redeem <code>\n\n' +
-        '  This will securely transfer the shared encryption key to your device.',
-        ERROR_CODES.AUTH_FAILED
-      );
+      throw new CapyError(orgKeyMissingMessage(selectedOrg.name), ERROR_CODES.AUTH_FAILED);
     }
 
     // Discover existing projects in the org. If any exist, give the user the
@@ -631,25 +701,27 @@ export class CapyCommand {
     // "The lookup failed" and "this org has none" both end up as an empty list
     // here, and they are not the same fact: one walks the user into creating a
     // second project alongside one they already have. The rail says which.
-    const { existingProjects } = await this.listExistingProjectsOrUnavailable();
+    const { existingProjects, projectsUnavailable } = await this.listExistingProjectsOrUnavailable();
 
-    if (existingProjects.length > 0) {
-      const projectChoice = await this.resolveProjectChoice(existingProjects, CREATE_NEW_PROJECT);
+    // `--project` / `--name` answer the question; with neither, it is asked when there is anything to choose from.
+    const typedChoice = this.typedProjectChoice(existingProjects, projectsUnavailable, CREATE_NEW_PROJECT);
+    const projectChoice = typedChoice ?? (existingProjects.length > 0
+      ? await this.resolveProjectChoice(existingProjects, CREATE_NEW_PROJECT)
+      : CREATE_NEW_PROJECT);
 
-      if (projectChoice !== CREATE_NEW_PROJECT) {
-        const picked = existingProjects.find(p => p.id === projectChoice)!;
-        await this.bootstrapExistingProject(
-          picked,
-          selectedOrg.id,
-          authResult.user_id!,
-        );
-        return;
-      }
+    if (projectChoice !== CREATE_NEW_PROJECT) {
+      const picked = existingProjects.find(p => p.id === projectChoice)!;
+      await this.bootstrapExistingProject(
+        picked,
+        selectedOrg.id,
+        authResult.user_id!,
+      );
+      return;
     }
 
-    // Prompt for project name
+    // Prompt for project name (`--name` answers it)
     const defaultName = this.projectManager.getDefaultProjectName();
-    const projectName = await this.resolveProjectName(defaultName);
+    const projectName = this.options.setup?.name ?? await this.resolveProjectName(defaultName);
 
     // Defense in depth: the prompt validators above already refuse
     // "_system" (CAP-664), but this is the actual choke point before the
@@ -691,11 +763,9 @@ export class CapyCommand {
     // one, so pick the name: default 'development', or a custom name the
     // user enters. Protection isn't asked here - branches are unprotected
     // by default and can be protected later via a dedicated action.
-    const initialBranchChoice = await this.resolveInitialBranchChoice();
-    const initialBranchName = initialBranchChoice === 'other'
-      ? await this.resolveCustomBranchName()
-      : 'development';
-    const initialBranchProtected = false;
+    // `--branch` answers the branch question and `--protected` / `--no-protected` the protection (never asked here).
+    const initialBranchName = this.options.setup?.branch ?? await this.resolveInitialBranchName();
+    const initialBranchProtected = this.options.setup?.protectedAnswer === 'yes';
 
     const branchSpinner = ora(`Creating branch ${initialBranchName}...`).start();
     try {
@@ -840,6 +910,32 @@ export class CapyCommand {
   /** Asks (via the prompt engine) for the new project's name. */
   private async resolveProjectName(defaultName: string): Promise<string> {
     return this.promptEngine.promptForProjectName(defaultName);
+  }
+
+  /** The project `--project` / `--name` stand for: an existing project's id, or `newProjectValue`; undefined when neither was typed. An unknown project is a coded error. */
+  private typedProjectChoice(
+    existingProjects: ReadonlyArray<{ id: string; name: string }>,
+    projectsUnavailable: boolean,
+    newProjectValue: string,
+  ): string | undefined {
+    const setup = this.options.setup;
+    if (setup === undefined || (setup.project === undefined && setup.name === undefined)) return undefined;
+    const wantsExisting = setup.project !== undefined && setup.project !== NEW_PROJECT;
+    if (wantsExisting && projectsUnavailable) {
+      throw new CapyError('Could not read the projects of this organization, so nothing was created.', ERROR_CODES.PROJECT_LOOKUP_FAILED); // COPY-FLAG
+    }
+    const choice = chooseProject(existingProjects, setup);
+    if (choice.kind === 'unknown' || choice.kind === 'ambiguous') {
+      const problem = projectChoiceProblem(choice, undefined);
+      throw new CapyError(problem.message, problem.code, problem.extra);
+    }
+    return choice.kind === 'existing' ? choice.project.id : newProjectValue;
+  }
+
+  /** Asks which first branch: 'development' or a custom name. */
+  private async resolveInitialBranchName(): Promise<string> {
+    const initialBranchChoice = await this.resolveInitialBranchChoice();
+    return initialBranchChoice === 'other' ? this.resolveCustomBranchName() : 'development';
   }
 
   /** Asks whether the initial branch is 'development' or a custom name. */
@@ -1009,7 +1105,7 @@ export class CapyCommand {
 
       try {
         // Backup plaintext .env before encrypting
-        this.fileManager.backupPlaintextEnv(this.options.envPath);
+        this.fileManager.backupPlaintextEnv(this.options.envPath, (line) => this.say(line));
       } catch (error) {
         return { ok: false, error, pushedToKeep: true, backupWritten: false, envRewritten: false };
       }
@@ -1044,7 +1140,7 @@ export class CapyCommand {
     orgId: string,
     userId: string,
   ): Promise<void> {
-    const branch = 'development';
+    const branch = this.options.setup?.branch ?? 'development';
     const encryptionKey = await resolveProjectKey(orgId, project.id, userId, this.keyServiceOps());
 
     const fetchSpinner = ora(`Pulling ${project.name} (${branch})...`).start();
@@ -2010,7 +2106,7 @@ export class CapyCommand {
     // Update sync state
     const existingSyncState = this.projectManager.readSyncState();
     this.fileManager.writeSyncState({
-      ...existingSyncState,
+      ...withoutPendingSetup(existingSyncState),
       last_sync: new Date().toISOString(),
       synced_variables: Object.keys(finalEnv),
       user_id: authResult.user_id,

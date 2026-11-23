@@ -74,6 +74,17 @@ export function restoreProjectDisplay(input: {
   ]);
 }
 
+/** The table for `capy kick`: the organization and the member who would be removed. */
+export function kickMemberDisplay(input: {
+  readonly org: { readonly id: string; readonly name: string };
+  readonly email: string;
+}): string {
+  return table(['', ''], [
+    ['Org', input.org.name],
+    ['Member', input.email], // COPY-FLAG
+  ]);
+}
+
 /** The table for a name that matches several projects: one numbered row per project, labelled as the options are. */
 export function chooseProjectDisplay(labels: readonly string[]): string {
   return table(['', 'Project'], labels.map((label, i) => [String(i + 1), label] as const)); // COPY-FLAG
@@ -108,6 +119,50 @@ export function createProjectDisplay(input: CreateDisplayInput): string {
     ['Protected', protectedCell(input.isProtected)], // COPY-FLAG
   ]);
   return `${summary}\n\n${input.branchDescription}`;
+}
+
+/** The table for `capy pair` asking for the email of the account that will approve: one row, still to choose. */
+export function pairEmailDisplay(): string {
+  return table(['', ''], [['Email', TO_CHOOSE]]); // COPY-FLAG
+}
+
+export interface SetupDisplayInput {
+  /** The organization's name, when it is decided. */
+  readonly org?: string;
+  /** The project's name, when it is decided (an existing one, or the name given for a new one). */
+  readonly project?: string;
+  /** The first branch, when it is decided. */
+  readonly branch?: string;
+  /** Whether the first branch is protected, when it is decided. */
+  readonly isProtected?: boolean;
+  /** How many variables the folder's `.env` holds. 0 or absent: no row. */
+  readonly variables?: number;
+  /** Whether the human is still choosing between a new project and an existing one: then the row says what each choice does to the variables. */
+  readonly projectChoice?: boolean;
+  /** What a branch is, shown under the table. */
+  readonly branchDescription: string;
+}
+
+const EXISTING_PROJECT_OUTCOME = ' (new project). Existing project: nothing is pushed; if it has secrets they replace these, and the old values are kept in a .pre-capy.old file.'; // COPY-FLAG
+
+function variablesCell(count: number, projectChoice: boolean): string {
+  const base = `${count} ${count === 1 ? 'variable' : 'variables'} to encrypt and push`; // COPY-FLAG
+  return projectChoice ? `${base}${EXISTING_PROJECT_OUTCOME}` : base;
+}
+
+/**
+ * The table for bare `capy` setting up a folder with nobody to ask: where it goes, what is decided so far, and how
+ * many variables of the `.env` will be encrypted and pushed. It is the whole summary, so there is no second confirmation.
+ */
+export function setupDisplay(input: SetupDisplayInput): string {
+  const rows: ReadonlyArray<readonly [string, string]> = [
+    ['Org', input.org ?? TO_CHOOSE],
+    ['Project', input.project ?? TO_CHOOSE],
+    ['First branch', input.branch ?? TO_CHOOSE], // COPY-FLAG
+    ['Protected', protectedCell(input.isProtected)], // COPY-FLAG
+    ...(input.variables !== undefined && input.variables > 0 ? [['Variables', variablesCell(input.variables, input.projectChoice === true)] as const] : []),
+  ];
+  return `${table(['', ''], rows)}\n\n${input.branchDescription}`;
 }
 
 /** The table for `capy projects rename` asking for the new name: where the project is, what it is called now, and the name suggested for this folder. */
