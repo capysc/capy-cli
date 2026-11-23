@@ -13,9 +13,9 @@ import path from 'path';
  */
 export const PAIRING_PRESENTATION = {
   version: 1,
-  command: 'capy pair --email <email> --json',
+  command: 'capy pair --json',
   instructions: [
-    'Ask the human which email will approve, then run `capy pair --email <email> --json`. Never fill in the email yourself.', // COPY-FLAG
+    'Run `capy pair --json` without asking the human anything first. On a machine with no keys it asks, as a form, how to get them: ask the human, never choose yourself.', // COPY-FLAG
     'The refusal PAIR_APPROVAL_PENDING carries an elicitation of kind "link". Always show the human its `url`, `code` and `expires_at`.', // COPY-FLAG
     'Show the QR in this order. First, if your client can show images, show the PNG: attach or send `qr.image.file`, or decode `qr.image.data_uri`.', // COPY-FLAG
     'Second, show `qr.text` only if your client is a real terminal with a monospace grid and no extra line spacing.', // COPY-FLAG
@@ -23,7 +23,6 @@ export const PAIRING_PRESENTATION = {
     'If qr.image.file is inside a remote runtime, copy it to your display-accessible workspace. Alternatively decode qr.image.data_uri locally. Never send the pairing link to an external QR service.', // COPY-FLAG (adapted from an earlier sentence)
     'Then run `answer.wait` at once in the foreground, and run it again whenever it exits 3 with PAIR_STILL_WAITING. The wait response does not repeat `qr.text` or `qr.image.data_uri`.', // COPY-FLAG
     'After the human approves, Keep shows them a one-time code and the wait exits 3 with PAIR_CODE_REQUIRED and a form with one `code` field: ask the human for that code and run `answer.rerun` (`capy pair --wait --code <code>`). Never fill in the code yourself; only the person who approved can see it. A wrong code returns PAIR_CODE_MISMATCH with the form again.', // COPY-FLAG
-    'If a different account approves, PAIR_ACCOUNT_MISMATCH is returned and nothing is installed.', // COPY-FLAG
     'When the keys are already on this machine, the pairing only signs in: the result says `"keys": "already_present"`.', // COPY-FLAG
   ],
 } as const;

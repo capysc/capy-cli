@@ -728,14 +728,10 @@ export const ERROR_CODES = {
   PAIR_NO_KEYS: 'PAIR_NO_KEYS',
   /** `capy pair`: an entry's `local.key` already exists on this machine with a DIFFERENT value — refused unless `--force`. */
   PAIR_LOCAL_KEY_CONFLICT: 'PAIR_LOCAL_KEY_CONFLICT',
-  /** `capy pair` (agent mode): no expected account is known yet; the refusal carries a form asking for the email. */
-  PAIR_EMAIL_REQUIRED: 'PAIR_EMAIL_REQUIRED',
   /** `capy pair` (agent mode) start run: the grant is waiting for the human; the refusal carries a `link` elicitation. */
   PAIR_APPROVAL_PENDING: 'PAIR_APPROVAL_PENDING',
   /** `capy pair --wait`: the wait ceiling passed and the grant is still pending; the refusal carries the same `link` elicitation. */
   PAIR_STILL_WAITING: 'PAIR_STILL_WAITING',
-  /** `capy pair --wait`: the approving account is not the expected one. Nothing was installed. */
-  PAIR_ACCOUNT_MISMATCH: 'PAIR_ACCOUNT_MISMATCH',
   /** `capy pair --wait`: there is no pending pairing (never started, finished, cancelled or unreadable). Start again. */
   PAIR_NOT_PENDING: 'PAIR_NOT_PENDING',
   /** `capy pair --wait`: the grant expired before it was approved. */
