@@ -49,8 +49,9 @@ mock.module('../../src/auth/authService', () => ({
   })),
 }));
 
-const mockConfirmPairAccount = jest.fn();
-mock.module('../../src/commands/pairAccountConfirmation', () => ({ confirmPairAccount: mockConfirmPairAccount }));
+// The terminal flow asks a person at the terminal for the code Keep shows (CAP-877).
+const mockAskConfirmationCode = jest.fn();
+mock.module('../../src/commands/pairConfirmationCode', () => ({ askConfirmationCode: mockAskConfirmationCode }));
 
 const mockPickupDevicePairing = jest.fn();
 const realServiceClient = await import('../../src/service/serviceClient');
@@ -86,6 +87,10 @@ const PENDING = { status: 200, body: { status: 'pending', code: 'authorization_p
 const SLOW_DOWN = { status: 200, body: { status: 'pending', code: 'slow_down' } };
 const EXPIRED = { status: 400, body: { status: 'denied', code: 'expired_token' } };
 const DENIED = { status: 400, body: { status: 'denied', code: 'access_denied' } };
+// CAP-877: approved in Keep, the one-time code Keep showed the approver is needed.
+const CONFIRM_REQUIRED = { status: 200, body: { status: 'confirm', code: 'confirmation_required', attempts_left: 5 } };
+const CONFIRM_MISMATCH = { status: 200, body: { status: 'confirm', code: 'confirmation_mismatch', attempts_left: 4 } };
+const CONFIRM_FAILED = { status: 400, body: { status: 'denied', code: 'confirmation_failed' } };
 
 type Wire = { readonly status: number; readonly body: unknown };
 
@@ -331,6 +336,65 @@ describe('capy pair, agent mode', () => {
       mockPickupDevicePairing.mockImplementation(async () => ({ sealed: await sealAsBrowser(PAYLOAD, publicKey) }));
       return stubFetch(tokens);
     }
+
+    /** What each `/auth/device/token` call sent. */
+    const tokenBodies = (fetchMock: ReturnType<typeof stubFetch>): readonly Record<string, unknown>[] =>
+      callsTo(fetchMock, '/auth/device/token').map(([, init]) => JSON.parse((init as { body: string }).body));
+
+    describe('the one-time code Keep shows the approver (CAP-877)', () => {
+      test('approved in Keep: PAIR_CODE_REQUIRED with a form for the code, nothing installed, the grant kept', async () => {
+        await startThenStub('mike@example.com', [CONFIRM_REQUIRED]);
+        const ran = await run({ wait: true }, fakeClock(Date.now() + 5000));
+        expect(ran.exit).toBe(3);
+        expect(ran.json.code).toBe(ERROR_CODES.PAIR_CODE_REQUIRED);
+        const form = ran.json.elicitation;
+        expect(form.kind).toBe('form');
+        expect(form.fields).toEqual([expect.objectContaining({ name: 'code', type: 'string' })]);
+        expect(form.details).toEqual({ attempts_left: 5 });
+        expect(form.answer.rerun).toBe('capy pair --wait --code <code>');
+        expect(mockInstallDeviceGrantSession).not.toHaveBeenCalled();
+        expect(pendingExists()).toBe(true);
+      });
+
+      test('--code sends the code at once and finishes the pairing', async () => {
+        await startThenStub('mike@example.com', [CONFIRM_REQUIRED]);
+        await run({ wait: true }, fakeClock(Date.now() + 5000));
+        const fetchMock = stubFetch([APPROVED]);
+        const clock = fakeClock(Date.now());
+        const ran = await run({ wait: true, code: ' abcd-efgh ' }, clock);
+        expect(ran.exit).toBe(0);
+        expect(ran.json.ok).toBe(true);
+        expect(tokenBodies(fetchMock)).toEqual([{ device_code: 'device-1', confirmation_code: 'abcd-efgh' }]);
+        expect(clock.sleep).not.toHaveBeenCalled();
+        expect(mockInstallDeviceGrantSession).toHaveBeenCalledTimes(1);
+        expect(pendingExists()).toBe(false);
+      });
+
+      test('a wrong code: PAIR_CODE_MISMATCH with the form again and the tries left, nothing installed', async () => {
+        await startThenStub('mike@example.com', [CONFIRM_MISMATCH]);
+        const ran = await run({ wait: true, code: 'WRONG-CODE' }, fakeClock(Date.now() + 5000));
+        expect(ran.exit).toBe(3);
+        expect(ran.json.code).toBe(ERROR_CODES.PAIR_CODE_MISMATCH);
+        expect(ran.json.elicitation.details).toEqual({ attempts_left: 4 });
+        expect(mockInstallDeviceGrantSession).not.toHaveBeenCalled();
+        expect(pendingExists()).toBe(true);
+      });
+
+      test('too many wrong codes: PAIR_CODE_FAILED, the grant removed, nothing installed', async () => {
+        await startThenStub('mike@example.com', [CONFIRM_FAILED]);
+        const ran = await run({ wait: true, code: 'WRONG-CODE' }, fakeClock(Date.now() + 5000));
+        expect(ran.exit).toBe(1);
+        expect(ran.json).toEqual({ ok: false, code: ERROR_CODES.PAIR_CODE_FAILED, error: expect.any(String) });
+        expect(mockInstallDeviceGrantSession).not.toHaveBeenCalled();
+        expect(pendingExists()).toBe(false);
+      });
+
+      test('without --code, no confirmation_code is sent', async () => {
+        const fetchMock = await startThenStub('mike@example.com', [PENDING, APPROVED]);
+        await run({ wait: true }, fakeClock(Date.now() + 5000));
+        expect(tokenBodies(fetchMock).every((body) => !('confirmation_code' in body))).toBe(true);
+      });
+    });
 
     test('approved by the expected account: installs the session, writes the keys, removes the pending file, prints the success JSON', async () => {
       const fetchMock = await startThenStub('mike@example.com', [PENDING, APPROVED]);
@@ -1300,7 +1364,6 @@ describe('capy pair, agent mode', () => {
     const ENC = (userId: string): string => getOrgKeyPath('org-123', userId);
 
     test('keys already here: no pickup, key files untouched, signed-in line instead of the paired one', async () => {
-      mockConfirmPairAccount.mockResolvedValue(true);
       approvedTerminalPairing();
       placeKeysFor(USER.id);
       const before = [fingerprint(ROOT(USER.id)), fingerprint(ENC(USER.id))];
@@ -1315,7 +1378,6 @@ describe('capy pair, agent mode', () => {
     });
 
     test('local.key missing: the pickup runs and repairs the machine', async () => {
-      mockConfirmPairAccount.mockResolvedValue(true);
       approvedTerminalPairing();
       placeKeysFor(USER.id);
       rmSync(ROOT(USER.id));
@@ -1327,7 +1389,6 @@ describe('capy pair, agent mode', () => {
     });
 
     test('keys absent: the pickup runs and the paired line is printed exactly as before', async () => {
-      mockConfirmPairAccount.mockResolvedValue(true);
       approvedTerminalPairing();
       const ran = await runTerminal({});
       expect(ran.exit).toBe(0);
@@ -1337,7 +1398,6 @@ describe('capy pair, agent mode', () => {
     });
 
     test('--force with the keys already here picks them up', async () => {
-      mockConfirmPairAccount.mockResolvedValue(true);
       approvedTerminalPairing();
       placeKeysFor(USER.id);
       const ran = await runTerminal({ force: true });
@@ -1348,7 +1408,6 @@ describe('capy pair, agent mode', () => {
     });
 
     test('keys of another account only: it is the pickup path', async () => {
-      mockConfirmPairAccount.mockResolvedValue(true);
       approvedTerminalPairing();
       placeKeysFor('someone-else');
       const ran = await runTerminal({});
@@ -1357,9 +1416,10 @@ describe('capy pair, agent mode', () => {
       expect(readLocalRoot('org-123', USER.id)?.equals(Buffer.alloc(32, 5))).toBe(true);
     });
 
-    test('a declined confirmation installs nothing, even with the keys already here', async () => {
-      mockConfirmPairAccount.mockResolvedValue(false);
-      approvedTerminalPairing();
+    test('no code from the terminal installs nothing, even with the keys already here', async () => {
+      mockAskConfirmationCode.mockRejectedValue(new CapyError('no terminal', ERROR_CODES.PAIR_CODE_REQUIRED));
+      const fetchMock = stubFetch([CONFIRM_REQUIRED, APPROVED], { ...AUTHORIZE_BODY, interval: 0.001 });
+      mockPickupDevicePairing.mockImplementation(async () => ({ sealed: await sealAsBrowser(PAYLOAD, sentPublicKey(fetchMock)) }));
       placeKeysFor(USER.id);
       const before = [fingerprint(ROOT(USER.id)), fingerprint(ENC(USER.id))];
       const ran = await runTerminal({});

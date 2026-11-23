@@ -243,8 +243,14 @@ the PNG to the display environment or decode its data URI there.
 
 Then run `answer.wait` (`capy pair --wait`) at once in the foreground, and run it
 again whenever it exits 3 with `PAIR_STILL_WAITING`. That answer repeats the link
-and only the PNG's file path, not `qr.text` or `qr.image.data_uri`. When the
-human approves, the account that approved is compared with the email you gave: a
+and only the PNG's file path, not `qr.text` or `qr.image.data_uri`. After the
+human approves, Keep shows them a one-time code, and the wait exits 3 with
+`PAIR_CODE_REQUIRED` and a form with one `code` field. Ask the human for the code
+and run `capy pair --wait --code <code>`; a wrong code returns
+`PAIR_CODE_MISMATCH` with the form again, and five wrong codes cancel the
+pairing (`PAIR_CODE_FAILED`). Never fill in the code yourself: only the person
+who approved can see it, which is what stops someone else's approval from
+installing anything. When the human approves, the account that approved is compared with the email you gave: a
 different account returns `PAIR_ACCOUNT_MISMATCH` and nothing is installed.
 When the keys are already on this machine, the pairing only signs in: the result says `"keys": "already_present"`.
 The PNG is removed when the pairing ends (approval, expiry, denial,

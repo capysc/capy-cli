@@ -119,6 +119,13 @@ export type DeviceTokenPoll =
   | { status: 'denied' }
   /** The account WorkOS approved is not the Keep approver, or not a member of the bound org: no session was handed over. */
   | { status: 'forbidden' }
+  /**
+   * Approved in Keep: the service wants the one-time code Keep showed the approver (CAP-877) before it hands anything
+   * over. `mismatch` when a code was sent and was wrong. `attemptsLeft` is null from a service that did not say.
+   */
+  | { status: 'confirm'; mismatch: boolean; attemptsLeft: number | null }
+  /** Too many wrong codes: the service dropped the pairing. Nothing was handed over. */
+  | { status: 'confirmation_failed' }
   | ({ status: 'success' } & DeviceTokenExchange);
 
 /** The RFC 8628 wire codes this module branches on — see file header. */
@@ -129,6 +136,12 @@ const RFC8628_ERROR = {
   DENIED: 'access_denied',
   /** Capy's own, not RFC 8628's: the service refused the approving account for this pairing. */
   FORBIDDEN: 'pairing_access_denied',
+  /** Capy's own (CAP-877): approved in Keep, the code Keep showed the approver is needed. */
+  CONFIRM_REQUIRED: 'confirmation_required',
+  /** Capy's own (CAP-877): the code sent was not the one Keep showed. */
+  CONFIRM_MISMATCH: 'confirmation_mismatch',
+  /** Capy's own (CAP-877): too many wrong codes, the pairing is gone. */
+  CONFIRM_FAILED: 'confirmation_failed',
 } as const;
 
 /**
@@ -138,8 +151,9 @@ const RFC8628_ERROR = {
  * Loosely typed on purpose: this is raw, unvalidated JSON off the wire.
  */
 interface DeviceTokenResponseBody {
-  status?: 'pending' | 'denied';
+  status?: 'pending' | 'denied' | 'confirm';
   code?: string;
+  attempts_left?: unknown;
   error?: string;
   token?: DeviceTokenExchange['token'];
   user?: DeviceTokenExchange['user'];
@@ -148,11 +162,13 @@ interface DeviceTokenResponseBody {
 }
 
 /**
- * One `POST /auth/device/token` attempt. Never throws for the four expected polling states.
+ * One `POST /auth/device/token` attempt. Never throws for the expected polling states.
  * `options.signal` bounds the request (`capy pair --wait` passes a timeout); without it the request is unbounded, as before.
+ * `options.confirmationCode` is the one-time code Keep showed the approver, as the human typed it (CAP-877).
  */
-export async function pollDeviceTokenOnce(apiUrl: string, deviceCode: string, options: { readonly signal?: AbortSignal } = {}): Promise<DeviceTokenPoll> {
-  const { status: httpStatus, data } = await postJson<DeviceTokenResponseBody>(`${apiUrl}/auth/device/token`, { device_code: deviceCode }, options.signal);
+export async function pollDeviceTokenOnce(apiUrl: string, deviceCode: string, options: { readonly signal?: AbortSignal; readonly confirmationCode?: string } = {}): Promise<DeviceTokenPoll> {
+  const body = { device_code: deviceCode, ...(options.confirmationCode ? { confirmation_code: options.confirmationCode } : {}) };
+  const { status: httpStatus, data } = await postJson<DeviceTokenResponseBody>(`${apiUrl}/auth/device/token`, body, options.signal);
 
   // Success is a STRUCTURAL fact, never inferred from the HTTP status alone
   // (pending is ALSO 200): no `status` field, and a token actually arrived.
@@ -165,12 +181,34 @@ export async function pollDeviceTokenOnce(apiUrl: string, deviceCode: string, op
   if (data.status === 'denied' && data.code === RFC8628_ERROR.EXPIRED) return { status: 'expired' };
   if (data.status === 'denied' && data.code === RFC8628_ERROR.DENIED) return { status: 'denied' };
   if (data.status === 'denied' && data.code === RFC8628_ERROR.FORBIDDEN) return { status: 'forbidden' };
+  if (data.status === 'confirm' && (data.code === RFC8628_ERROR.CONFIRM_REQUIRED || data.code === RFC8628_ERROR.CONFIRM_MISMATCH)) {
+    const attemptsLeft = typeof data.attempts_left === 'number' && Number.isInteger(data.attempts_left) && data.attempts_left >= 0 ? data.attempts_left : null;
+    return { status: 'confirm', mismatch: data.code === RFC8628_ERROR.CONFIRM_MISMATCH, attemptsLeft };
+  }
+  if (data.status === 'denied' && data.code === RFC8628_ERROR.CONFIRM_FAILED) return { status: 'confirmation_failed' };
 
   throw new CapyError(
     typeof data.error === 'string' ? data.error : 'Device token exchange failed',
     codeOrFallback(data, ERROR_CODES.AUTH_FAILED),
     { status: httpStatus, code: data.code },
   );
+}
+
+/** Approved, but the one-time code Keep showed the approver was not given. Nothing was installed. */
+export function pairCodeRequired(): CapyError {
+  return new CapyError('Enter the code Keep showed after you approved. No session or keys were installed.', ERROR_CODES.PAIR_CODE_REQUIRED); // COPY-FLAG
+}
+
+/** Too many wrong codes: the service dropped the pairing. */
+export function pairCodeFailed(): CapyError {
+  return new CapyError('Too many wrong codes. This pairing was cancelled and nothing was installed. Start a new one.', ERROR_CODES.PAIR_CODE_FAILED); // COPY-FLAG
+}
+
+/** What the service said about the code so far, for whoever asks the human for it. */
+export interface ConfirmationState {
+  /** A code was sent and it was wrong. */
+  readonly mismatch: boolean;
+  readonly attemptsLeft: number | null;
 }
 
 /** The service refused the approving account for this pairing. Nothing was handed over or installed. */
@@ -187,6 +225,11 @@ export interface DevicePollOptions {
   sleep?: (ms: number) => Promise<void>;
   /** Injectable for tests — defaults to `Date.now`. */
   now?: () => number;
+  /**
+   * Asks the human for the one-time code Keep shows once they approve (CAP-877), and again after a wrong one.
+   * Without it, a pairing that needs the code is refused with PAIR_CODE_REQUIRED.
+   */
+  askConfirmationCode?: (state: ConfirmationState) => Promise<string>;
 }
 
 const defaultSleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
@@ -201,19 +244,29 @@ export async function pollDeviceToken(apiUrl: string, deviceCode: string, opts: 
   const now = opts.now ?? Date.now;
   const deadline = now() + opts.timeoutMs;
 
-  const tick = async (intervalMs: number): Promise<DeviceTokenExchange> => {
+  // The code the human typed, once they have; sent with every poll after that.
+  const tick = async (intervalMs: number, confirmationCode?: string): Promise<DeviceTokenExchange> => {
     if (now() >= deadline) {
       throw new CapyError('Device pairing expired before it was approved', ERROR_CODES.AUTH_FAILED, { reason: RFC8628_ERROR.EXPIRED });
     }
     await sleep(intervalMs);
-    const result = await pollDeviceTokenOnce(apiUrl, deviceCode);
+    const result = await pollDeviceTokenOnce(apiUrl, deviceCode, { confirmationCode });
     switch (result.status) {
       case 'success':
         return result;
       case 'pending':
-        return tick(intervalMs);
+        return tick(intervalMs, confirmationCode);
       case 'slow_down':
-        return tick(intervalMs + 5000);
+        return tick(intervalMs + 5000, confirmationCode);
+      case 'confirm': {
+        if (!opts.askConfirmationCode) throw pairCodeRequired();
+        const typed = (await opts.askConfirmationCode({ mismatch: result.mismatch, attemptsLeft: result.attemptsLeft })).trim();
+        if (!typed) throw pairCodeRequired();
+        // The human just typed it: check it at once rather than a full interval later.
+        return tick(0, typed);
+      }
+      case 'confirmation_failed':
+        throw pairCodeFailed();
       case 'expired':
         throw new CapyError('Device pairing expired before it was approved', ERROR_CODES.AUTH_FAILED, { reason: RFC8628_ERROR.EXPIRED });
       case 'denied':

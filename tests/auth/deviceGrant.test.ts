@@ -250,3 +250,59 @@ describe('pollDeviceToken', () => {
     }
   });
 });
+
+describe('the one-time code Keep shows the approver (CAP-877)', () => {
+  /** Serves `responses` in order and records each request body. */
+  function recordingFetch(responses: Array<{ status: number; body: any }>): Array<Record<string, unknown>> {
+    const bodies: Array<Record<string, unknown>> = [];
+    const iterator = responses[Symbol.iterator]();
+    const last = responses[responses.length - 1];
+    globalThis.fetch = (async (_url: unknown, init?: { body?: string }) => {
+      bodies.push(JSON.parse(init?.body ?? '{}'));
+      const { value, done } = iterator.next();
+      const next = done ? last : value;
+      return { ok: next.status >= 200 && next.status < 300, status: next.status, json: async () => next.body } as Response;
+    }) as typeof fetch;
+    return bodies;
+  }
+  const REQUIRED = { status: 200, body: { status: 'confirm', code: 'confirmation_required', attempts_left: 5 } };
+  const MISMATCH = { status: 200, body: { status: 'confirm', code: 'confirmation_mismatch', attempts_left: 4 } };
+  const FAILED = { status: 400, body: { status: 'denied', code: 'confirmation_failed' } };
+  const opts = { intervalMs: 1000, timeoutMs: 60000, sleep: async () => {}, now: () => 0 };
+
+  test('pollDeviceTokenOnce reads confirm, mismatch and failed, and sends the code only when given', async () => {
+    const bodies = recordingFetch([REQUIRED, MISMATCH, FAILED]);
+    expect(await pollDeviceTokenOnce('https://api.example', 'dc')).toEqual({ status: 'confirm', mismatch: false, attemptsLeft: 5 });
+    expect(await pollDeviceTokenOnce('https://api.example', 'dc', { confirmationCode: 'ABCD-EFGH' })).toEqual({ status: 'confirm', mismatch: true, attemptsLeft: 4 });
+    expect(await pollDeviceTokenOnce('https://api.example', 'dc', { confirmationCode: 'ABCD-EFGH' })).toEqual({ status: 'confirmation_failed' });
+    expect(bodies).toEqual([
+      { device_code: 'dc' },
+      { device_code: 'dc', confirmation_code: 'ABCD-EFGH' },
+      { device_code: 'dc', confirmation_code: 'ABCD-EFGH' },
+    ]);
+  });
+
+  test('pollDeviceToken asks for the code, asks again after a wrong one, and sends the last one until success', async () => {
+    const bodies = recordingFetch([REQUIRED, MISMATCH, { status: 200, body: { status: 'pending', code: 'authorization_pending' } }, { status: 200, body: SUCCESS_BODY }]);
+    const ask = jest.fn().mockResolvedValueOnce('wrong-code').mockResolvedValueOnce(' ABCD-EFGH ');
+    const result = await pollDeviceToken('https://api.example', 'dc', { ...opts, askConfirmationCode: ask });
+    expect(result.user.id).toBe('user_1');
+    expect(ask.mock.calls).toEqual([[{ mismatch: false, attemptsLeft: 5 }], [{ mismatch: true, attemptsLeft: 4 }]]);
+    expect(bodies.map((body) => body.confirmation_code)).toEqual([undefined, 'wrong-code', 'ABCD-EFGH', 'ABCD-EFGH']);
+  });
+
+  test('without a way to ask, a pairing that needs the code is refused with PAIR_CODE_REQUIRED', async () => {
+    recordingFetch([REQUIRED]);
+    await expect(pollDeviceToken('https://api.example', 'dc', opts)).rejects.toMatchObject({ code: 'PAIR_CODE_REQUIRED' });
+  });
+
+  test('a blank answer is refused with PAIR_CODE_REQUIRED', async () => {
+    recordingFetch([REQUIRED]);
+    await expect(pollDeviceToken('https://api.example', 'dc', { ...opts, askConfirmationCode: async () => '   ' })).rejects.toMatchObject({ code: 'PAIR_CODE_REQUIRED' });
+  });
+
+  test('too many wrong codes are refused with PAIR_CODE_FAILED', async () => {
+    recordingFetch([REQUIRED, FAILED]);
+    await expect(pollDeviceToken('https://api.example', 'dc', { ...opts, askConfirmationCode: async () => 'WRONG-ONE' })).rejects.toMatchObject({ code: 'PAIR_CODE_FAILED' });
+  });
+});

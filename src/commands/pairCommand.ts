@@ -28,7 +28,7 @@
  *    logged-in user.
  */
 import { prepareTransportCustody } from '../auth/pairing/transportCustody';
-import { confirmPairAccount } from './pairAccountConfirmation';
+import { askConfirmationCode } from './pairConfirmationCode';
 import { resolveActiveUrl } from '../config/profileConfig';
 import { generatePairKeyPair, openPairEnvelope, parsePairEnvelope, type PairKeyPair } from '../crypto/pairCrypto';
 import { authorizeDevice, pollDeviceToken, type DeviceTokenExchange, type PairingIntent } from '../auth/deviceGrant';
@@ -335,18 +335,17 @@ export async function pairCommand(options: PairOptions = {}): Promise<void> {
         return await pollDeviceToken(apiUrl, authorize.device_code, {
           intervalMs: authorize.interval * 1000,
           timeoutMs: authorize.expires_in * 1000,
+          // Keep shows the approver a one-time code (CAP-877): the masked-link key listener lets go of the terminal
+          // first, so the question gets every keystroke.
+          askConfirmationCode: async (state) => {
+            prompt?.stop();
+            return askConfirmationCode(state, json);
+          },
         });
       } finally {
         prompt?.stop();
       }
     })();
-
-    if (!await confirmPairAccount(exchange.user.email, json)) {
-      throw new CapyError(
-        'Pairing cancelled. No session or keys were installed.',
-        ERROR_CODES.AUTH_FAILED,
-      );
-    }
 
     const { paired, keys } = await finishPairing(exchange, keyPair, authorize.device_code, options, scope);
 
@@ -356,6 +355,7 @@ export async function pairCommand(options: PairOptions = {}): Promise<void> {
     }
 
     console.log('');
+    console.log(`  Signed in as ${exchange.user.email}.`); // COPY-FLAG
     console.log(pairedSummary(paired, keys));
     console.log('');
   } catch (err) {

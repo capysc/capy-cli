@@ -20,9 +20,9 @@ import { CapyError, ERROR_CODES } from '../../src/types/index';
 import { PAIR_AAD, type PairEnvelope } from '../../src/crypto/pairCrypto';
 import type { PairingPayload } from '../../src/crypto/pairingPayload';
 
-const mockConfirmPairAccount = jest.fn();
-mock.module('../../src/commands/pairAccountConfirmation', () => ({
-  confirmPairAccount: mockConfirmPairAccount,
+const mockAskConfirmationCode = jest.fn();
+mock.module('../../src/commands/pairConfirmationCode', () => ({
+  askConfirmationCode: mockAskConfirmationCode,
 }));
 
 const mockAuthorizeDevice = jest.fn();
@@ -170,7 +170,6 @@ describe('pairCommand', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
-    mockConfirmPairAccount.mockResolvedValue(true);
 
     mockAuthorizeDevice.mockResolvedValue({ device_code: 'device-1', user_code: 'ABCD-EFGH', verification_uri: 'https://x/verify', expires_in: 600, interval: 5 });
     mockPollDeviceToken.mockResolvedValue({

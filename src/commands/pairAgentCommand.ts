@@ -12,13 +12,17 @@
  *    PNG's file path (no text, no data URI) so the answer stays small.
  * 3. No expected account known (no `--email`): exit 3 with a `form` asking for the email,
  *    before any request is made. The agent never fills that in itself.
- * 4. `capy pair --cancel` removes the pending grant.
+ * 4. Once the human approves in Keep, Keep shows them a one-time code (CAP-877) and the wait run answers
+ *    PAIR_CODE_REQUIRED with a `form` asking for it. The human pastes it into the chat, and `capy pair --wait --code
+ *    <code>` sends it; a wrong one answers PAIR_CODE_MISMATCH with the form again. The agent never makes the code up:
+ *    only the person who approved can see it, which is what stops a phished approval from installing anything.
+ * 5. `capy pair --cancel` removes the pending grant.
  *
  * stdout is JSON only, and every stop carries a code. Terminal behaviour is untouched: `pairEntry.ts` sends only
  * agent mode here (`json`, no terminal, or one of the new flags).
  */
 import { existsSync } from 'fs';
-import { authorizeDevice, pairAccessDenied, pollDeviceTokenOnce, type DeviceAuthorizeResult, type DeviceTokenExchange, type DeviceTokenPoll } from '../auth/deviceGrant';
+import { authorizeDevice, pairAccessDenied, pairCodeFailed, pollDeviceTokenOnce, type DeviceAuthorizeResult, type DeviceTokenExchange, type DeviceTokenPoll } from '../auth/deviceGrant';
 import {
   readPendingPairGrant,
   removePendingPairGrant,
@@ -33,7 +37,7 @@ import { resolveActiveUrl } from '../config/profileConfig';
 import { generatePairKeyPair } from '../crypto/pairCrypto';
 import { CapyError, ERROR_CODES } from '../types/index';
 import type { ElicitationForm, ElicitationLink, ElicitationLinkQr } from '../ui/elicitation';
-import { pairEmailDisplay, pairKeysDisplay } from '../ui/elicitationDisplay';
+import { pairCodeDisplay, pairEmailDisplay, pairKeysDisplay } from '../ui/elicitationDisplay';
 import { EXIT_NEEDS_INPUT } from '../ui/interactive';
 import { createPairingQrImage, removePairingQrImage, type PairingQrImage } from '../ui/pairingPresentation';
 import { buildTerminalQr } from '../ui/terminalQr';
@@ -55,6 +59,8 @@ export interface PairAgentOptions extends PairOptions {
   readonly wait?: boolean;
   /** `--cancel`: drop the pending grant. */
   readonly cancel?: boolean;
+  /** `--code` (with `--wait`): the one-time code Keep showed the approver, as the human gave it. */
+  readonly code?: string;
 }
 
 /** Clock and sleep, injectable so tests never really wait. */
@@ -118,6 +124,23 @@ function emailForm(bin: string, options: PairAgentOptions): ElicitationForm {
     display: pairEmailDisplay(),
     fields: [{ name: 'email', type: 'string', pattern: EMAIL_PATTERN, question: EMAIL_QUESTION }],
     answer: { rerun: `${bin} pair --email <email>${scopeFlags(options)}${options.force === true ? ' --force' : ''} --json` },
+  };
+}
+
+const CODE_QUESTION = 'What code does Keep show after you approve?'; // COPY-FLAG
+const CODE_DESCRIPTION = 'Keep shows a one-time code once you approve. Paste it here. Only you can see it.'; // COPY-FLAG
+/** What the code field accepts: the eight characters Keep shows, typed loosely (case, spaces and a dash are fine). */
+const CODE_PATTERN = '^[0-9A-Za-z][0-9A-Za-z -]{6,10}[0-9A-Za-z]$';
+
+/** The form that asks for the one-time code. The rerun is the same wait, with the code. */
+function codeForm(bin: string, attemptsLeft: number | null): ElicitationForm {
+  return {
+    kind: 'form',
+    question: CODE_QUESTION,
+    details: attemptsLeft === null ? {} : { attempts_left: attemptsLeft },
+    display: pairCodeDisplay(attemptsLeft),
+    fields: [{ name: 'code', type: 'string', pattern: CODE_PATTERN, question: CODE_QUESTION, description: CODE_DESCRIPTION }],
+    answer: { rerun: `${bin} pair --wait --code <code>` },
   };
 }
 
@@ -318,6 +341,8 @@ type WaitStep =
   | { readonly kind: 'expired' }
   | { readonly kind: 'denied' }
   | { readonly kind: 'forbidden' }
+  | { readonly kind: 'confirm'; readonly mismatch: boolean; readonly attemptsLeft: number | null }
+  | { readonly kind: 'confirmation_failed' }
   | { readonly kind: 'waiting'; readonly intervalMs: number; readonly nextPollAt: number };
 
 type Clock = Required<Pick<PairAgentDeps, 'sleep' | 'now'>>;
@@ -326,9 +351,9 @@ type Clock = Required<Pick<PairAgentDeps, 'sleep' | 'now'>>;
  * One poll, bounded by an `AbortSignal` timeout. A timed-out poll, like any other transport failure, is a coded
  * `NETWORK_ERROR` and the pending grant is kept, so the agent can wait again. Errors the service itself coded pass through.
  */
-async function pollOnceBounded(grant: PendingPairGrant, timeoutMs: number): Promise<DeviceTokenPoll> {
+async function pollOnceBounded(grant: PendingPairGrant, timeoutMs: number, confirmationCode: string | undefined): Promise<DeviceTokenPoll> {
   try {
-    return await pollDeviceTokenOnce(grant.apiUrl, grant.deviceCode, { signal: AbortSignal.timeout(timeoutMs) });
+    return await pollDeviceTokenOnce(grant.apiUrl, grant.deviceCode, { signal: AbortSignal.timeout(timeoutMs), confirmationCode });
   } catch (error) {
     if (error instanceof CapyError) throw error;
     throw new CapyError('The pairing check could not reach the service. The pairing is still pending.', ERROR_CODES.NETWORK_ERROR); // COPY-FLAG
@@ -345,7 +370,7 @@ async function pollOnceBounded(grant: PendingPairGrant, timeoutMs: number): Prom
  * least the ceiling (then it returns at once). Either way the earliest next poll time is handed back to be saved.
  * Each request is bounded by `pollTimeoutMs`, shortened so it cannot run past the deadline.
  */
-async function pollUntil(grant: PendingPairGrant, ceilingMs: number, pollTimeoutMs: number, clock: Clock): Promise<WaitStep> {
+async function pollUntil(grant: PendingPairGrant, ceilingMs: number, pollTimeoutMs: number, clock: Clock, confirmationCode?: string): Promise<WaitStep> {
   const startedAt = clock.now();
   const deadline = startedAt + ceilingMs;
   const expiresAtMs = Date.parse(grant.expiresAt);
@@ -366,8 +391,12 @@ async function pollUntil(grant: PendingPairGrant, ceilingMs: number, pollTimeout
   const poll = async (intervalMs: number): Promise<WaitStep> => {
     if (clock.now() >= expiresAtMs) return { kind: 'expired' };
     const timeout = Math.min(pollTimeoutMs, Math.max(deadline - clock.now(), 1000));
-    const result = await pollOnceBounded(grant, timeout);
+    const result = await pollOnceBounded(grant, timeout, confirmationCode);
     switch (result.status) {
+      case 'confirm':
+        return { kind: 'confirm', mismatch: result.mismatch, attemptsLeft: result.attemptsLeft };
+      case 'confirmation_failed':
+        return { kind: 'confirmation_failed' };
       case 'success':
         return { kind: 'approved', exchange: result };
       case 'expired':
@@ -382,7 +411,8 @@ async function pollUntil(grant: PendingPairGrant, ceilingMs: number, pollTimeout
         return schedule(intervalMs, clock.now() + intervalMs);
     }
   };
-  return schedule(grant.intervalSeconds * 1000, grant.nextPollAt ?? 0);
+  // A code the human just gave is checked at once: the service already answered for this grant, so this is no early poll.
+  return schedule(grant.intervalSeconds * 1000, confirmationCode ? 0 : grant.nextPollAt ?? 0);
 }
 
 async function completeApproved(grant: PendingPairGrant, exchange: DeviceTokenExchange, options: PairAgentOptions): Promise<Outcome> {
@@ -409,7 +439,8 @@ async function waitRun(options: PairAgentOptions, deps: PairAgentDeps): Promise<
     throw new CapyError('No pairing is waiting. Start a new one.', ERROR_CODES.PAIR_NOT_PENDING); // COPY-FLAG
   }
   const now = deps.now ?? Date.now;
-  const step = await pollUntil(grant, deps.ceilingMs ?? PAIR_WAIT_CEILING_MS, deps.pollTimeoutMs ?? PAIR_POLL_TIMEOUT_MS, { sleep: deps.sleep ?? defaultSleep, now });
+  const code = options.code?.trim() || undefined;
+  const step = await pollUntil(grant, deps.ceilingMs ?? PAIR_WAIT_CEILING_MS, deps.pollTimeoutMs ?? PAIR_POLL_TIMEOUT_MS, { sleep: deps.sleep ?? defaultSleep, now }, code);
   switch (step.kind) {
     case 'approved':
       return completeApproved(grant, step.exchange, options);
@@ -422,6 +453,20 @@ async function waitRun(options: PairAgentOptions, deps: PairAgentDeps): Promise<
     case 'forbidden':
       removePendingPairGrant();
       throw pairAccessDenied();
+    case 'confirmation_failed':
+      removePendingPairGrant();
+      throw pairCodeFailed();
+    case 'confirm':
+      // The grant stays: the next run sends the code.
+      return {
+        kind: 'refusal',
+        refusal: {
+          code: step.mismatch ? ERROR_CODES.PAIR_CODE_MISMATCH : ERROR_CODES.PAIR_CODE_REQUIRED,
+          message: step.mismatch ? 'That code did not match the one Keep shows. Nothing was installed.' : 'Approved in Keep. The code Keep shows is needed before anything is installed.', // COPY-FLAG
+          exitCode: EXIT_NEEDS_INPUT,
+          extra: { elicitation: codeForm(binName(options.devMode === true), step.attemptsLeft) },
+        },
+      };
     case 'waiting': {
       const kept: PendingPairGrant = { ...grant, intervalSeconds: step.intervalMs / 1000, nextPollAt: step.nextPollAt };
       savePendingPairGrant(kept);
