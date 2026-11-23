@@ -716,7 +716,7 @@ program
   .option('--wait', 'agent mode: wait for the pending pairing to be approved (exits 3 with PAIR_STILL_WAITING after 30 seconds; run it again)') // COPY-FLAG
   .option('--cancel', 'agent mode: drop the pending pairing') // COPY-FLAG
   .option('--code <code>', 'agent mode, with --wait: the one-time code Keep shows the person who approved; ask them for it') // COPY-FLAG
-  .option('--transport', 'receive this project\'s keys from Keep (/transport/pair); once per machine. Without it, pair only signs in a machine that already has its keys (/pair)') // COPY-FLAG
+  .option('--transport', 'receive this project\'s keys from Keep (/transport/pair); once per machine. Without it, pair only signs in a machine that already has its keys (/pair); a machine with no keys asks for them anyway') // COPY-FLAG
   .option('--signup', 'a new project: the approver creates the organization in Keep and this machine gets its first keys') // COPY-FLAG
   .option('--org <id>', 'prefer this organization when your account has several and the folder does not say (no keep.lock); the organization you approve in Keep decides') // COPY-FLAG
   .option('--title <text>', 'short summary of why you are pairing, shown as the Keep pairing heading (max 120 chars)') // COPY-FLAG

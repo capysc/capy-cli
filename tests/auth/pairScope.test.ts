@@ -5,20 +5,34 @@ import { CapyError, ERROR_CODES } from '../../src/types/index';
 
 const lock = (orgId: string, projectId: string) => () => ({ orgId, projectId }) as any;
 const none = () => null;
+const keys = () => true;
+const noKeys = () => false;
 
 describe('resolvePairScope: keep.lock and --org are hints, never required', () => {
-  test('plain capy pair is sign-in only, hinting the keep.lock org', () => {
-    expect(resolvePairScope({}, '/x', { readProject: lock('org_1', 'proj_1') }))
+  test('plain capy pair on a machine with keys is sign-in only, hinting the keep.lock org', () => {
+    expect(resolvePairScope({}, '/x', { readProject: lock('org_1', 'proj_1'), hasKeys: keys }))
       .toEqual({ mode: 'session', orgId: 'org_1', projectId: null, signup: false });
   });
 
   test('outside a project with no --org, nothing is hinted: the Keep session org decides', () => {
-    expect(resolvePairScope({}, '/x', { readProject: none }))
+    expect(resolvePairScope({}, '/x', { readProject: none, hasKeys: keys }))
       .toEqual({ mode: 'session', orgId: null, projectId: null, signup: false });
   });
 
+  test('plain capy pair on a machine with no keys asks for them, never for a choice: an unhinted key handover outside a project', () => {
+    expect(resolvePairScope({}, '/x', { readProject: none, hasKeys: noKeys }))
+      .toEqual({ mode: 'transport', orgId: null, projectId: null, signup: false });
+  });
+
+  test('plain capy pair with no keys inside a project hints its org and project', () => {
+    const seen: (string | null)[] = [];
+    expect(resolvePairScope({}, '/x', { readProject: lock('org_1', 'proj_1'), hasKeys: (org) => { seen.push(org); return false; } }))
+      .toEqual({ mode: 'transport', orgId: 'org_1', projectId: 'proj_1', signup: false });
+    expect(seen).toEqual(['org_1']);
+  });
+
   test('--org wins over keep.lock', () => {
-    expect(resolvePairScope({ org: ' org_2 ' }, '/x', { readProject: lock('org_1', 'proj_1') }).orgId).toBe('org_2');
+    expect(resolvePairScope({ org: ' org_2 ' }, '/x', { readProject: lock('org_1', 'proj_1'), hasKeys: keys }).orgId).toBe('org_2');
   });
 
   test('--transport hints the keep.lock org and project', () => {

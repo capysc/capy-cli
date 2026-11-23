@@ -15,7 +15,7 @@ export const PAIRING_PRESENTATION = {
   version: 1,
   command: 'capy pair --json',
   instructions: [
-    'Run `capy pair --json` without asking the human anything first. On a machine with no keys it asks, as a form, how to get them: ask the human, never choose yourself.', // COPY-FLAG
+    'Run `capy pair --json` without asking the human anything first, and add no flags. It gives one approval link: Keep signs the human in or up and decides whether this machine gets their organization keys or a new organization.', // COPY-FLAG
     'The refusal PAIR_APPROVAL_PENDING carries an elicitation of kind "link". Always show the human its `url`, `code` and `expires_at`.', // COPY-FLAG
     'Show the QR in this order. First, if your client can show images, show the PNG: attach or send `qr.image.file`, or decode `qr.image.data_uri`.', // COPY-FLAG
     'Second, show `qr.text` only if your client is a real terminal with a monospace grid and no extra line spacing.', // COPY-FLAG

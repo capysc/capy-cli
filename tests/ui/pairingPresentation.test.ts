@@ -200,7 +200,9 @@ describe('pairing contract', () => {
     expect(text).toContain('Always show the human its `url`, `code` and `expires_at`.');
     expect(text).toContain('run it again whenever it exits 3 with PAIR_STILL_WAITING');
     expect(text).toContain('"keys": "already_present"');
-    expect(AGENTS_BLOCK).toContain('run `capy pair --json`. Do not ask the human anything first.');
+    expect(AGENTS_BLOCK).toContain('run `capy pair --json`. Do not ask the human anything first, and add no flags.');
+    expect(AGENTS_BLOCK).not.toContain('--signup');
+    expect(text).not.toContain('--signup');
     expect(AGENTS_BLOCK).toContain('show the human its `url`, `code`, `fingerprint` and `expires_at`');
     // CAP-877: the one-time code Keep shows the approver comes from the human, never from the agent.
     expect(text).toContain('PAIR_CODE_REQUIRED');
@@ -212,7 +214,7 @@ describe('pairing contract', () => {
     expect(readmeSection).toContain('capy pair --wait --code <code>');
     expect(AGENTS_BLOCK).toContain('"keys": "already_present"');
     expect(ELICITATION_HELP).toContain('show the human the `url`, the `code`, the `fingerprint` (the page shows the same one) and `expires_at`');
-    expect(readmeSection).toContain('Run `capy pair --json` without asking the human anything first.');
+    expect(readmeSection).toContain('Run `capy pair --json` without asking the human anything first, and add no');
     expect(readmeSection).not.toContain('PAIR_ACCOUNT_MISMATCH');
     expect(readmeSection).toContain('`"keys": "already_present"`');
   });

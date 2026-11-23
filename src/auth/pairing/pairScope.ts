@@ -9,8 +9,12 @@
  * the orgs a multi-org user belongs to: Keep asks the approver to switch org
  * when the hint names another of theirs, and nobody else sees the request.
  *
- *  - Sign-in only (`capy pair`): for a machine that already has its keys.
- *    Approval goes through Keep `/pair`.
+ *  - Sign-in only (`capy pair` on a machine that already has keys for the
+ *    org): approval goes through Keep `/pair`.
+ *  - `capy pair` on a machine with no keys asks nothing and becomes a key
+ *    handover: one link, and Keep decides after sign-in. An existing user
+ *    approves the handover of their org's keys; a new user with no org is sent
+ *    through signup, which creates the org, and comes back to approve.
  *  - Key handover (`capy pair --transport`): Keep `/transport/pair` seals the
  *    session org's keys to this run.
  *  - Fresh project (`capy pair --signup`): nothing exists yet; the approver
@@ -18,6 +22,7 @@
  */
 import { resolveKeepOrigin } from '../../config/keepOrigin';
 import { readKeep } from '../../commands/deployCommand';
+import { hasAnyUsableOrgKeys } from '../../config/globalConfig';
 import { CapyError, ERROR_CODES } from '../../types/index';
 
 export type PairMode = 'session' | 'transport';
@@ -43,6 +48,8 @@ function scopeRequired(message: string): CapyError {
 /** Decides what is asked for before anything is sent. Throws `PAIR_SCOPE_REQUIRED` only for `--signup` inside a project. */
 export function resolvePairScope(options: PairScopeOptions, cwd: string = process.cwd(), deps: {
   readonly readProject?: typeof readKeep;
+  /** Whether this machine holds usable keys for the org (any org when null). */
+  readonly hasKeys?: (orgId: string | null) => boolean;
 } = {}): PairScope {
   const project = (deps.readProject ?? readKeep)(cwd);
   if (options.signup === true) {
@@ -50,7 +57,8 @@ export function resolvePairScope(options: PairScopeOptions, cwd: string = proces
     return { mode: 'transport', orgId: null, projectId: null, signup: true };
   }
   const org = options.org?.trim() || project?.orgId || null;
-  if (options.transport === true) {
+  // No keys here: signing in alone would be refused after approval, so ask for the keys instead. Nobody is asked to choose.
+  if (options.transport === true || !(deps.hasKeys ?? hasAnyUsableOrgKeys)(org)) {
     // The project hint only holds when it is in the hinted org.
     const projectId = project && project.orgId === org ? project.projectId : null;
     return { mode: 'transport', orgId: org, projectId, signup: false };

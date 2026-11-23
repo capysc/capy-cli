@@ -224,10 +224,11 @@ Good when you want to see drift across the whole branch, edit one variable witho
 
 ### Pairing from an agent
 
-Run `capy pair --json` without asking the human anything first. On a machine
-with no keys yet it first asks, as a form, whether to pick up the organization's
-keys (`--transport`) or create a new organization (`--signup`): ask the human,
-never choose yourself. Then it asks for the pairing, saves it, and exits
+Run `capy pair --json` without asking the human anything first, and add no
+flags. On a machine with no keys yet it asks for keys, and Keep decides after
+sign-in: an existing user approves the handover of their organization's keys,
+and a new user signs up, which creates the organization. It asks for the
+pairing, saves it, and exits
 **3** at once with `PAIR_APPROVAL_PENDING` and an elicitation of kind `link`
 (`url`, `code`, `purpose`, `expires_at`, `answer.wait`, and a `qr`).
 
