@@ -126,6 +126,11 @@ export function pairEmailDisplay(): string {
   return table(['', ''], [['Email', TO_CHOOSE]]); // COPY-FLAG
 }
 
+/** The table for `capy pair` on a machine with no keys yet: how it gets them, still to choose. */
+export function pairKeysDisplay(email: string): string {
+  return table(['', ''], [['Email', email], ['Keys on this machine', 'none yet'], ['How to get them', TO_CHOOSE]]); // COPY-FLAG
+}
+
 export interface SetupDisplayInput {
   /** The organization's name, when it is decided. */
   readonly org?: string;

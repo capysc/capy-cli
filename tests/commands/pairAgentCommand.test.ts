@@ -567,7 +567,29 @@ describe('capy pair, agent mode', () => {
       expect(mockInstallDeviceGrantSession).not.toHaveBeenCalled();
     });
 
+    test('sign-in only on a machine with no keys: PAIR_TRANSPORT_REQUIRED and a keys form before anything is sent', async () => {
+      const fetchMock = stubFetch([PENDING]);
+      const ran = await run({ email: 'Mike@Example.com', transport: false, title: 'Ship it' });
+      expect(ran.exit).toBe(3);
+      expect(ran.json.code).toBe(ERROR_CODES.PAIR_TRANSPORT_REQUIRED);
+      const form = ran.json.elicitation;
+      expect(form.kind).toBe('form');
+      expect(form.details).toEqual({ email: 'mike@example.com' });
+      expect(form.fields).toHaveLength(1);
+      expect(form.fields[0].name).toBe('keys');
+      // This repo has no keep.lock, so creating an organization is offered next to picking up keys.
+      expect(form.fields[0].options.map((option: { value: string }) => option.value)).toEqual(['transport', 'signup']);
+      expect(new RegExp(form.fields[0].pattern).test('transport')).toBe(true);
+      expect(new RegExp(form.fields[0].pattern).test('force')).toBe(false);
+      expect(form.answer).toEqual({ rerun: `${BIN} pair --<keys> --email mike@example.com --title 'Ship it' --json` });
+      expect(form.display).toContain('none yet');
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(pendingExists()).toBe(false);
+    });
+
     test('sign-in only: the link is Keep /pair, the rerun carries no --transport, and keys of an org other than the bound one are not enough', async () => {
+      // Keys of some org are here, so sign-in only goes ahead (the bound org is only known after approval).
+      placeKeysFor('someone-else');
       stubFetch([PENDING]);
       const asked = await run({ json: true, transport: false });
       expect(asked.json.elicitation.answer).toEqual({ rerun: `${BIN} pair --email <email> --json` });
