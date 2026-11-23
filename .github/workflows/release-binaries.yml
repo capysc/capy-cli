@@ -102,7 +102,8 @@ jobs:
 
       - name: Sign capy.exe with SignPath (waits for approval)
         if: vars.SIGNPATH_ORGANIZATION_ID != ''
-        uses: signpath/github-action-submit-signing-request@v2
+        # Pinned to a commit: this action receives SIGNPATH_API_TOKEN.
+        uses: signpath/github-action-submit-signing-request@c92b958760219087e01f8d67a1669ed57afe2627 # v2
         with:
           connector-url: ${{ vars.SIGNPATH_CONNECTOR_URL || 'https://githubactions.connector.signpath.io' }}
           api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
@@ -191,6 +192,7 @@ jobs:
   smoke-windows:
     needs: build-binaries
     runs-on: windows-latest
+    permissions: {} # downloads only public release assets
     steps:
       - name: Install with Windows PowerShell 5.1 and run capy
         shell: powershell
@@ -222,8 +224,11 @@ jobs:
     needs: smoke-windows
     if: vars.WINGET_IDENTIFIER != ''
     runs-on: ubuntu-latest
+    permissions:
+      contents: read # reads this release; the winget PR uses WINGET_TOKEN
     steps:
-      - uses: vedantmgoyal9/winget-releaser@v2
+      # Pinned to a commit: this third-party action receives WINGET_TOKEN.
+      - uses: vedantmgoyal9/winget-releaser@b7370d4d152efdce803a26cc6ca9eee58cb2ad54 # v2
         with:
           identifier: ${{ vars.WINGET_IDENTIFIER }}
           release-tag: ${{ github.event.release.tag_name || inputs.tag }}

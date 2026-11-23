@@ -7,6 +7,9 @@ on:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   # Builds capy.exe the way release-binaries.yml does and runs it on Windows,
   # so a change to the Windows build (branded Node base, pkg) is caught on the
