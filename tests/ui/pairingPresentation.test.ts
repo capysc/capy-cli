@@ -185,34 +185,35 @@ describe('pairing contract', () => {
   const text = PAIRING_PRESENTATION.instructions.join('\n');
 
   test('names the one command and the QR order: image, then text in a real terminal, then say it cannot be shown', () => {
-    expect(PAIRING_PRESENTATION.command).toBe('capy pair --email <email> --json');
+    expect(PAIRING_PRESENTATION.command).toBe('capy pair --json');
     expect(text.indexOf('show the PNG')).toBeGreaterThan(-1);
     expect(text.indexOf('show `qr.text` only if your client is a real terminal')).toBeGreaterThan(text.indexOf('show the PNG'));
     expect(text.indexOf('say plainly that the QR cannot be shown here')).toBeGreaterThan(text.indexOf('qr.text'));
     expect(text).toContain('Never send the pairing link to an external QR service.');
   });
 
-  test('says the same thing as the agents block, the elicitation help and the README: the email comes from the human, show url, code and expires_at, how the wait is repeated, the mismatch, the sign-in-only result', () => {
+  test('says the same thing as the agents block, the elicitation help and the README: no email is asked, show url, code and expires_at, how the wait is repeated, the mismatch, the sign-in-only result', () => {
     const readme = readFileSync(path.join(import.meta.dir, '../../README.md'), 'utf8');
     const readmeSection = readme.slice(readme.indexOf('### Pairing from an agent'), readme.indexOf('## Syncing'));
-    expect(text).toContain('Never fill in the email yourself.');
+    expect(text).toContain('without asking the human anything first');
+    expect(text).not.toMatch(/email/i);
     expect(text).toContain('Always show the human its `url`, `code` and `expires_at`.');
     expect(text).toContain('run it again whenever it exits 3 with PAIR_STILL_WAITING');
-    expect(text).toContain('PAIR_ACCOUNT_MISMATCH is returned and nothing is installed');
     expect(text).toContain('"keys": "already_present"');
-    expect(AGENTS_BLOCK).toContain('run `capy pair --email <email> --json`');
+    expect(AGENTS_BLOCK).toContain('run `capy pair --json`. Do not ask the human anything first.');
     expect(AGENTS_BLOCK).toContain('show the human its `url`, `code`, `fingerprint` and `expires_at`');
     // CAP-877: the one-time code Keep shows the approver comes from the human, never from the agent.
     expect(text).toContain('PAIR_CODE_REQUIRED');
     expect(text).toContain('Never fill in the code yourself');
     expect(AGENTS_BLOCK).toContain('capy pair --wait --code <code>');
-    expect(AGENTS_BLOCK).toContain('Never fill in the email or the code yourself');
+    expect(AGENTS_BLOCK).toContain('Never fill in the code yourself');
+    expect(AGENTS_BLOCK).not.toContain('email will approve');
     expect(ELICITATION_HELP).toContain('PAIR_CODE_REQUIRED');
     expect(readmeSection).toContain('capy pair --wait --code <code>');
     expect(AGENTS_BLOCK).toContain('"keys": "already_present"');
     expect(ELICITATION_HELP).toContain('show the human the `url`, the `code`, the `fingerprint` (the page shows the same one) and `expires_at`');
-    expect(readmeSection).toContain('capy pair --email <email> --json');
-    expect(readmeSection).toContain('`PAIR_ACCOUNT_MISMATCH`');
+    expect(readmeSection).toContain('Run `capy pair --json` without asking the human anything first.');
+    expect(readmeSection).not.toContain('PAIR_ACCOUNT_MISMATCH');
     expect(readmeSection).toContain('`"keys": "already_present"`');
   });
 

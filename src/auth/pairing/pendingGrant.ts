@@ -29,8 +29,6 @@ export interface PendingPairGrant {
   readonly keyPair: PairKeyPair;
   readonly userCode: string;
   readonly deviceLink: string;
-  /** Already trimmed and lower-cased. */
-  readonly expectedEmail: string;
   readonly force: boolean;
   readonly apiUrl: string;
   /** What the human is told the pairing is for (display only). */
@@ -79,14 +77,12 @@ function parsePending(raw: string): PendingPairGrant | null {
   const purpose = str(data.purpose);
   const expiresAt = str(data.expires_at);
   const interval = data.interval_seconds;
-  const expectedEmail = str(data.expected_email);
   const qrFile = str(data.qr_file);
   const nextPollAt = typeof data.next_poll_at === 'number' && Number.isFinite(data.next_poll_at) ? data.next_poll_at : undefined;
   const mode: PairMode = data.mode === 'session' ? 'session' : 'transport';
   if (!deviceCode || !privateKey || !publicKey || !userCode || !deviceLink || !apiUrl || !purpose || !expiresAt) return null;
   if (typeof interval !== 'number' || !Number.isFinite(interval) || interval <= 0) return null;
   if (Number.isNaN(Date.parse(expiresAt))) return null;
-  if (!expectedEmail) return null;
   const keyPair = (() => {
     try {
       return importPairKeyPair({ privateKey, publicKey });
@@ -100,7 +96,6 @@ function parsePending(raw: string): PendingPairGrant | null {
     keyPair,
     userCode,
     deviceLink,
-    expectedEmail,
     force: data.force === true,
     apiUrl,
     purpose,
@@ -122,7 +117,6 @@ export function savePendingPairGrant(grant: PendingPairGrant): void {
     pair_public_key: key.publicKey,
     user_code: grant.userCode,
     device_link: grant.deviceLink,
-    expected_email: grant.expectedEmail,
     force: grant.force,
     api_url: grant.apiUrl,
     purpose: grant.purpose,

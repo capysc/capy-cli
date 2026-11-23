@@ -42,7 +42,7 @@ describe('capy pair routing', () => {
     expect(mockPairCommand).not.toHaveBeenCalled();
   });
 
-  test.each([{ wait: true }, { cancel: true }, { email: 'a@b.co' }])('%p is agent mode on a terminal', async (options) => {
+  test.each([{ wait: true }, { cancel: true }, { code: 'ABCD-EFGH' }])('%p is agent mode on a terminal', async (options) => {
     mockIsInteractive.mockReturnValue(true);
     await pairEntry(options);
     expect(mockPairAgentCommand).toHaveBeenCalledTimes(1);

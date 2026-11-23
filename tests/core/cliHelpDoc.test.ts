@@ -41,7 +41,7 @@ describe('buildCliHelpDoc', () => {
     expect(doc.version).toBe('9.9.9');
     expect(typeof doc.conventions.json).toBe('string');
     expect(typeof doc.conventions.codes).toBe('string');
-    expect(doc.conventions.pairing.command).toBe('capy pair --email <email> --json');
+    expect(doc.conventions.pairing.command).toBe('capy pair --json');
     expect(doc.conventions.pairing.instructions.join('\n')).toContain('Never send the pairing link to an external QR service.');
   });
 

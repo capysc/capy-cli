@@ -224,8 +224,10 @@ Good when you want to see drift across the whole branch, edit one variable witho
 
 ### Pairing from an agent
 
-Ask the human which email will approve. Never fill it in yourself. Run
-`capy pair --email <email> --json`: it asks for the pairing, saves it, and exits
+Run `capy pair --json` without asking the human anything first. On a machine
+with no keys yet it first asks, as a form, whether to pick up the organization's
+keys (`--transport`) or create a new organization (`--signup`): ask the human,
+never choose yourself. Then it asks for the pairing, saves it, and exits
 **3** at once with `PAIR_APPROVAL_PENDING` and an elicitation of kind `link`
 (`url`, `code`, `purpose`, `expires_at`, `answer.wait`, and a `qr`).
 
@@ -250,11 +252,10 @@ and run `capy pair --wait --code <code>`; a wrong code returns
 `PAIR_CODE_MISMATCH` with the form again, and five wrong codes cancel the
 pairing (`PAIR_CODE_FAILED`). Never fill in the code yourself: only the person
 who approved can see it, which is what stops someone else's approval from
-installing anything. When the human approves, the account that approved is compared with the email you gave: a
-different account returns `PAIR_ACCOUNT_MISMATCH` and nothing is installed.
+installing anything. No email is ever asked: the code is the check.
 When the keys are already on this machine, the pairing only signs in: the result says `"keys": "already_present"`.
 The PNG is removed when the pairing ends (approval, expiry, denial,
-`capy pair --cancel`, or a new `capy pair --email`). stdout is only ever one JSON
+`capy pair --cancel`, or a new `capy pair`). stdout is only ever one JSON
 object. `capy help --json` publishes the same instructions (`conventions.pairing`).
 
 ## Syncing

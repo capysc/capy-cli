@@ -63,7 +63,7 @@ mock.module('../../src/service/serviceClient', () => ({
   })),
 }));
 
-const { pairAgentCommand, accountMatches, normalizeEmail, PAIR_WAIT_CEILING_MS } = await import('../../src/commands/pairAgentCommand');
+const { pairAgentCommand, PAIR_WAIT_CEILING_MS } = await import('../../src/commands/pairAgentCommand');
 const { getPairPendingPath, getGlobalCapyDir, getAuthSessionPath, getLocalRootPath, getOrgKeyPath, readLocalRoot, saveAuthSession, saveLocalRoot, savePairPendingRaw, writeOrgKeyFileRaw } = await import('../../src/config/globalConfig');
 const { PAIR_DEFAULT_PURPOSE, pairCommand, pairPurpose } = await import('../../src/commands/pairCommand');
 const { exportPairKeyPair, generatePairKeyPair, importPairKeyPair } = await import('../../src/crypto/pairCrypto');
@@ -234,39 +234,22 @@ describe('capy pair, agent mode', () => {
     rmSync(tempHome, { recursive: true, force: true });
   });
 
-  describe('no expected account', () => {
-    test('exits 3 with a form for the email, and contacts nothing', async () => {
-      const fetchMock = stubFetch([PENDING]);
+  describe('asks nothing up front', () => {
+    test('no email is asked: the start run goes straight to the link, and the pending file names no email', async () => {
+      stubFetch([PENDING]);
       const ran = await run({ json: true });
       expect(ran.exit).toBe(3);
-      expect(fetchMock).not.toHaveBeenCalled();
-      expect(pendingExists()).toBe(false);
-      expect(ran.json.ok).toBe(false);
-      expect(ran.json.code).toBe(ERROR_CODES.PAIR_EMAIL_REQUIRED);
-      expect(ran.json.elicitation.kind).toBe('form');
-      expect(ran.json.elicitation.fields.map((f: { name: string }) => f.name)).toEqual(['email']);
-      expect(ran.json.elicitation.answer).toEqual({ rerun: `${BIN} pair --email <email> --transport --json` });
+      expect(ran.json.code).toBe(ERROR_CODES.PAIR_APPROVAL_PENDING);
+      expect(ran.json.elicitation.kind).toBe('link');
+      expect(ran.stdout).not.toMatch(/email/i);
+      expect(pendingRaw()).not.toMatch(/email/i);
     });
 
-    test('--force is carried into the rerun, and running that rerun saves a grant with force', async () => {
-      const fetchMock = stubFetch([PENDING]);
-      const asked = await run({ json: true, force: true });
-      expect(asked.json.code).toBe(ERROR_CODES.PAIR_EMAIL_REQUIRED);
-      expect(asked.json.elicitation.answer).toEqual({ rerun: `${BIN} pair --email <email> --transport --force --json` });
-      expect(fetchMock).not.toHaveBeenCalled();
-      // What an agent does with the rerun: fill in the email and run it with the flags it names.
-      const rerun = asked.json.elicitation.answer.rerun as string;
-      const started = await run({ json: true, email: 'mike@example.com', force: rerun.includes(' --force') });
+    test('--force is kept in the pending grant', async () => {
+      stubFetch([PENDING]);
+      const started = await run({ json: true, force: true });
       expect(started.exit).toBe(3);
       expect(JSON.parse(pendingRaw()).force).toBe(true);
-    });
-
-    test('an empty or blank --email is the same as none', async () => {
-      const fetchMock = stubFetch([PENDING]);
-      const ran = await run({ email: '   ' });
-      expect(ran.exit).toBe(3);
-      expect(ran.json.code).toBe(ERROR_CODES.PAIR_EMAIL_REQUIRED);
-      expect(fetchMock).not.toHaveBeenCalled();
     });
   });
 
@@ -297,7 +280,7 @@ describe('capy pair, agent mode', () => {
       expect(file).not.toContain('access_token');
       expect(file).not.toContain('refresh_token');
       expect(file).not.toContain('jwt-secret');
-      expect(JSON.parse(file).expected_email).toBe('mike@example.com');
+      expect(JSON.parse(file).expected_email).toBeUndefined();
     });
 
     test('the displayed purpose says what each kind of pairing does', async () => {
@@ -422,35 +405,6 @@ describe('capy pair, agent mode', () => {
       const ran = await run({ wait: true }, clock);
       expect(ran.exit).toBe(0);
       expect(clock.sleep).not.toHaveBeenCalled();
-    });
-
-    test('the email is compared case- and whitespace-insensitively', async () => {
-      await startThenStub('  MIKE@Example.COM  ', [APPROVED]);
-      const ran = await run({ wait: true });
-      expect(ran.exit).toBe(0);
-      expect(ran.json.ok).toBe(true);
-      expect(mockInstallDeviceGrantSession).toHaveBeenCalledTimes(1);
-    });
-
-    test('approved by a different email: PAIR_ACCOUNT_MISMATCH, nothing installed, pending file gone', async () => {
-      await startThenStub('someone.else@example.com', [APPROVED]);
-      const ran = await run({ wait: true });
-      expect(ran.exit).toBe(1);
-      expect(ran.json).toEqual({ ok: false, code: ERROR_CODES.PAIR_ACCOUNT_MISMATCH, error: expect.any(String) });
-      expect(mockInstallDeviceGrantSession).not.toHaveBeenCalled();
-      expect(mockPickupDevicePairing).not.toHaveBeenCalled();
-      expect(existsSync(getAuthSessionPath(USER.id))).toBe(false);
-      expect(existsSync(getAuthSessionPath())).toBe(false);
-      expect(keysWritten()).toBe(false);
-      expect(pendingExists()).toBe(false);
-      expect(ran.stdout).not.toContain('mike@example.com');
-    });
-
-    test('an email that merely contains the expected one is a mismatch', async () => {
-      await startThenStub('ike@example.com', [APPROVED]);
-      const ran = await run({ wait: true });
-      expect(ran.json.code).toBe(ERROR_CODES.PAIR_ACCOUNT_MISMATCH);
-      expect(mockInstallDeviceGrantSession).not.toHaveBeenCalled();
     });
 
     test('a different local key is refused without --force carried from the start run, and the pending file is gone', async () => {
@@ -633,19 +587,20 @@ describe('capy pair, agent mode', () => {
 
     test('sign-in only on a machine with no keys: PAIR_TRANSPORT_REQUIRED and a keys form before anything is sent', async () => {
       const fetchMock = stubFetch([PENDING]);
-      const ran = await run({ email: 'Mike@Example.com', transport: false, title: 'Ship it' });
+      const ran = await run({ transport: false, title: 'Ship it' });
       expect(ran.exit).toBe(3);
       expect(ran.json.code).toBe(ERROR_CODES.PAIR_TRANSPORT_REQUIRED);
       const form = ran.json.elicitation;
       expect(form.kind).toBe('form');
-      expect(form.details).toEqual({ email: 'mike@example.com' });
+      expect(form.details).toEqual({});
+      expect(ran.stdout).not.toMatch(/email/i);
       expect(form.fields).toHaveLength(1);
       expect(form.fields[0].name).toBe('keys');
       // This repo has no keep.lock, so creating an organization is offered next to picking up keys.
       expect(form.fields[0].options.map((option: { value: string }) => option.value)).toEqual(['transport', 'signup']);
       expect(new RegExp(form.fields[0].pattern).test('transport')).toBe(true);
       expect(new RegExp(form.fields[0].pattern).test('force')).toBe(false);
-      expect(form.answer).toEqual({ rerun: `${BIN} pair --<keys> --email mike@example.com --title 'Ship it' --json` });
+      expect(form.answer).toEqual({ rerun: `${BIN} pair --<keys> --title 'Ship it' --json` });
       expect(form.display).toContain('none yet');
       expect(fetchMock).not.toHaveBeenCalled();
       expect(pendingExists()).toBe(false);
@@ -655,9 +610,7 @@ describe('capy pair, agent mode', () => {
       // Keys of some org are here, so sign-in only goes ahead (the bound org is only known after approval).
       placeKeysFor('someone-else');
       stubFetch([PENDING]);
-      const asked = await run({ json: true, transport: false });
-      expect(asked.json.elicitation.answer).toEqual({ rerun: `${BIN} pair --email <email> --json` });
-      const started = await run({ email: 'mike@example.com', transport: false });
+      const started = await run({ json: true, transport: false });
       expect(started.json.elicitation.url).toContain('/pair?code=ABCD-EFGH');
       expect(started.json.elicitation.url).not.toContain('/transport/');
       // APPROVED reports no paired_org_id: nothing to check keys against, so nothing is installed.
@@ -669,11 +622,9 @@ describe('capy pair, agent mode', () => {
       expect(mockPickupDevicePairing).not.toHaveBeenCalled();
     });
 
-    test('--title/--description are sent as the pairing intent, shown as the purpose, and repeated (quoted) on the rerun', async () => {
+    test('--title/--description are sent as the pairing intent and shown as the purpose', async () => {
       const fetchMock = stubFetch([PENDING]);
-      const asked = await run({ json: true, title: "  Deploy Bob's API ", description: 'Ship it' });
-      expect(asked.json.elicitation.answer).toEqual({ rerun: `${BIN} pair --email <email> --transport --title 'Deploy Bob'\\''s API' --description 'Ship it' --json` });
-      const started = await run({ email: 'mike@example.com', title: "Deploy Bob's API", description: 'Ship it' });
+      const started = await run({ json: true, title: "  Deploy Bob's API ", description: 'Ship it' });
       expect(started.json.elicitation.purpose).toBe('Ship it');
       const authorizeBody = JSON.parse(String((callsTo(fetchMock, '/auth/device/authorize')[0] as unknown[])[1] && ((callsTo(fetchMock, '/auth/device/authorize')[0] as [unknown, RequestInit])[1].body)));
       expect(authorizeBody).toMatchObject({ intent_title: "Deploy Bob's API", intent_description: 'Ship it', mode: 'transport' });
@@ -818,7 +769,7 @@ describe('capy pair, agent mode', () => {
       expect(init.signal).toBeUndefined();
     });
 
-    test('an expired pending file is swept by a start run that fails, and by the form path, and by cancel', async () => {
+    test('an expired pending file is swept by a start run that fails, and by cancel', async () => {
       const expire = () => {
         const file = JSON.parse(pendingRaw());
         savePairPendingRaw(JSON.stringify({ ...file, expires_at: new Date(Date.now() - 1000).toISOString() }));
@@ -827,9 +778,6 @@ describe('capy pair, agent mode', () => {
       await run({ email: 'mike@example.com' });
       expire();
       expect(pendingExists()).toBe(true);
-      const form = await run({});
-      expect(form.json.code).toBe(ERROR_CODES.PAIR_EMAIL_REQUIRED);
-      expect(pendingExists()).toBe(false);
 
       await run({ email: 'mike@example.com' });
       expire();
@@ -850,39 +798,6 @@ describe('capy pair, agent mode', () => {
       await run({ email: 'mike@example.com' });
       await run({});
       expect(pendingExists()).toBe(true);
-    });
-
-    test('an approving user with no email, or an empty one, cannot satisfy an email expectation: PAIR_ACCOUNT_MISMATCH, nothing installed', async () => {
-      const { email: _omitted, ...noEmail } = USER;
-      const bodies = [{ ...APPROVED.body, user: noEmail }, { ...APPROVED.body, user: EMPTY_EMAIL_USER }, { ...APPROVED.body, user: { ...USER, email: null } }];
-      for (const body of bodies) {
-        await startThenStubAny('mike@example.com', [{ status: 200, body }]);
-        const ran = await run({ wait: true });
-        expect(ran.exit).toBe(1);
-        expect(ran.json.code).toBe(ERROR_CODES.PAIR_ACCOUNT_MISMATCH);
-        expect(mockInstallDeviceGrantSession).not.toHaveBeenCalled();
-        expect(existsSync(getAuthSessionPath(USER.id))).toBe(false);
-        expect(keysWritten()).toBe(false);
-        expect(pendingExists()).toBe(false);
-      }
-    });
-
-    test.each(['not-an-email', 'a b@c.co', 'a@@b.co', '@b.co', 'a@'])('--email %p fails the form field\'s own pattern: the form again, no network call', async (email) => {
-      const fetchMock = stubFetch([PENDING]);
-      const ran = await run({ email });
-      expect(ran.exit).toBe(3);
-      expect(ran.json.code).toBe(ERROR_CODES.PAIR_EMAIL_REQUIRED);
-      expect(ran.json.elicitation.kind).toBe('form');
-      expect(fetchMock).not.toHaveBeenCalled();
-      expect(pendingExists()).toBe(false);
-    });
-
-    test('every email the form accepts is one the form\'s pattern matches', async () => {
-      stubFetch([PENDING]);
-      const form = await run({});
-      const pattern = new RegExp(form.json.elicitation.fields[0].pattern);
-      expect(pattern.test('mike@example.com')).toBe(true);
-      expect(pattern.test('not-an-email')).toBe(false);
     });
 
     test.each([
@@ -1015,14 +930,6 @@ describe('capy pair, agent mode', () => {
       expect(gone(file)).toBe(true);
     });
 
-    test('the PNG is gone after approval by another account', async () => {
-      const { file } = await started('someone.else@example.com');
-      stubFetch([APPROVED]);
-      const ran = await run({ wait: true });
-      expect(ran.json.code).toBe(ERROR_CODES.PAIR_ACCOUNT_MISMATCH);
-      expect(gone(file)).toBe(true);
-    });
-
     test.each([
       ['an expiry the service reports', EXPIRED, ERROR_CODES.PAIR_EXPIRED],
       ['a denial', DENIED, ERROR_CODES.PAIR_DENIED],
@@ -1052,6 +959,8 @@ describe('capy pair, agent mode', () => {
     test('the PNG is gone when a later run sweeps the expired grant', async () => {
       const { file } = await started();
       savePairPendingRaw(JSON.stringify({ ...JSON.parse(pendingRaw()), expires_at: new Date(Date.now() - 1000).toISOString() }));
+      // A start run that fails after the sweep: the expired grant and its PNG are gone, and no new one is made.
+      globalThis.fetch = (async () => ({ ok: false, status: 500, json: async () => ({ error: 'down', code: 'AUTH_FAILED' }) }) as Response) as typeof fetch;
       await run({});
       expect(pendingExists()).toBe(false);
       expect(gone(file)).toBe(true);
@@ -1148,6 +1057,7 @@ describe('capy pair, agent mode', () => {
       const blocker = await startWithDirectoryForPng();
       try {
         savePairPendingRaw(JSON.stringify({ ...JSON.parse(pendingRaw()), expires_at: new Date(Date.now() - 1000).toISOString() }));
+        globalThis.fetch = (async () => ({ ok: false, status: 500, json: async () => ({ error: 'down', code: 'AUTH_FAILED' }) }) as Response) as typeof fetch;
         await run({});
         expect(pendingExists()).toBe(false);
       } finally {
@@ -1313,24 +1223,6 @@ describe('capy pair, agent mode', () => {
       expect(mockPickupDevicePairing).toHaveBeenCalledTimes(1);
       // The sealed local key differs from the one already here, so without --force the write is refused: the pickup really ran.
       expect(ran.json.code).toBe(ERROR_CODES.PAIR_LOCAL_KEY_CONFLICT);
-    });
-
-    test.each([
-      ['keys present', true],
-      ['keys absent', false],
-    ])('a different approving account installs nothing and writes nothing (%s)', async (_name, present) => {
-      await startThenStub('someone.else@example.com', [APPROVED]);
-      if (present) placeKeysFor(USER.id);
-      const before = present ? [fingerprint(ROOT(USER.id)), fingerprint(ENC(USER.id))] : [];
-      const ran = await run({ wait: true });
-      expect(ran.exit).toBe(1);
-      expect(ran.json.code).toBe(ERROR_CODES.PAIR_ACCOUNT_MISMATCH);
-      expect(mockInstallDeviceGrantSession).not.toHaveBeenCalled();
-      expect(mockPickupDevicePairing).not.toHaveBeenCalled();
-      expect(existsSync(getAuthSessionPath(USER.id))).toBe(false);
-      expect(existsSync(getAuthSessionPath())).toBe(false);
-      expect(present ? [fingerprint(ROOT(USER.id)), fingerprint(ENC(USER.id))] : []).toEqual(before);
-      expect(keysWritten()).toBe(present);
     });
   });
 
@@ -1510,19 +1402,6 @@ describe('capy pair, agent mode', () => {
   });
 });
 
-describe('who must approve', () => {
-  test('normalizeEmail trims and lower-cases', () => {
-    expect(normalizeEmail('  Mike@Example.COM\n')).toBe('mike@example.com');
-  });
-
-  test('an email matches only on exact equality after normalizing', () => {
-    const grant = { expectedEmail: 'mike@example.com' };
-    expect(accountMatches(grant, { email: ' MIKE@example.com ' })).toBe(true);
-    expect(accountMatches(grant, { email: 'mike@example.com.evil.io' })).toBe(false);
-    expect(accountMatches(grant, { email: 'xmike@example.com' })).toBe(false);
-    expect(accountMatches(grant, { email: '' })).toBe(false);
-  });
-});
 
 describe('the pair key pair in the pending file', () => {
   test('survives export and import: the restored key opens what the original public key received', async () => {
