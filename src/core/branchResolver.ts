@@ -115,6 +115,8 @@ export async function selectBranchWithServer(deps: {
   syncedBranches: string[];
   /** A branch the caller already named (`capy checkout <branch>`): it wins over auto-selection and the picker when the server has it. */
   preferred?: string;
+  /** A branch the person typed as the answer (`capy --branch <name>` joining a project): used when the server has it, refused with BRANCH_NOT_FOUND when it does not. Never falls through to a pick. */
+  required?: string;
   /** Joining a project into a new folder: the person always picks, even when the project has one branch. Nothing is auto-selected. */
   alwaysAsk?: boolean;
   /** The project has no branch at all (its setup stopped before the first one was created): creates one and returns its name. Without it the run stops with BRANCH_NOT_FOUND. */
@@ -146,6 +148,8 @@ export async function selectBranchWithServer(deps: {
     );
   }
 
+  if (deps.required !== undefined) return requiredBranch(branches, deps.required);
+
   if (deps.alwaysAsk === true) return deps.promptPick(branches, defaultBranchChoice(branches));
 
   if (deps.preferred !== undefined && branches.some((b) => b.name === deps.preferred)) return deps.preferred;
@@ -154,4 +158,15 @@ export async function selectBranchWithServer(deps: {
   if (auto) return auto;
 
   return deps.promptPick(branches, defaultBranchChoice(branches));
+}
+
+/** `required` when the project has it; BRANCH_NOT_FOUND naming the project's branches when it does not. */
+function requiredBranch(branches: readonly Branch[], required: string): string {
+  if (branches.some((b) => b.name === required)) return required;
+  const names = branches.map((b) => b.name);
+  throw new CapyError(
+    `This project has no branch ${required} (branches: ${names.join(', ')}).`, // COPY-FLAG
+    ERROR_CODES.BRANCH_NOT_FOUND,
+    { branches: names },
+  );
 }

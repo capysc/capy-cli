@@ -83,8 +83,8 @@ type CreateOutcome =
   | { readonly kind: 'created'; readonly project: ProjectRef; readonly branch: FirstBranch; readonly org: OrgRef };
 
 /** `--protected` answers, as the elicitation's options carry them. */
-const PROTECTED_YES = 'yes';
-const PROTECTED_NO = 'no';
+export const PROTECTED_YES = 'yes';
+export const PROTECTED_NO = 'no';
 
 /** The answer typed with `--protected`, as a boolean; undefined when none was typed. Checked to be yes or no first. */
 function protectedFrom(answer: string | undefined): boolean | undefined {
@@ -93,7 +93,7 @@ function protectedFrom(answer: string | undefined): boolean | undefined {
 }
 
 /** The yes/no question, worded as `capy checkout -b` asks it. Before the branch has a name it says "the first branch". */
-function protectedQuestion(branch: string | undefined): string {
+export function protectedQuestion(branch: string | undefined): string {
   return branch === undefined
     ? 'Make the first branch a protected branch? (invite-only)' // COPY-FLAG: checkout's wording, adapted for an unnamed branch
     : `Make "${branch}" a protected branch? (invite-only)`;
@@ -103,7 +103,7 @@ function protectedQuestion(branch: string | undefined): string {
  * The folder's name as a project name, when it is allowed as one and no live project in the org has it already.
  * The init prompt offers the same name; a taken one would only be refused with PROJECT_NAME_EXISTS, so it is never offered.
  */
-function suggestedName(isTaken: (name: string) => boolean): string | undefined {
+export function suggestedName(isTaken: (name: string) => boolean): string | undefined {
   const folderName = new ProjectManager().getDefaultProjectName();
   return projectNameProblem(folderName) === null && !isTaken(folderName) ? folderName : undefined;
 }
@@ -241,7 +241,7 @@ async function createFlow(typed: string | undefined, opts: CreateProjectOpts, ag
 }
 
 /** The refusal for a failed create: a duplicate name by its HTTP status, everything else as the lifecycle commands refuse it. */
-function createRefusalFor(err: unknown): Refusal {
+export function createRefusalFor(err: unknown): Refusal {
   if (err instanceof CapyError && err.code === ERROR_CODES.SERVICE_ERROR && err.details?.status === 409) {
     return {
       code: ERROR_CODES.PROJECT_NAME_EXISTS,

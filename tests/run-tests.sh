@@ -78,6 +78,7 @@ ISOLATED_FILES=(
   tests/commands/bareCapyCommit.test.ts
   tests/commands/initialSetupTrackedKeep.test.ts
   tests/commands/initialSetupLocalTrackedKeep.test.ts
+  tests/commands/agentSetup.test.ts
   tests/sync/missingEnvFile.test.ts
   tests/commands/deployGate.test.ts
   tests/system/systemStore.test.ts
@@ -99,6 +100,8 @@ ISOLATED_FILES=(
   tests/commands/agentsCommand.test.ts
   tests/commands/transportCommand.test.ts
   tests/commands/pairCommand.test.ts
+  tests/commands/pairAgentCommand.test.ts
+  tests/commands/pairEntry.test.ts
   tests/commands/deployVercelApiMode.test.ts
   tests/deploy/vercelApiModeTokenStore.test.ts
   tests/commands/systemSetKeyHelp.test.ts
