@@ -2,7 +2,7 @@ import { AuthService } from '../auth/authService';
 import { ProjectManager } from '../core/projectManager';
 import { ServiceClient } from '../service/serviceClient';
 import { isProjectDeletedError } from '../errors/projectDeleted';
-import type { AuthResult } from '../types/index';
+import { ERROR_CODES, type AuthResult } from '../types/index';
 
 const DIM = '\x1b[90m';
 const RESET = '\x1b[0m';
@@ -82,7 +82,12 @@ export class InfoCommand {
     const authService = new AuthService(this.apiUrl, this.devMode, projectState.userId);
     const authResult = await authenticateForInfo(authService, projectState.organizationId, hasKeep);
     if (!authResult.success) {
-      console.error(`Not signed in. Run ${B('capy')} to authenticate.`);
+      if (opts.json) {
+        // Agents branch on `code`: a signed-out machine answers in JSON too.
+        console.log(JSON.stringify({ ok: false, code: ERROR_CODES.AUTH_FAILED, error: 'Not signed in.' }, null, 2)); // COPY-FLAG
+      } else {
+        console.error(`Not signed in. Run ${B('capy')} to authenticate.`);
+      }
       process.exit(1);
     }
 
