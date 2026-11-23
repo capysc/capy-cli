@@ -22,6 +22,10 @@ export interface SetupFormInput {
   readonly orgChoices?: readonly OrgRef[];
   /** The organization's existing projects, when "which project" is a question ("new" is always one more answer). */
   readonly projects?: readonly ProjectRef[];
+  /** The existing project the folder is being linked to, when one is chosen. */
+  readonly existingProject?: ProjectRef;
+  /** That project's branches, when "which branch" is the question. */
+  readonly branchChoices?: readonly BranchChoice[];
   /** The answers a new project still needs, when it is being created and some are missing. */
   readonly gaps?: NewProjectGaps;
   /** What was typed already. */
@@ -35,6 +39,12 @@ export interface SetupFormInput {
   readonly dryRun?: boolean;
   /** True under `capy-dev`, which does not set `CAPY_BIN_NAME`: the rerun then names `capy-dev`. */
   readonly devMode?: boolean;
+}
+
+/** One of an existing project's branches, as the form offers it. */
+export interface BranchChoice {
+  readonly name: string;
+  readonly isProtected: boolean;
 }
 
 /** A regular-expression source that matches exactly one of `values`. */
@@ -62,7 +72,7 @@ function rerunCommand(input: SetupFormInput): string {
     ...flagWords('--org', answers.org, input.orgChoices === undefined ? undefined : '<org>'),
     ...flagWords('--project', answers.project, input.projects === undefined ? undefined : '<project>'),
     ...flagWords('--name', answers.name, gaps?.name === true ? '<name>' : undefined),
-    ...flagWords('--branch', answers.branch, gaps?.branch === true ? '<branch>' : undefined),
+    ...flagWords('--branch', answers.branch, gaps?.branch === true || input.branchChoices !== undefined ? '<branch>' : undefined),
     ...flagWords('--protected', answers.protectedAnswer, gaps?.isProtected === true ? '<protected>' : undefined),
     '--json',
   ].join(' ');
@@ -112,6 +122,17 @@ function branchField(answers: SetupAnswers): ElicitationField {
   };
 }
 
+/** Which of an existing project's branches to use: a choice among them, with no default, so nothing is picked for the human. */
+function existingBranchField(branches: readonly BranchChoice[]): ElicitationField {
+  return {
+    name: 'branch',
+    type: 'string',
+    pattern: oneOf(branches.map((b) => b.name)),
+    question: 'Which branch do you want to use?', // the terminal's own wording
+    options: branches.map((b) => ({ value: b.name, label: b.isProtected ? `${b.name} (protected)` : b.name })), // the terminal's own wording
+  };
+}
+
 function protectedField(answers: SetupAnswers): ElicitationField {
   return {
     name: 'protected',
@@ -131,6 +152,7 @@ function fieldsOf(input: SetupFormInput): readonly ElicitationField[] {
   return [
     ...(input.orgChoices === undefined ? [] : [orgField(input.orgChoices)]),
     ...(input.projects === undefined ? [] : [projectField(input.projects)]),
+    ...(input.branchChoices === undefined ? [] : [existingBranchField(input.branchChoices)]),
     ...(gaps?.name === true ? [nameField(input.suggestedName)] : []),
     ...(gaps?.branch === true ? [branchField(input.answers)] : []),
     ...(gaps?.isProtected === true ? [protectedField(input.answers)] : []),
@@ -140,7 +162,7 @@ function fieldsOf(input: SetupFormInput): readonly ElicitationField[] {
 /** The project cell of the summary: an existing project is not known yet; a new one is known by its typed name. */
 function projectCell(input: SetupFormInput): string | undefined {
   if (input.projects !== undefined) return undefined;
-  return input.answers.name;
+  return input.existingProject?.name ?? input.answers.name;
 }
 
 export function setupForm(input: SetupFormInput): ElicitationForm {
@@ -151,6 +173,8 @@ export function setupForm(input: SetupFormInput): ElicitationForm {
       ...(input.org === undefined ? {} : { org: { id: input.org.id, name: input.org.name } }),
       ...(input.orgChoices === undefined ? {} : { orgs: input.orgChoices.map((o) => ({ id: o.id, name: o.name })) }),
       ...(input.projects === undefined ? {} : { projects: input.projects.map((p) => ({ id: p.id, name: p.name })) }),
+      ...(input.existingProject === undefined ? {} : { project: { id: input.existingProject.id, name: input.existingProject.name } }),
+      ...(input.branchChoices === undefined ? {} : { branches: input.branchChoices.map((b) => ({ name: b.name, protected: b.isProtected })) }),
       // Only a new project needs these; with an existing project chosen they are left out.
       ...(input.projects !== undefined && input.gaps !== undefined ? { new_project_fields: fieldsOf({ ...input, orgChoices: undefined, projects: undefined }).map((f) => f.name) } : {}),
       variables: input.variables,
@@ -162,6 +186,7 @@ export function setupForm(input: SetupFormInput): ElicitationForm {
       isProtected: input.answers.protectedAnswer === undefined ? undefined : input.answers.protectedAnswer === PROTECTED_YES,
       variables: input.variables,
       projectChoice: input.projects !== undefined,
+      existingProject: input.existingProject !== undefined,
       branchDescription: BRANCH_DESCRIPTION,
     }),
     fields: fieldsOf(input),

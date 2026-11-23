@@ -11,6 +11,7 @@ import { join } from 'path';
 import { execSync } from 'child_process';
 import inquirer from 'inquirer';
 import {
+  Branch,
   CliOptions,
   Organization,
   ProjectState,
@@ -27,6 +28,7 @@ import {
 } from '../types/index';
 import { validateSeedPhrase } from '../crypto/keyManager';
 import { offerAgentsSetupAfterInit } from './agentsCommand';
+import { validateBranchNameInput } from '../core/branchNameRule';
 import {
   resolveBranchFromLocalState,
   selectBranchWithServer,
@@ -381,32 +383,103 @@ export class CapyCommand {
       listBranches: () => this.serviceClient.listBranches(projectState.projectId!),
       syncedBranches: syncedBranchNames(this.projectManager.readSyncState()),
       preferred: this.branchNamedForUnrecordedFolder(),
-      promptPick: async (branches, defaultName) => {
-        // Off a terminal nobody can pick: the run ends with a code and the command that records the choice.
-        if (this.protocol) {
-          throw new CapyError(
-            `No branch is checked out in this directory. Run \`capy checkout <branch>\` first (branches: ${branches.map((b) => b.name).join(', ')}).`, // COPY-FLAG
+      promptPick: (branches, defaultName) =>
+        this.promptBranchPick(branches, defaultName, 'No branch is checked out in this directory yet.', (names) =>
+          // Off a terminal nobody can pick: the run ends with a code and the command that records the choice.
+          new CapyError(
+            `No branch is checked out in this directory. Run \`capy checkout <branch>\` first (branches: ${names.join(', ')}).`, // COPY-FLAG
             ERROR_CODES.NO_ACTIVE_BRANCH,
-            { branches: branches.map((b) => b.name) },
-          );
-        }
-        const grey = (s: string) => `\x1b[90m${s}\x1b[0m`;
-        console.log('\nNo branch is checked out in this directory yet.');
-        const { selected: pick } = await inquirer.prompt([{
-          type: 'list',
-          name: 'selected',
-          message: 'Which branch do you want to use?',
-          choices: branches.map(b => ({
-            name: b.is_protected ? `${b.name}  ${grey('(protected)')}` : b.name,
-            value: b.name,
-          })),
-          default: defaultName,
-        }]);
-        return pick;
-      },
+            { branches: names },
+          )),
     });
     this.projectManager.writeActiveBranch(selected);
     return selected;
+  }
+
+  /**
+   * The branch picker for a folder that records no branch. Off a terminal nobody can pick, so the run ends with
+   * `refusal` (a coded error naming the branches) and nothing is guessed.
+   */
+  private async promptBranchPick(
+    branches: readonly Branch[],
+    defaultName: string | undefined,
+    intro: string,
+    refusal: (names: readonly string[]) => CapyError,
+  ): Promise<string> {
+    if (this.protocol) throw refusal(branches.map((b) => b.name));
+    const grey = (s: string) => `\x1b[90m${s}\x1b[0m`;
+    console.log(`\n${intro}`);
+    const { selected: pick } = await inquirer.prompt([{
+      type: 'list',
+      name: 'selected',
+      message: 'Which branch do you want to use?',
+      choices: branches.map(b => ({
+        name: b.is_protected ? `${b.name}  ${grey('(protected)')}` : b.name,
+        value: b.name,
+      })),
+      default: defaultName,
+    }]);
+    return pick;
+  }
+
+  /**
+   * Joining a project that has no branch at all: its setup stopped after the project was created and before its
+   * first branch was. The person names the branch, it is created open to the project, and the join
+   * goes on with it. No name is assumed. Only a project admin can create a branch: anyone else gets
+   * FIRST_BRANCH_NEEDS_ADMIN, its own code so the screen says who to ask instead of the generic "no access to these secrets".
+   */
+  private async createFirstBranch(project: { id: string; name: string }): Promise<string> {
+    if (this.protocol) {
+      throw new CapyError(
+        `${project.name} has no branches yet. Ask the human to run \`capy\` in a terminal in this folder and create one there.`, // COPY-FLAG
+        ERROR_CODES.BRANCH_NOT_FOUND,
+      );
+    }
+    console.log(`\n${project.name} has no branches yet. Create its first branch to join it.`); // COPY-FLAG
+    const choice = await this.resolveInitialBranchChoice();
+    const name = choice === 'other' ? await this.resolveCustomBranchName() : choice;
+    const spinner = ora(`Creating branch ${name}...`).start();
+    try {
+      // Open to the project, like a new project's first branch: protection is a separate, later action.
+      await this.serviceClient.createBranch(project.id, name, false);
+    } catch (err) {
+      spinner.fail(`Failed to create branch ${name}`);
+      // A 403 with no code of its own is "not a project admin". One that carries a code (a revoked membership) is that refusal, and keeps its screen.
+      if (err instanceof CapyError && err.code === ERROR_CODES.PERMISSION_DENIED && err.details?.code === undefined) {
+        throw new CapyError(
+          `${project.name} has no branches yet, and only a project admin can create one. Ask a project admin to run \`capy\` in a folder for this project and create its first branch.`, // COPY-FLAG
+          ERROR_CODES.FIRST_BRANCH_NEEDS_ADMIN,
+          { ...err.details, cause: err },
+        );
+      }
+      throw err;
+    }
+    spinner.succeed(`Created branch ${name}`);
+    return name;
+  }
+
+  /**
+   * The branch an existing project is joined on: always the one the person picks from the project's own branch list,
+   * even when it has a single branch. Never a branch name assumed here, and never auto-selected: a project's first
+   * branch can have any name, and reading or pushing a name the project does not have splits its secrets across a
+   * branch nobody created. `--branch` answers the question when the project has that branch, and is refused with
+   * BRANCH_NOT_FOUND when it does not. Agent mode never gets here: it asks through its form (agentSetup.ts).
+   */
+  private resolveBootstrapBranch(project: { id: string; name: string }): Promise<string> {
+    return selectBranchWithServer({
+      listBranches: () => this.serviceClient.listBranches(project.id),
+      syncedBranches: [],
+      alwaysAsk: true,
+      required: this.options.setup?.branch,
+      createFirst: () => this.createFirstBranch(project),
+      promptPick: (branches, defaultName) =>
+        this.promptBranchPick(branches, defaultName, `Joining ${project.name}.`, (names) =>
+          new CapyError(
+            `Joining ${project.name} needs a branch (branches: ${names.join(', ')}). Pass the one to use with \`--branch <name>\`.`, // COPY-FLAG
+            ERROR_CODES.NO_ACTIVE_BRANCH,
+            { branches: names },
+          )),
+    });
   }
 
   /**
@@ -958,7 +1031,7 @@ export class CapyCommand {
       type: 'input',
       name: 'branchName',
       message: 'Branch name:',
-      validate: (input: string) => input.trim().length > 0 || 'Branch name cannot be empty',
+      validate: validateBranchNameInput,
     }]);
     return String(branchName).trim();
   }
@@ -1131,7 +1204,7 @@ export class CapyCommand {
    *
    * Used when the user lands in a directory with no keep.lock and picks an
    * existing project from the org's project list. Pulls the latest keep.json
-   * + env_blob for the development branch from the server, decrypts each
+   * + env_blob for the project's branch (see `resolveBootstrapBranch`) from the server, decrypts each
    * variable, writes keep.lock + encrypted .env. After this returns, the
    * directory looks identical to one that did `capy push` from scratch.
    */
@@ -1140,7 +1213,7 @@ export class CapyCommand {
     orgId: string,
     userId: string,
   ): Promise<void> {
-    const branch = this.options.setup?.branch ?? 'development';
+    const branch = await this.resolveBootstrapBranch(project);
     const encryptionKey = await resolveProjectKey(orgId, project.id, userId, this.keyServiceOps());
 
     const fetchSpinner = ora(`Pulling ${project.name} (${branch})...`).start();

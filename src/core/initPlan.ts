@@ -6,7 +6,7 @@
  */
 import { ERROR_CODES } from '../types/index';
 import type { SetupAnswers } from '../types/index';
-import { BRANCH_NAME_PATTERN_SOURCE, DEFAULT_FIRST_BRANCH, branchNameProblem } from './branchNameRule';
+import { BRANCH_NAME_PATTERN_SOURCE, branchNameProblem } from './branchNameRule';
 import { PROJECT_NAME_PATTERN_SOURCE, projectNameProblem } from './projectNameRule';
 
 export interface OrgRef {
@@ -108,9 +108,6 @@ export function chooseProject(projects: readonly ProjectRef[], answers: SetupAns
   if (answers.name !== undefined || projects.length === 0) return { kind: 'new' };
   return { kind: 'ask', projects };
 }
-
-/** The first branch's default, and the one an existing project is pulled from unless `--branch` says another. */
-export const FIRST_BRANCH_DEFAULT = DEFAULT_FIRST_BRANCH;
 
 /** The answers a new project still needs: the ones not typed. */
 export interface NewProjectGaps {

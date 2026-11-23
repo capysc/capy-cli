@@ -1,5 +1,6 @@
 import { SecretIndexRow, SecretIndexSkipped } from '../service/serviceClient';
 import { resolveOrgContext } from '../core/orgContext';
+import { exitOrgSelectionRequired, isOrgSelectionRequired } from '../core/orgSelection';
 import { Spinner } from '../ui/spinner';
 import { CapyError, ERROR_CODES } from '../types/index';
 import { rowIdOf } from './secretsRowId';
@@ -105,10 +106,13 @@ export class SecretsCommand {
     // status line landing on stdout — a piped/CI/agent caller has no
     // terminal to animate on anyway.
     const spinner = interactive ? new Spinner('Loading secrets...') : null;
-    spinner?.start();
 
     try {
-      const { orgId, userId, serviceClient } = await resolveOrgContext(this.apiUrl, this.devMode);
+      // Which organization is asked only at a terminal. Under --json or off a terminal nobody can answer a picker:
+      // the run ends with ORG_SELECTION_REQUIRED and the orgs, for the agent to show the human.
+      const { orgId, userId, serviceClient } = await resolveOrgContext(this.apiUrl, this.devMode, { promptForOrg: interactive });
+      // The spinner starts once the org is known: resolving it may ask which org.
+      spinner?.start();
       const index = await serviceClient.getSecretIndex(orgId);
       const rows = this.filterRows(index.rows, opts);
 
@@ -131,6 +135,7 @@ export class SecretsCommand {
       this.emitJsonOutput(rows, index.skipped, index.org_id);
     } catch (err) {
       spinner?.fail('Failed to load secrets');
+      if (emitJson && isOrgSelectionRequired(err)) exitOrgSelectionRequired(err);
       this.exitWithError(err, emitJson);
     }
   }

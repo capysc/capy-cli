@@ -139,9 +139,13 @@ export interface SetupDisplayInput {
   readonly variables?: number;
   /** Whether the human is still choosing between a new project and an existing one: then the row says what each choice does to the variables. */
   readonly projectChoice?: boolean;
+  /** Whether the folder is being linked to an existing project: the branch is one of its own, nothing is protected here, and nothing is pushed. */
+  readonly existingProject?: boolean;
   /** What a branch is, shown under the table. */
   readonly branchDescription: string;
 }
+
+const LINKED_PROJECT_OUTCOME = 'nothing is pushed; if the project has secrets they replace these, and the old values are kept in a .pre-capy.old file.'; // COPY-FLAG: the wording of EXISTING_PROJECT_OUTCOME
 
 const EXISTING_PROJECT_OUTCOME = ' (new project). Existing project: nothing is pushed; if it has secrets they replace these, and the old values are kept in a .pre-capy.old file.'; // COPY-FLAG
 
@@ -155,12 +159,25 @@ function variablesCell(count: number, projectChoice: boolean): string {
  * many variables of the `.env` will be encrypted and pushed. It is the whole summary, so there is no second confirmation.
  */
 export function setupDisplay(input: SetupDisplayInput): string {
+  if (input.existingProject === true) return linkDisplay(input);
   const rows: ReadonlyArray<readonly [string, string]> = [
     ['Org', input.org ?? TO_CHOOSE],
     ['Project', input.project ?? TO_CHOOSE],
     ['First branch', input.branch ?? TO_CHOOSE], // COPY-FLAG
     ['Protected', protectedCell(input.isProtected)], // COPY-FLAG
     ...(input.variables !== undefined && input.variables > 0 ? [['Variables', variablesCell(input.variables, input.projectChoice === true)] as const] : []),
+  ];
+  return `${table(['', ''], rows)}\n\n${input.branchDescription}`;
+}
+
+/** The table for linking the folder to an existing project: no first branch is made and nothing is protected, so those rows are not shown. */
+function linkDisplay(input: SetupDisplayInput): string {
+  const count = input.variables ?? 0;
+  const rows: ReadonlyArray<readonly [string, string]> = [
+    ['Org', input.org ?? TO_CHOOSE],
+    ['Project', input.project ?? TO_CHOOSE],
+    ['Branch', input.branch ?? TO_CHOOSE], // COPY-FLAG
+    ...(count > 0 ? [['Variables', `${count} ${count === 1 ? 'variable' : 'variables'}: ${LINKED_PROJECT_OUTCOME}`] as const] : []),
   ];
   return `${table(['', ''], rows)}\n\n${input.branchDescription}`;
 }

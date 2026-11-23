@@ -86,11 +86,13 @@ interface World {
   readonly listFails?: boolean;
   readonly signedIn?: boolean;
   readonly branchFails?: boolean;
+  /** The branches every project has. Default: none, as for a project whose first branch is not created yet. */
+  readonly branches?: ReadonlyArray<{ name: string; is_protected: boolean }>;
 }
 
 /** Fakes every network and sign-in edge; returns the spies and the order the service was called in. */
 function fakeWorld(world: World = {}): Calls {
-  const { orgs = [ORG], projects = [], listFails = false, signedIn = true, branchFails = false } = world;
+  const { orgs = [ORG], projects = [], listFails = false, signedIn = true, branchFails = false, branches = [] } = world;
   const record = mock((_event: string) => undefined);
   const authenticateSilent = spyOn(AuthService.prototype, 'authenticateSilent').mockImplementation(async (orgId?: string) =>
     signedIn
@@ -115,7 +117,7 @@ function fakeWorld(world: World = {}): Calls {
   });
   const listBranches = spyOn(ServiceClient.prototype, 'listBranches').mockImplementation(async () => {
     record('listBranches');
-    return [] as never;
+    return branches.map((b) => ({ id: `id-${b.name}`, project_id: 'proj-web', ...b })) as never;
   });
   const pushSecrets = spyOn(ServiceClient.prototype, 'pushSecrets').mockImplementation(async () => {
     record('pushSecrets');
@@ -343,16 +345,66 @@ describe('every answer given: create, then link, then push', () => {
 });
 
 describe('an existing project', () => {
-  test('--project links the folder to it with nothing else asked: no project is created', async () => {
-    const calls = fakeWorld({ projects: [{ id: 'proj-web', name: 'web', organization_id: ORG.id }] });
+  const PROD = [{ name: 'prod', is_protected: false }];
+  const PROD_AND_STAGING = [...PROD, { name: 'staging', is_protected: true }];
+
+  test('--project and --branch link the folder to that branch: no project is created, and no branch name is assumed', async () => {
+    const calls = fakeWorld({ projects: [{ id: 'proj-web', name: 'web', organization_id: ORG.id }], branches: PROD });
     spyOn(ServiceClient.prototype, 'getDecryptData').mockRejectedValue(
       new CapyError('No secrets', ERROR_CODES.NO_SECRETS, { status: 404 }),
     );
-    const out = await run({ project: 'web' });
+    const read = ServiceClient.prototype.getDecryptData as unknown as ReturnType<typeof spyOn>;
+    const out = await run({ project: 'web', branch: 'prod' });
     expect(out.exitCode).toBeUndefined();
-    expect(out.json).toMatchObject({ ok: true, created: false, project: { id: 'proj-web', name: 'web' }, branch: { name: 'development' }, pushed: 0 });
+    expect(out.json).toMatchObject({ ok: true, created: false, project: { id: 'proj-web', name: 'web' }, branch: { name: 'prod' }, pushed: 0 });
+    expect(read.mock.calls[0]?.[1]).toBe('prod');
     expect(calls.initializeProject).not.toHaveBeenCalled();
+    expect(calls.createBranch).not.toHaveBeenCalled();
     expect(readJson(folder('keep.lock'))).toMatchObject({ project_id: 'proj-web' });
+    expect(readFileSync(folder('.capy', 'branch'), 'utf-8').trim()).toBe('prod');
+  });
+
+  test('--project with no --branch asks which of the project branches, even when it has one: INIT_INPUT_REQUIRED, nothing read or written', async () => {
+    fakeWorld({ projects: [{ id: 'proj-web', name: 'web', organization_id: ORG.id }], branches: PROD });
+    const read = spyOn(ServiceClient.prototype, 'getDecryptData');
+    const out = await run({ project: 'web' });
+    expect(out.exitCode).toBe(3);
+    expect(out.json).toMatchObject({ ok: false, code: 'INIT_INPUT_REQUIRED' });
+    expect(fieldNames(out.json)).toEqual(['branch']);
+    const field = out.json!.elicitation.fields[0];
+    expect(field.options).toEqual([{ value: 'prod', label: 'prod' }]);
+    expect(field.default).toBeUndefined();
+    expect(out.json!.elicitation.details).toMatchObject({ project: { id: 'proj-web', name: 'web' }, branches: [{ name: 'prod', protected: false }] });
+    expect(out.json!.elicitation.answer.rerun).toContain('--project web --branch <branch> --json');
+    expect(out.json!.elicitation.display).not.toContain('First branch');
+    expect(read).not.toHaveBeenCalled();
+    expect(existsSync(folder('keep.lock'))).toBe(false);
+    expect(existsSync(folder('.capy', 'branch'))).toBe(false);
+  });
+
+  test('several branches: the form offers each, and marks the protected one', async () => {
+    fakeWorld({ projects: [{ id: 'proj-web', name: 'web', organization_id: ORG.id }], branches: PROD_AND_STAGING });
+    const out = await run({ project: 'web' });
+    expect(out.json!.elicitation.fields[0].options).toEqual([{ value: 'prod', label: 'prod' }, { value: 'staging', label: 'staging (protected)' }]);
+  });
+
+  test('--branch the project does not have is BRANCH_NOT_FOUND naming its branches: nothing read or written', async () => {
+    fakeWorld({ projects: [{ id: 'proj-web', name: 'web', organization_id: ORG.id }], branches: PROD });
+    const read = spyOn(ServiceClient.prototype, 'getDecryptData');
+    const out = await run({ project: 'web', branch: 'development' });
+    expect(out.exitCode).toBe(1);
+    expect(out.json).toMatchObject({ ok: false, code: 'BRANCH_NOT_FOUND', branches: ['prod'] });
+    expect(read).not.toHaveBeenCalled();
+    expect(existsSync(folder('keep.lock'))).toBe(false);
+  });
+
+  test('a project with no branches is BRANCH_NOT_FOUND: no branch is created or assumed', async () => {
+    const calls = fakeWorld({ projects: [{ id: 'proj-web', name: 'web', organization_id: ORG.id }] });
+    const out = await run({ project: 'web', branch: 'development' });
+    expect(out.exitCode).toBe(1);
+    expect(out.json).toMatchObject({ ok: false, code: 'BRANCH_NOT_FOUND', branches: [] });
+    expect(calls.createBranch).not.toHaveBeenCalled();
+    expect(existsSync(folder('keep.lock'))).toBe(false);
   });
 
   const WEB = { id: 'proj-web', name: 'web', organization_id: ORG.id };
@@ -360,7 +412,7 @@ describe('an existing project', () => {
   const variablesRowOf = (display: string): string => display.split('\n').find((line) => line.includes('Variables')) ?? '';
 
   test('with a project to choose, the summary states both outcomes, and choosing an existing project does what it says (secrets: replaced, copy kept, nothing pushed)', async () => {
-    const calls = fakeWorld({ projects: [WEB] });
+    const calls = fakeWorld({ projects: [WEB], branches: [{ name: 'development', is_protected: false }] });
     writeFileSync(folder('.env'), `API_KEY=${SENTINEL}\nDB_URL=other\n`, 'utf-8');
 
     const asked = await run();
@@ -377,7 +429,7 @@ describe('an existing project', () => {
       keep_file: JSON.stringify(keep),
       env_content: `API_KEY=capy:${deriveResourceId('development', 'API_KEY')}:${Encryptor.encrypt('remote-value', 'a'.repeat(64))}\n`,
     } as never);
-    const out = await run({ project: WEB.id });
+    const out = await run({ project: WEB.id, branch: 'development' });
 
     expect(out.json).toMatchObject({ ok: true, created: false, pushed: 0, pulled: 1 });
     expect(calls.pushSecrets).not.toHaveBeenCalled();
@@ -391,12 +443,12 @@ describe('an existing project', () => {
   });
 
   test('with a project to choose, an existing project with no secrets leaves the .env as it is and pushes nothing, as the summary says', async () => {
-    const calls = fakeWorld({ projects: [WEB] });
+    const calls = fakeWorld({ projects: [WEB], branches: [{ name: 'development', is_protected: false }] });
     writeFileSync(folder('.env'), `API_KEY=${SENTINEL}\n`, 'utf-8');
     const asked = await run();
     expect(variablesRowOf(asked.json!.elicitation.display)).toContain('nothing is pushed');
     spyOn(ServiceClient.prototype, 'getDecryptData').mockRejectedValue(new CapyError('No secrets', ERROR_CODES.NO_SECRETS, { status: 404 }));
-    const out = await run({ project: WEB.id });
+    const out = await run({ project: WEB.id, branch: 'development' });
     expect(out.json).toMatchObject({ ok: true, created: false, pushed: 0 });
     expect(calls.pushSecrets).not.toHaveBeenCalled();
     expect(readFileSync(folder('.env'), 'utf-8')).toBe(`API_KEY=${SENTINEL}\n`);

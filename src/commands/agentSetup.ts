@@ -32,7 +32,6 @@ import { excludeSystemProject } from '../system/reservedProjectName';
 import { orgKeyMissingMessage } from '../core/orgKeyMissing';
 import { givenSetupFlags, pendingDisagreements, pendingSetupOf } from '../core/pendingSetup';
 import {
-  FIRST_BRANCH_DEFAULT,
   answerProblem,
   chooseOrg,
   chooseProject,
@@ -402,12 +401,50 @@ function dryRunOutcome(ctx: RunContext, project: object, branch: object, pushes:
 async function act(deps: AgentSetupDeps, setup: SetupOptions, ctx: RunContext, projects: readonly ProjectRef[]): Promise<AgentOutcome> {
   const choice = chooseProject(projects, setup);
   if (choice.kind === 'unknown' || choice.kind === 'ambiguous') return problemOutcome(projectChoiceProblem(choice, ctx.org));
-  if (choice.kind === 'existing') {
-    const branch = setup.branch ?? FIRST_BRANCH_DEFAULT;
-    if (ctx.dryRun) return dryRunOutcome(ctx, choice.project, branchJson(branch, null), 0);
-    return linkExisting(deps, ctx, choice.project, branch);
-  }
+  if (choice.kind === 'existing') return actExisting(deps, setup, ctx, choice.project);
   return actNew(deps, setup, ctx, projects, choice.kind === 'ask' ? choice.projects : undefined);
+}
+
+/**
+ * An existing project: the branch is one of the project's own, and the human names it. No name is assumed, even when
+ * the project has one branch: a project's first branch can have any name, and pulling or pushing a name the project
+ * does not have splits its secrets across a branch nobody created. With no `--branch` the form asks; a `--branch` the
+ * project does not have is BRANCH_NOT_FOUND; a project with no branch at all needs a terminal to create its first one.
+ */
+async function actExisting(deps: AgentSetupDeps, setup: SetupOptions, ctx: RunContext, project: ProjectRef): Promise<AgentOutcome> {
+  const listed = await settle(() => deps.serviceClient.listBranches(project.id));
+  if (!listed.ok) return refusalOutcome({ ...refusalFor(listed.error), extra: { project, org: ctx.org } });
+  const names = listed.value.map((b) => b.name);
+  if (names.length === 0) {
+    return refusalOutcome({
+      code: ERROR_CODES.BRANCH_NOT_FOUND,
+      message: `${project.name} has no branches yet. Ask the human to run \`capy\` in a terminal in this folder and create one there.`, // COPY-FLAG: the terminal's own wording
+      exitCode: 1,
+      extra: { project, org: ctx.org, branches: names },
+    });
+  }
+  if (setup.branch === undefined) {
+    return needsInput(setupForm({
+      org: ctx.org,
+      existingProject: project,
+      branchChoices: listed.value.map((b) => ({ name: b.name, isProtected: b.is_protected === true })),
+      answers: setup,
+      variables: ctx.env.variables,
+      envPath: deps.options.envPath,
+      dryRun: ctx.dryRun,
+      devMode: deps.devMode,
+    }));
+  }
+  if (!names.includes(setup.branch)) {
+    return refusalOutcome({
+      code: ERROR_CODES.BRANCH_NOT_FOUND,
+      message: `${project.name} has no branch ${setup.branch} (branches: ${names.join(', ')}).`, // COPY-FLAG
+      exitCode: 1,
+      extra: { project, org: ctx.org, branches: names },
+    });
+  }
+  if (ctx.dryRun) return dryRunOutcome(ctx, project, branchJson(setup.branch, null), 0);
+  return linkExisting(deps, ctx, project, setup.branch);
 }
 
 /** The organization's projects in the shape `existingProjectNamed` reads. */

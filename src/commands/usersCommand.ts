@@ -1,6 +1,6 @@
 import { ServiceClient, MemberDetail } from '../service/serviceClient';
 import { resolveOrgContext, type OrgContext } from '../core/orgContext';
-import { CapyError, ERROR_CODES } from '../types/index';
+import { exitOrgSelectionRequired, isOrgSelectionRequired } from '../core/orgSelection';
 import { InteractiveTable } from '../ui/interactiveTable';
 import { Spinner } from '../ui/spinner';
 import { excludeSystemProject } from '../system/reservedProjectName';
@@ -82,9 +82,8 @@ export class UsersCommand {
     try {
       return await resolveOrgContext(this.apiUrl, this.devMode, { promptForOrg: !json });
     } catch (err) {
-      if (!json || !(err instanceof CapyError) || err.code !== ERROR_CODES.ORG_SELECTION_REQUIRED) throw err;
-      console.log(JSON.stringify({ ok: false, code: err.code, message: err.message, orgs: err.details?.orgs ?? [] }, null, 2));
-      return process.exit(1);
+      if (!json || !isOrgSelectionRequired(err)) throw err;
+      return exitOrgSelectionRequired(err);
     }
   }
 

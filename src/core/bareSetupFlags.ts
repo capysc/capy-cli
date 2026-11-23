@@ -16,7 +16,7 @@ export function bareSetupOptions(): readonly Option[] {
     new Option('--org <id|name>', 'the organization to set this folder up in (asked when you belong to more than one)'), // COPY-FLAG
     new Option('--project <id|name>', 'link this folder to an existing project in the organization, or "new" to create one'), // COPY-FLAG
     new Option('--name <name>', 'the name of a new project'), // COPY-FLAG
-    new Option('--branch <name>', 'the first branch; a Capy branch works like a git branch (offered by default: development)'),
+    new Option('--branch <name>', 'the first branch of a new project (offered by default: development), or the branch of an existing project to use; a Capy branch works like a git branch'), // COPY-FLAG
     new Option('--protected [yes|no]', 'whether the first branch is protected (invite-only)'),
     new Option('--no-protected', 'Create it open to the project'),
     new Option('--json', 'emit machine-readable JSON instead of the human UI'),

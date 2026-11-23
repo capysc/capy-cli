@@ -190,7 +190,7 @@ function commandDoc(cmd: Command, parentPath: string): CliCommandDoc {
 
 // COPY-FLAG: minimal and neutral.
 const ROOT_DESCRIPTION =
-  'Bare `capy` syncs a folder that is a Capy project. In a folder that is not one, in a terminal it asks how to set it up; with --json, --non-tty or no terminal it asks nothing: with questions left it refuses with INIT_INPUT_REQUIRED (exit 3) and one elicitation form, and when every answer is given as a flag it creates the project and first branch, links the folder (keep.lock) and pushes the .env.';
+  'Bare `capy` syncs a folder that is a Capy project. In a folder that is not one, in a terminal it asks how to set it up; with --json, --non-tty or no terminal it asks nothing: with questions left it refuses with INIT_INPUT_REQUIRED (exit 3) and one elicitation form, and when every answer is given as a flag it creates the project and first branch, links the folder (keep.lock) and pushes the .env. Linking to an existing project always needs --branch naming one of that project\'s branches.';
 
 /** Pure: walks the fully-registered `program` tree into a stable JSON document. */
 export function buildCliHelpDoc(program: Command): CliHelpDoc {
