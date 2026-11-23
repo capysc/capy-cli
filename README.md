@@ -70,14 +70,16 @@ For a new install it uses `/usr/local/bin` when that folder is on your `PATH` an
 Use the native PowerShell installer, not `install.sh`:
 
 ```powershell
-irm https://capy.sc/install.ps1 | iex
+irm https://www.capy.sc/install.ps1 | iex
 capy --version
 ```
+
+Use the `www.` address: Windows PowerShell 5.1, the version built into Windows, does not follow the redirect from `capy.sc`. The Windows binary is code signed; see [Code signing policy](#code-signing-policy).
 
 Or download and run it using Windows' `curl.exe`:
 
 ```powershell
-$installer = curl.exe -fsSL https://capy.sc/install.ps1 | Out-String
+$installer = curl.exe -fsSL https://www.capy.sc/install.ps1 | Out-String
 if ($LASTEXITCODE -ne 0) { throw 'Installer download failed' }
 Invoke-Expression $installer
 capy --version
@@ -364,6 +366,19 @@ Capy ships with five runtime dependencies. Each is a load-bearing piece of the C
 Live audit status and the full transitive dep tree: [github.com/capysc/capy-cli/network/dependencies](https://github.com/capysc/capy-cli/network/dependencies).
 
 [Dependabot](https://docs.github.com/en/code-security/dependabot) keeps dependencies current — see [`.github/dependabot.yml`](./.github/dependabot.yml). It opens weekly PRs for `npm` and `github-actions`, with dev dependencies grouped into a single PR per ecosystem.
+
+## Code signing policy
+
+Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by [SignPath Foundation](https://signpath.org).
+
+The Windows binary (`capy.exe`) on [GitHub Releases](https://github.com/capysc/capy-cli/releases) is built from this repository by GitHub Actions ([`release-binaries.yml`](./.github/workflows/release-binaries.yml)) and signed by SignPath. Nothing built outside that workflow is signed.
+
+- **Committers and reviewers:** [members of the capysc organization](https://github.com/orgs/capysc/people). Changes from anyone else arrive as pull requests and are reviewed by a member before they are merged.
+- **Approvers:** owners of the [capysc organization](https://github.com/capysc). Every signing request is approved by hand in SignPath.
+
+All team members use multi-factor authentication for GitHub and SignPath.
+
+**Privacy:** Capy sends data only to the Capy service you sign in to (or your own server with `capy byoc`), and to the hosting platforms you deploy to when you ask it to. Secrets are encrypted on your machine first; the service never receives plaintext values or keys. See the [privacy policy](https://www.capy.sc/privacy).
 
 ## Security
 

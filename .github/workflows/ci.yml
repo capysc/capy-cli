@@ -8,6 +8,47 @@ on:
   workflow_dispatch:
 
 jobs:
+  # Builds capy.exe the way release-binaries.yml does and runs it on Windows,
+  # so a change to the Windows build (branded Node base, pkg) is caught on the
+  # PR rather than on release day.
+  windows-binary:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Typecheck Windows build script
+        run: bun run typecheck:windows
+
+      - name: Build capy.exe with Capy's version info
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION=$(node -p "require('./package.json').version")
+          bun run bundle
+          bun scripts/windows/prepare-node-base.ts --version "$VERSION" --cache .pkg-cache-win
+          cd build
+          PKG_CACHE_PATH=../.pkg-cache-win ../node_modules/.bin/pkg . --public-packages "*" --public --target node22-win-x64 --output ../build-win/capy.exe
+
+      - name: Run capy.exe and check its version info
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $exe = Resolve-Path 'build-win\capy.exe'
+          $printed = (& $exe --version | Out-String).Trim()
+          if ($printed -ne $version) { throw "capy --version printed '$printed', expected '$version'" }
+          $info = (Get-Item -LiteralPath $exe).VersionInfo
+          Write-Host "ProductName=$($info.ProductName) ProductVersion=$($info.ProductVersion) CompanyName=$($info.CompanyName)"
+          if ($info.ProductName -ne 'Capy' -or $info.ProductVersion -ne $version) {
+            throw "capy.exe version info says '$($info.ProductName) $($info.ProductVersion)', expected 'Capy $version'"
+          }
+          & $exe --help | Select-Object -First 3
+
   test:
     runs-on: ubuntu-latest
 
