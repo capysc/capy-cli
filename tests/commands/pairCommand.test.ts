@@ -177,9 +177,60 @@ describe('pairCommand', () => {
       organizations: [{ id: 'org-123', workos_org_id: 'wo_1', name: 'Acme' }],
     });
     mockInstallDeviceGrantSession.mockResolvedValue({ success: true, organization_id: 'org-123', user_id: EXCHANGE_USER.id });
+    mockAuthenticateSilent.mockResolvedValue({ success: true, organization_id: 'org-123', user_id: EXCHANGE_USER.id });
     mockPickupDevicePairing.mockImplementation(async () => ({ sealed: await sealAsBrowser(buildPayload(), capturedPairPublicKey()) }));
     mockReadLocalRoot.mockReturnValue(null);
     mockRenderTerminalQr.mockReturnValue(null);
+  });
+
+  test('a conflict in a later organization refuses all key writes', async () => {
+    const first = buildPayload().entries[0];
+    mockPickupDevicePairing.mockImplementation(async () => ({ sealed: await sealAsBrowser(buildPayload({ entries: [first, { ...first, org_id: 'org-second' }] }), capturedPairPublicKey()) }));
+    mockReadLocalRoot.mockImplementation((org: string) => org === 'org-second' ? Buffer.alloc(32, 9) : null);
+    const { stdout } = await withCapturedIo(async () => {
+      await expect(pairCommand({ json: true })).rejects.toThrow();
+    });
+    expect(JSON.parse(stdout).code).toBe('PAIR_LOCAL_KEY_CONFLICT');
+    expect(mockSaveLocalRoot).not.toHaveBeenCalled();
+    expect(mockWriteOrgKeyFileRaw).not.toHaveBeenCalled();
+  });
+
+  test('the selected current Transport scopes to its organization before unwrapping, even when the grant default differs', async () => {
+    const org = 'org-selected';
+    const root = Buffer.alloc(32, 5);
+    const transportId = '11111111-1111-4111-8111-111111111111';
+    const inner = encryptMasterKey(Buffer.alloc(32, 8), deriveLocalInnerKey(root), masterKeyAAD(EXCHANGE_USER.id, org));
+    const keyFile = { version: '2.0', org_id: org, encrypted_master_key: 'synthetic-transport-outer', wrapping_method: 'local_root', transport_id: transportId };
+    const payload: PairingPayload = { v: 1, entries: [{ org_id: org, user_id: EXCHANGE_USER.id, k_local: root.toString('base64url'), key_enc: JSON.stringify(keyFile) }] };
+    mockPickupDevicePairing.mockImplementation(async () => ({ sealed: await sealAsBrowser(payload, capturedPairPublicKey()) }));
+    mockAuthenticateSilent.mockResolvedValue({ success: true, organization_id: org, user_id: EXCHANGE_USER.id });
+    mockCoDecryptTransport.mockResolvedValue({ plaintext: inner });
+    mockWrapInstalledCustody.mockResolvedValue({ ciphertext: 'synthetic-installation-outer' });
+    await withCapturedIo(() => pairCommand({ json: true }));
+    expect(mockAuthenticateSilent).toHaveBeenCalledWith(org);
+    expect(mockCoDecryptTransport).toHaveBeenCalledWith(org, keyFile.encrypted_master_key, undefined, transportId);
+    expect(mockWrapInstalledCustody).toHaveBeenCalledWith(org, inner);
+    expect(mockWriteOrgKeyFileRaw).toHaveBeenCalledWith(org, expect.any(String), EXCHANGE_USER.id);
+  });
+
+  test('a scope change to another account or organization refuses Transport access and every key write', async () => {
+    const entry = buildPayload().entries[0];
+    const keyFile = { ...JSON.parse(entry.key_enc), transport_id: '11111111-1111-4111-8111-111111111111' };
+    const payload = buildPayload({ entries: [{ ...entry, key_enc: JSON.stringify(keyFile) }] });
+    mockPickupDevicePairing.mockImplementation(async () => ({ sealed: await sealAsBrowser(payload, capturedPairPublicKey()) }));
+    for (const identity of [{ success: true, user_id: 'user-other', organization_id: 'org-123' },
+      { success: true, user_id: EXCHANGE_USER.id, organization_id: 'org-other' }]) {
+      mockAuthorizeDevice.mockClear();
+      mockAuthenticateSilent.mockResolvedValue(identity);
+      const { stdout } = await withCapturedIo(async () => {
+        await expect(pairCommand({ json: true })).rejects.toThrow();
+      });
+      expect(stdout).toContain('The selected Transport account or organization could not be verified.');
+    }
+    expect(mockCoDecryptTransport).not.toHaveBeenCalled();
+    expect(mockWrapInstalledCustody).not.toHaveBeenCalled();
+    expect(mockSaveLocalRoot).not.toHaveBeenCalled();
+    expect(mockWriteOrgKeyFileRaw).not.toHaveBeenCalled();
   });
 
   test('writes local.key + key.enc for every entry matching the logged-in user, and reports it under --json', async () => {
