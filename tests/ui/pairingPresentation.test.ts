@@ -203,7 +203,7 @@ describe('pairing contract', () => {
     expect(AGENTS_BLOCK).toContain('run `capy pair --email <email> --json`');
     expect(AGENTS_BLOCK).toContain('show the human its `url`, `code` and `expires_at`');
     expect(AGENTS_BLOCK).toContain('"keys": "already_present"');
-    expect(ELICITATION_HELP).toContain('show the human the `url`, the `code` and `expires_at`');
+    expect(ELICITATION_HELP).toContain('show the human the `url`, the `code`, the `fingerprint` (the page shows the same one) and `expires_at`');
     expect(readmeSection).toContain('capy pair --email <email> --json');
     expect(readmeSection).toContain('`PAIR_ACCOUNT_MISMATCH`');
     expect(readmeSection).toContain('`"keys": "already_present"`');
