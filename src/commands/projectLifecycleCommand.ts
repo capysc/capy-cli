@@ -26,6 +26,7 @@ import { CapyError, ERROR_CODES } from '../types/index';
 import type { DeleteProjectResponse, LiveDeployTokenInfo } from '../service/serviceClient';
 import type { ElicitationConfirm, ElicitationForm } from '../ui/elicitation';
 import { chooseProjectDisplay, deleteProjectDisplay, restoreProjectDisplay } from '../ui/elicitationDisplay';
+import { refuse, settle, type Refusal, type Settled } from './refusal';
 import { formatRelativeTime } from '../ui/relativeTime';
 import { variableBranchesFromKeep, type VariableBranches } from '../core/keepVariableNames';
 
@@ -88,15 +89,7 @@ const CODED_FORBIDDEN: ReadonlySet<string> = new Set([
   ERROR_CODES.SYSTEM_STORE_IMMUTABLE,
 ]);
 
-export interface Refusal {
-  readonly code: string;
-  readonly message: string;
-  readonly exitCode: number;
-  /** Extra structured fields for `--json` (the token list, the ambiguous ids). */
-  readonly extra?: Readonly<Record<string, unknown>>;
-  /** Extra prose lines for the human refusal. */
-  readonly lines?: readonly string[];
-}
+export type { Refusal };
 
 /** The code a thrown error carries: the server's own 403 code when the client wrapped it as PERMISSION_DENIED. */
 function codeOf(err: CapyError): string {
@@ -139,26 +132,10 @@ export function refusalFor(err: unknown): Refusal {
   return { code, message: err.message, exitCode: 1 };
 }
 
-/** The refusal on the right stream: JSON on stdout under `--json`, prose on stderr otherwise. Never returns. */
-export function refuse(json: boolean, r: Refusal): never {
-  if (json) {
-    console.log(JSON.stringify({ ok: false, code: r.code, error: r.message, ...(r.extra ?? {}) }, null, 2));
-  } else {
-    console.error(r.message);
-    (r.lines ?? []).forEach((l) => console.error(l));
-  }
-  return process.exit(r.exitCode);
-}
+export { refuse };
 
-export type Settled<T> = { readonly ok: true; readonly value: T } | { readonly ok: false; readonly error: unknown };
-
-/** Runs `fn` and returns what it threw as a value, so a refusal's `process.exit` is never caught by the code that raised it. */
-export async function settle<T>(fn: () => Promise<T>): Promise<Settled<T>> {
-  return fn().then(
-    (value) => ({ ok: true as const, value }),
-    (error: unknown) => ({ ok: false as const, error }),
-  );
-}
+export { settle };
+export type { Settled };
 
 /** Prose goes to stdout in human mode and to stderr under `--json`, so stdout stays pure JSON. */
 function say(json: boolean, line: string): void {

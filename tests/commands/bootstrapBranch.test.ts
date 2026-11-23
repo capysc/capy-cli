@@ -19,7 +19,6 @@ mock.module('../../src/crypto/keyResolver', () => ({
 import inquirer from 'inquirer';
 import { CapyCommand } from '../../src/commands/capyCommand';
 import { ServiceClient } from '../../src/service/serviceClient';
-import { AuthService } from '../../src/auth/authService';
 import { Branch, CapyError, CliOptions, ERROR_CODES } from '../../src/types/index';
 
 const PROJECT = { id: 'proj-1', name: 'marketing', organization_id: 'org-1' };
@@ -104,31 +103,28 @@ describe('bootstrapExistingProject: the branch comes from the project', () => {
     expect(existsSync(join(process.cwd(), '.capy'))).toBe(false);
   });
 
-  test('bare capy with nobody to answer, in a folder that is no project yet: SETUP_NEEDS_TTY on stdout, exit 3, no sign-in, no picker, nothing written', async () => {
-    class Exit extends Error {
-      constructor(readonly code: number | undefined) {
-        super('exit');
-      }
-    }
-    const exit = spyOn(process, 'exit').mockImplementation(((code?: number) => {
-      throw new Exit(code);
-    }) as never);
+  test('--branch naming one of the project branches answers the question: no picker, and that branch is joined', async () => {
     const log = spyOn(console, 'log').mockImplementation(() => {});
     const prompt = spyOn(inquirer, 'prompt');
-    const signIn = spyOn(AuthService.prototype, 'authenticate');
     try {
-      const ended = await new CapyCommand({ protocol: true }, false).execute().then(() => undefined, (err: unknown) => err);
-      expect((ended as Exit).code).toBe(3);
-      expect(JSON.parse(log.mock.calls.map((c) => c.join(' ')).join('\n'))).toMatchObject({ ok: false, code: 'SETUP_NEEDS_TTY' });
+      const { cmd, read } = commandFor([branchNamed('prod'), branchNamed('staging')], { setup: { branch: 'staging', json: false, nonTty: false, agentMode: false } });
+      await bootstrap(cmd);
       expect(prompt).not.toHaveBeenCalled();
-      expect(signIn).not.toHaveBeenCalled();
-      expect(existsSync(join(process.cwd(), '.capy'))).toBe(false);
+      expect(read.mock.calls[0]?.[1]).toBe('staging');
+      expect(activeBranch()).toBe('staging');
     } finally {
-      exit.mockRestore();
-      log.mockRestore();
       prompt.mockRestore();
-      signIn.mockRestore();
+      log.mockRestore();
     }
+  });
+
+  test('--branch naming a branch the project does not have: BRANCH_NOT_FOUND naming its branches, reads and writes nothing', async () => {
+    const { cmd, read } = commandFor([branchNamed('prod')], { setup: { branch: 'development', json: false, nonTty: false, agentMode: false } });
+    const refusal = await bootstrap(cmd).then(() => undefined, (err: unknown) => err);
+    expect((refusal as CapyError).code).toBe(ERROR_CODES.BRANCH_NOT_FOUND);
+    expect((refusal as CapyError).details?.branches).toEqual(['prod']);
+    expect(read).not.toHaveBeenCalled();
+    expect(existsSync(join(process.cwd(), 'keep.lock'))).toBe(false);
   });
 
   test('a project with no branches: the person names the first branch, it is created, and the join goes on with it', async () => {

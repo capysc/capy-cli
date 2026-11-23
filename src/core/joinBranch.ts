@@ -141,9 +141,9 @@ export function resolveJoinBranch(deps: JoinBranchDeps): Promise<string> {
     promptPick: async (branches, defaultName) =>
       deps.named !== undefined
         ? namedBranchOf(deps, deps.named, branches)
-        : promptBranchPick(deps.canAsk, branches, defaultName, `Joining ${project.name}. Agents: show the human these branches and ask which one. Never pick it yourself.`, (names) => // COPY-FLAG
+        : promptBranchPick(deps.canAsk, branches, defaultName, `Joining ${project.name}.`, (names) =>
           new CapyError(
-            `Joining ${project.name} needs a branch (branches: ${names.join(', ')}). Ask which one to use, then run \`capy\` in a terminal and pick it.`, // COPY-FLAG
+            `Joining ${project.name} needs a branch (branches: ${names.join(', ')}). Pass the one to use with \`--branch <name>\`.`, // COPY-FLAG
             ERROR_CODES.NO_ACTIVE_BRANCH,
             { branches: names },
           )),

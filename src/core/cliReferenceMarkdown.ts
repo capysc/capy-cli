@@ -4,7 +4,7 @@
  * `scripts/gen-cli-reference.ts` and the staleness test both call the exact
  * same renderer — there is nowhere for the two to drift apart.
  */
-import type { CliCommandDoc, CliHelpDoc, CliModeDoc, CliOptionDoc } from './cliHelpDoc';
+import type { CliCommandDoc, CliHelpDoc, CliModeDoc, CliOptionDoc, CliRootDoc } from './cliHelpDoc';
 
 function usageLine(cmd: CliCommandDoc): string {
   const args = cmd.arguments
@@ -64,6 +64,25 @@ function renderCommand(cmd: CliCommandDoc, depth: number): string {
   return lines.join('\n');
 }
 
+/** Bare `capy`: what it does and the flags only it takes. A doc without it (an older one) has no section. */
+function renderRoot(root: CliRootDoc | undefined): string[] {
+  if (root === undefined) return [];
+  return [
+    '## Bare `capy`', // COPY-FLAG
+    '',
+    root.description,
+    '',
+    '```',
+    'capy [options]',
+    '```',
+    '',
+    optionsTable(root.options),
+    '',
+    `JSON support: ${root.supportsJson ? 'yes (`--json`)' : 'no'}`,
+    '',
+  ];
+}
+
 /** The schemas section; a doc with no schemas (an older one) has none. */
 function renderSchemas(doc: CliHelpDoc): string[] {
   const entries = Object.entries(doc.schemas ?? {});
@@ -87,6 +106,7 @@ export function renderCliReferenceMarkdown(doc: CliHelpDoc): string {
     '',
     `Version \`${doc.version}\`. Generated from \`capy help --json\`.`,
     '',
+    ...renderRoot(doc.root),
     '## Commands',
     '',
     ...doc.commands.map((cmd) => renderCommand(cmd, 0)),

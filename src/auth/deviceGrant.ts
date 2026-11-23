@@ -37,14 +37,17 @@ export interface DeviceAuthorizeResult {
   verification_uri: string;
   verification_uri_complete?: string;
   expires_in: number;
+  readonly expires_at?: string;
   interval: number;
 }
 
-async function postJson<T>(url: string, body: Record<string, unknown>): Promise<{ ok: boolean; status: number; data: T & { error?: string; code?: string } }> {
+async function postJson<T>(url: string, body: Record<string, unknown>, signal?: AbortSignal): Promise<{ ok: boolean; status: number; data: T & { error?: string; code?: string } }> {
   const res = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
+    // Only the callers that ask for a bound send one; every other request is exactly as it was.
+    ...(signal ? { signal } : {}),
   });
   const data = (await res.json().catch(() => ({}))) as T & { error?: string; code?: string };
   return { ok: res.ok, status: res.status, data };
@@ -115,9 +118,12 @@ interface DeviceTokenResponseBody {
   organizations?: Organization[];
 }
 
-/** One `POST /auth/device/token` attempt. Never throws for the four expected polling states. */
-export async function pollDeviceTokenOnce(apiUrl: string, deviceCode: string): Promise<DeviceTokenPoll> {
-  const { status: httpStatus, data } = await postJson<DeviceTokenResponseBody>(`${apiUrl}/auth/device/token`, { device_code: deviceCode });
+/**
+ * One `POST /auth/device/token` attempt. Never throws for the four expected polling states.
+ * `options.signal` bounds the request (`capy pair --wait` passes a timeout); without it the request is unbounded, as before.
+ */
+export async function pollDeviceTokenOnce(apiUrl: string, deviceCode: string, options: { readonly signal?: AbortSignal } = {}): Promise<DeviceTokenPoll> {
+  const { status: httpStatus, data } = await postJson<DeviceTokenResponseBody>(`${apiUrl}/auth/device/token`, { device_code: deviceCode }, options.signal);
 
   // Success is a STRUCTURAL fact, never inferred from the HTTP status alone
   // (pending is ALSO 200): no `status` field, and a token actually arrived.
