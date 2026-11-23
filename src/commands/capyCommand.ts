@@ -49,7 +49,7 @@ import { isProjectDeletedError } from '../errors/projectDeleted';
 import { cleanupOrgData } from '../cleanup/orgCleanup';
 import { formatSnippet } from './statusCommand';
 import { compareSecrets, hashValue, type DiffResult } from '../sync/compareSecrets';
-import { baseHashOf, changesToMatch, commitFolder, envBlobOf, isStaleBase, keepForEnv, pinnedHashes, snapshotFrom, type Snapshot } from '../sync/commit';
+import { baseHashOf, changesToMatch, commitFolder, envBlobOf, isStaleBase, keepForEnv, pinnedHashes, remoteHashesFrom, snapshotFrom, type Snapshot } from '../sync/commit';
 import {
   conflictFlagsOrExit,
   conflictRefusalFor,
@@ -1716,7 +1716,7 @@ export class CapyCommand {
         const remotePlaintext = Object.fromEntries(
           Object.entries(snapshot.entries).flatMap(([key, entry]) => (entry.plaintext === undefined ? [] : [[key, entry.plaintext] as const])),
         );
-        const remoteHashes = Object.fromEntries(Object.entries(remotePlaintext).map(([key, value]) => [key, hashValue(value)]));
+        const remoteHashes = remoteHashesFrom(snapshot);
         this.debug('remote hashes', remoteHashes);
 
         // Bootstrap only (CAP-303): an existing keep.lock is git-owned and is

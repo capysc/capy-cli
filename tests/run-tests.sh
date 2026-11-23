@@ -27,6 +27,7 @@ ISOLATED_FILES=(
   tests/commands/branchKeepFile.test.ts
   tests/commands/capyCommand.test.ts
   tests/commands/staleSyncHash.test.ts
+  tests/commands/statusSeesNewerPushes.test.ts
   tests/commands/readOnlyRun.e2e.test.ts
   tests/commands/kickCommand.test.ts
   tests/commands/usersWithoutFolder.test.ts

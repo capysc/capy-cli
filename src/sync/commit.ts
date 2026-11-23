@@ -199,10 +199,28 @@ export function snapshotFrom(
   };
 }
 
+/** Hash of each value the branch holds on the server that this key can decrypt. A line it cannot decrypt is left out. */
+export function remoteHashesFrom(snapshot: Snapshot): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(snapshot.entries).flatMap(([name, entry]) => (entry.plaintext === undefined ? [] : [[name, hashValue(entry.plaintext)] as const])),
+  );
+}
+
 export type CommitClient = Pick<ServiceClient, 'getDecryptData' | 'pushSecrets'>;
 
-export async function readSnapshot(client: CommitClient, projectId: string, branch: string, projectKey: string): Promise<Snapshot> {
-  return snapshotFrom(await client.getDecryptData(projectId, branch, undefined, true), branch, projectKey);
+/** The branch's latest on the server (no pinned `keep_hash`: whatever was pushed last). `timeoutMs` bounds the read. */
+export async function readSnapshot(
+  client: CommitClient,
+  projectId: string,
+  branch: string,
+  projectKey: string,
+  timeoutMs?: number,
+): Promise<Snapshot> {
+  const data =
+    timeoutMs === undefined
+      ? await client.getDecryptData(projectId, branch, undefined, true)
+      : await client.getDecryptData(projectId, branch, undefined, true, undefined, timeoutMs);
+  return snapshotFrom(data, branch, projectKey);
 }
 
 // ── Building the keep ───────────────────────────────────────────────────────
