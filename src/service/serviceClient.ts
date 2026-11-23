@@ -14,6 +14,7 @@ import { createHash } from 'crypto';
 import { Encryptor } from '../crypto/encryptor';
 import { deriveResourceId } from '../crypto/resourceId';
 import { debug } from '../ui/debug';
+import { snippetWithEncryption } from '../files/valuePreview';
 import type { RateInfo } from '../utils/pool';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
@@ -692,7 +693,7 @@ export class ServiceClient {
         } else {
           const resourceId = deriveResourceId(activeBranch, key);
           const encrypted = Encryptor.encrypt(value, encryptionKey);
-          const snippetValue = this.createSnippetWithEncryption(value, encrypted);
+          const snippetValue = snippetWithEncryption(value, encrypted);
           encryptedVars[key] = `capy:${resourceId}:${snippetValue}`;
           resultVariables[key] = {
             resource_id: resourceId,
@@ -875,25 +876,6 @@ export class ServiceClient {
       return res.status === 200;
     } catch {
       return false;
-    }
-  }
-
-  /**
-   * Creates a snippet-enhanced encrypted value for better usability (same logic as FileManager)
-   */
-  private createSnippetWithEncryption(originalValue: string, encryptedValue: string): string {
-    const valueLength = originalValue.length;
-
-    if (valueLength <= 8) {
-      const snippet = originalValue.slice(-1);
-      return `${encryptedValue}...${snippet}`;
-    } else if (valueLength <= 16) {
-      const snippet = originalValue.slice(-3);
-      return `${encryptedValue}...${snippet}`;
-    } else {
-      const firstSnippet = originalValue.slice(0, 4);
-      const lastSnippet = originalValue.slice(-4);
-      return `${firstSnippet}...${encryptedValue}...${lastSnippet}`;
     }
   }
 
