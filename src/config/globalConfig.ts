@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync, rmSync } from 'fs';
 import { homedir } from 'os';
 import { join } from 'path';
 import type { KeepFile, SyncState } from '../types/index';
@@ -16,6 +16,16 @@ export function getAuthSessionPath(userId?: string): string {
     return join(getGlobalCapyDir(), 'auth', 'sessions', `${userId}.json`);
   }
   return join(getGlobalCapyDir(), 'auth', 'session.json');
+}
+
+/**
+ * The one pending `capy pair` grant (agent mode): written by the start run, read by `capy pair --wait`. Removal is
+ * decided in `auth/pairing/pendingGrant.ts` (approval seen, expiry, denial, cancel, an expired grant at the start of
+ * any other agent-mode run, an unreadable file, replacement by a new start run). Under the global dir, so `capy-dev`
+ * and `capy-staging` keep their own.
+ */
+export function getPairPendingPath(): string {
+  return join(getGlobalCapyDir(), 'pair', 'pending.json');
 }
 
 export function getOrgKeyPath(orgId: string, userId?: string): string {
@@ -157,6 +167,26 @@ export function hasOrgKey(orgId: string, userId?: string): boolean {
 }
 
 /**
+ * Whether both key files of this org+user are on this machine and shaped like what `capy pair` and `capy transport`
+ * write: `local.key` decodes to a 32-byte K_local, and `key.enc` is JSON with a non-empty `encrypted_master_key`. A
+ * missing, truncated or corrupt file is not usable. This is a shape check only: it cannot tell a stale key from a
+ * current one, which needs the service.
+ */
+export function hasUsableOrgKeys(orgId: string, userId?: string): boolean {
+  if (readLocalRoot(orgId, userId) === null) return false;
+  const raw = readFileOrNull(getOrgKeyPath(orgId, userId));
+  if (raw === null) return false;
+  try {
+    const data: unknown = JSON.parse(raw);
+    if (typeof data !== 'object' || data === null) return false;
+    const blob = (data as { readonly encrypted_master_key?: unknown }).encrypted_master_key;
+    return typeof blob === 'string' && blob !== '';
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Reads `key.enc`'s file content verbatim (the JSON `saveMasterKey` wrote,
  * unparsed) — for `capy transport`/`capy pair` (CAP-684), which move the
  * file "as-is" rather than decomposing and re-wrapping it. `readMasterKey`
@@ -190,6 +220,39 @@ export function readProjectKeyCache(
 
 export function saveAuthSession(token: object, userId?: string): void {
   writeSecureFile(getAuthSessionPath(userId), JSON.stringify(token, null, 2));
+}
+
+/**
+ * Writes the pending pair grant, mode 0600, replacing any earlier one. The new content is staged in its own fresh file
+ * (so no earlier file's mode carries over) and moved over the old one, so a failed write leaves the earlier grant whole,
+ * still naming its QR image, instead of deleting it first.
+ */
+export function savePairPendingRaw(content: string): void {
+  const target = getPairPendingPath();
+  const staged = `${target}.new`;
+  const discardStaged = (): void => {
+    try {
+      rmSync(staged, { force: true });
+    } catch {
+      // Best effort: the original failure is the one to report.
+    }
+  };
+  try {
+    rmSync(staged, { force: true });
+    writeSecureFile(staged, content);
+    renameSync(staged, target);
+  } catch (error) {
+    discardStaged();
+    throw error;
+  }
+}
+
+export function readPairPendingRaw(): string | null {
+  return readFileOrNull(getPairPendingPath());
+}
+
+export function deletePairPending(): void {
+  rmSync(getPairPendingPath(), { force: true });
 }
 
 export function readAuthSession(userId?: string): object | null {

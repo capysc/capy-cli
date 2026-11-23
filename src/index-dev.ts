@@ -12,6 +12,7 @@ import { CliOptions } from './types/index';
 import { version as CLI_VERSION } from '../package.json';
 import { conflictOption, rawConflictFlagsOf, resolveOption } from './sync/conflicts';
 import { answersByProtocol } from './sync/gate';
+import { registerBareSetupOptions, setupOptionsFrom } from './core/bareSetupFlags';
 import { refuseWebMode } from './core/webModeRemoved';
 import { ACCENT } from './ui/colors';
 
@@ -109,6 +110,8 @@ program
       process.exit(1);
     }
 
+    // The flags that answer the setup questions of a folder that is not a project yet (only bare `capy` has them).
+    const setup = setupOptionsFrom(options);
     const cliOptions: CliOptions = {
       envPath: options.envPath,
       verbose: options.verbose,
@@ -116,7 +119,8 @@ program
       dryRun: options.dryRun,
       conflictFlags: rawConflictFlagsOf(cmd),
       // Off a terminal, under --dry-run, or given --resolve nobody can answer the menu: the flags do (CAP-717).
-      protocol: answersByProtocol({ conflictFlags: rawConflictFlagsOf(cmd), dryRun: options.dryRun === true }),
+      protocol: answersByProtocol({ conflictFlags: rawConflictFlagsOf(cmd), dryRun: options.dryRun === true, json: setup.json, nonTty: setup.nonTty }),
+      setup,
     };
 
     const command = new CapyCommand(cliOptions, true);
@@ -473,22 +477,32 @@ program
 
 program
   .command('pair')
-  .description('Pair this device via Keep; requires interactive confirmation of the returned account before installing any session or keys')
+  .description('Pair this device via Keep; confirms the returned account before installing any session or keys: interactively in a terminal, and in agent mode the approving account must match --email') // COPY-FLAG
   .option('--json', 'emit machine-readable JSON instead of the human UI')
   .option('--force', 'overwrite a different local key already on this machine')
-  .addHelpText('after', '\nAfter browser approval: Enable this location as [email]? (y/N)\nAgents: use an interactive terminal/PTY, show the email to the human, and obtain explicit approval before answering Yes. Never auto-confirm. No upfront email is required.\n')
-  .action(async (options) => {
-    const { pairCommand } = await import('./commands/pairCommand');
-    await pairCommand({ json: options.json === true, force: options.force === true, apiUrl: process.env.CAPY_API_URL, devMode: true });
+  .option('--email <email>', 'agent mode: the account that will approve; prints a link and exits 3 at once, then run --wait') // COPY-FLAG
+  .option('--wait', 'agent mode: wait for the pending pairing to be approved (exits 3 with PAIR_STILL_WAITING after 30 seconds; run it again)') // COPY-FLAG
+  .option('--cancel', 'agent mode: drop the pending pairing') // COPY-FLAG
+  .addHelpText('after', '\nIn a terminal, after browser approval: Enable this location as [email]? (y/N)\nAgents: ask the human which email will approve, run `capy pair --email <email> --json`, show the human the url, code and expires_at, then run `capy pair --wait`. Never fill in the email yourself.\n') // COPY-FLAG
+  .action(async (options, command) => {
+    const { pairEntry } = await import('./commands/pairEntry');
+    // Read from the merged view: the program's `-f/--force` takes that flag before this command sees it.
+    const merged = command.optsWithGlobals();
+    await pairEntry({ json: options.json === true, force: merged.force === true, email: options.email, wait: options.wait === true, cancel: options.cancel === true, apiUrl: process.env.CAPY_API_URL, devMode: true });
   });
 
 program
   .command('kick <email>')
   .description('Remove a teammate from this organization')
+  .option('--yes', 'skip the confirmation question')
+  .option('--non-tty', 'same as --json: never ask, and answer in JSON (agents/CI)') // COPY-FLAG
+  .option('--json', 'emit machine-readable JSON instead of the human UI')
   .action(async (email, _options, command) => {
     const { KickCommand } = await import('./commands/kickCommand');
+    const { lifecycleOptsFrom } = await import('./commands/projectLifecycleCommand');
+    const { yes, nonTty, json } = lifecycleOptsFrom(command);
     const cmd = new KickCommand(process.env.CAPY_API_URL, true);
-    await cmd.execute(email);
+    await cmd.execute(email, { yes, nonTty, json });
   });
 
 const systemCmd = program
@@ -1277,5 +1291,9 @@ program
     const { mergeKeepLockCommand } = await import('./commands/mergeKeepLockCommand');
     process.exit(mergeKeepLockCommand(ancestor, ours, theirs, ourLabel, baseLabel, theirLabel, markerSize));
   });
+
+// Bare `capy` gets the setup flags (`--org`, `--project`, `--name`, `--branch`, `--protected`, `--json`, `--non-tty`); a
+// subcommand's own flags of those names are untouched.
+registerBareSetupOptions(program, process.argv);
 
 program.parse(process.argv);

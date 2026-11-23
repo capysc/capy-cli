@@ -56,6 +56,35 @@ export function generatePairKeyPair(): PairKeyPair {
   return { ecdh, publicKey: ecdh.getPublicKey().toString('base64url') };
 }
 
+/** A pair key pair as plain strings, for the pending-grant file of `capy pair`'s agent mode. Holds the private key: file mode 0600, removed when the pairing ends. */
+export interface SerializedPairKeyPair {
+  /** Raw private scalar, base64url. */
+  readonly privateKey: string;
+  /** Raw uncompressed public key, base64url. */
+  readonly publicKey: string;
+}
+
+export function exportPairKeyPair(keyPair: PairKeyPair): SerializedPairKeyPair {
+  return { privateKey: keyPair.ecdh.getPrivateKey().toString('base64url'), publicKey: keyPair.publicKey };
+}
+
+/** Restores a key pair from {@link exportPairKeyPair}. Throws `INVALID_FORMAT` when the private key does not belong to the stored public key. */
+export function importPairKeyPair(serialized: SerializedPairKeyPair): PairKeyPair {
+  const ecdh = createECDH(CURVE);
+  const restored = (() => {
+    try {
+      ecdh.setPrivateKey(Buffer.from(serialized.privateKey, 'base64url'));
+      return ecdh.getPublicKey().toString('base64url');
+    } catch {
+      throw new CapyError('The pair key is malformed', ERROR_CODES.INVALID_FORMAT); // COPY-FLAG
+    }
+  })();
+  if (restored !== serialized.publicKey) {
+    throw new CapyError('The pair key is malformed', ERROR_CODES.INVALID_FORMAT); // COPY-FLAG
+  }
+  return { ecdh, publicKey: restored };
+}
+
 /**
  * Parses and validates `POST /device-pairings/pickup`'s `sealed` field.
  *

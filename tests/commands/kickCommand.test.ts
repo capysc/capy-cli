@@ -158,4 +158,18 @@ describe('KickCommand', () => {
     expect(mockPromptFn).toHaveBeenCalled();
     expect(mockKickMember).toHaveBeenCalledWith('org-123', 'mem-alice-2');
   });
+  it('asks the terminal confirm with the sentence the agent elicitation repeats word for word', async () => {
+    mockListMemberDetails.mockResolvedValue({
+      members: [{ membershipId: 'mem-alice-2', userId: 'u', email: 'alice@acme.com', role: 'member', status: 'active', createdAt: '2025-02-01T00:00:00Z', projects: [] }],
+    });
+    mockPromptFn.mockClear();
+    mockPromptFn.mockResolvedValue({ confirm: false });
+
+    await new KickCommand().execute('alice@acme.com');
+
+    const [[questions]] = mockPromptFn.mock.calls as unknown as [[Array<{ message: string; default: boolean }>]];
+    expect(questions[0].message).toBe('Remove alice@acme.com from this organization? They will lose access to all secrets.');
+    expect(questions[0].default).toBe(false);
+    expect(mockKickMember).not.toHaveBeenCalled();
+  });
 });
