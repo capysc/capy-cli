@@ -482,7 +482,7 @@ program
   .description('Pair this device via Keep; nothing is installed until the one-time code Keep shows the approver is entered here (in agent mode the approving account must also match --email)') // COPY-FLAG
   .option('--json', 'emit machine-readable JSON instead of the human UI')
   .option('--force', 'overwrite a different local key already on this machine')
-  .option('--email <email>', 'agent mode: the account that will approve; prints a link and exits 3 at once, then run --wait') // COPY-FLAG
+  .option('--email <email>', 'agent mode, with --wait --code: the email the human approved with in Keep; checked against the approving account') // COPY-FLAG
   .option('--wait', 'agent mode: wait for the pending pairing to be approved (exits 3 with PAIR_STILL_WAITING after 30 seconds; run it again)') // COPY-FLAG
   .option('--cancel', 'agent mode: drop the pending pairing') // COPY-FLAG
   .option('--code <code>', 'agent mode, with --wait: the one-time code Keep shows the person who approved; ask them for it') // COPY-FLAG
@@ -491,7 +491,7 @@ program
   .option('--org <id>', 'prefer this organization when your account has several and the folder does not say (no keep.lock); the organization you approve in Keep decides') // COPY-FLAG
   .option('--title <text>', 'short summary of why you are pairing, shown as the Keep pairing heading (max 120 chars)') // COPY-FLAG
   .option('--description <text>', 'what you will do once paired, shown under it on the Keep pairing page (max 600 chars)') // COPY-FLAG
-  .addHelpText('after', '\nIn a terminal, after you approve in Keep: Enter the code shown in Keep.\nAgents: ask the human which email will approve, run `capy pair --email <email> --json`, show the human the url, code and expires_at, then run `capy pair --wait`. When it answers PAIR_CODE_REQUIRED, ask the human for the code Keep shows and run `capy pair --wait --code <code>`. Never fill in the email or the code yourself.\n') // COPY-FLAG
+  .addHelpText('after', '\nIn a terminal, after you approve in Keep: Enter the code shown in Keep.\nAgents: run `capy pair --json` without asking anything first, show the human the url, code and expires_at, then run `capy pair --wait`. When it answers PAIR_CODE_REQUIRED, ask the human for the code Keep shows and the email they approved with, and run `capy pair --wait --code <code> --email <email>`. Never fill in the email or the code yourself.\n') // COPY-FLAG
   .action(async (options, command) => {
     const { pairEntry } = await import('./commands/pairEntry');
     // Read from the merged view: the program's `-f/--force` takes that flag before this command sees it.

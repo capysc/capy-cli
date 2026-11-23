@@ -29,8 +29,11 @@ export interface PendingPairGrant {
   readonly keyPair: PairKeyPair;
   readonly userCode: string;
   readonly deviceLink: string;
-  /** Already trimmed and lower-cased. */
-  readonly expectedEmail: string;
+  /**
+   * The email the human says they approved with, trimmed and lower-cased. Null until they give it: it is asked after
+   * approval, together with the one-time code, and nothing is installed without it.
+   */
+  readonly expectedEmail: string | null;
   readonly force: boolean;
   readonly apiUrl: string;
   /** What the human is told the pairing is for (display only). */
@@ -86,7 +89,8 @@ function parsePending(raw: string): PendingPairGrant | null {
   if (!deviceCode || !privateKey || !publicKey || !userCode || !deviceLink || !apiUrl || !purpose || !expiresAt) return null;
   if (typeof interval !== 'number' || !Number.isFinite(interval) || interval <= 0) return null;
   if (Number.isNaN(Date.parse(expiresAt))) return null;
-  if (!expectedEmail) return null;
+  // A missing email is a grant still waiting for it; any other non-string is not ours.
+  if (expectedEmail === undefined && data.expected_email !== null) return null;
   const keyPair = (() => {
     try {
       return importPairKeyPair({ privateKey, publicKey });
@@ -100,7 +104,7 @@ function parsePending(raw: string): PendingPairGrant | null {
     keyPair,
     userCode,
     deviceLink,
-    expectedEmail,
+    expectedEmail: expectedEmail ?? null,
     force: data.force === true,
     apiUrl,
     purpose,

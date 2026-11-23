@@ -10,8 +10,12 @@
  *    link with their own account is refused by code, and nothing is installed); then the same post-approval path
  *    the terminal flow runs (`finishPairing`). Still pending: exit 3 again with the same `link`, its QR cut down to the
  *    PNG's file path (no text, no data URI) so the answer stays small.
- * 3. No expected account known (no `--email`): exit 3 with a `form` asking for the email,
- *    before any request is made. The agent never fills that in itself.
+ * 3. Nothing is asked before the flow but, on a machine with no keys, how to get them (`--transport` or `--signup`).
+ *    The email is asked AFTER the human approved, together with the one-time code: a new user picks their email
+ *    when they sign up in Keep, so nobody can know it before. It is the anti-phishing check: the human says which
+ *    account they approved with, and when that is not the account that actually approved (a stranger approved the
+ *    link with their own), nothing is installed. It holds for signup, key pickup and sign-in alike. The agent never
+ *    fills in the email or the code itself.
  * 4. Once the human approves in Keep, Keep shows them a one-time code (CAP-877) and the wait run answers
  *    PAIR_CODE_REQUIRED with a `form` asking for it. The human pastes it into the chat, and `capy pair --wait --code
  *    <code>` sends it; a wrong one answers PAIR_CODE_MISMATCH with the form again. The agent never makes the code up:
@@ -37,7 +41,7 @@ import { resolveActiveUrl } from '../config/profileConfig';
 import { generatePairKeyPair } from '../crypto/pairCrypto';
 import { CapyError, ERROR_CODES } from '../types/index';
 import type { ElicitationForm, ElicitationLink, ElicitationLinkQr } from '../ui/elicitation';
-import { pairCodeDisplay, pairEmailDisplay, pairKeysDisplay } from '../ui/elicitationDisplay';
+import { pairCodeDisplay, pairKeysDisplay } from '../ui/elicitationDisplay';
 import { EXIT_NEEDS_INPUT } from '../ui/interactive';
 import { createPairingQrImage, removePairingQrImage, type PairingQrImage } from '../ui/pairingPresentation';
 import { buildTerminalQr } from '../ui/terminalQr';
@@ -98,10 +102,12 @@ function expectedOf(options: PairAgentOptions): string | null {
  * off the wire, so a missing or non-string email never matches.
  */
 export function accountMatches(grant: Pick<PendingPairGrant, 'expectedEmail'>, user: { readonly email?: unknown }): boolean {
-  return typeof user.email === 'string' && normalizeEmail(user.email) === grant.expectedEmail;
+  // No email given yet never matches: nothing is installed without the human's own answer.
+  return grant.expectedEmail !== null && typeof user.email === 'string' && normalizeEmail(user.email) === grant.expectedEmail;
 }
 
-const EMAIL_QUESTION = 'Which email will approve this pairing?'; // COPY-FLAG
+const EMAIL_QUESTION = 'Which email did you approve with in Keep?'; // COPY-FLAG
+const EMAIL_DESCRIPTION = 'The account you signed in or signed up with on the approval page. If it is not the one that approved, nothing is installed.'; // COPY-FLAG
 
 /** POSIX single-quoting, so typed text reaches the rerun exactly as typed. */
 function shellQuote(value: string): string {
@@ -115,32 +121,26 @@ function scopeFlags(options: PairAgentOptions): string {
     + `${intent.title ? ` --title ${shellQuote(intent.title)}` : ''}${intent.description ? ` --description ${shellQuote(intent.description)}` : ''}`;
 }
 
-/** The form that asks for the email. Its rerun repeats the flags that were typed (`--force`), so the answer keeps the run's meaning. */
-function emailForm(bin: string, options: PairAgentOptions): ElicitationForm {
-  return {
-    kind: 'form',
-    question: EMAIL_QUESTION,
-    details: {},
-    display: pairEmailDisplay(),
-    fields: [{ name: 'email', type: 'string', pattern: EMAIL_PATTERN, question: EMAIL_QUESTION }],
-    answer: { rerun: `${bin} pair --email <email>${scopeFlags(options)}${options.force === true ? ' --force' : ''} --json` },
-  };
-}
-
 const CODE_QUESTION = 'What code does Keep show after you approve?'; // COPY-FLAG
 const CODE_DESCRIPTION = 'Keep shows a one-time code once you approve. Paste it here. Only you can see it.'; // COPY-FLAG
 /** What the code field accepts: the eight characters Keep shows, typed loosely (case, spaces and a dash are fine). */
 const CODE_PATTERN = '^[0-9A-Za-z][0-9A-Za-z -]{6,10}[0-9A-Za-z]$';
 
-/** The form that asks for the one-time code. The rerun is the same wait, with the code. */
-function codeForm(bin: string, attemptsLeft: number | null): ElicitationForm {
+/**
+ * The form asked once the human approved: the one-time code Keep shows, and, until the human has given it, the email
+ * they approved with (the anti-phishing check). The rerun is the same wait, with both.
+ */
+function codeForm(bin: string, attemptsLeft: number | null, askEmail: boolean): ElicitationForm {
   return {
     kind: 'form',
     question: CODE_QUESTION,
     details: attemptsLeft === null ? {} : { attempts_left: attemptsLeft },
-    display: pairCodeDisplay(attemptsLeft),
-    fields: [{ name: 'code', type: 'string', pattern: CODE_PATTERN, question: CODE_QUESTION, description: CODE_DESCRIPTION }],
-    answer: { rerun: `${bin} pair --wait --code <code>` },
+    display: pairCodeDisplay(attemptsLeft, askEmail),
+    fields: [
+      { name: 'code', type: 'string', pattern: CODE_PATTERN, question: CODE_QUESTION, description: CODE_DESCRIPTION },
+      ...(askEmail ? [{ name: 'email', type: 'string' as const, pattern: EMAIL_PATTERN, question: EMAIL_QUESTION, description: EMAIL_DESCRIPTION }] : []),
+    ],
+    answer: { rerun: `${bin} pair --wait --code <code>${askEmail ? ' --email <email>' : ''}` },
   };
 }
 
@@ -152,9 +152,9 @@ const KEYS_SIGNUP_LABEL = 'Create a new Capy organization for this project (new 
  * The form a sign-in-only start run answers with on a machine that has no keys for the org (any org, when the folder
  * names none). Sign-in only would be refused with PAIR_TRANSPORT_REQUIRED after the human approved, so the choice is
  * asked before any request is made. Picking up keys (`--transport`) is always offered; creating an org (`--signup`) only
- * outside a project folder. The rerun keeps the email and every other flag that was typed.
+ * outside a project folder. No email is asked here: it is asked after approval. The rerun keeps every flag that was typed.
  */
-function keysForm(bin: string, email: string, options: PairAgentOptions, signupAllowed: boolean): ElicitationForm {
+function keysForm(bin: string, options: PairAgentOptions, signupAllowed: boolean): ElicitationForm {
   const choices = [
     { value: 'transport', label: KEYS_TRANSPORT_LABEL },
     ...(signupAllowed ? [{ value: 'signup', label: KEYS_SIGNUP_LABEL }] : []),
@@ -162,8 +162,8 @@ function keysForm(bin: string, email: string, options: PairAgentOptions, signupA
   return {
     kind: 'form',
     question: KEYS_QUESTION,
-    details: { email },
-    display: pairKeysDisplay(email),
+    details: {},
+    display: pairKeysDisplay(),
     fields: [{
       name: 'keys',
       type: 'string',
@@ -171,7 +171,7 @@ function keysForm(bin: string, email: string, options: PairAgentOptions, signupA
       question: KEYS_QUESTION,
       options: choices,
     }],
-    answer: { rerun: `${bin} pair --<keys> --email ${shellQuote(email)}${scopeFlags(options)}${options.force === true ? ' --force' : ''} --json` },
+    answer: { rerun: `${bin} pair --<keys>${scopeFlags(options)}${options.force === true ? ' --force' : ''} --json` },
   };
 }
 
@@ -271,18 +271,8 @@ function expiryOf(authorize: DeviceAuthorizeResult, nowMs: number): string {
 async function startRun(options: PairAgentOptions, deps: PairAgentDeps): Promise<Outcome> {
   const devMode = options.devMode === true;
   const bin = binName(devMode);
+  // Only an email typed with the start run is kept; otherwise it is asked after approval.
   const expected = expectedOf(options);
-  if (!expected) {
-    return {
-      kind: 'refusal',
-      refusal: {
-        code: ERROR_CODES.PAIR_EMAIL_REQUIRED,
-        message: 'An email is needed to pair.', // COPY-FLAG
-        exitCode: EXIT_NEEDS_INPUT,
-        extra: { elicitation: emailForm(bin, options) },
-      },
-    };
-  }
   const now = deps.now ?? Date.now;
   const apiUrl = options.apiUrl || resolveActiveUrl(devMode);
   const scope = resolvePairScope(options);
@@ -293,7 +283,7 @@ async function startRun(options: PairAgentOptions, deps: PairAgentDeps): Promise
         code: ERROR_CODES.PAIR_TRANSPORT_REQUIRED,
         message: 'This machine has no keys yet, so signing in alone would be refused. Nothing was sent.', // COPY-FLAG
         exitCode: EXIT_NEEDS_INPUT,
-        extra: { elicitation: keysForm(bin, expected, options, !folderHasProject()) },
+        extra: { elicitation: keysForm(bin, options, !folderHasProject()) },
       },
     };
   }
@@ -418,6 +408,13 @@ async function pollUntil(grant: PendingPairGrant, ceilingMs: number, pollTimeout
 async function completeApproved(grant: PendingPairGrant, exchange: DeviceTokenExchange, options: PairAgentOptions): Promise<Outcome> {
   // The grant is spent either way: its device code was just exchanged, so nothing is left to wait for.
   removePendingPairGrant();
+  if (grant.expectedEmail === null) {
+    // A service that hands the session over without asking for the code left no point to ask the email: refuse.
+    throw new CapyError(
+      'Approved, but the email you approved with was not given, so it could not be checked. Nothing was installed. Start again.', // COPY-FLAG
+      ERROR_CODES.PAIR_EMAIL_REQUIRED,
+    );
+  }
   if (!accountMatches(grant, exchange.user)) {
     throw new CapyError(
       'The approving account is not the expected one. No session or keys were installed.', // COPY-FLAG
@@ -434,12 +431,29 @@ async function completeApproved(grant: PendingPairGrant, exchange: DeviceTokenEx
 }
 
 async function waitRun(options: PairAgentOptions, deps: PairAgentDeps): Promise<Outcome> {
-  const grant = readPendingPairGrant();
-  if (!grant) {
+  const stored = readPendingPairGrant();
+  if (!stored) {
     throw new CapyError('No pairing is waiting. Start a new one.', ERROR_CODES.PAIR_NOT_PENDING); // COPY-FLAG
   }
   const now = deps.now ?? Date.now;
   const code = options.code?.trim() || undefined;
+  const bin = binName(options.devMode === true);
+  // The email the human approved with: given on this run, or kept from an earlier one.
+  const email = expectedOf(options) ?? stored.expectedEmail;
+  const grant: PendingPairGrant = email === stored.expectedEmail ? stored : { ...stored, expectedEmail: email };
+  if (grant !== stored) savePendingPairGrant(grant);
+  if (code !== undefined && grant.expectedEmail === null) {
+    // The code alone would hand the session over with nothing to check it against: ask for both, send nothing.
+    return {
+      kind: 'refusal',
+      refusal: {
+        code: ERROR_CODES.PAIR_EMAIL_REQUIRED,
+        message: 'The email you approved with is needed with the code. Nothing was sent.', // COPY-FLAG
+        exitCode: EXIT_NEEDS_INPUT,
+        extra: { elicitation: codeForm(bin, null, true) },
+      },
+    };
+  }
   const step = await pollUntil(grant, deps.ceilingMs ?? PAIR_WAIT_CEILING_MS, deps.pollTimeoutMs ?? PAIR_POLL_TIMEOUT_MS, { sleep: deps.sleep ?? defaultSleep, now }, code);
   switch (step.kind) {
     case 'approved':
@@ -464,7 +478,7 @@ async function waitRun(options: PairAgentOptions, deps: PairAgentDeps): Promise<
           code: step.mismatch ? ERROR_CODES.PAIR_CODE_MISMATCH : ERROR_CODES.PAIR_CODE_REQUIRED,
           message: step.mismatch ? 'That code did not match the one Keep shows. Nothing was installed.' : 'Approved in Keep. The code Keep shows is needed before anything is installed.', // COPY-FLAG
           exitCode: EXIT_NEEDS_INPUT,
-          extra: { elicitation: codeForm(binName(options.devMode === true), step.attemptsLeft) },
+          extra: { elicitation: codeForm(bin, step.attemptsLeft, grant.expectedEmail === null) },
         },
       };
     case 'waiting': {
