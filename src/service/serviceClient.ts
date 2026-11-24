@@ -368,8 +368,11 @@ export interface OrgReposResponse {
  * access token the service just rejected (a 401), it must return a token that
  * is NOT that one (another process already refreshed, or a refresh made now),
  * or null when it cannot.
+ *
+ * `refusalCode` is the `code` the service sent with that 401, when it sent one. `SESSION_NOT_RECOGNIZED` means
+ * the service never handed the session out: the provider forgets the saved session and returns null.
  */
-export type TokenProvider = (rejectedAccessToken?: string) => Promise<ServiceToken | null>;
+export type TokenProvider = (rejectedAccessToken?: string, refusalCode?: string) => Promise<ServiceToken | null>;
 
 /**
  * A 404 from the repo-links route means the service predates the route (decided
@@ -531,15 +534,31 @@ export class ServiceClient {
         // it cannot help: ask the provider for a token other than that one (another process
         // already refreshed it, or the provider refreshes now) and retry once with it. No
         // different token, or a 401 on the retry: the failure below.
+        // The server's `code` rides along so a caller can tell "sign in again" from any other 401 without
+        // reading the sentence.
+        const serverCode = typeof data.code === 'string' ? data.code : undefined;
+        const detail = data.error || 'Unknown auth error';
+        if (serverCode === 'SESSION_NOT_RECOGNIZED') {
+          // The service never handed this session out, so a refresh cannot help. The provider forgets the saved
+          // session (or hands back the one another process has stored since, which is worth one retry).
+          const replacement = this.tokenProvider ? await this.tokenProvider(token?.access_token, serverCode) : null;
+          if (replacement && !options?._retried && replacement.access_token !== token?.access_token) {
+            return this.request<T>(method, path, body, { ...options, _retried: true, _token: replacement });
+          }
+          throw new CapyError(
+            'Capy no longer recognizes this session. Run `capy` to sign in again.',
+            ERROR_CODES.AUTH_FAILED,
+            { status: 401, detail, code: serverCode, next_command: 'capy pair' }
+          );
+        }
         const retryToken = !options?._retried && this.tokenProvider ? await this.tokenProvider(token?.access_token) : null;
         if (retryToken && retryToken.access_token !== token?.access_token) {
           return this.request<T>(method, path, body, { ...options, _retried: true, _token: retryToken });
         }
-        const detail = data.error || 'Unknown auth error';
         throw new CapyError(
           `Authentication failed: ${detail}`,
           ERROR_CODES.AUTH_FAILED,
-          { status: 401, detail }
+          { status: 401, detail, ...(serverCode ? { code: serverCode } : {}) }
         );
       }
 

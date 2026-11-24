@@ -140,7 +140,7 @@ export class CheckoutCommand {
     this.authService = new AuthService(undefined, devMode);
     this.serviceClient = new ServiceClient(undefined, devMode);
 
-    this.serviceClient.setTokenProvider((rejected) => this.authService.getValidToken(rejected));
+    this.serviceClient.setTokenProvider((rejected, refusal) => this.authService.getValidToken(rejected, refusal));
   }
 
   async execute(branchName: string, options: CheckoutOptions = {}): Promise<void> {

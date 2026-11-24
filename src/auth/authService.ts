@@ -34,14 +34,23 @@ export interface RefreshFailure {
   status?: number;
   /** Server `error` body or transport error message. Never contains tokens. */
   detail?: string;
+  /**
+   * True when the service answered `SESSION_NOT_RECOGNIZED`: it did not hand this session out, so no refresh or
+   * retry can ever make it work. The saved session is removed and the user signs in again.
+   */
+  notRecognized?: boolean;
 }
+
+/** The service's `code` for a session it did not hand out. Decided by this code, never by the message text. */
+export const SESSION_NOT_RECOGNIZED = 'SESSION_NOT_RECOGNIZED';
 
 function classifyRefreshFailure(error: any): RefreshFailure {
   if (error instanceof HttpStatusError) {
     if (error.status === 401) {
       // WorkOS rejected the refresh token — the backing session has ended
       // (inactivity timeout, max duration, sign-out, or revocation).
-      return { reason: 'session_ended', status: error.status, detail: error.message };
+      const notRecognized = error.body?.code === SESSION_NOT_RECOGNIZED;
+      return { reason: 'session_ended', status: error.status, detail: error.message, ...(notRecognized ? { notRecognized } : {}) };
     }
     if (error.status === 404) {
       return { reason: 'org_not_found', status: error.status, detail: error.message };
@@ -234,6 +243,11 @@ export class AuthService {
   private currentOrgId: string | null = null;
   private lastRefreshFailure: RefreshFailure | null = null;
   /**
+   * Set once the service has refused this session as one it never handed out. It outlives `lastRefreshFailure`
+   * (which every silent auth resets), so the next silent auth in the same run still says why there is no session.
+   */
+  private sessionNotRecognized = false;
+  /**
    * The one refresh a 401 started and that is still running. Refresh tokens are single-use, so concurrent 401s in
    * this process must share a single refresh instead of each spending the same refresh token. The holder is
    * written only by `shareRefresh`.
@@ -365,6 +379,9 @@ export class AuthService {
   private describeSilentAuthFailure(): { code: SilentAuthFailureCode; message: string } {
     switch (this.lastRefreshFailure?.reason) {
       case 'session_ended':
+        if (this.lastRefreshFailure.notRecognized) {
+          return { code: 'session_ended', message: 'Capy no longer recognizes this session — sign in again' };
+        }
         return { code: 'session_ended', message: 'Session expired — sign-in required' };
       case 'network':
         return { code: 'network', message: 'Could not reach the Capy service to refresh your session' };
@@ -376,6 +393,9 @@ export class AuthService {
           message: `Token refresh failed (HTTP ${this.lastRefreshFailure.status})`,
         };
       default:
+        if (this.sessionNotRecognized) {
+          return { code: 'session_ended', message: 'Capy no longer recognizes this session — sign in again' };
+        }
         return { code: 'no_session', message: 'No valid session available' };
     }
   }
@@ -605,6 +625,7 @@ export class AuthService {
     // (file doesn't exist yet, etc.), proceed without lock.
     const release = tryLockSession(getAuthSessionPath(userId));
 
+    let sentRefreshToken = this.session.refresh_token;
     try {
       // Re-read session from disk in case another process updated it
       const freshSession = release ? readSessionStore(userId) : null;
@@ -617,6 +638,7 @@ export class AuthService {
       // Use the latest refresh token
       const base: SessionStore = freshSession ? { ...this.session, refresh_token: freshSession.refresh_token } : this.session;
       this.session = base;
+      sentRefreshToken = base.refresh_token;
 
       const data = await postJson<RefreshResponse>(
         `${this.serviceApiUrl}/auth/refresh`,
@@ -641,6 +663,9 @@ export class AuthService {
         `[auth] token refresh failed for org ${orgId} (${failure.reason}` +
         `${failure.status ? `, HTTP ${failure.status}` : ''}): ${failure.detail || 'no detail'}`
       );
+      // The service never handed this session out. Keeping the file would only make every later command send
+      // the same refused token until it expires, so forget it now: the next sign-in starts clean.
+      if (failure.notRecognized) this.forgetUnrecognizedSession(sentRefreshToken);
       return false;
     } finally {
       if (release) {
@@ -767,10 +792,18 @@ export class AuthService {
    * Returns null if there's no session, no current org, or refresh failed.
    * Callers typically surface that as "you need to re-authenticate".
    */
-  async getValidToken(rejectedAccessToken?: string): Promise<ServiceToken | null> {
+  async getValidToken(rejectedAccessToken?: string, refusalCode?: string): Promise<ServiceToken | null> {
     if (!this.session || !this.currentOrgId) return null;
     const orgSession = this.session.sessions[this.currentOrgId];
     if (!orgSession) return null;
+
+    if (rejectedAccessToken !== undefined && refusalCode === SESSION_NOT_RECOGNIZED) {
+      // The service never handed this session out, so refreshing it cannot help. Another process may have signed
+      // in again since: its stored session is worth using. Otherwise forget ours.
+      if (this.adoptStoredSession(this.currentOrgId, rejectedAccessToken)) return this.getToken();
+      this.forgetUnrecognizedSession(this.session.refresh_token);
+      return null;
+    }
 
     if (rejectedAccessToken !== undefined) {
       const replaced = await this.refreshPastRejected(this.currentOrgId, rejectedAccessToken);
@@ -860,6 +893,22 @@ export class AuthService {
       }
       throw err;
     }
+  }
+
+  /**
+   * Forget a session the service answered `SESSION_NOT_RECOGNIZED` for. Memory is always cleared. The file is
+   * removed only while it still holds the refused session (`refusedRefreshToken`): another process may have
+   * signed in again and stored a new one, and that one must survive.
+   */
+  private forgetUnrecognizedSession(refusedRefreshToken: string | undefined): void {
+    this.sessionNotRecognized = true;
+    const stored = this.readStoredSession();
+    if (stored && stored.refresh_token !== refusedRefreshToken) {
+      this.session = null;
+      this.currentOrgId = null;
+      return;
+    }
+    this.clearSession();
   }
 
   clearSession(): void {
@@ -968,6 +1017,8 @@ export class AuthService {
 
   private saveSession(): void {
     if (!this.session) return;
+    // A session being stored is a new or refreshed one: the earlier refusal no longer describes this process.
+    this.sessionNotRecognized = false;
     try {
       // Save to user-scoped path once we know the user ID
       const userId = this.sessionUserId || this.session.user_id;

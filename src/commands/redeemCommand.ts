@@ -74,7 +74,7 @@ export class RedeemCommand {
     this.switchLocalContext(orgId, userId, orgName);
 
     const serviceClient = new ServiceClient(this.apiUrl, this.devMode);
-    serviceClient.setTokenProvider((rejected) => authService.getValidToken(rejected));
+    serviceClient.setTokenProvider((rejected, refusal) => authService.getValidToken(rejected, refusal));
 
     // 5. Always verify membership via co-decrypt, even if local key exists.
     //    A kicked user still has the local org key — co-decrypt is the

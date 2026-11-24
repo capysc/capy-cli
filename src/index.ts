@@ -201,7 +201,7 @@ program
 
     const authService = new AuthService(undefined, false, projectState.userId);
     const serviceClient = new ServiceClient();
-    serviceClient.setTokenProvider((rejected) => authService.getValidToken(rejected));
+    serviceClient.setTokenProvider((rejected, refusal) => authService.getValidToken(rejected, refusal));
     const authResult = await authService.authenticate(projectState.organizationId);
     if (!authResult.success) {
       console.error('Authentication failed');

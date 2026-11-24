@@ -312,7 +312,7 @@ async function decryptCurrentBranch(
     throw new Error(silentAuthFailureMessage(result));
   }
   const svc = new ServiceClient(undefined, devMode);
-  svc.setTokenProvider((rejected) => auth.getValidToken(rejected));
+  svc.setTokenProvider((rejected, refusal) => auth.getValidToken(rejected, refusal));
   const keyServiceOps = {
     coDecrypt: (o: string, c: string) =>
       svc.coDecrypt(o, c).then((r) => r.plaintext),
@@ -361,7 +361,7 @@ async function mintForDeploy(
     throw new Error(silentAuthFailureMessage(result));
   }
   const svc = new ServiceClient(undefined, devMode);
-  svc.setTokenProvider((rejected) => auth.getValidToken(rejected));
+  svc.setTokenProvider((rejected, refusal) => auth.getValidToken(rejected, refusal));
   const minted = await mintDeployToken({
     serviceClient: svc,
     fm: new FileManager(),
@@ -599,7 +599,7 @@ async function resolveFreshSnapshot(
 
     const authService = new AuthService(undefined, devMode, projectState.userId);
     const serviceClient = new ServiceClient(undefined, devMode);
-    serviceClient.setTokenProvider((rejected) => authService.getValidToken(rejected));
+    serviceClient.setTokenProvider((rejected, refusal) => authService.getValidToken(rejected, refusal));
     const authResult = await authenticateSilentWithFallback(authService, projectState.organizationId);
     if (!authResult.success || !authResult.user_id) {
       console.error(`  ${YELLOW('!')} could not ${label} — ${codePrefix}${silentAuthFailureMessage(authResult)}`);
@@ -746,7 +746,7 @@ async function recordCiDeliveryOnServer(
     const { ServiceClient } = await import('../service/serviceClient');
     const authService = new AuthService(undefined, devMode, projectState.userId);
     const serviceClient = new ServiceClient(undefined, devMode);
-    serviceClient.setTokenProvider((rejected) => authService.getValidToken(rejected));
+    serviceClient.setTokenProvider((rejected, refusal) => authService.getValidToken(rejected, refusal));
     const authResult = await authenticateSilentWithFallback(authService, projectState.organizationId);
     if (!authResult.success || !authResult.user_id) {
       return { ok: false, detail: silentAuthFailureMessage(authResult) };
@@ -793,7 +793,7 @@ async function revokeSupersededDeployTokens(
     if (!projectState.organizationId) return;
     const authService = new AuthService(undefined, devMode, projectState.userId);
     const serviceClient = new ServiceClient(undefined, devMode);
-    serviceClient.setTokenProvider((rejected) => authService.getValidToken(rejected));
+    serviceClient.setTokenProvider((rejected, refusal) => authService.getValidToken(rejected, refusal));
     const authResult = await authenticateSilentWithFallback(authService, projectState.organizationId);
     if (!authResult.success) return;
 
@@ -1808,7 +1808,7 @@ export async function deployRemove(
               if (!projectState.organizationId) throw new Error('no organization id in keep.lock');
               const authService = new AuthService(undefined, opts.devMode, projectState.userId);
               const serviceClient = new ServiceClient(undefined, opts.devMode);
-              serviceClient.setTokenProvider((rejected) => authService.getValidToken(rejected));
+              serviceClient.setTokenProvider((rejected, refusal) => authService.getValidToken(rejected, refusal));
               const authResult = await authenticateSilentWithFallback(authService, projectState.organizationId);
               if (authResult.success) {
                 await Promise.all(deployIds.map((id) => serviceClient.revokeDeployToken(id).catch(() => {})));

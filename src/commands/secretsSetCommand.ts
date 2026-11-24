@@ -686,7 +686,7 @@ export async function resolveSilentContext(devMode: boolean): Promise<SilentCont
   const state = await new ProjectManager().detectProjectState().catch(() => undefined);
   const authService = new AuthService(undefined, devMode, state?.userId);
   const client = new ServiceClient(undefined, devMode);
-  client.setTokenProvider((rejected) => authService.getValidToken(rejected));
+  client.setTokenProvider((rejected, refusal) => authService.getValidToken(rejected, refusal));
   const forOrg = await authService.authenticateSilent(state?.organizationId);
   const auth = forOrg.success ? forOrg : await authService.authenticateSilent();
   if (!auth.success || !auth.user_id) {

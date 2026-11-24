@@ -254,7 +254,7 @@ export class EditCommand {
   ): Promise<{ serviceClient: ServiceClient; userId: string }> {
     const authService = new AuthService(this.apiUrl, this.devMode, sessionUserId);
     const serviceClient = new ServiceClient(this.apiUrl, this.devMode);
-    serviceClient.setTokenProvider((rejected) => authService.getValidToken(rejected));
+    serviceClient.setTokenProvider((rejected, refusal) => authService.getValidToken(rejected, refusal));
     const forOrg = await authService.authenticateSilent(orgId);
     const silent = forOrg.success ? forOrg : await authService.authenticateSilent();
     const authResult = silent.success ? silent : await authService.authenticate(orgId);
