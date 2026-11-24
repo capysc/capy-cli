@@ -500,6 +500,32 @@ program
   });
 
 program
+  .command('setup')
+  .description('Set this folder up with Capy in one command, for agents: pair, choose the organization, project and branch, write the agent instructions, and list the integrations found. Always answers in JSON; run it again after every stop until it says "setup": "complete"') // COPY-FLAG
+  .option('--code <code>', 'the one-time code Keep shows the person who approved the pairing; ask them for it') // COPY-FLAG
+  .option('--org <id|name>', 'the organization to set this folder up in (asked when you belong to more than one)') // COPY-FLAG
+  .option('--project <id|name>', 'link this folder to an existing project in the organization, or "new" to create one') // COPY-FLAG
+  .option('--name <name>', 'the name of a new project') // COPY-FLAG
+  .option('--branch <name>', 'the first branch of a new project (offered by default: development), or the branch of an existing project to use') // COPY-FLAG
+  .option('--protected [yes|no]', 'whether the first branch is protected (invite-only)')
+  .option('--no-protected', 'Create it open to the project')
+  .option('--json', 'accepted for symmetry: setup always answers in JSON') // COPY-FLAG
+  .addHelpText('after', '\nAgents: run `capy setup --json`. On exit 3, show the human the elicitation and ask its questions, then run the command in its `answer`. Never answer for the human. The result with "setup": "complete" names the organization, project and branch, and lists under `integrations` what was found in this folder with the next command for each; discovery needs a provider token that an owner or admin saves with `capy system set`.\n') // COPY-FLAG
+  .action(async (options, command) => {
+    const { setupCommand } = await import('./commands/setupCommand');
+    const merged = command.optsWithGlobals();
+    const { org, project, name, branch, protectedAnswer } = setupOptionsFrom(options);
+    await setupCommand({
+      code: options.code,
+      answers: { org, project, name, branch, protectedAnswer },
+      envPath: merged.envPath,
+      dryRun: merged.dryRun === true,
+      devMode: true,
+      apiUrl: process.env.CAPY_API_URL,
+    });
+  });
+
+program
   .command('kick <email>')
   .description('Remove a teammate from this organization')
   .option('--yes', 'skip the confirmation question')

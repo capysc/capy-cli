@@ -296,6 +296,14 @@ export class CapyCommand {
     return agentResume(this.agentSetupDeps(), setup, detected.value);
   }
 
+  /**
+   * Bare `capy`'s agent-mode folder setup as a step of `capy setup`: the same run, with its outcome handed back instead
+   * of printed. `sync` means the folder is a Capy project already; `undefined` means agent mode is off or local-only.
+   */
+  async folderSetupOutcome(): Promise<AgentOutcome | Extract<LinkedStep, { kind: 'sync' }> | undefined> {
+    return this.agentStep();
+  }
+
   /** Agent mode: the setup flags that were typed and applied to nothing, as one JSON result. Nothing is printed when there are none. */
   private reportIgnoredFlags(flags: readonly string[]): void {
     if (flags.length === 0) return;
