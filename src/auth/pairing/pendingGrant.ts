@@ -22,7 +22,7 @@
 import { deletePairPending, readPairPendingRaw, savePairPendingRaw } from '../../config/globalConfig';
 import { exportPairKeyPair, importPairKeyPair, type PairKeyPair } from '../../crypto/pairCrypto';
 import { removePairingQrImage } from '../../ui/pairingPresentation';
-import type { PairMode } from './pairScope';
+import type { PairMode, PairScope } from './pairScope';
 
 export interface PendingPairGrant {
   readonly deviceCode: string;
@@ -42,6 +42,31 @@ export interface PendingPairGrant {
   readonly qrFile?: string;
   /** Sign-in only (`session`) or key handover (`transport`). A file from before the split has none: `transport`, as it always was. */
   readonly mode: PairMode;
+  /**
+   * What this pairing asked for (CAP-885), so `capy pair --wait` can start a fresh one with the same scope and intent
+   * when this one expires before approval. Absent in a file written by an earlier build: that grant is not renewed.
+   */
+  readonly renew?: {
+    readonly scope: PairScope;
+    readonly intentTitle?: string;
+    readonly intentDescription?: string;
+  };
+}
+
+function parseRenew(value: unknown, mode: PairMode): PendingPairGrant['renew'] | undefined {
+  if (typeof value !== 'object' || value === null) return undefined;
+  const r = value as Record<string, unknown>;
+  const id = (v: unknown): string | null | undefined => v === null ? null : (typeof v === 'string' && v !== '' ? v : undefined);
+  const orgId = id(r.org_id);
+  const projectId = id(r.project_id);
+  if (orgId === undefined || projectId === undefined || typeof r.signup !== 'boolean') return undefined;
+  const intentTitle = str(r.intent_title);
+  const intentDescription = str(r.intent_description);
+  return {
+    scope: { mode, orgId, projectId, signup: r.signup },
+    ...(intentTitle !== undefined ? { intentTitle } : {}),
+    ...(intentDescription !== undefined ? { intentDescription } : {}),
+  };
 }
 
 const FILE_VERSION = 1;
@@ -80,6 +105,7 @@ function parsePending(raw: string): PendingPairGrant | null {
   const qrFile = str(data.qr_file);
   const nextPollAt = typeof data.next_poll_at === 'number' && Number.isFinite(data.next_poll_at) ? data.next_poll_at : undefined;
   const mode: PairMode = data.mode === 'session' ? 'session' : 'transport';
+  const renew = parseRenew(data.renew, mode);
   if (!deviceCode || !privateKey || !publicKey || !userCode || !deviceLink || !apiUrl || !purpose || !expiresAt) return null;
   if (typeof interval !== 'number' || !Number.isFinite(interval) || interval <= 0) return null;
   if (Number.isNaN(Date.parse(expiresAt))) return null;
@@ -104,6 +130,7 @@ function parsePending(raw: string): PendingPairGrant | null {
     ...(nextPollAt !== undefined ? { nextPollAt } : {}),
     ...(qrFile !== undefined ? { qrFile } : {}),
     mode,
+    ...(renew !== undefined ? { renew } : {}),
   };
 }
 
@@ -125,6 +152,15 @@ export function savePendingPairGrant(grant: PendingPairGrant): void {
     ...(grant.nextPollAt !== undefined ? { next_poll_at: grant.nextPollAt } : {}),
     ...(grant.qrFile !== undefined ? { qr_file: grant.qrFile } : {}),
     mode: grant.mode,
+    ...(grant.renew !== undefined ? {
+      renew: {
+        org_id: grant.renew.scope.orgId,
+        project_id: grant.renew.scope.projectId,
+        signup: grant.renew.scope.signup,
+        ...(grant.renew.intentTitle !== undefined ? { intent_title: grant.renew.intentTitle } : {}),
+        ...(grant.renew.intentDescription !== undefined ? { intent_description: grant.renew.intentDescription } : {}),
+      },
+    } : {}),
   }));
 }
 

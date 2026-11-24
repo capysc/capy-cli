@@ -15,7 +15,10 @@
  *    PAIR_CODE_REQUIRED with a `form` asking for it. The human pastes it into the chat, and `capy pair --wait --code
  *    <code>` sends it; a wrong one answers PAIR_CODE_MISMATCH with the form again. The agent never makes the code up:
  *    only the person who approved can see it, which is what stops a phished approval from installing anything.
- * 5. `capy pair --cancel` removes the pending grant.
+ * 5. A grant that expires before it is approved is replaced (CAP-885): the wait run starts a fresh pairing with the same
+ *    scope and intent and answers PAIR_LINK_RENEWED with the new link, so a slow human never sees pairing die. The agent
+ *    shows the new link and code and runs the wait again.
+ * 6. `capy pair --cancel` removes the pending grant.
  *
  * stdout is JSON only, and every stop carries a code. Terminal behaviour is untouched: `pairEntry.ts` sends only
  * agent mode here (`json`, no terminal, or one of the new flags).
@@ -29,7 +32,8 @@ import {
   sweepExpiredPendingPairGrant,
   type PendingPairGrant,
 } from '../auth/pairing/pendingGrant';
-import { pairApprovalLink, resolvePairScope } from '../auth/pairing/pairScope';
+import { pairApprovalLink, resolvePairScope, type PairScope } from '../auth/pairing/pairScope';
+import type { PairingIntent } from '../auth/deviceGrant';
 import { pairKeyFingerprint } from '../crypto/pairFingerprint';
 import { resolveActiveUrl } from '../config/profileConfig';
 import { generatePairKeyPair } from '../crypto/pairCrypto';
@@ -175,14 +179,22 @@ function expiryOf(authorize: DeviceAuthorizeResult, nowMs: number): string {
   return at.toISOString();
 }
 
-async function startRun(options: PairAgentOptions, deps: PairAgentDeps): Promise<Outcome> {
-  const devMode = options.devMode === true;
-  const bin = binName(devMode);
+/** What a fresh grant is made from: the start run's options, or the expired grant it replaces (CAP-885). */
+interface GrantRequest {
+  readonly apiUrl: string;
+  readonly scope: PairScope;
+  readonly intent: PairingIntent;
+  readonly force: boolean;
+}
+
+/**
+ * Asks the service for a grant and saves it as the pending one, replacing (and cleaning up after) any previous grant.
+ * Answers the grant and the full QR (text, and the PNG with its data URI) for a link the human has not seen yet.
+ */
+async function issueGrant(request: GrantRequest, deps: PairAgentDeps): Promise<{ readonly grant: PendingPairGrant; readonly qr: ElicitationLinkQr | null }> {
   const now = deps.now ?? Date.now;
-  const apiUrl = options.apiUrl || resolveActiveUrl(devMode);
-  const scope = resolvePairScope(options);
+  const { apiUrl, scope, intent } = request;
   const keyPair = generatePairKeyPair();
-  const intent = pairIntent(options);
   const authorize = await authorizeDevice(apiUrl, keyPair.publicKey, scope, intent);
   const authorizedAt = now();
   if (typeof authorize.device_code !== 'string' || !authorize.device_code
@@ -200,7 +212,7 @@ async function startRun(options: PairAgentOptions, deps: PairAgentDeps): Promise
     keyPair,
     userCode: authorize.user_code,
     deviceLink,
-    force: options.force === true,
+    force: request.force,
     apiUrl,
     purpose: pairPurpose(scope, intent),
     expiresAt,
@@ -209,13 +221,54 @@ async function startRun(options: PairAgentOptions, deps: PairAgentDeps): Promise
     nextPollAt: authorizedAt + authorize.interval * 1000,
     ...(image ? { qrFile: image.file } : {}),
     mode: scope.mode,
+    renew: {
+      scope,
+      ...(intent.title ? { intentTitle: intent.title } : {}),
+      ...(intent.description ? { intentDescription: intent.description } : {}),
+    },
   };
   saveOrDiscardQr(grant);
   // The new grant replaced the old one: the old one's QR file goes with it.
-  if (previous?.qrFile !== undefined) removePairingQrImage(previous.qrFile);
+  if (previous?.qrFile !== undefined && previous.qrFile !== grant.qrFile) removePairingQrImage(previous.qrFile);
+  return { grant, qr: startQr(deviceLink, image) };
+}
+
+async function startRun(options: PairAgentOptions, deps: PairAgentDeps): Promise<Outcome> {
+  const devMode = options.devMode === true;
+  const { grant, qr } = await issueGrant({
+    apiUrl: options.apiUrl || resolveActiveUrl(devMode),
+    scope: resolvePairScope(options),
+    intent: pairIntent(options),
+    force: options.force === true,
+  }, deps);
   return {
     kind: 'refusal',
-    refusal: linkRefusal(ERROR_CODES.PAIR_APPROVAL_PENDING, 'Waiting for approval.', grant, bin, startQr(deviceLink, image)), // COPY-FLAG
+    refusal: linkRefusal(ERROR_CODES.PAIR_APPROVAL_PENDING, 'Waiting for approval.', grant, binName(devMode), qr), // COPY-FLAG
+  };
+}
+
+/**
+ * CAP-885: a slow human never sees pairing die. A grant that expired before it was approved is replaced by a fresh one
+ * with the same scope and intent, and the wait answers PAIR_LINK_RENEWED with the new link (and its full QR) for the
+ * agent to show. A grant from an earlier build has no `renew` and simply expires.
+ */
+async function renewExpired(grant: PendingPairGrant, options: PairAgentOptions, deps: PairAgentDeps): Promise<Outcome> {
+  if (!grant.renew) {
+    removePendingPairGrant();
+    throw new CapyError('Device pairing expired before it was approved', ERROR_CODES.PAIR_EXPIRED); // COPY-FLAG
+  }
+  const { grant: fresh, qr } = await issueGrant({
+    apiUrl: grant.apiUrl,
+    scope: grant.renew.scope,
+    intent: {
+      ...(grant.renew.intentTitle ? { title: grant.renew.intentTitle } : {}),
+      ...(grant.renew.intentDescription ? { description: grant.renew.intentDescription } : {}),
+    },
+    force: grant.force,
+  }, deps);
+  return {
+    kind: 'refusal',
+    refusal: linkRefusal(ERROR_CODES.PAIR_LINK_RENEWED, 'The last link expired before it was approved, so here is a new one. Nothing was installed.', fresh, binName(options.devMode === true), qr), // COPY-FLAG
   };
 }
 
@@ -322,8 +375,7 @@ async function waitRun(options: PairAgentOptions, deps: PairAgentDeps): Promise<
     case 'approved':
       return completeApproved(grant, step.exchange, options);
     case 'expired':
-      removePendingPairGrant();
-      throw new CapyError('Device pairing expired before it was approved', ERROR_CODES.PAIR_EXPIRED); // COPY-FLAG
+      return renewExpired(grant, options, deps);
     case 'denied':
       removePendingPairGrant();
       throw new CapyError('Device pairing was denied', ERROR_CODES.PAIR_DENIED); // COPY-FLAG
@@ -362,7 +414,7 @@ function cancelRun(): Outcome {
 
 /**
  * An expired pending grant is deleted first, on every agent-mode run but `--wait`: that run finds it itself and
- * answers `PAIR_EXPIRED` (and deletes it), which tells the agent more than "nothing is pending" would.
+ * replaces it with a fresh pairing (`PAIR_LINK_RENEWED`, CAP-885).
  */
 async function run(options: PairAgentOptions, deps: PairAgentDeps): Promise<Outcome> {
   if (!options.wait) sweepExpiredPendingPairGrant((deps.now ?? Date.now)());
