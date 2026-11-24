@@ -230,7 +230,9 @@ sign-in: an existing user approves the handover of their organization's keys,
 and a new user signs up, which creates the organization. It asks for the
 pairing, saves it, and exits
 **3** at once with `PAIR_APPROVAL_PENDING` and an elicitation of kind `link`
-(`url`, `code`, `purpose`, `expires_at`, `answer.wait`, and a `qr`).
+(`url`, `code`, `purpose`, `expires_at`, `answer.wait`, a `qr`, and
+`instructions`, a fixed sentence that says what to do next, so an agent with no
+AGENTS block yet still waits and renews).
 
 Always show the human the link, the code and the expiry. Show the QR in this
 order:

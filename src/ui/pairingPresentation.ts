@@ -18,6 +18,14 @@ import path from 'path';
 export const PAIRING_QR_IMAGE_RULE =
   'Show the QR as an image the human can scan right in the conversation: if your client can show images or HTML widgets, show the PNG inline with `qr.image.data_uri` as the image source (a wait response has no data URI, so read `qr.image.file` and show it inline the same way). An attached file, a download link or a file path is not showing the QR.';
 
+/**
+ * CAP-897: what every `link` elicitation says to do next, in its own `instructions` field. An agent in a fresh folder
+ * has no AGENTS block yet and may never read `capy help --json`, so the link response itself has to carry the wait and
+ * renew rule (run 9: the agent showed the link, ended its turn and planned a new `capy pair` on expiry).
+ */
+export const PAIR_LINK_INSTRUCTIONS =
+  'Show the human the `url`, `code`, `fingerprint`, `expires_at` and QR now, then run `answer.wait` at once in the foreground, without waiting for a reply. Run it again whenever it exits 3 with PAIR_STILL_WAITING. If it exits 3 with PAIR_LINK_RENEWED, the old link expired and this is a new one: show the human the new link the same way and run its `answer.wait`. Never start a new `capy pair` for an expired link, and never fill in the one-time code yourself.'; // COPY-FLAG
+
 export const PAIRING_PRESENTATION = {
   version: 1,
   command: 'capy pair --json',

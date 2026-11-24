@@ -14,6 +14,7 @@ import jsQR from 'jsqr';
 import { PNG } from 'pngjs';
 import { webcrypto } from 'crypto';
 import { CapyError, ERROR_CODES } from '../../src/types/index';
+import { PAIR_LINK_INSTRUCTIONS } from '../../src/ui/pairingPresentation';
 import { PAIR_AAD, type PairEnvelope } from '../../src/crypto/pairCrypto';
 import type { PairingPayload } from '../../src/crypto/pairingPayload';
 
@@ -262,7 +263,7 @@ describe('capy pair, agent mode', () => {
       expect(ran.json.ok).toBe(false);
       expect(ran.json.code).toBe(ERROR_CODES.PAIR_APPROVAL_PENDING);
       const { elicitation } = ran.json;
-      expect(Object.keys(elicitation).toSorted()).toEqual(['answer', 'code', 'expires_at', 'fingerprint', 'kind', 'purpose', 'qr', 'url']);
+      expect(Object.keys(elicitation).toSorted()).toEqual(['answer', 'code', 'expires_at', 'fingerprint', 'instructions', 'kind', 'purpose', 'qr', 'url']);
       expect(elicitation.fingerprint).toMatch(/^[0-9A-F]{4}(-[0-9A-F]{4}){3}$/);
       expect(elicitation.kind).toBe('link');
       expect(elicitation.code).toBe('ABCD-EFGH');
@@ -574,6 +575,25 @@ describe('capy pair, agent mode', () => {
       expect(fresh.mode).toBe(old.mode);
       expect(callsTo(fetchMock, '/auth/device/authorize')).toHaveLength(1);
       expect(mockInstallDeviceGrantSession).not.toHaveBeenCalled();
+    });
+
+    // CAP-897: an agent with no AGENTS block learns the wait and renew rule from the link itself.
+    test('every link (pending, still waiting, renewed) carries the same next-step instructions', async () => {
+      stubFetch([PENDING]);
+      const started = await run({ email: 'mike@example.com' });
+      expect(started.json.code).toBe(ERROR_CODES.PAIR_APPROVAL_PENDING);
+      expect(started.json.elicitation.instructions).toBe(PAIR_LINK_INSTRUCTIONS);
+      stubFetch([PENDING]);
+      const still = await run({ wait: true }, { ...fakeClock(Date.now() + 5000), ceilingMs: PAIR_WAIT_CEILING_MS });
+      expect(still.json.code).toBe(ERROR_CODES.PAIR_STILL_WAITING);
+      expect(still.json.elicitation.instructions).toBe(PAIR_LINK_INSTRUCTIONS);
+      stubFetch([PENDING], RENEWED_BODY);
+      const renewed = await run({ wait: true }, fakeClock(Date.now() + 10_000_000));
+      expect(renewed.json.code).toBe(ERROR_CODES.PAIR_LINK_RENEWED);
+      expect(renewed.json.elicitation.instructions).toBe(PAIR_LINK_INSTRUCTIONS);
+      for (const phrase of ['at once in the foreground', 'PAIR_STILL_WAITING', 'PAIR_LINK_RENEWED', 'Never start a new `capy pair`', 'never fill in the one-time code']) {
+        expect(PAIR_LINK_INSTRUCTIONS).toContain(phrase);
+      }
     });
 
     test('an expired grant (its own expiry has passed): renewed without polling the old one', async () => {

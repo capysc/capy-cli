@@ -41,7 +41,7 @@ import { CapyError, ERROR_CODES } from '../types/index';
 import type { ElicitationForm, ElicitationLink, ElicitationLinkQr } from '../ui/elicitation';
 import { pairCodeDisplay } from '../ui/elicitationDisplay';
 import { EXIT_NEEDS_INPUT } from '../ui/interactive';
-import { createPairingQrImage, removePairingQrImage, type PairingQrImage } from '../ui/pairingPresentation';
+import { createPairingQrImage, PAIR_LINK_INSTRUCTIONS, removePairingQrImage, type PairingQrImage } from '../ui/pairingPresentation';
 import { buildTerminalQr } from '../ui/terminalQr';
 import { binName } from './binName';
 import { finishPairing, pairIntent, pairPurpose, type PairOptions } from './pairCommand';
@@ -103,6 +103,7 @@ function linkElicitation(grant: PendingPairGrant, bin: string, qr: ElicitationLi
     purpose: grant.purpose,
     expires_at: grant.expiresAt,
     ...(qr ? { qr } : {}),
+    instructions: PAIR_LINK_INSTRUCTIONS,
     answer: { wait: `${bin} pair --wait` },
   };
 }
