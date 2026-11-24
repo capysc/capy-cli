@@ -533,38 +533,93 @@ describe('capy pair, agent mode', () => {
       expect(slept).toBeLessThanOrEqual(30_000);
     });
 
-    test('an expired grant (service says so): PAIR_EXPIRED, pending file gone, nothing installed', async () => {
+    // CAP-885: a slow human never sees pairing die. An expired grant is replaced by a fresh one, and the wait hands the
+    // agent the new link to show.
+    const RENEWED_BODY = { ...AUTHORIZE_BODY, device_code: 'device-2', user_code: 'WXYZ-2345' };
+
+    test('an expired grant (service says so): PAIR_LINK_RENEWED with a fresh link and full QR, nothing installed', async () => {
       await startThenStub('mike@example.com', [EXPIRED]);
+      const old = JSON.parse(pendingRaw());
+      const fetchMock = stubFetch([EXPIRED], RENEWED_BODY);
       const ran = await run({ wait: true });
-      expect(ran.exit).toBe(1);
-      expect(ran.json.code).toBe(ERROR_CODES.PAIR_EXPIRED);
-      expect(pendingExists()).toBe(false);
+      expect(ran.exit).toBe(3);
+      expect(ran.json.code).toBe(ERROR_CODES.PAIR_LINK_RENEWED);
+      const link = ran.json.elicitation;
+      expect(link.kind).toBe('link');
+      expect(link.code).toBe('WXYZ-2345');
+      expect(link.url).toContain('WXYZ-2345');
+      expect(link.answer).toEqual({ wait: `${BIN} pair --wait` });
+      // A link the human has not seen: the whole QR, as a start run gives it.
+      expect(typeof link.qr.text).toBe('string');
+      expect(link.qr.image.data_uri).toMatch(/^data:image\/png;base64,/);
+      // The fresh grant replaced the old one, with a new key pair, and asked for the same thing.
+      const fresh = JSON.parse(pendingRaw());
+      expect(fresh.device_code).toBe('device-2');
+      expect(fresh.pair_public_key).not.toBe(old.pair_public_key);
+      expect(fresh.renew).toEqual(old.renew);
+      expect(fresh.mode).toBe(old.mode);
+      expect(callsTo(fetchMock, '/auth/device/authorize')).toHaveLength(1);
       expect(mockInstallDeviceGrantSession).not.toHaveBeenCalled();
     });
 
-    test('an expired grant (its own expiry has passed): PAIR_EXPIRED without polling', async () => {
+    test('an expired grant (its own expiry has passed): renewed without polling the old one', async () => {
       await startThenStub('mike@example.com', [APPROVED]);
-      const fetchMock = stubFetch([APPROVED]);
+      const fetchMock = stubFetch([APPROVED], RENEWED_BODY);
       const clock = fakeClock(Date.now() + 10_000_000);
       const ran = await run({ wait: true }, clock);
-      expect(ran.json.code).toBe(ERROR_CODES.PAIR_EXPIRED);
+      expect(ran.json.code).toBe(ERROR_CODES.PAIR_LINK_RENEWED);
       expect(callsTo(fetchMock, '/auth/device/token')).toHaveLength(0);
-      expect(pendingExists()).toBe(false);
+      expect(JSON.parse(pendingRaw()).device_code).toBe('device-2');
     });
 
-    test('an expired grant (its own expiry has passed) is PAIR_EXPIRED even when this run would not poll', async () => {
+    test('an expired grant is renewed even when this run would not poll, and the old PNG goes', async () => {
       stubFetch([PENDING], { ...AUTHORIZE_BODY, expires_in: 10, interval: 60 });
       const started = await run({ email: 'mike@example.com' });
       const image = started.json.elicitation.qr.image.file as string;
       // The start run saved the earliest first poll a minute away (the interval is longer than the ceiling).
-      const fetchMock = stubFetch([PENDING]);
+      const fetchMock = stubFetch([PENDING], RENEWED_BODY);
       // This run starts after the grant's own expiry (10 seconds) but before that poll time: it does not poll.
       const later = await run({ wait: true }, fakeClock(Date.now() + 20_000));
-      expect(later.exit).toBe(1);
-      expect(later.json.code).toBe(ERROR_CODES.PAIR_EXPIRED);
+      expect(later.exit).toBe(3);
+      expect(later.json.code).toBe(ERROR_CODES.PAIR_LINK_RENEWED);
       expect(callsTo(fetchMock, '/auth/device/token')).toHaveLength(0);
-      expect(pendingExists()).toBe(false);
       expect(existsSync(image)).toBe(false);
+      expect(existsSync(later.json.elicitation.qr.image.file)).toBe(true);
+    });
+
+    test('the renewed grant is waited on like any other: approve it and the pairing finishes', async () => {
+      await startThenStub('mike@example.com', [EXPIRED]);
+      stubFetch([EXPIRED], RENEWED_BODY);
+      const renewed = await run({ wait: true });
+      expect(renewed.json.code).toBe(ERROR_CODES.PAIR_LINK_RENEWED);
+      const fetchMock = stubFetch([PENDING]);
+      const still = await run({ wait: true });
+      expect(still.json.code).toBe(ERROR_CODES.PAIR_STILL_WAITING);
+      expect(still.json.elicitation.code).toBe('WXYZ-2345');
+      const [, init] = callsTo(fetchMock, '/auth/device/token')[0] as [string, { body: string }];
+      expect(JSON.parse(init.body).device_code).toBe('device-2');
+    });
+
+    test('a grant saved by an earlier build (no renew) still answers PAIR_EXPIRED, pending file gone', async () => {
+      await startThenStub('mike@example.com', [EXPIRED]);
+      const { renew: _renew, ...older } = JSON.parse(pendingRaw());
+      savePairPendingRaw(JSON.stringify(older));
+      const fetchMock = stubFetch([EXPIRED]);
+      const ran = await run({ wait: true });
+      expect(ran.exit).toBe(1);
+      expect(ran.json.code).toBe(ERROR_CODES.PAIR_EXPIRED);
+      expect(pendingExists()).toBe(false);
+      expect(callsTo(fetchMock, '/auth/device/authorize')).toHaveLength(0);
+    });
+
+    test('a renewal the service refuses ends the wait with that error, coded', async () => {
+      await startThenStub('mike@example.com', [EXPIRED]);
+      globalThis.fetch = (async (url: string) => url.endsWith('/auth/device/authorize')
+        ? ({ ok: false, status: 500, json: async () => ({ error: 'down', code: 'AUTH_FAILED' }) }) as Response
+        : ({ ok: false, status: 400, json: async () => EXPIRED.body }) as Response) as typeof fetch;
+      const ran = await run({ wait: true });
+      expect(ran.exit).toBe(1);
+      expect(ran.json.code).toBe(ERROR_CODES.AUTH_FAILED);
     });
 
     test('a denied grant: PAIR_DENIED, pending file gone, nothing installed', async () => {
@@ -925,7 +980,7 @@ describe('capy pair, agent mode', () => {
     });
 
     test.each([
-      ['an expiry the service reports', EXPIRED, ERROR_CODES.PAIR_EXPIRED],
+      ['an expiry the service reports (the link is renewed)', EXPIRED, ERROR_CODES.PAIR_LINK_RENEWED],
       ['a denial', DENIED, ERROR_CODES.PAIR_DENIED],
     ])('the PNG is gone after %s', async (_name, wire, code) => {
       const { file } = await started();
@@ -935,11 +990,11 @@ describe('capy pair, agent mode', () => {
       expect(gone(file)).toBe(true);
     });
 
-    test('the PNG is gone after the grant\'s own expiry passes', async () => {
+    test('the PNG is gone after the grant\'s own expiry passes (the link is renewed)', async () => {
       const { file } = await started();
-      stubFetch([APPROVED]);
+      stubFetch([APPROVED], { ...AUTHORIZE_BODY, device_code: 'device-2', user_code: 'WXYZ-2345' });
       const ran = await run({ wait: true }, fakeClock(Date.now() + 10_000_000));
-      expect(ran.json.code).toBe(ERROR_CODES.PAIR_EXPIRED);
+      expect(ran.json.code).toBe(ERROR_CODES.PAIR_LINK_RENEWED);
       expect(gone(file)).toBe(true);
     });
 
@@ -1020,14 +1075,14 @@ describe('capy pair, agent mode', () => {
       }
     });
 
-    test('--wait on an expired grant answers PAIR_EXPIRED and the pending file is gone', async () => {
+    test('--wait on an expired grant renews it, and the old grant is replaced', async () => {
       const blocker = await startWithDirectoryForPng();
       try {
-        stubFetch([APPROVED]);
+        stubFetch([APPROVED], { ...AUTHORIZE_BODY, device_code: 'device-2', user_code: 'WXYZ-2345' });
         const ran = await run({ wait: true }, fakeClock(Date.now() + 10_000_000));
-        expect(ran.exit).toBe(1);
-        expect(ran.json.code).toBe(ERROR_CODES.PAIR_EXPIRED);
-        expect(pendingExists()).toBe(false);
+        expect(ran.exit).toBe(3);
+        expect(ran.json.code).toBe(ERROR_CODES.PAIR_LINK_RENEWED);
+        expect(JSON.parse(pendingRaw()).device_code).toBe('device-2');
       } finally {
         cleanUp(blocker);
       }

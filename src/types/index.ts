@@ -738,8 +738,10 @@ export const ERROR_CODES = {
   PAIR_STILL_WAITING: 'PAIR_STILL_WAITING',
   /** `capy pair --wait`: there is no pending pairing (never started, finished, cancelled or unreadable). Start again. */
   PAIR_NOT_PENDING: 'PAIR_NOT_PENDING',
-  /** `capy pair --wait`: the grant expired before it was approved. */
+  /** `capy pair --wait`: the grant expired before it was approved (and could not be renewed: a grant from an earlier build). */
   PAIR_EXPIRED: 'PAIR_EXPIRED',
+  /** `capy pair --wait`: the grant expired before it was approved, so the wait started a fresh one (CAP-885); the refusal carries the new `link` elicitation to show the human. */
+  PAIR_LINK_RENEWED: 'PAIR_LINK_RENEWED',
   /** `capy pair --wait`: the human denied the grant. */
   PAIR_DENIED: 'PAIR_DENIED',
   /** `capy pair`: the approving account is not a member of the org (or project) this pairing is for. No session was handed over. */
