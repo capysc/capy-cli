@@ -156,9 +156,11 @@ function saveOrDiscardQr(grant: PendingPairGrant): void {
   }
 }
 
-type Outcome =
+export type PairAgentOutcome =
   | { readonly kind: 'refusal'; readonly refusal: Refusal }
   | { readonly kind: 'done'; readonly body: Readonly<Record<string, unknown>> };
+
+type Outcome = PairAgentOutcome;
 
 /** What `authorizeDevice` answered is checked before anything is saved: a grant that could never be polled or expire is refused. */
 function malformedAuthorize(): CapyError {
@@ -425,6 +427,22 @@ async function run(options: PairAgentOptions, deps: PairAgentDeps): Promise<Outc
   if (options.cancel) return cancelRun();
   if (options.wait) return waitRun(options, deps);
   return startRun(options, deps);
+}
+
+/**
+ * Agent-mode `capy pair` as a step of another command (`capy setup`): the same run, with what it would print or refuse
+ * handed back instead. Nothing is printed and the process never exits here.
+ */
+export async function pairAgentOutcome(options: PairAgentOptions = {}, deps: PairAgentDeps = {}): Promise<PairAgentOutcome> {
+  const settled = await settle(() => run(options, deps));
+  if (settled.ok) return settled.value;
+  const err = settled.error;
+  return {
+    kind: 'refusal',
+    refusal: err instanceof CapyError
+      ? { code: err.code, message: err.message, exitCode: 1 }
+      : { code: ERROR_CODES.SERVICE_ERROR, message: err instanceof Error ? err.message : String(err), exitCode: 1 },
+  };
 }
 
 /**

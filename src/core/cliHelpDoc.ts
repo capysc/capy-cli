@@ -141,6 +141,7 @@ export const DRY_RUN_COMMANDS: ReadonlySet<string> = new Set([
   'secrets',
   'secrets set',
   'secrets deploy',
+  'setup',
 ]);
 
 /** The JSON Schemas published in `capy help --json`. */

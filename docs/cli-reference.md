@@ -429,6 +429,29 @@ capy pair [options]
 
 JSON support: yes (`--json`)
 
+## `capy setup`
+
+Set this folder up with Capy in one command, for agents: pair, choose the organization, project and branch, write the agent instructions, and list the integrations found. Always answers in JSON; run it again after every stop until it says "setup": "complete"
+
+```
+capy setup [options]
+```
+
+| Option | Description | Default |
+|---|---|---|
+| `--code <code>` | the one-time code Keep shows the person who approved the pairing; ask them for it |  |
+| `--org <id|name>` | the organization to set this folder up in (asked when you belong to more than one) |  |
+| `--project <id|name>` | link this folder to an existing project in the organization, or "new" to create one |  |
+| `--name <name>` | the name of a new project |  |
+| `--branch <name>` | the first branch of a new project (offered by default: development), or the branch of an existing project to use |  |
+| `--protected [yes|no]` | whether the first branch is protected (invite-only) |  |
+| `--no-protected` | Create it open to the project |  |
+| `--json` | accepted for symmetry: setup always answers in JSON |  |
+
+JSON support: yes (`--json`)
+
+Dry run: yes (`--dry-run`)
+
 ## `capy kick`
 
 Remove a teammate from this organization
