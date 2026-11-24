@@ -8,7 +8,7 @@
  * what the session file holds afterwards.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, mock, spyOn, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { homedir, tmpdir } from 'os';
 import { join, relative } from 'path';
 import { AuthService } from '../../src/auth/authService';
@@ -358,5 +358,65 @@ describe('the local expiry of a refreshed token', () => {
     const { expires_at } = storedOrgSession();
     expect(expires_at).toBeGreaterThanOrEqual(before + 5000);
     expect(expires_at).toBeLessThanOrEqual(Date.now() + 5000);
+  });
+});
+
+describe('a session the service did not hand out (SESSION_NOT_RECOGNIZED)', () => {
+  const notRecognized = (): Response =>
+    json(401, { error: 'This session was not issued by Capy. Sign in again.', code: 'SESSION_NOT_RECOGNIZED' });
+
+  test('the saved session is removed and the user is told to sign in again, after one refresh and no retry', async () => {
+    writeStoredSession(REJECTED, 'rt-1');
+    const spy = installFakeService({ accepts: [], rejection: notRecognized, onRefresh: notRecognized });
+    const client = await signedInClient();
+
+    const error = await failureOf(client.listProjects());
+
+    expect(error).toBeInstanceOf(CapyError);
+    expect((error as CapyError).code).toBe(ERROR_CODES.AUTH_FAILED);
+    expect((error as CapyError).details?.code).toBe('SESSION_NOT_RECOGNIZED');
+    expect((error as CapyError).message).toContain('sign in again');
+    expect(bearersSent(spy)).toEqual([bearer(REJECTED)]);
+    expect(refreshBodies(spy)).toHaveLength(1);
+    expect(existsSync(sessionFile)).toBe(false);
+  });
+
+  test('the next command finds no session instead of sending the refused token again', async () => {
+    writeStoredSession(REJECTED, 'rt-1');
+    const spy = installFakeService({ accepts: [], rejection: notRecognized, onRefresh: notRecognized });
+    const client = await signedInClient();
+    await failureOf(client.listProjects());
+    const callsAfterFirstCommand = spy.mock.calls.length;
+
+    const next = await new AuthService(API_URL, false, USER_ID).authenticateSilent(ORG_ID);
+
+    expect(next.success).toBe(false);
+    expect(next.error_code).toBe('no_session');
+    expect(spy.mock.calls.length).toBe(callsAfterFirstCommand);
+  });
+
+  test('an expired token whose refresh is refused this way: silent auth says to sign in again and removes the session', async () => {
+    writeStoredSession(REJECTED, 'rt-1');
+    const stored = JSON.parse(readFileSync(sessionFile, 'utf-8'));
+    stored.sessions[ORG_ID].expires_at = Date.now() - 1000;
+    writeFileSync(sessionFile, JSON.stringify(stored));
+    installFakeService({ accepts: [], onRefresh: notRecognized });
+
+    const result = await new AuthService(API_URL, false, USER_ID).authenticateSilent(ORG_ID);
+
+    expect(result.success).toBe(false);
+    expect(result.error_code).toBe('session_ended');
+    expect(result.error).toContain('sign in again');
+    expect(existsSync(sessionFile)).toBe(false);
+  });
+
+  test('an ordinary refused refresh (no code) still keeps the session file', async () => {
+    writeStoredSession(REJECTED, 'rt-1');
+    installFakeService({ accepts: [], onRefresh: refreshRefused });
+    const client = await signedInClient();
+
+    await failureOf(client.listProjects());
+
+    expect(existsSync(sessionFile)).toBe(true);
   });
 });

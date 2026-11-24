@@ -34,14 +34,23 @@ export interface RefreshFailure {
   status?: number;
   /** Server `error` body or transport error message. Never contains tokens. */
   detail?: string;
+  /**
+   * True when the service answered `SESSION_NOT_RECOGNIZED`: it did not hand this session out, so no refresh or
+   * retry can ever make it work. The saved session is removed and the user signs in again.
+   */
+  notRecognized?: boolean;
 }
+
+/** The service's `code` for a session it did not hand out. Decided by this code, never by the message text. */
+export const SESSION_NOT_RECOGNIZED = 'SESSION_NOT_RECOGNIZED';
 
 function classifyRefreshFailure(error: any): RefreshFailure {
   if (error instanceof HttpStatusError) {
     if (error.status === 401) {
       // WorkOS rejected the refresh token — the backing session has ended
       // (inactivity timeout, max duration, sign-out, or revocation).
-      return { reason: 'session_ended', status: error.status, detail: error.message };
+      const notRecognized = error.body?.code === SESSION_NOT_RECOGNIZED;
+      return { reason: 'session_ended', status: error.status, detail: error.message, ...(notRecognized ? { notRecognized } : {}) };
     }
     if (error.status === 404) {
       return { reason: 'org_not_found', status: error.status, detail: error.message };
@@ -365,6 +374,9 @@ export class AuthService {
   private describeSilentAuthFailure(): { code: SilentAuthFailureCode; message: string } {
     switch (this.lastRefreshFailure?.reason) {
       case 'session_ended':
+        if (this.lastRefreshFailure.notRecognized) {
+          return { code: 'session_ended', message: 'Capy no longer recognizes this session — sign in again' };
+        }
         return { code: 'session_ended', message: 'Session expired — sign-in required' };
       case 'network':
         return { code: 'network', message: 'Could not reach the Capy service to refresh your session' };
@@ -641,6 +653,9 @@ export class AuthService {
         `[auth] token refresh failed for org ${orgId} (${failure.reason}` +
         `${failure.status ? `, HTTP ${failure.status}` : ''}): ${failure.detail || 'no detail'}`
       );
+      // The service never handed this session out. Keeping the file would only make every later command send
+      // the same refused token until it expires, so forget it now: the next sign-in starts clean.
+      if (failure.notRecognized) this.clearSession();
       return false;
     } finally {
       if (release) {

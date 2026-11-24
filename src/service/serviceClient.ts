@@ -536,10 +536,20 @@ export class ServiceClient {
           return this.request<T>(method, path, body, { ...options, _retried: true, _token: retryToken });
         }
         const detail = data.error || 'Unknown auth error';
+        // The server's `code` rides along so a caller can tell "sign in again" from any other 401 without
+        // reading the sentence.
+        const serverCode = typeof data.code === 'string' ? data.code : undefined;
+        if (serverCode === 'SESSION_NOT_RECOGNIZED') {
+          throw new CapyError(
+            'Capy no longer recognizes this session. Run `capy` to sign in again.',
+            ERROR_CODES.AUTH_FAILED,
+            { status: 401, detail, code: serverCode }
+          );
+        }
         throw new CapyError(
           `Authentication failed: ${detail}`,
           ERROR_CODES.AUTH_FAILED,
-          { status: 401, detail }
+          { status: 401, detail, ...(serverCode ? { code: serverCode } : {}) }
         );
       }
 
