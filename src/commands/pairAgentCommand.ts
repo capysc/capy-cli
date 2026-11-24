@@ -320,7 +320,14 @@ async function pollOnceBounded(grant: PendingPairGrant, timeoutMs: number, confi
  * least the ceiling (then it returns at once). Either way the earliest next poll time is handed back to be saved.
  * Each request is bounded by `pollTimeoutMs`, shortened so it cannot run past the deadline.
  */
-async function pollUntil(grant: PendingPairGrant, ceilingMs: number, pollTimeoutMs: number, clock: Clock, confirmationCode?: string): Promise<WaitStep> {
+async function pollUntil(
+  grant: PendingPairGrant,
+  ceilingMs: number,
+  pollTimeoutMs: number,
+  clock: Clock,
+  confirmationCode?: string,
+  remember?: (intervalMs: number, nextPollAt: number) => void,
+): Promise<WaitStep> {
   const startedAt = clock.now();
   const deadline = startedAt + ceilingMs;
   const expiresAtMs = Date.parse(grant.expiresAt);
@@ -337,6 +344,8 @@ async function pollUntil(grant: PendingPairGrant, ceilingMs: number, pollTimeout
       return { kind: 'expired' };
     }
     if (at < deadline) {
+      // CAP-899: a run can now wait minutes, and the agent's tool may kill it; the next run must still never poll early.
+      remember?.(intervalMs, at);
       await sleepUntil(at);
       return poll(intervalMs);
     }
@@ -389,7 +398,7 @@ async function waitRun(options: PairAgentOptions, deps: PairAgentDeps): Promise<
   }
   const now = deps.now ?? Date.now;
   const code = options.code?.trim() || undefined;
-  const step = await pollUntil(grant, deps.ceilingMs ?? PAIR_WAIT_CEILING_MS, deps.pollTimeoutMs ?? PAIR_POLL_TIMEOUT_MS, { sleep: deps.sleep ?? defaultSleep, now }, code);
+  const step = await pollUntil(grant, deps.ceilingMs ?? PAIR_WAIT_CEILING_MS, deps.pollTimeoutMs ?? PAIR_POLL_TIMEOUT_MS, { sleep: deps.sleep ?? defaultSleep, now }, code, (intervalMs, nextPollAt) => savePendingPairGrant({ ...grant, intervalSeconds: intervalMs / 1000, nextPollAt }));
   switch (step.kind) {
     case 'approved':
       return completeApproved(grant, step.exchange, options);

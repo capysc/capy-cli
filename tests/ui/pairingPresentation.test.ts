@@ -205,6 +205,10 @@ describe('pairing contract', () => {
       expect(source).toContain('tool timeout of at least 10 minutes');
     }
     expect(readmeSection.replace(/\s+/g, ' ')).toContain('give it a tool timeout of at least 10 minutes');
+    const help = readFileSync(path.join(import.meta.dir, '../../src/index.ts'), 'utf8');
+    const waitHelp = help.slice(help.indexOf(".option('--wait'"), help.indexOf('\n', help.indexOf(".option('--wait'")));
+    expect(waitHelp).toContain('up to 9 minutes');
+    expect(waitHelp).toContain('tool timeout of at least 10 minutes');
     expect(text).toContain('"keys": "already_present"');
     expect(AGENTS_BLOCK).toContain('run `capy pair --json`. Do not ask the human anything first, and add no flags.');
     expect(AGENTS_BLOCK).not.toContain('--signup');
