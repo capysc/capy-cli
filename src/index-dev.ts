@@ -5,7 +5,9 @@
  * This file is NOT included in production builds or npm packages.
  */
 import { config } from 'dotenv';
-import { resolve } from 'path';
+import { join, resolve } from 'path';
+import { execSync } from 'child_process';
+import { chmodSync, existsSync, readdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'fs';
 import { Command, Option } from 'commander';
 import { CapyCommand } from './commands/capyCommand';
 import { CliOptions } from './types/index';
@@ -13,6 +15,8 @@ import { version as CLI_VERSION } from '../package.json';
 import { conflictOption, rawConflictFlagsOf, resolveOption } from './sync/conflicts';
 import { answersByProtocol } from './sync/gate';
 import { refuseWebMode } from './core/webModeRemoved';
+import { commandPath, dryRunRefusal } from './core/dryRunGuard';
+import { refuseDryRunUnsupported } from './commands/pipedValue';
 import { ACCENT } from './ui/colors';
 import { SYNC_HOOK_MARKER, withoutSyncHookBlock } from './git/syncHooks';
 
@@ -88,7 +92,7 @@ program
   .option('--env-path <path>', 'specify custom .env file location')
   .option('-v, --verbose', 'enable detailed logging')
   .option('-f, --force', 're-encrypt existing variables')
-  .option('-d, --dry-run', 'preview changes without applying')
+  .option('-d, --dry-run', 'preview changes without applying; a command that cannot preview refuses and changes nothing')
   .addOption(resolveOption())
   .addOption(conflictOption())
   // Hidden: `--web` was removed. It still parses so the hook below can refuse it (WEB_MODE_REMOVED).
@@ -102,6 +106,11 @@ program
   .hook('preAction', (_thisCommand, actionCommand) => {
     const opts = actionCommand.optsWithGlobals();
     if (opts.web === true) refuseWebMode(opts.json === true);
+    // `--dry-run` never runs a command for real: one that cannot preview refuses here, before it starts.
+    if (opts.dryRun === true) {
+      const refusal = dryRunRefusal(commandPath(actionCommand), opts);
+      if (refusal !== undefined) refuseDryRunUnsupported(opts.json === true, refusal);
+    }
   })
   .action(async (options, cmd) => {
     if (cmd.args.length > 0) {
@@ -634,7 +643,6 @@ program
         process.exit(0);
       }
 
-      const { writeFileSync, readFileSync } = await import('fs');
       const { dotenvEscape } = await import('./commands/exportCommand');
       const { upsertEnvText } = await import('./files/envUpsert');
       // Escape so multi-line secrets survive being re-read by dotenv. Values are
@@ -657,8 +665,6 @@ program
   .command('logout')
   .description('End the current session')
   .action(async () => {
-    const { existsSync, unlinkSync, rmSync } = await import('fs');
-    const { join } = await import('path');
     const { getGlobalCapyDir } = await import('./config/globalConfig');
 
     const capyDir = join(process.cwd(), '.capy');
@@ -701,7 +707,6 @@ program
     // Clear project key caches (master keys survive logout — they require the seed phrase)
     const orgsDir = join(globalCapyDir, 'orgs');
     if (existsSync(orgsDir)) {
-      const { readdirSync } = await import('fs');
       for (const orgId of readdirSync(orgsDir)) {
         const projectsDir = join(orgsDir, orgId, 'projects');
         if (existsSync(projectsDir)) {
@@ -1006,8 +1011,6 @@ program
   .command('cleanup')
   .description('Remove Capy git hooks from this repository')
   .action(async () => {
-    const { execSync } = await import('child_process');
-    const { existsSync, readFileSync, writeFileSync, unlinkSync, chmodSync } = await import('fs');
 
     let gitDir: string;
     try {

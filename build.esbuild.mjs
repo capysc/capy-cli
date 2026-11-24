@@ -37,12 +37,37 @@ async function printSize(file) {
   console.log(`Bundle: ${(size / 1024 / 1024).toFixed(2)} MB`);
 }
 
+// The standalone binary runs this bundle as a CommonJS script inside pkg,
+// where a real `import()` has no loader and throws
+// ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING ("A dynamic import callback was not
+// specified"). esbuild rewrites `await import('./x')` and npm packages into
+// require(), but leaves `await import('fs')`-style imports of Node built-ins
+// as real import() calls, so those crash only in the binary. Refuse to emit a
+// bundle that still contains one; import built-ins statically instead.
+// (esbuild writes code with double quotes; single-quoted import('…') in the
+// output is JSDoc type syntax in bundled dependencies, not a call.)
+export function runtimeDynamicImports(code) {
+  return code
+    .split('\n')
+    .map((line, index) => ({ line: line.trim(), number: index + 1 }))
+    .filter(({ line }) => /(?<![\w.$])import\(\s*"/.test(line));
+}
+
 async function main() {
   const pkgJson = JSON.parse(await readFile(path.join(here, 'package.json'), 'utf8'));
 
   await emptyDir(outDir);
 
   await build({ ...bundleOptions, outfile: outFile });
+
+  const dynamic = runtimeDynamicImports(await readFile(outFile, 'utf8'));
+  if (dynamic.length > 0) {
+    const list = dynamic.map(({ line, number }) => `  build/index.cjs:${number}: ${line}`).join('\n');
+    throw new Error(
+      `The bundle has import() calls that crash in the standalone binary (ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING).\n` +
+        `Import these Node built-ins statically at the top of the source file instead:\n${list}`,
+    );
+  }
 
   await printSize(outFile);
 

@@ -3,11 +3,15 @@
 // land before a single Capy module reads configuration.
 import { applyProdPins, formatPinNotice } from './config/prodPins';
 import { Command, Option } from 'commander';
+import { execSync } from 'child_process';
+import { chmodSync, existsSync, readFileSync, unlinkSync, writeFileSync } from 'fs';
 import { CapyCommand } from './commands/capyCommand';
 import { CliOptions } from './types/index';
 import { assertNotLocalOnly } from './core/localGate';
 import { version as CLI_VERSION } from '../package.json';
 import { refuseWebMode } from './core/webModeRemoved';
+import { commandPath, dryRunRefusal } from './core/dryRunGuard';
+import { refuseDryRunUnsupported } from './commands/pipedValue';
 import { ACCENT } from './ui/colors';
 import { SYNC_HOOK_MARKER, withoutSyncHookBlock } from './git/syncHooks';
 import { conflictOption, rawConflictFlagsOf, resolveOption } from './sync/conflicts';
@@ -73,7 +77,7 @@ program
   .option('--env-path <path>', 'specify custom .env file location')
   .option('-v, --verbose', 'enable detailed logging')
   .option('-f, --force', 're-encrypt existing variables')
-  .option('-d, --dry-run', 'preview changes without applying')
+  .option('-d, --dry-run', 'preview changes without applying; a command that cannot preview refuses and changes nothing')
   .addOption(resolveOption())
   .addOption(conflictOption())
   // Hidden: `--web` was removed. It still parses so the hook below can refuse it (WEB_MODE_REMOVED).
@@ -87,6 +91,11 @@ program
   .hook('preAction', (_thisCommand, actionCommand) => {
     const opts = actionCommand.optsWithGlobals();
     if (opts.web === true) refuseWebMode(opts.json === true);
+    // `--dry-run` never runs a command for real: one that cannot preview refuses here, before it starts.
+    if (opts.dryRun === true) {
+      const refusal = dryRunRefusal(commandPath(actionCommand), opts);
+      if (refusal !== undefined) refuseDryRunUnsupported(opts.json === true, refusal);
+    }
   })
   .action(async (options, cmd) => {
     if (cmd.args.length > 0) {
@@ -561,8 +570,6 @@ program
   .command('cleanup')
   .description('Remove Capy git hooks from this repository')
   .action(async () => {
-    const { execSync } = await import('child_process');
-    const { existsSync, readFileSync, writeFileSync, unlinkSync } = await import('fs');
 
     let gitDir: string;
     try {
@@ -589,7 +596,6 @@ program
         unlinkSync(hookPath);
       } else {
         writeFileSync(hookPath, updated + '\n', 'utf-8');
-        const { chmodSync } = await import('fs');
         chmodSync(hookPath, 0o755);
       }
       removed = true;

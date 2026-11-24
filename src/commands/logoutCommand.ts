@@ -1,3 +1,5 @@
+import { existsSync, readdirSync, rmSync, unlinkSync } from 'fs';
+import { join } from 'path';
 /**
  * Session cleanup for `capy logout`.
  *
@@ -10,8 +12,6 @@
  * Returns true if anything was cleared.
  */
 export async function performLogoutCleanup(): Promise<boolean> {
-  const { existsSync, unlinkSync, rmSync, readdirSync } = await import('fs');
-  const { join } = await import('path');
   const { getGlobalCapyDir } = await import('../config/globalConfig');
 
   const capyDir = join(process.cwd(), '.capy');

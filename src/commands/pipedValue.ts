@@ -162,6 +162,7 @@ export const DRY_RUN_UNSUPPORTED_MESSAGES = {
   editPrompt: "--dry-run isn't available for an interactive edit. Pipe a value with: <cmd> | capy edit NAME --dry-run", // COPY-FLAG
   add: "--dry-run isn't available for an interactive add. Pipe a value with: <cmd> | capy add NAME --dry-run", // COPY-FLAG
   remove: "--dry-run isn't available at the confirmation prompt. Add --yes, --json or --non-tty to preview.", // COPY-FLAG
+  setup: "--dry-run can't preview first-time setup: it creates the project and branch on Capy and writes .gitignore, keep.lock and git hooks. Nothing was changed. Run capy without --dry-run to set up this folder.", // COPY-FLAG
 } as const;
 
 /** `DRY_RUN_UNSUPPORTED`, exit 1, before any prompt or screen. `--json`: `{ ok:false, code, error }`. */
