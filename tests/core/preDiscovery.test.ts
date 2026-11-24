@@ -25,9 +25,17 @@ describe('preDiscover', () => {
     ]);
   });
 
-  test('the token is present only when its environment variable is set', () => {
+  test('the token is present only when its environment variable is set, and that variable is a signal on its own', () => {
     const [vercel] = preDiscover(input({ exists: (p) => p === 'vercel.json', envIsSet: (n) => n === 'VERCEL_TOKEN' }));
     expect(vercel?.token?.state).toBe('present');
+    expect(vercel?.found).toEqual(['vercel.json', 'env:VERCEL_TOKEN']);
+    const alone = preDiscover(input({ envIsSet: (n) => n === 'VERCEL_TOKEN' }));
+    expect(alone.map((i) => [i.provider, i.found])).toEqual([['vercel', ['env:VERCEL_TOKEN']]]);
+  });
+
+  test('Dokploy also names the dashboard URL entry discovery reads', () => {
+    const [dokploy] = preDiscover(input({ envNames: ['DOKPLOY_URL'] }));
+    expect(dokploy?.settings).toEqual([{ name: '_CONNECTOR_DOKPLOY_BASE_URL', set: 'capy system set _CONNECTOR_DOKPLOY_BASE_URL' }]);
   });
 
   test('Dokploy is listed from variable names, since it leaves no file in a repo', () => {

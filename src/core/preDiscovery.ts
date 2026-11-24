@@ -12,7 +12,7 @@
  *
  * Pure: every input is a parameter.
  */
-import { DEFAULT_TOKEN_ENV as DOKPLOY_TOKEN_ENV, DOKPLOY_CONNECTOR_SECRET_NAME } from '../deploy/dokployApi';
+import { DEFAULT_TOKEN_ENV as DOKPLOY_TOKEN_ENV, DOKPLOY_BASE_URL_VAR_NAME, DOKPLOY_CONNECTOR_SECRET_NAME } from '../deploy/dokployApi';
 import { DEFAULT_VERCEL_TOKEN_ENV, VERCEL_CONNECTOR_SECRET_NAME } from '../deploy/vercelApi';
 
 export interface PreDiscoveryInput {
@@ -43,6 +43,8 @@ export interface Integration {
   readonly found: readonly string[];
   /** Present for the providers whose discovery needs a token from the system store. */
   readonly token?: IntegrationToken;
+  /** Other system store entries discovery reads that are not secrets (a dashboard URL), and how to save each. */
+  readonly settings?: readonly { readonly name: string; readonly set: string }[];
   /** The command that comes next for this provider. It changes nothing. */
   readonly next: string;
 }
@@ -54,7 +56,10 @@ function token(input: PreDiscoveryInput, name: string, env: string): Integration
 }
 
 function vercel(input: PreDiscoveryInput): readonly Integration[] {
-  const found = VERCEL_FILES.filter((file) => input.exists(file));
+  const found = [
+    ...VERCEL_FILES.filter((file) => input.exists(file)),
+    ...(input.envIsSet(DEFAULT_VERCEL_TOKEN_ENV) ? [`env:${DEFAULT_VERCEL_TOKEN_ENV}`] : []),
+  ];
   if (found.length === 0) return [];
   return [{
     provider: 'vercel',
@@ -75,6 +80,8 @@ function dokploy(input: PreDiscoveryInput): readonly Integration[] {
     provider: 'dokploy',
     found,
     token: token(input, DOKPLOY_CONNECTOR_SECRET_NAME, DOKPLOY_TOKEN_ENV),
+    // Discovery also needs the dashboard URL, which is a system store entry of its own (or `--base-url`).
+    settings: [{ name: DOKPLOY_BASE_URL_VAR_NAME, set: `${input.bin} system set ${DOKPLOY_BASE_URL_VAR_NAME}` }],
     next: `${input.bin} connect dokploy --discover --dry-run --json`,
   }];
 }

@@ -4,7 +4,7 @@
  * they are stand-ins that record what was asked of them. Nothing is prefilled for the human: a stop is passed on as it is.
  */
 import { describe, expect, test } from 'bun:test';
-import { asSetupCommand, forSetup, setupOutcome, type FolderOutcome, type SetupCommandOptions, type SetupDeps } from '../../src/commands/setupCommand';
+import { asSetupCommand, forSetup, setupOutcome, type FolderOutcome, type LinkedFolder, type PendingPair, type SetupCommandOptions, type SetupDeps } from '../../src/commands/setupCommand';
 import type { PairAgentOutcome } from '../../src/commands/pairAgentCommand';
 import type { Refusal } from '../../src/commands/refusal';
 import { CapyError, ERROR_CODES } from '../../src/types/index';
@@ -38,24 +38,45 @@ const CREATED = { ok: true, created: true, org: { id: 'org_1', name: 'Acme' }, p
 
 const paired: PairAgentOutcome = { kind: 'done', body: { ok: true, user_id: 'u_1', paired: true, keys: 'installed' } };
 
-/** Stand-in steps. `folder` and `pair` answer from their lists in order (the last answer repeats); `calls` is what was asked. */
-function deps(over: { readonly pending?: boolean; readonly folder?: readonly FolderOutcome[]; readonly pair?: readonly PairAgentOutcome[]; readonly agentsFiles?: SetupDeps['agentsFiles'] }) {
+const LINKED: LinkedFolder = { organizationId: 'org_1', projectId: 'p_1', projectName: 'web', activeBranch: 'main' };
+
+interface Stand {
+  /** `true` is a pairing that is waiting. */
+  readonly pending?: boolean | PendingPair;
+  readonly folder?: readonly FolderOutcome[];
+  readonly pair?: readonly PairAgentOutcome[];
+  readonly linked?: readonly LinkedFolder[];
+  /** What the session check answers, in order: a refusal, or undefined for "signed in". */
+  readonly session?: readonly (Refusal | undefined)[];
+  readonly agentsFiles?: SetupDeps['agentsFiles'];
+  readonly localOnly?: boolean;
+}
+
+/** Stand-in steps. Each answers from its list in order (the last answer repeats); `calls` is what was asked. */
+function deps(over: Stand) {
   const calls: string[] = [];
   const count = (prefix: string) => calls.filter((c) => c.startsWith(prefix)).length;
   const at = <T,>(list: readonly T[], index: number): T => list[Math.min(index, list.length - 1)] as T;
+  const pending: PendingPair = over.pending === true ? 'waiting' : over.pending === false || over.pending === undefined ? 'none' : over.pending;
   const made: SetupDeps = {
-    pendingPair: () => over.pending === true,
+    localOnly: () => over.localOnly === true,
+    pendingPair: () => pending,
     pair: async (step) => {
       const answer = at(over.pair ?? [paired], count('pair'));
       calls.push(`pair ${step.wait ? 'wait' : 'start'}${step.code === undefined ? '' : ` code=${step.code}`}`);
       return answer;
     },
-    folder: async () => {
+    folder: async (answers) => {
       const answer = at(over.folder ?? [{ kind: 'done', result: CREATED }], count('folder'));
-      calls.push('folder');
+      calls.push(answers === undefined ? 'folder' : `folder name=${answers.name} branch=${answers.branch} protected=${answers.protectedAnswer}`);
       return answer;
     },
-    linked: async () => ({ organizationId: 'org_1', projectId: 'p_1', projectName: 'web', activeBranch: 'main' }),
+    linked: async () => at(over.linked ?? [LINKED], count('linked-read')),
+    session: async (orgId) => {
+      const answer = at(over.session ?? [undefined], count('session'));
+      calls.push(`session org=${orgId}`);
+      return answer;
+    },
     agentsFiles: over.agentsFiles ?? ((apply) => {
       calls.push(`agents apply=${apply}`);
       return [{ path: 'AGENTS.md', action: 'created' }, { path: 'CLAUDE.md', action: 'unchanged' }];
@@ -184,10 +205,10 @@ describe('setupOutcome', () => {
     expect((outcome.refusal.extra?.elicitation as { fields: unknown }).fields).toEqual([{ name: 'project' }]);
   });
 
-  test('a folder that is a project already still gets the agent instructions and the integrations', async () => {
-    const { made, calls } = deps({ folder: [{ kind: 'sync' }] });
+  test('a folder that is a project already, signed in: the agent instructions and the integrations, and the sync to run next', async () => {
+    const { made, calls } = deps({ folder: [{ kind: 'sync', ignoredFlags: ['--name'] }] });
     const outcome = await setupOutcome(OPTIONS, made);
-    expect(calls).toEqual(['folder', 'agents apply=true']);
+    expect(calls).toEqual(['folder', 'session org=org_1', 'agents apply=true']);
     if (outcome.kind !== 'done') throw new Error('expected a result');
     expect(outcome.result).toMatchObject({
       ok: true,
@@ -197,7 +218,75 @@ describe('setupOutcome', () => {
       org: { id: 'org_1' },
       project: { id: 'p_1', name: 'web' },
       branch: { name: 'main', protected: null },
+      ignored_flags: ['--name'],
+      next: 'capy --json',
     });
+  });
+
+  test('a cloned project on a machine that was never paired is not complete: pairing starts and nothing is written', async () => {
+    const { made, calls } = deps({ folder: [{ kind: 'sync' }], session: [NOT_SIGNED_IN], pair: [{ kind: 'refusal', refusal: LINK }] });
+    const outcome = await setupOutcome(OPTIONS, made);
+    expect(calls).toEqual(['folder', 'session org=org_1', 'pair start']);
+    if (outcome.kind !== 'refusal') throw new Error('expected a refusal');
+    expect(outcome.refusal.code).toBe(ERROR_CODES.PAIR_APPROVAL_PENDING);
+    expect(elicitationAnswer(outcome.refusal)).toEqual({ wait: 'capy setup --json' });
+  });
+
+  test('a cloned project and the code from Keep: the pairing is finished, the session is checked again, then it completes', async () => {
+    const { made, calls } = deps({ pending: true, folder: [{ kind: 'sync' }] });
+    const outcome = await setupOutcome({ ...OPTIONS, code: 'ABCD' }, made);
+    expect(calls).toEqual(['pair wait code=ABCD', 'folder', 'session org=org_1', 'agents apply=true']);
+    expect(outcome.kind).toBe('done');
+  });
+
+  test('a cloned project, signed out, with a pairing waiting: it is waited on, then the folder is read again', async () => {
+    const { made, calls } = deps({ pending: true, folder: [{ kind: 'sync' }], session: [NOT_SIGNED_IN, undefined] });
+    const outcome = await setupOutcome(OPTIONS, made);
+    expect(calls).toEqual(['folder', 'session org=org_1', 'pair wait', 'folder', 'session org=org_1', 'agents apply=true']);
+    expect(outcome.kind).toBe('done');
+  });
+
+  test('a linked folder that cannot reach the service is a refusal, never complete', async () => {
+    const offline: Refusal = { code: ERROR_CODES.AUTH_FAILED, message: 'offline', exitCode: 1, extra: { reason: 'network' } };
+    const { made, calls } = deps({ folder: [{ kind: 'sync' }], session: [offline] });
+    const outcome = await setupOutcome(OPTIONS, made);
+    expect(calls).toEqual(['folder', 'session org=org_1']);
+    expect(outcome).toEqual({ kind: 'refusal', refusal: offline });
+  });
+
+  test('a setup that stopped half way is picked back up with the answers the folder kept, once', async () => {
+    const half: LinkedFolder = { ...LINKED, pendingSetup: { branch: 'development', protected: true } };
+    const { made, calls } = deps({ folder: [{ kind: 'sync' }, { kind: 'done', result: { ...CREATED, created: false, resumed: true } }], linked: [half] });
+    const outcome = await setupOutcome(OPTIONS, made);
+    expect(calls).toEqual(['folder', 'session org=org_1', 'folder name=web branch=development protected=yes', 'agents apply=true']);
+    if (outcome.kind !== 'done') throw new Error('expected a result');
+    expect(outcome.result).toMatchObject({ setup: 'complete', resumed: true, branch: { name: 'development' } });
+  });
+
+  test('a half-way setup whose resume fails is that refusal, never complete', async () => {
+    const half: LinkedFolder = { ...LINKED, pendingSetup: { branch: 'development', protected: false } };
+    const failed: Refusal = { code: 'BRANCH_CREATE_FAILED', message: 'no', exitCode: 1 };
+    const { made, calls } = deps({ folder: [{ kind: 'sync' }, { kind: 'refusal', refusal: failed }], linked: [half] });
+    const outcome = await setupOutcome(OPTIONS, made);
+    expect(calls).toEqual(['folder', 'session org=org_1', 'folder name=web branch=development protected=no']);
+    expect(outcome).toEqual({ kind: 'refusal', refusal: failed });
+  });
+
+  test('a code with a pairing whose link ran out is not sent to it; signed in, pairing is skipped', async () => {
+    const { made, calls } = deps({ pending: 'expired' });
+    const outcome = await setupOutcome({ ...OPTIONS, code: 'ABCD' }, made);
+    expect(calls).toEqual(['folder', 'agents apply=true']);
+    expect(outcome.kind).toBe('done');
+  });
+
+  test('signed out with a pairing whose link ran out: the wait renews it, and no second pairing starts', async () => {
+    const renewed: Refusal = { ...LINK, code: ERROR_CODES.PAIR_LINK_RENEWED };
+    const { made, calls } = deps({ pending: 'expired', folder: [{ kind: 'refusal', refusal: NOT_SIGNED_IN }], pair: [{ kind: 'refusal', refusal: renewed }] });
+    const outcome = await setupOutcome({ ...OPTIONS, code: 'ABCD' }, made);
+    expect(calls).toEqual(['folder', 'pair wait']);
+    if (outcome.kind !== 'refusal') throw new Error('expected a refusal');
+    expect(outcome.refusal.code).toBe(ERROR_CODES.PAIR_LINK_RENEWED);
+    expect(elicitationAnswer(outcome.refusal)).toEqual({ wait: 'capy setup --json' });
   });
 
   test('a dry run starts no pairing, writes no file and says so', async () => {
@@ -225,7 +314,15 @@ describe('setupOutcome', () => {
     expect(outcome.refusal.exitCode).toBe(1);
   });
 
-  test('local-only mode has nothing to set up here', async () => {
+  test('local-only mode is refused before any step, so a linked folder never reaches pairing', async () => {
+    const { made, calls } = deps({ localOnly: true, pending: true, folder: [{ kind: 'sync' }], session: [NOT_SIGNED_IN] });
+    const outcome = await setupOutcome({ ...OPTIONS, code: 'ABCD' }, made);
+    expect(calls).toEqual([]);
+    if (outcome.kind !== 'refusal') throw new Error('expected a refusal');
+    expect(outcome.refusal.exitCode).toBe(1);
+  });
+
+  test('a folder step with nothing to say is a refusal', async () => {
     const { made, calls } = deps({ folder: [undefined] });
     const outcome = await setupOutcome(OPTIONS, made);
     expect(calls).toEqual(['folder']);

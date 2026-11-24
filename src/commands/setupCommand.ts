@@ -16,6 +16,7 @@
 import { existsSync } from 'fs';
 import { join } from 'path';
 import { readPendingPairGrant } from '../auth/pairing/pendingGrant';
+import { isLocalOnly } from '../config/profileConfig';
 import { preDiscover, type Integration } from '../core/preDiscovery';
 import { FileManager } from '../files/fileManager';
 import { ERROR_CODES, type CliOptions, type SetupOptions } from '../types/index';
@@ -30,7 +31,7 @@ export interface SetupCommandOptions {
   /** `--code`: the one-time code Keep showed the person who approved the pairing. */
   readonly code?: string;
   /** The answers to the folder questions, as typed (`--org`, `--project`, `--name`, `--branch`, `--protected`). */
-  readonly answers: Pick<SetupOptions, 'org' | 'project' | 'name' | 'branch' | 'protectedAnswer'>;
+  readonly answers: FolderAnswers;
   readonly envPath?: string;
   readonly dryRun?: boolean;
   readonly devMode?: boolean;
@@ -43,18 +44,28 @@ export interface LinkedFolder {
   readonly projectId?: string;
   readonly projectName?: string;
   readonly activeBranch: string | null;
+  /** The first branch of a setup of this folder that stopped half way, when its marker is still there. */
+  readonly pendingSetup?: { readonly branch: string; readonly protected: boolean };
 }
 
-export type FolderOutcome = AgentOutcome | { readonly kind: 'sync' } | undefined;
+export type FolderAnswers = Pick<SetupOptions, 'org' | 'project' | 'name' | 'branch' | 'protectedAnswer'>;
+
+export type FolderOutcome = AgentOutcome | { readonly kind: 'sync'; readonly ignoredFlags?: readonly string[] } | undefined;
+
+/** `waiting`: a pairing started on this machine can still be approved. `expired`: its link has run out. */
+export type PendingPair = 'none' | 'waiting' | 'expired';
 
 export interface SetupDeps {
-  /** Whether a pairing started on this machine is still waiting. */
-  readonly pendingPair: () => boolean;
+  /** Whether the active profile is local-only: no organization and no server, so there is nothing to set up against. */
+  readonly localOnly: () => boolean;
+  readonly pendingPair: () => PendingPair;
   /** Agent-mode `capy pair`: `wait` polls the pending pairing (with the code, when there is one); otherwise a new one starts. */
   readonly pair: (step: { readonly wait: boolean; readonly code?: string }) => Promise<PairAgentOutcome>;
-  /** Agent-mode bare `capy`. */
-  readonly folder: () => Promise<FolderOutcome>;
+  /** Agent-mode bare `capy`, with the answers that were typed, or with `answers` in their place. */
+  readonly folder: (answers?: FolderAnswers) => Promise<FolderOutcome>;
   readonly linked: () => Promise<LinkedFolder>;
+  /** The refusal when nobody is signed in (for `orgId`, when the folder names one); undefined when someone is. Never a browser. */
+  readonly session: (orgId: string | undefined) => Promise<Refusal | undefined>;
   /** Writes the Capy block (or, with `apply` false, reports what it would write). */
   readonly agentsFiles: (apply: boolean) => readonly AgentsFileResult[];
   readonly integrations: () => readonly Integration[];
@@ -107,13 +118,16 @@ function notPaired(r: Refusal, bin: string, dryRun: boolean): Refusal {
   };
 }
 
-function linkedResult(folder: LinkedFolder): Readonly<Record<string, unknown>> {
+function linkedResult(folder: LinkedFolder, ignoredFlags: readonly string[], bin: string, dryRun: boolean): Readonly<Record<string, unknown>> {
   return {
     created: false,
     already_set_up: true,
     org: { id: folder.organizationId ?? null },
     project: { id: folder.projectId ?? null, name: folder.projectName ?? null },
     branch: { name: folder.activeBranch, protected: null },
+    ...(ignoredFlags.length === 0 ? {} : { ignored_flags: ignoredFlags }),
+    // Setup links and reports; it does not sync. Bare `capy` brings the folder's variables up to date.
+    ...(dryRun ? {} : { next: `${bin} --json` }),
   };
 }
 
@@ -135,32 +149,68 @@ async function finish(options: SetupCommandOptions, deps: SetupDeps, folder: Rea
   };
 }
 
-async function folderStep(options: SetupCommandOptions, deps: SetupDeps, mayPair: boolean): Promise<Outcome> {
+/** Where a run is: whether it may still pair, and whether it has already picked a half-finished setup back up. */
+interface Progress {
+  readonly mayPair: boolean;
+  readonly resumed: boolean;
+}
+
+/** Nobody is signed in: pairing comes first, then the folder again. A dry run changes nothing, so it starts no pairing. */
+async function pairThenFolder(options: SetupCommandOptions, deps: SetupDeps, signedOut: Refusal, progress: Progress): Promise<Outcome> {
   const bin = binName(options.devMode === true);
-  const folder = await deps.folder();
+  if (!needsPairing(signedOut)) return refusal(forSetup(signedOut, bin));
+  if (!progress.mayPair || options.dryRun === true) return refusal(notPaired(signedOut, bin, options.dryRun === true));
+  // A pairing that is waiting is waited on, and one whose link ran out is renewed by that wait; a second one never starts beside it.
+  const paired = await deps.pair({ wait: deps.pendingPair() !== 'none' });
+  return paired.kind === 'refusal' ? refusal(forSetup(paired.refusal, bin)) : folderStep(options, deps, { ...progress, mayPair: false });
+}
+
+/**
+ * The folder is linked to a project already. That alone is not "set up": this machine may never have been paired, and
+ * an earlier setup may have stopped after the project was created. Both are settled before anything is written.
+ */
+async function linkedStep(options: SetupCommandOptions, deps: SetupDeps, progress: Progress, ignoredFlags: readonly string[]): Promise<Outcome> {
+  const state = await deps.linked();
+  const signedOut = await deps.session(state.organizationId);
+  if (signedOut !== undefined) return pairThenFolder(options, deps, signedOut, progress);
+  const pending = state.pendingSetup;
+  if (pending !== undefined && state.projectName !== undefined && !progress.resumed) {
+    // The answers are the ones the human gave to the run that stopped; the folder kept them.
+    const again = await deps.folder({ ...options.answers, name: state.projectName, branch: pending.branch, protectedAnswer: pending.protected ? 'yes' : 'no' });
+    return afterFolder(options, deps, again, { ...progress, resumed: true });
+  }
+  return finish(options, deps, linkedResult(state, ignoredFlags, binName(options.devMode === true), options.dryRun === true));
+}
+
+async function afterFolder(options: SetupCommandOptions, deps: SetupDeps, folder: FolderOutcome, progress: Progress): Promise<Outcome> {
   if (folder === undefined) {
     return refusal({ code: ERROR_CODES.SERVICE_ERROR, message: 'This folder cannot be set up here.', exitCode: 1 }); // COPY-FLAG
   }
-  if (folder.kind === 'sync') return finish(options, deps, linkedResult(await deps.linked()));
+  if (folder.kind === 'sync') return linkedStep(options, deps, progress, folder.ignoredFlags ?? []);
   if (folder.kind === 'done') return finish(options, deps, folder.result);
-  // Nobody is signed in: pairing comes first. A dry run changes nothing, so it starts no pairing.
-  if (!needsPairing(folder.refusal)) return refusal(forSetup(folder.refusal, bin));
-  if (!mayPair || options.dryRun === true) return refusal(notPaired(folder.refusal, bin, options.dryRun === true));
-  const paired = await deps.pair({ wait: deps.pendingPair() });
-  return paired.kind === 'refusal' ? refusal(forSetup(paired.refusal, bin)) : folderStep(options, deps, false);
+  return pairThenFolder(options, deps, folder.refusal, progress);
+}
+
+async function folderStep(options: SetupCommandOptions, deps: SetupDeps, progress: Progress): Promise<Outcome> {
+  return afterFolder(options, deps, await deps.folder(), progress);
 }
 
 /** What `capy setup` ends with: the stop of the first step that needs the human, or the finished setup. */
 export async function setupOutcome(options: SetupCommandOptions, deps: SetupDeps): Promise<Outcome> {
   const bin = binName(options.devMode === true);
+  // Before any step: a linked folder would otherwise reach the pairing start, which local-only mode never allows.
+  if (deps.localOnly()) {
+    return refusal({ code: ERROR_CODES.SERVICE_ERROR, message: `\`${bin} setup\` is disabled in local-only mode: there is no organization or server to set up against.`, exitCode: 1 }); // COPY-FLAG
+  }
   const code = options.code?.trim() || undefined;
-  // A code means the person has just approved a pairing: finish that one first. Without a pending pairing the code
-  // has been used already (a rerun), and the folder step says whether pairing is still needed.
-  if (code !== undefined && options.dryRun !== true && deps.pendingPair()) {
+  // A code means the person has just approved a pairing: finish that one first. With no pairing waiting the code has
+  // been used already (a rerun), and a code cannot belong to a pairing whose link ran out; in both cases the folder
+  // step says whether pairing is still needed.
+  if (code !== undefined && options.dryRun !== true && deps.pendingPair() === 'waiting') {
     const paired = await deps.pair({ wait: true, code });
     if (paired.kind === 'refusal') return refusal(forSetup(paired.refusal, bin));
   }
-  return folderStep(options, deps, true);
+  return folderStep(options, deps, { mayPair: true, resumed: false });
 }
 
 function realDeps(options: SetupCommandOptions): SetupDeps {
@@ -168,18 +218,28 @@ function realDeps(options: SetupCommandOptions): SetupDeps {
   const setup: SetupOptions = { ...options.answers, json: true, nonTty: true, agentMode: true };
   const cliOptions: CliOptions = { envPath: options.envPath, dryRun: options.dryRun, protocol: true, setup };
   return {
-    pendingPair: () => readPendingPairGrant() !== null,
+    localOnly: () => isLocalOnly(),
+    pendingPair: () => {
+      const grant = readPendingPairGrant();
+      if (grant === null) return 'none';
+      return Date.now() < Date.parse(grant.expiresAt) ? 'waiting' : 'expired';
+    },
     pair: async (step) => {
       const { pairAgentOutcome } = await import('./pairAgentCommand');
       return pairAgentOutcome({ json: true, wait: step.wait, code: step.code, devMode, ...(options.apiUrl === undefined ? {} : { apiUrl: options.apiUrl }) });
     },
-    folder: async () => {
+    folder: async (answers) => {
       const { CapyCommand } = await import('./capyCommand');
-      return new CapyCommand(cliOptions, devMode).folderSetupOutcome();
+      const withAnswers: CliOptions = answers === undefined ? cliOptions : { ...cliOptions, setup: { ...answers, json: true, nonTty: true, agentMode: true } };
+      return new CapyCommand(withAnswers, devMode).folderSetupOutcome();
     },
     linked: async () => {
-      const { ProjectManager } = await import('../core/projectManager');
-      return new ProjectManager().detectProjectState();
+      const { CapyCommand } = await import('./capyCommand');
+      return new CapyCommand(cliOptions, devMode).linkedFolder();
+    },
+    session: async (orgId) => {
+      const { CapyCommand } = await import('./capyCommand');
+      return new CapyCommand(cliOptions, devMode).signedOutRefusal(orgId);
     },
     agentsFiles: (apply) => writeAgentsBlock(resolveRepoRoot(process.cwd()), apply),
     integrations: () => {

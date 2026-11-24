@@ -70,10 +70,11 @@ import { isInteractive } from '../ui/interactive';
 import { initProjectQuestion } from '../ui/projectQuestions';
 import { reportRepoLinkForCommand } from '../core/repoLinkReporter';
 import { orgKeyMissingMessage } from '../core/orgKeyMissing';
-import { withoutPendingSetup } from '../core/pendingSetup';
+import { pendingSetupOf, withoutPendingSetup } from '../core/pendingSetup';
 import { NEW_PROJECT, answerProblem, chooseOrg, chooseProject, orgChoiceProblem, projectChoiceProblem } from '../core/initPlan';
-import { agentResume, agentSetup, type AgentOutcome, type AgentSetupDeps, type LinkedStep } from './agentSetup';
+import { agentResume, agentSetup, signedOutRefusal, type AgentOutcome, type AgentSetupDeps, type LinkedStep } from './agentSetup';
 import { refuse, refusalFor, settle } from './projectLifecycleCommand';
+import type { Refusal } from './refusal';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -302,6 +303,25 @@ export class CapyCommand {
    */
   async folderSetupOutcome(): Promise<AgentOutcome | Extract<LinkedStep, { kind: 'sync' }> | undefined> {
     return this.agentStep();
+  }
+
+  /** For `capy setup`: the linked folder as it stands, with the first branch of a setup that stopped half way when its marker is still there. */
+  async linkedFolder(): Promise<{ organizationId?: string; projectId?: string; projectName?: string; activeBranch: string | null; pendingSetup?: { branch: string; protected: boolean } }> {
+    const state = await this.detectOrRecoverProjectState();
+    const pending = pendingSetupOf(this.projectManager.readSyncState());
+    const marked = pending !== undefined && state?.hasKeepFile === true && pending.project_id === state.projectId && pending.org_id === state.organizationId;
+    return {
+      organizationId: state?.organizationId,
+      projectId: state?.projectId,
+      projectName: state?.projectName,
+      activeBranch: state?.activeBranch ?? null,
+      ...(marked ? { pendingSetup: { branch: pending.branch, protected: pending.protected } } : {}),
+    };
+  }
+
+  /** For `capy setup`: the refusal bare `capy` gives when nobody is signed in, or undefined when someone is. Never a browser. */
+  async signedOutRefusal(orgId: string | undefined): Promise<Refusal | undefined> {
+    return signedOutRefusal(this.agentSetupDeps(), orgId);
   }
 
   /** Agent mode: the setup flags that were typed and applied to nothing, as one JSON result. Nothing is printed when there are none. */

@@ -144,6 +144,12 @@ async function signIn(deps: AgentSetupDeps, orgId: string | undefined): Promise<
   return { ok: true, auth: attempt.value };
 }
 
+/** The refusal when nothing stored signs anyone in (scoped to `orgId` when there is one); undefined when someone is signed in. */
+export async function signedOutRefusal(deps: AgentSetupDeps, orgId: string | undefined): Promise<Refusal | undefined> {
+  const signed = await signIn(deps, orgId);
+  return signed.ok ? undefined : signed.refusal;
+}
+
 /** A session scoped to the organization that was chosen. An organization the service does not know is ORG_NOT_FOUND. */
 async function scopeToOrg(deps: AgentSetupDeps, org: OrgRef): Promise<SignedIn> {
   const attempt = await settle(() => deps.authService.authenticateSilent(org.id));

@@ -743,7 +743,6 @@ program
   .option('--json', 'accepted for symmetry: setup always answers in JSON') // COPY-FLAG
   .addHelpText('after', '\nAgents: run `capy setup --json`. On exit 3, show the human the elicitation and ask its questions, then run the command in its `answer`. Never answer for the human. The result with "setup": "complete" names the organization, project and branch, and lists under `integrations` what was found in this folder with the next command for each; discovery needs a provider token that an owner or admin saves with `capy system set`.\n') // COPY-FLAG
   .action(async (options, command) => {
-    assertNotLocalOnly('setup');
     const { setupCommand } = await import('./commands/setupCommand');
     const merged = command.optsWithGlobals();
     const { org, project, name, branch, protectedAnswer } = setupOptionsFrom(options);
