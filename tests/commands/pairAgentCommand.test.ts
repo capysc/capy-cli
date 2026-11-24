@@ -353,6 +353,20 @@ describe('capy pair, agent mode', () => {
         expect(pendingExists()).toBe(false);
       });
 
+      test('CAP-890: the 4-character code fits the form and finishes the pairing; the form asks for it to be entered', async () => {
+        await startThenStub('mike@example.com', [CONFIRM_REQUIRED]);
+        const asked = await run({ wait: true }, fakeClock(Date.now() + 5000));
+        const field = asked.json.elicitation.fields[0];
+        expect(new RegExp(field.pattern).test('K7QM')).toBe(true);
+        expect(JSON.stringify(asked.json.elicitation.display)).toContain('to enter');
+        expect(JSON.stringify(asked.json.elicitation.display)).not.toContain('to choose');
+        const fetchMock = stubFetch([APPROVED]);
+        const ran = await run({ wait: true, code: ' k7qm ' }, fakeClock(Date.now()));
+        expect(ran.exit).toBe(0);
+        expect(tokenBodies(fetchMock)).toEqual([{ device_code: 'device-1', confirmation_code: 'k7qm' }]);
+        expect(mockInstallDeviceGrantSession).toHaveBeenCalledTimes(1);
+      });
+
       test('a wrong code: PAIR_CODE_MISMATCH with the form again and the tries left, nothing installed', async () => {
         await startThenStub('mike@example.com', [CONFIRM_MISMATCH]);
         const ran = await run({ wait: true, code: 'WRONG-CODE' }, fakeClock(Date.now() + 5000));

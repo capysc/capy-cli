@@ -76,8 +76,11 @@ const defaultSleep = (ms: number): Promise<void> => new Promise((resolve) => set
 
 const CODE_QUESTION = 'What code does Keep show after you approve?'; // COPY-FLAG
 const CODE_DESCRIPTION = 'Keep shows a one-time code once you approve. Paste it here. Only you can see it.'; // COPY-FLAG
-/** What the code field accepts: the eight characters Keep shows, typed loosely (case, spaces and a dash are fine). */
-const CODE_PATTERN = '^[0-9A-Za-z][0-9A-Za-z -]{6,10}[0-9A-Za-z]$';
+/**
+ * What the code field accepts: the four characters Keep shows (CAP-890), or eight from a service before it, typed
+ * loosely (case, spaces and a dash are fine).
+ */
+const CODE_PATTERN = '^[0-9A-Za-z][0-9A-Za-z -]{2,10}[0-9A-Za-z]$';
 
 /** The form that asks for the one-time code. The rerun is the same wait, with the code. */
 function codeForm(bin: string, attemptsLeft: number | null): ElicitationForm {
