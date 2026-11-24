@@ -77,6 +77,7 @@ ISOLATED_FILES=(
   tests/commands/initialSetupTrackedKeep.test.ts
   tests/commands/initialSetupLocalTrackedKeep.test.ts
   tests/sync/missingEnvFile.test.ts
+  tests/commands/dryRunNoWrites.test.ts
   tests/commands/deployGate.test.ts
   tests/system/systemStore.test.ts
   tests/system/systemStoreFreshStore.test.ts

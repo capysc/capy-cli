@@ -7,7 +7,9 @@ import { SyncEngine } from '../sync/syncEngine';
 import { PromptEngine } from '../ui/promptEngine';
 import { debugLine } from '../ui/debug';
 import { existsSync, unlinkSync, rmSync } from 'fs';
-import { join } from 'path';
+import { basename, join } from 'path';
+import { DRY_RUN_UNSUPPORTED_MESSAGES, refuseDryRunUnsupported } from './pipedValue';
+import { createHash, randomUUID } from 'crypto';
 import { execSync } from 'child_process';
 import inquirer from 'inquirer';
 import {
@@ -194,6 +196,9 @@ export class CapyCommand {
       const projectState = await this.detectOrRecoverProjectState();
 
       if (projectState === undefined) {
+        // First-time setup creates the project and branch on the server and writes .gitignore, keep.lock and hooks
+        // as it goes; none of it can be previewed. A dry run refuses before any of it starts.
+        if (this.options.dryRun === true) refuseDryRunUnsupported(false, DRY_RUN_UNSUPPORTED_MESSAGES.setup);
         if (isLocalOnly()) {
           // Local-only mode: bootstrap a project entirely on this machine
           // (synthetic org, generated projectId) instead of server onboarding.
@@ -288,6 +293,15 @@ export class CapyCommand {
    * localMode skips all server steps; an unknown branch there falls back to
    * the local-mode default (local-only projects have exactly one branch).
    */
+  /**
+   * Records the branch this folder is on in `.capy/branch` (a gitignored local cache). A dry run leaves it as it was:
+   * the branch is still resolved for this run, it is only not written down.
+   */
+  private rememberActiveBranch(name: string): void {
+    if (this.options.dryRun === true) return;
+    this.projectManager.writeActiveBranch(name);
+  }
+
   private async resolveActiveBranch(projectState: ProjectState, localMode: boolean): Promise<string> {
     const envMeta = this.fileManager.readEnvMeta(this.options.envPath);
     const local = resolveBranchFromLocalState({
@@ -299,7 +313,7 @@ export class CapyCommand {
     if (local.kind === 'resolved') {
       if (local.rebuildBranchFile) {
         // .capy/branch was missing — rebuild it from the .env header.
-        this.projectManager.writeActiveBranch(local.branch);
+        this.rememberActiveBranch(local.branch);
       }
       return local.branch;
     }
@@ -312,7 +326,7 @@ export class CapyCommand {
     if (localMode) {
       // Local-only projects operate on a single branch (see localGate); the
       // first run has no files yet, so the local-mode default applies.
-      this.projectManager.writeActiveBranch(SyncEngine.DEFAULT_BRANCH);
+      this.rememberActiveBranch(SyncEngine.DEFAULT_BRANCH);
       return SyncEngine.DEFAULT_BRANCH;
     }
 
@@ -344,7 +358,7 @@ export class CapyCommand {
         return pick;
       },
     });
-    this.projectManager.writeActiveBranch(selected);
+    this.rememberActiveBranch(selected);
     return selected;
   }
 
@@ -383,7 +397,7 @@ export class CapyCommand {
 
     if (!fileBranchIsReal) {
       console.log(`Ignoring stale .capy/branch (${B(fileBranch)} is not a branch in this project); staying on ${B(envBranch)}.`);
-      this.projectManager.writeActiveBranch(envBranch);
+      this.rememberActiveBranch(envBranch);
       return envBranch;
     }
 
@@ -439,8 +453,6 @@ export class CapyCommand {
    */
   private async initializeProjectLocal(): Promise<void> {
     this.debug('initializeProjectLocal start', { cwd: process.cwd() });
-    const { randomUUID } = await import('crypto');
-    const { basename } = await import('path');
 
     // Unlock now so a missing/locked key fails before we write keep.lock.
     await resolveLocalProjectKey('bootstrap');
@@ -956,7 +968,6 @@ export class CapyCommand {
     | { ok: false; error: unknown; pushedToKeep: boolean; backupWritten: boolean; envRewritten: boolean }
   > {
     try {
-      const { createHash } = await import('crypto');
       const { deriveResourceId } = await import('../crypto/resourceId');
       const { Encryptor } = await import('../crypto/encryptor');
 
