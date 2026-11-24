@@ -235,14 +235,12 @@ pairing, saves it, and exits
 Always show the human the link, the code and the expiry. Show the QR in this
 order:
 
-1. If your client can show images, show the PNG: attach or send `qr.image.file`
-   (a temporary 0600 file), or decode `qr.image.data_uri`.
-2. Show `qr.text` only if your client is a real terminal with a monospace grid
-   and no extra line spacing.
+1. Show the QR as an image the human can scan right in the conversation: if your client can show images or HTML widgets, show the PNG inline with `qr.image.data_uri` as the image source (a wait response has no data URI, so read `qr.image.file` and show it inline the same way). An attached file, a download link or a file path is not showing the QR.
+2. If you cannot show an image, show `qr.text` only if your client is a real
+   terminal with a monospace grid and no extra line spacing.
 3. Otherwise say plainly that the QR cannot be shown here.
 
-Never use an external QR service. If the CLI runs inside another runtime, copy
-the PNG to the display environment or decode its data URI there.
+Never use an external QR service.
 
 Then run `answer.wait` (`capy pair --wait`) at once in the foreground, and run it
 again whenever it exits 3 with `PAIR_STILL_WAITING`. That answer repeats the link

@@ -5,7 +5,7 @@ import { tmpdir } from 'os';
 import path from 'path';
 import jsQR from 'jsqr';
 import { PNG } from 'pngjs';
-import { PAIRING_PRESENTATION, createPairingQrImage, removePairingQrImage } from '../../src/ui/pairingPresentation';
+import { PAIRING_PRESENTATION, PAIRING_QR_IMAGE_RULE, createPairingQrImage, removePairingQrImage } from '../../src/ui/pairingPresentation';
 import { ELICITATION_HELP } from '../../src/ui/elicitation';
 import { AGENTS_BLOCK } from '../../src/core/agentsBlockPlan';
 
@@ -217,6 +217,44 @@ describe('pairing contract', () => {
     expect(readmeSection).toContain('Run `capy pair --json` without asking the human anything first, and add no');
     expect(readmeSection).not.toContain('PAIR_ACCOUNT_MISMATCH');
     expect(readmeSection).toContain('`"keys": "already_present"`');
+  });
+
+  // CAP-888: in run 7 the agent followed "attach or send `qr.image.file`" and the human got a file they could not scan,
+  // while the AGENTS block said to show the image inline. The three texts must carry one rule, word for word.
+  test('the AGENTS block, conventions.pairing and the README all say to show the QR inline as an image, and none says to attach the file', () => {
+    const readme = readFileSync(path.join(import.meta.dir, '../../README.md'), 'utf8');
+    const readmeSection = readme.slice(readme.indexOf('### Pairing from an agent'), readme.indexOf('## Syncing'));
+    const flat = (s: string): string => s.replace(/\s+/g, ' ');
+    expect(PAIRING_QR_IMAGE_RULE).toContain('show the PNG inline with `qr.image.data_uri` as the image source');
+    expect(PAIRING_QR_IMAGE_RULE).toContain('An attached file, a download link or a file path is not showing the QR.');
+    for (const source of [text, AGENTS_BLOCK, flat(readmeSection)]) {
+      expect(source).toContain(PAIRING_QR_IMAGE_RULE);
+      expect(source).not.toMatch(/attach or send/i);
+      expect(source).not.toMatch(/\battach (the|`qr\.image\.file`)/i);
+      // The image comes before the terminal text.
+      expect(source.indexOf(PAIRING_QR_IMAGE_RULE)).toBeLessThan(source.indexOf('`qr.text` only'));
+    }
+  });
+
+  test('the PNG stays scannable on any theme: opaque black on white, at least 256 px, decoding to the link', async () => {
+    const url = 'https://staging-keep.capy.sc/transport/pair?code=Z400-2MWM';
+    const image = await createPairingQrImage(url);
+    try {
+      const png = PNG.sync.read(await readFile(image.file));
+      expect(png.width).toBeGreaterThanOrEqual(256);
+      expect(png.height).toBe(png.width);
+      const colors = new Set<string>();
+      for (let i = 0; i < png.data.length; i += 4) {
+        expect(png.data[i + 3]).toBe(255);
+        colors.add(`${png.data[i]},${png.data[i + 1]},${png.data[i + 2]}`);
+      }
+      expect([...colors].sort()).toEqual(['0,0,0', '255,255,255']);
+      // The quiet zone: the corner pixel is white, so the code stands out on a dark chat background.
+      expect([png.data[0], png.data[1], png.data[2]]).toEqual([255, 255, 255]);
+      expect(jsQR(new Uint8ClampedArray(png.data), png.width, png.height)?.data).toBe(url);
+    } finally {
+      removePairingQrImage(image.file);
+    }
   });
 
   test('no longer describes the removed long-running handoff', () => {

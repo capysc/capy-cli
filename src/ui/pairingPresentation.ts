@@ -11,16 +11,23 @@ import path from 'path';
  * COPY-FLAG: every sentence below is minimal and neutral, awaiting approval. One is adapted from an earlier sentence
  * (the remote-runtime one), which keeps its wording except for the field names.
  */
+/**
+ * CAP-888: how the pairing QR reaches the human. The AGENTS block, `conventions.pairing` and the README all carry this
+ * exact sentence, and a test fails if they drift apart. An attached file is not an image the human can scan.
+ */
+export const PAIRING_QR_IMAGE_RULE =
+  'Show the QR as an image the human can scan right in the conversation: if your client can show images or HTML widgets, show the PNG inline with `qr.image.data_uri` as the image source (a wait response has no data URI, so read `qr.image.file` and show it inline the same way). An attached file, a download link or a file path is not showing the QR.';
+
 export const PAIRING_PRESENTATION = {
   version: 1,
   command: 'capy pair --json',
   instructions: [
     'Run `capy pair --json` without asking the human anything first, and add no flags. It gives one approval link: Keep signs the human in or up and decides whether this machine gets their organization keys or a new organization.', // COPY-FLAG
     'The refusal PAIR_APPROVAL_PENDING carries an elicitation of kind "link". Always show the human its `url`, `code` and `expires_at`.', // COPY-FLAG
-    'Show the QR in this order. First, if your client can show images, show the PNG: attach or send `qr.image.file`, or decode `qr.image.data_uri`.', // COPY-FLAG
-    'Second, show `qr.text` only if your client is a real terminal with a monospace grid and no extra line spacing.', // COPY-FLAG
+    PAIRING_QR_IMAGE_RULE, // CAP-888: the same sentence as the AGENTS block and the README
+    'If you cannot show an image, show `qr.text` only if your client is a real terminal with a monospace grid and no extra line spacing.', // COPY-FLAG
     'Otherwise say plainly that the QR cannot be shown here.', // COPY-FLAG
-    'If qr.image.file is inside a remote runtime, copy it to your display-accessible workspace. Alternatively decode qr.image.data_uri locally. Never send the pairing link to an external QR service.', // COPY-FLAG (adapted from an earlier sentence)
+    'Never send the pairing link to an external QR service.', // COPY-FLAG
     'Then run `answer.wait` at once in the foreground, and run it again whenever it exits 3 with PAIR_STILL_WAITING. The wait response does not repeat `qr.text` or `qr.image.data_uri`. A wait that exits 3 with PAIR_LINK_RENEWED carries a new link with its full QR, because the old one expired: show the human the new link, code and QR, then run `answer.wait` again.', // COPY-FLAG
     'After the human approves, Keep shows them a one-time code and the wait exits 3 with PAIR_CODE_REQUIRED and a form with one `code` field: ask the human for that code and run `answer.rerun` (`capy pair --wait --code <code>`). Never fill in the code yourself; only the person who approved can see it. A wrong code returns PAIR_CODE_MISMATCH with the form again.', // COPY-FLAG
     'When the keys are already on this machine, the pairing only signs in: the result says `"keys": "already_present"`.', // COPY-FLAG
