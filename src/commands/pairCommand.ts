@@ -203,7 +203,7 @@ async function pickUpPairedKeys(
   options: PairOptions,
 ): Promise<readonly PairedOrg[]> {
   const serviceClient = new ServiceClient(options.apiUrl, options.devMode === true);
-  serviceClient.setTokenProvider((rejected) => session.authService.getValidToken(rejected));
+  serviceClient.setTokenProvider((rejected, refusal) => session.authService.getValidToken(rejected, refusal));
 
   const { sealed } = await serviceClient.pickupDevicePairing(deviceCode);
   const envelope = parsePairEnvelope(sealed);

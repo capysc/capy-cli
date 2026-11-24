@@ -140,7 +140,7 @@ async function signedInClient(): Promise<ServiceClient> {
   const result = await auth.authenticateSilent(ORG_ID);
   expect(result.success).toBe(true);
   const client = new ServiceClient(API_URL);
-  client.setTokenProvider((rejected) => auth.getValidToken(rejected));
+  client.setTokenProvider((rejected, refusal) => auth.getValidToken(rejected, refusal));
   return client;
 }
 
@@ -316,7 +316,7 @@ describe('everything else is unchanged', () => {
     // authenticateSilent itself refreshes an expired token; the provider is then asked for the (fresh) token.
     await auth.authenticateSilent(ORG_ID);
     const client = new ServiceClient(API_URL);
-    client.setTokenProvider((rejected) => auth.getValidToken(rejected));
+    client.setTokenProvider((rejected, refusal) => auth.getValidToken(rejected, refusal));
 
     await client.listProjects();
 
@@ -365,9 +365,10 @@ describe('a session the service did not hand out (SESSION_NOT_RECOGNIZED)', () =
   const notRecognized = (): Response =>
     json(401, { error: 'This session was not issued by Capy. Sign in again.', code: 'SESSION_NOT_RECOGNIZED' });
 
-  test('the saved session is removed and the user is told to sign in again, after one refresh and no retry', async () => {
+  test('a refused request removes the saved session and says to sign in again, with no refresh and no retry', async () => {
     writeStoredSession(REJECTED, 'rt-1');
-    const spy = installFakeService({ accepts: [], rejection: notRecognized, onRefresh: notRecognized });
+    // The refresh would succeed here (a service mid-deploy): the route's answer alone decides.
+    const spy = installFakeService({ accepts: [], rejection: notRecognized });
     const client = await signedInClient();
 
     const error = await failureOf(client.listProjects());
@@ -375,10 +376,57 @@ describe('a session the service did not hand out (SESSION_NOT_RECOGNIZED)', () =
     expect(error).toBeInstanceOf(CapyError);
     expect((error as CapyError).code).toBe(ERROR_CODES.AUTH_FAILED);
     expect((error as CapyError).details?.code).toBe('SESSION_NOT_RECOGNIZED');
+    expect((error as CapyError).details?.next_command).toBe('capy pair');
     expect((error as CapyError).message).toContain('sign in again');
     expect(bearersSent(spy)).toEqual([bearer(REJECTED)]);
-    expect(refreshBodies(spy)).toHaveLength(1);
+    expect(refreshBodies(spy)).toHaveLength(0);
     expect(existsSync(sessionFile)).toBe(false);
+  });
+
+  test('another process signed in again meanwhile: its session is used once and its file is kept', async () => {
+    writeStoredSession(REJECTED, 'rt-1');
+    const spy = installFakeService({ accepts: [OTHER_PROCESS], rejection: notRecognized });
+    const client = await signedInClient();
+    writeStoredSession(OTHER_PROCESS, 'rt-other');
+
+    await expect(client.listProjects()).resolves.toEqual([]);
+
+    expect(bearersSent(spy)).toEqual([bearer(REJECTED), bearer(OTHER_PROCESS)]);
+    expect(refreshBodies(spy)).toHaveLength(0);
+    expect(storedRefreshToken()).toBe('rt-other');
+  });
+
+  test('a refused refresh does not delete a session another process stored since', async () => {
+    writeStoredSession(REJECTED, 'rt-1');
+    const stale = JSON.parse(readFileSync(sessionFile, 'utf-8'));
+    stale.sessions[ORG_ID].expires_at = Date.now() - 1000;
+    writeFileSync(sessionFile, JSON.stringify(stale));
+    const auth = new AuthService(API_URL, false, USER_ID);
+    // The new session is for the same user, with no cached token for this org yet.
+    writeFileSync(sessionFile, JSON.stringify({ ...stale, refresh_token: 'rt-other', sessions: {} }));
+    installFakeService({ accepts: [], onRefresh: notRecognized });
+
+    const result = await auth.authenticateSilent(ORG_ID);
+
+    expect(result.success).toBe(false);
+    expect(existsSync(sessionFile)).toBe(true);
+    expect(storedRefreshToken()).toBe('rt-other');
+  });
+
+  test('a second silent auth in the same run still says why there is no session', async () => {
+    writeStoredSession(REJECTED, 'rt-1');
+    const stale = JSON.parse(readFileSync(sessionFile, 'utf-8'));
+    stale.sessions[ORG_ID].expires_at = Date.now() - 1000;
+    writeFileSync(sessionFile, JSON.stringify(stale));
+    installFakeService({ accepts: [], onRefresh: notRecognized });
+    const auth = new AuthService(API_URL, false, USER_ID);
+
+    await auth.authenticateSilent(ORG_ID);
+    const second = await auth.authenticateSilent();
+
+    expect(second.success).toBe(false);
+    expect(second.error_code).toBe('session_ended');
+    expect(second.error).toContain('sign in again');
   });
 
   test('the next command finds no session instead of sending the refused token again', async () => {

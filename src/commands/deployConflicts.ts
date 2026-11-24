@@ -81,7 +81,7 @@ async function openFolder(cwd: string, branch: string, devMode: boolean | undefi
     throw new CapyError(silentAuthFailureMessage(signedIn), ERROR_CODES.AUTH_FAILED);
   }
   const serviceClient = new ServiceClient(undefined, devMode);
-  serviceClient.setTokenProvider((rejected) => auth.getValidToken(rejected));
+  serviceClient.setTokenProvider((rejected, refusal) => auth.getValidToken(rejected, refusal));
   const projectKey = await resolveProjectKey(state.organizationId, state.projectId, signedIn.user_id, {
     coDecrypt: (o, c) => serviceClient.coDecrypt(o, c).then((r) => r.plaintext),
     wrapOuterLayer: (o, p) => serviceClient.wrapOuterLayer(o, p).then((r) => r.ciphertext),
