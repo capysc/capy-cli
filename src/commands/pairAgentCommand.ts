@@ -5,7 +5,8 @@
  *    (`auth/pairing/pendingGrant.ts`), prints ONE refusal with a `link` elicitation and exits 3 at once. No polling.
  *    The link carries a QR of the approval URL (text, and a PNG file with the same bytes as a data URI). The PNG is a
  *    temp file recorded in the pending grant and removed wherever the grant is removed.
- * 2. Wait run, `capy pair --wait`: polls the pending grant for at most `PAIR_WAIT_CEILING_MS`. Approved: the
+ * 2. Wait run, `capy pair --wait`: polls the pending grant until something changes, up to its expiry and for at most
+ *    `PAIR_WAIT_CEILING_MS` (CAP-899). Approved: the
  *    service asks for the one-time code (step 4) before it hands anything over; then the same post-approval path
  *    the terminal flow runs (`finishPairing`). Still pending: exit 3 again with the same `link`, its QR cut down to the
  *    PNG's file path (no text, no data URI) so the answer stays small.
@@ -48,8 +49,14 @@ import { finishPairing, pairIntent, pairPurpose, type PairOptions } from './pair
 import { refuseError } from './pairingRefusal';
 import { refuse, settle, type Refusal } from './refusal';
 
-/** How long one `capy pair --wait` run polls before it says "still waiting". */
-export const PAIR_WAIT_CEILING_MS = 30_000;
+/**
+ * The longest one `capy pair --wait` run waits (CAP-899). A run returns only when something changes: approval, a
+ * renewed link once the old one expires, a denial or an error. Every "still waiting" answer is a turn on which an agent
+ * may stop (run 9b: two 30-second waits, then the agent ended its turn and nothing renewed), so a run waits out the
+ * whole link. Nine minutes keeps it under common agent tool limits (Claude Code allows ten); a link that lives longer
+ * gets PAIR_STILL_WAITING at the cap.
+ */
+export const PAIR_WAIT_CEILING_MS = 9 * 60_000;
 
 /** The longest one device-token poll may take; a poll that takes longer is a poll error (the pending grant is kept). */
 export const PAIR_POLL_TIMEOUT_MS = 10_000;
@@ -304,7 +311,8 @@ async function pollOnceBounded(grant: PendingPairGrant, timeoutMs: number, confi
 
 /**
  * Polls at the grant's interval (+5s on every `slow_down`, as `pollDeviceToken` does) until approval, expiry, denial
- * or the ceiling, and never sleeps past the ceiling.
+ * or the ceiling, and never sleeps past the ceiling. When the grant's own expiry comes before the next poll and within
+ * the ceiling, the run sleeps until that moment and answers `expired`, so the caller renews the link (CAP-899).
  *
  * The first poll waits until the grant's `nextPollAt` (set by the start run, then by each wait run), so back-to-back runs never poll before
  * the interval is up. After a poll, the next one is scheduled at now + interval: if that is before the deadline the run
@@ -312,7 +320,14 @@ async function pollOnceBounded(grant: PendingPairGrant, timeoutMs: number, confi
  * least the ceiling (then it returns at once). Either way the earliest next poll time is handed back to be saved.
  * Each request is bounded by `pollTimeoutMs`, shortened so it cannot run past the deadline.
  */
-async function pollUntil(grant: PendingPairGrant, ceilingMs: number, pollTimeoutMs: number, clock: Clock, confirmationCode?: string): Promise<WaitStep> {
+async function pollUntil(
+  grant: PendingPairGrant,
+  ceilingMs: number,
+  pollTimeoutMs: number,
+  clock: Clock,
+  confirmationCode?: string,
+  remember?: (intervalMs: number, nextPollAt: number) => void,
+): Promise<WaitStep> {
   const startedAt = clock.now();
   const deadline = startedAt + ceilingMs;
   const expiresAtMs = Date.parse(grant.expiresAt);
@@ -323,7 +338,14 @@ async function pollUntil(grant: PendingPairGrant, ceilingMs: number, pollTimeout
     if (ms > 0) await clock.sleep(ms);
   };
   const schedule = async (intervalMs: number, at: number): Promise<WaitStep> => {
+    // CAP-899: the link runs out before the next poll and within this run, so wait for that moment and renew it then.
+    if (at >= expiresAtMs && expiresAtMs <= deadline) {
+      await sleepUntil(expiresAtMs);
+      return { kind: 'expired' };
+    }
     if (at < deadline) {
+      // CAP-899: a run can now wait minutes, and the agent's tool may kill it; the next run must still never poll early.
+      remember?.(intervalMs, at);
       await sleepUntil(at);
       return poll(intervalMs);
     }
@@ -376,7 +398,7 @@ async function waitRun(options: PairAgentOptions, deps: PairAgentDeps): Promise<
   }
   const now = deps.now ?? Date.now;
   const code = options.code?.trim() || undefined;
-  const step = await pollUntil(grant, deps.ceilingMs ?? PAIR_WAIT_CEILING_MS, deps.pollTimeoutMs ?? PAIR_POLL_TIMEOUT_MS, { sleep: deps.sleep ?? defaultSleep, now }, code);
+  const step = await pollUntil(grant, deps.ceilingMs ?? PAIR_WAIT_CEILING_MS, deps.pollTimeoutMs ?? PAIR_POLL_TIMEOUT_MS, { sleep: deps.sleep ?? defaultSleep, now }, code, (intervalMs, nextPollAt) => savePendingPairGrant({ ...grant, intervalSeconds: intervalMs / 1000, nextPollAt }));
   switch (step.kind) {
     case 'approved':
       return completeApproved(grant, step.exchange, options);

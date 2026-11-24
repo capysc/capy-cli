@@ -483,7 +483,7 @@ program
   .description('Pair this device via Keep; nothing is installed until the one-time code Keep shows the approver is entered here (in agent mode the approving account must also match --email)') // COPY-FLAG
   .option('--json', 'emit machine-readable JSON instead of the human UI')
   .option('--force', 'overwrite a different local key already on this machine')
-  .option('--wait', 'agent mode: wait for the pending pairing to be approved (exits 3 with PAIR_STILL_WAITING after 30 seconds, or PAIR_LINK_RENEWED with a new link when the old one expired; run it again)') // COPY-FLAG
+  .option('--wait', 'agent mode: wait for the pending pairing to be approved (returns only when something changes, up to 9 minutes: exits 3 with PAIR_CODE_REQUIRED once approved, PAIR_LINK_RENEWED with a new link when the old one expired, or PAIR_STILL_WAITING at the 9-minute cap; give it a tool timeout of at least 10 minutes and run it again)') // COPY-FLAG
   .option('--cancel', 'agent mode: drop the pending pairing') // COPY-FLAG
   .option('--code <code>', 'agent mode, with --wait: the one-time code Keep shows the person who approved; ask them for it') // COPY-FLAG
   .option('--transport', 'receive this project\'s keys from Keep (/transport/pair); once per machine. Without it, pair only signs in a machine that already has its keys (/pair); a machine with no keys asks for them anyway') // COPY-FLAG

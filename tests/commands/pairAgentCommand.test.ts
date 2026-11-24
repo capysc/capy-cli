@@ -448,7 +448,7 @@ describe('capy pair, agent mode', () => {
       // The start run saved authorize time + interval as the earliest first poll; this run starts after it, so it polls at once.
       const clock = fakeClock(Date.now() + 5000);
       const ran = await run({ wait: true }, { ...clock, ceilingMs: PAIR_WAIT_CEILING_MS });
-      expect(PAIR_WAIT_CEILING_MS).toBe(30_000);
+      expect(PAIR_WAIT_CEILING_MS).toBe(540_000);
       expect(ran.exit).toBe(3);
       expect(ran.json.ok).toBe(false);
       expect(ran.json.code).toBe(ERROR_CODES.PAIR_STILL_WAITING);
@@ -459,10 +459,11 @@ describe('capy pair, agent mode', () => {
       });
       expect(ran.json.elicitation.answer).toEqual({ wait: `${BIN} pair --wait` });
       expect(pendingExists()).toBe(true);
-      // Polls at 0,5,...,25 seconds, then one more interval so the next run never polls early: 30 seconds in all.
-      expect(callsTo(fetchMock, '/auth/device/token')).toHaveLength(6);
-      expect(clock.sleep).toHaveBeenCalledTimes(6);
-      expect((clock.sleep.mock.calls as number[][]).reduce((total, [ms]) => total + ms, 0)).toBe(30_000);
+      // The link lives 10 minutes, past the 9-minute cap (CAP-899). Polls at 0,5,...,535 seconds, then one more interval
+      // so the next run never polls early: 9 minutes in all.
+      expect(callsTo(fetchMock, '/auth/device/token')).toHaveLength(108);
+      expect(clock.sleep).toHaveBeenCalledTimes(108);
+      expect((clock.sleep.mock.calls as number[][]).reduce((total, [ms]) => total + ms, 0)).toBe(540_000);
     });
 
     test('a slow_down adds 5 seconds to the interval, and the longer interval is kept for the next run', async () => {
@@ -481,14 +482,14 @@ describe('capy pair, agent mode', () => {
       const fetchMock = stubFetch([PENDING]);
       // The start run saved authorize time + 60 seconds; this run starts after it, so it polls once.
       const first = fakeClock(Date.now() + 60_000);
-      const ran = await run({ wait: true }, first);
+      const ran = await run({ wait: true }, { ...first, ceilingMs: 30_000 });
       expect(ran.exit).toBe(3);
       expect(ran.json.code).toBe(ERROR_CODES.PAIR_STILL_WAITING);
       expect(callsTo(fetchMock, '/auth/device/token')).toHaveLength(1);
       expect(first.sleep).not.toHaveBeenCalled();
       expect(JSON.parse(pendingRaw()).interval_seconds).toBe(60);
       const second = fakeClock();
-      const again = await run({ wait: true }, second);
+      const again = await run({ wait: true }, { ...second, ceilingMs: 30_000 });
       expect(again.json.code).toBe(ERROR_CODES.PAIR_STILL_WAITING);
       expect(callsTo(fetchMock, '/auth/device/token')).toHaveLength(1);
       expect(second.sleep).not.toHaveBeenCalled();
@@ -532,7 +533,7 @@ describe('capy pair, agent mode', () => {
 
     test('the interval is respected across runs: the next run sleeps until the saved earliest-next-poll time before it polls', async () => {
       await startThenStub('mike@example.com', [PENDING]);
-      const first = await run({ wait: true });
+      const first = await run({ wait: true }, { ...fakeClock(), ceilingMs: 30_000 });
       expect(first.json.code).toBe(ERROR_CODES.PAIR_STILL_WAITING);
       const saved = JSON.parse(pendingRaw()).next_poll_at as number;
       expect(saved).toBeGreaterThan(Date.now());
@@ -594,6 +595,96 @@ describe('capy pair, agent mode', () => {
       for (const phrase of ['at once in the foreground', 'PAIR_STILL_WAITING', 'PAIR_LINK_RENEWED', 'Never start a new `capy pair`', 'never fill in the one-time code']) {
         expect(PAIR_LINK_INSTRUCTIONS).toContain(phrase);
       }
+    });
+
+    // CAP-899: one wait run returns only when something changes, so an agent never gets a "still waiting" turn to stop on.
+    test('a pending link is waited out to its expiry in one run, then renewed (no PAIR_STILL_WAITING on the way)', async () => {
+      const authorizedAt = 1_700_000_000_000;
+      stubFetch([PENDING], { ...AUTHORIZE_BODY, expires_in: 300 });
+      await run({ email: 'mike@example.com' }, fakeClock(authorizedAt));
+      const expiresAt = Date.parse(JSON.parse(pendingRaw()).expires_at);
+      expect(expiresAt).toBe(authorizedAt + 300_000);
+      const fetchMock = stubFetch([PENDING], RENEWED_BODY);
+      const clock = fakeClock(authorizedAt + 5000);
+      const ran = await run({ wait: true }, clock);
+      expect(ran.exit).toBe(3);
+      expect(ran.json.code).toBe(ERROR_CODES.PAIR_LINK_RENEWED);
+      expect(ran.json.elicitation.code).toBe('WXYZ-2345');
+      // It polled the old link until it ran out (5,10,...,295 seconds), slept to its expiry, and never polled past it.
+      expect(callsTo(fetchMock, '/auth/device/token')).toHaveLength(59);
+      expect(clock.now()).toBe(expiresAt);
+      expect(callsTo(fetchMock, '/auth/device/authorize')).toHaveLength(1);
+    });
+
+    test('an approval mid-wait returns at once with the code form, without waiting for the link to run out', async () => {
+      const authorizedAt = 1_700_000_000_000;
+      stubFetch([PENDING], { ...AUTHORIZE_BODY, expires_in: 300 });
+      await run({ email: 'mike@example.com' }, fakeClock(authorizedAt));
+      const fetchMock = stubFetch([PENDING, PENDING, CONFIRM_REQUIRED]);
+      const clock = fakeClock(authorizedAt + 5000);
+      const ran = await run({ wait: true }, clock);
+      expect(ran.exit).toBe(3);
+      expect(ran.json.code).toBe(ERROR_CODES.PAIR_CODE_REQUIRED);
+      expect(callsTo(fetchMock, '/auth/device/token')).toHaveLength(3);
+      expect(clock.now()).toBe(authorizedAt + 15_000);
+      expect(pendingExists()).toBe(true);
+    });
+
+    test('a denial mid-wait returns at once', async () => {
+      const authorizedAt = 1_700_000_000_000;
+      stubFetch([PENDING], { ...AUTHORIZE_BODY, expires_in: 300 });
+      await run({ email: 'mike@example.com' }, fakeClock(authorizedAt));
+      stubFetch([PENDING, DENIED]);
+      const clock = fakeClock(authorizedAt + 5000);
+      const ran = await run({ wait: true }, clock);
+      expect(ran.json.code).toBe(ERROR_CODES.PAIR_DENIED);
+      expect(clock.now()).toBe(authorizedAt + 10_000);
+    });
+
+    test('a wait killed by the agent\'s tool loses nothing: the file keeps the next poll time, and a rerun after expiry renews', async () => {
+      const authorizedAt = 1_700_000_000_000;
+      stubFetch([PENDING], { ...AUTHORIZE_BODY, expires_in: 300 });
+      await run({ email: 'mike@example.com' }, fakeClock(authorizedAt));
+      const fetchMock = stubFetch([PENDING], RENEWED_BODY);
+      // The tool kills the run while it sleeps after its third poll.
+      const clock = fakeClock(authorizedAt + 5000);
+      const killed = jest.fn(async (ms: number) => {
+        if (callsTo(fetchMock, '/auth/device/token').length === 3) throw new Error('killed by the tool');
+        await clock.sleep(ms);
+      });
+      // A thrown sleep stands in for the kill: the run stops mid-wait, between polls.
+      const stopped = await run({ wait: true }, { sleep: killed, now: clock.now });
+      expect(stopped.exit).not.toBe(0);
+      const kept = JSON.parse(pendingRaw());
+      expect(kept.device_code).toBe('device-1');
+      // The next run would not poll before the killed run's next poll.
+      expect(kept.next_poll_at).toBe(authorizedAt + 20_000);
+      // A rerun after the link ran out renews it.
+      const ran = await run({ wait: true }, fakeClock(authorizedAt + 400_000));
+      expect(ran.json.code).toBe(ERROR_CODES.PAIR_LINK_RENEWED);
+      expect(ran.json.elicitation.code).toBe('WXYZ-2345');
+    });
+
+    test('a slow_down that pushes the next poll past expiry: sleeps to the expiry and renews, never polls the dead link', async () => {
+      const authorizedAt = 1_700_000_000_000;
+      stubFetch([PENDING], { ...AUTHORIZE_BODY, expires_in: 300 });
+      await run({ email: 'mike@example.com' }, fakeClock(authorizedAt));
+      const fetchMock = stubFetch([SLOW_DOWN], RENEWED_BODY);
+      const clock = fakeClock(authorizedAt + 292_000);
+      const ran = await run({ wait: true }, clock);
+      expect(ran.json.code).toBe(ERROR_CODES.PAIR_LINK_RENEWED);
+      expect(callsTo(fetchMock, '/auth/device/token')).toHaveLength(1);
+      expect(clock.now()).toBe(authorizedAt + 300_000);
+    });
+
+    test('--code on a link that already expired: the code is not sent, and the link is renewed', async () => {
+      const authorizedAt = 1_700_000_000_000;
+      stubFetch([PENDING], { ...AUTHORIZE_BODY, expires_in: 300 });
+      await run({ email: 'mike@example.com' }, fakeClock(authorizedAt));
+      const fetchMock = stubFetch([CONFIRM_REQUIRED], RENEWED_BODY);
+      const ran = await run({ wait: true, code: 'AB12' }, fakeClock(authorizedAt + 301_000));
+      expect(ran.json.code).toBe(ERROR_CODES.PAIR_LINK_RENEWED);
+      expect(callsTo(fetchMock, '/auth/device/token')).toHaveLength(0);
     });
 
     test('an expired grant (its own expiry has passed): renewed without polling the old one', async () => {
