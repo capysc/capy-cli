@@ -5,7 +5,7 @@ import { tmpdir } from 'os';
 import path from 'path';
 import jsQR from 'jsqr';
 import { PNG } from 'pngjs';
-import { PAIRING_PRESENTATION, PAIRING_QR_IMAGE_RULE, createPairingQrImage, removePairingQrImage } from '../../src/ui/pairingPresentation';
+import { PAIRING_PRESENTATION, PAIRING_QR_IMAGE_RULE, PAIR_LINK_INSTRUCTIONS, createPairingQrImage, removePairingQrImage } from '../../src/ui/pairingPresentation';
 import { ELICITATION_HELP } from '../../src/ui/elicitation';
 import { AGENTS_BLOCK } from '../../src/core/agentsBlockPlan';
 
@@ -198,7 +198,13 @@ describe('pairing contract', () => {
     expect(text).toContain('without asking the human anything first');
     expect(text).not.toMatch(/email/i);
     expect(text).toContain('Always show the human its `url`, `code` and `expires_at`.');
-    expect(text).toContain('run it again whenever it exits 3 with PAIR_STILL_WAITING');
+    expect(text).toContain('Run it again whenever it exits 3 with PAIR_STILL_WAITING');
+    // CAP-899: one wait can take up to 9 minutes, and every source says to give it a long enough tool timeout.
+    for (const source of [text, AGENTS_BLOCK, ELICITATION_HELP, PAIR_LINK_INSTRUCTIONS]) {
+      expect(source).toContain('up to 9 minutes');
+      expect(source).toContain('tool timeout of at least 10 minutes');
+    }
+    expect(readmeSection.replace(/\s+/g, ' ')).toContain('give it a tool timeout of at least 10 minutes');
     expect(text).toContain('"keys": "already_present"');
     expect(AGENTS_BLOCK).toContain('run `capy pair --json`. Do not ask the human anything first, and add no flags.');
     expect(AGENTS_BLOCK).not.toContain('--signup');

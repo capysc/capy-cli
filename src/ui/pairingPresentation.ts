@@ -24,7 +24,7 @@ export const PAIRING_QR_IMAGE_RULE =
  * renew rule (run 9: the agent showed the link, ended its turn and planned a new `capy pair` on expiry).
  */
 export const PAIR_LINK_INSTRUCTIONS =
-  'Show the human the `url`, `code`, `fingerprint`, `expires_at` and QR now, then run `answer.wait` at once in the foreground, without waiting for a reply. Run it again whenever it exits 3 with PAIR_STILL_WAITING. If it exits 3 with PAIR_LINK_RENEWED, the old link expired and this is a new one: show the human the new link the same way and run its `answer.wait`. Never start a new `capy pair` for an expired link, and never fill in the one-time code yourself.'; // COPY-FLAG
+  'Show the human the `url`, `code`, `fingerprint`, `expires_at` and QR now, then run `answer.wait` at once in the foreground, without waiting for a reply. It can take up to 9 minutes, because it returns only when something changes, so give it a tool timeout of at least 10 minutes. Run it again whenever it exits 3 with PAIR_STILL_WAITING, or if your tool stopped it early. If it exits 3 with PAIR_LINK_RENEWED, the old link expired and this is a new one: show the human the new link the same way and run its `answer.wait`. Never start a new `capy pair` for an expired link, and never fill in the one-time code yourself.'; // COPY-FLAG
 
 export const PAIRING_PRESENTATION = {
   version: 1,
@@ -36,7 +36,7 @@ export const PAIRING_PRESENTATION = {
     'If you cannot show an image, show `qr.text` only if your client is a real terminal with a monospace grid and no extra line spacing.', // COPY-FLAG
     'Otherwise say plainly that the QR cannot be shown here.', // COPY-FLAG
     'Never send the pairing link to an external QR service.', // COPY-FLAG
-    'Then run `answer.wait` at once in the foreground, and run it again whenever it exits 3 with PAIR_STILL_WAITING. The wait response does not repeat `qr.text` or `qr.image.data_uri`. A wait that exits 3 with PAIR_LINK_RENEWED carries a new link with its full QR, because the old one expired: show the human the new link, code and QR, then run `answer.wait` again.', // COPY-FLAG
+    'Then run `answer.wait` at once in the foreground. It can take up to 9 minutes, because it returns only when something changes, so give it a tool timeout of at least 10 minutes. Run it again whenever it exits 3 with PAIR_STILL_WAITING, or if your tool stopped it early. The wait response does not repeat `qr.text` or `qr.image.data_uri`. A wait that exits 3 with PAIR_LINK_RENEWED carries a new link with its full QR, because the old one expired: show the human the new link, code and QR, then run `answer.wait` again.', // COPY-FLAG
     'After the human approves, Keep shows them a one-time code and the wait exits 3 with PAIR_CODE_REQUIRED and a form with one `code` field: ask the human for that code and run `answer.rerun` (`capy pair --wait --code <code>`). Never fill in the code yourself; only the person who approved can see it. A wrong code returns PAIR_CODE_MISMATCH with the form again.', // COPY-FLAG
     'When the keys are already on this machine, the pairing only signs in: the result says `"keys": "already_present"`.', // COPY-FLAG
   ],

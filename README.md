@@ -244,8 +244,10 @@ order:
 
 Never use an external QR service.
 
-Then run `answer.wait` (`capy pair --wait`) at once in the foreground, and run it
-again whenever it exits 3 with `PAIR_STILL_WAITING`. That answer repeats the link
+Then run `answer.wait` (`capy pair --wait`) at once in the foreground. It can
+take up to 9 minutes, because it returns only when something changes, so give it
+a tool timeout of at least 10 minutes. Run it again whenever it exits 3 with
+`PAIR_STILL_WAITING`, or if your tool stopped it early. That answer repeats the link
 and only the PNG's file path, not `qr.text` or `qr.image.data_uri`. After the
 human approves, Keep shows them a one-time code, and the wait exits 3 with
 `PAIR_CODE_REQUIRED` and a form with one `code` field. Ask the human for the code
