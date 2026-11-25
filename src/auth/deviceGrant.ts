@@ -30,6 +30,7 @@
  */
 import type { Organization } from '../types/index';
 import { CapyError, ERROR_CODES } from '../types/index';
+import { pairingDeviceInfo } from './pairing/deviceInfo';
 
 export interface DeviceAuthorizeResult {
   device_code: string;
@@ -83,7 +84,10 @@ export interface PairingIntent {
   readonly description?: string;
 }
 
-/** `POST /auth/device/authorize {public_key, mode, org_id?, project_id?, is_signup?, intent_title?, intent_description?}` — step 1 of `capy pair`. */
+/**
+ * `POST /auth/device/authorize {public_key, mode, org_id?, project_id?, is_signup?, intent_title?, intent_description?, device}` — step 1 of `capy pair`.
+ * `device` (CAP-892) is this machine's name, system and client, shown on Keep's "Unlock Device" screen. Display only.
+ */
 export async function authorizeDevice(apiUrl: string, publicKey: string, scope: DeviceAuthorizeScope, intent: PairingIntent = {}): Promise<DeviceAuthorizeResult> {
   const { ok, status, data } = await postJson<DeviceAuthorizeResult>(`${apiUrl}/auth/device/authorize`, {
     public_key: publicKey,
@@ -93,6 +97,7 @@ export async function authorizeDevice(apiUrl: string, publicKey: string, scope: 
     ...(scope.orgId ? { org_id: scope.orgId } : {}),
     ...(scope.projectId ? { project_id: scope.projectId } : {}),
     ...(scope.signup ? { is_signup: true } : {}),
+    device: pairingDeviceInfo(),
   });
   if (!ok) {
     throw new CapyError(

@@ -18,6 +18,7 @@
  */
 import { describe, test, expect, jest, afterEach } from 'bun:test';
 import { authorizeDevice, pollDeviceTokenOnce, pollDeviceToken } from '../../src/auth/deviceGrant';
+import { pairingDeviceInfo } from '../../src/auth/pairing/deviceInfo';
 import { CapyError } from '../../src/types/index';
 
 const originalFetch = globalThis.fetch;
@@ -67,10 +68,17 @@ describe('authorizeDevice', () => {
     await authorizeDevice('https://api.example', 'pubkey', { mode: 'transport', orgId: 'org_1', projectId: 'proj_1', signup: false });
     await authorizeDevice('https://api.example', 'pubkey', { mode: 'transport', orgId: null, projectId: null, signup: true });
     expect(bodies).toEqual([
-      { public_key: 'pubkey', mode: 'session' },
-      { public_key: 'pubkey', mode: 'transport', org_id: 'org_1', project_id: 'proj_1' },
-      { public_key: 'pubkey', mode: 'transport', is_signup: true },
+      { public_key: 'pubkey', mode: 'session', device: pairingDeviceInfo() },
+      { public_key: 'pubkey', mode: 'transport', org_id: 'org_1', project_id: 'proj_1', device: pairingDeviceInfo() },
+      { public_key: 'pubkey', mode: 'transport', is_signup: true, device: pairingDeviceInfo() },
     ]);
+  });
+
+  test('CAP-892: describes this machine for Keep\'s Unlock Device screen', () => {
+    const device = pairingDeviceInfo();
+    expect(device.system).toMatch(/^.+ \(.+\)$/);
+    expect(device.client).toMatch(/^Capy CLI \S+$/);
+    if (device.name !== undefined) expect(device.name.length).toBeLessThanOrEqual(64);
   });
 
   test('returns the authorize response on success', async () => {
