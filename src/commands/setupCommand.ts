@@ -203,10 +203,10 @@ export async function setupOutcome(options: SetupCommandOptions, deps: SetupDeps
     return refusal({ code: ERROR_CODES.SERVICE_ERROR, message: `\`${bin} setup\` is disabled in local-only mode: there is no organization or server to set up against.`, exitCode: 1 }); // COPY-FLAG
   }
   const code = options.code?.trim() || undefined;
-  // A code means the person has just approved a pairing: finish that one first. With no pairing waiting the code has
-  // been used already (a rerun), and a code cannot belong to a pairing whose link ran out; in both cases the folder
-  // step says whether pairing is still needed.
-  if (code !== undefined && options.dryRun !== true && deps.pendingPair() === 'waiting') {
+  // A code means the person has just approved a pairing: finish that one first, even when its link ran out on this
+  // machine's clock, since the service may still hold the approval (CAP-902); the service decides. With no pairing
+  // pending the code has been used already (a rerun), and the folder step says whether pairing is still needed.
+  if (code !== undefined && options.dryRun !== true && deps.pendingPair() !== 'none') {
     const paired = await deps.pair({ wait: true, code });
     if (paired.kind === 'refusal') return refusal(forSetup(paired.refusal, bin));
   }

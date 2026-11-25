@@ -331,13 +331,16 @@ async function pollUntil(
   const startedAt = clock.now();
   const deadline = startedAt + ceilingMs;
   const expiresAtMs = Date.parse(grant.expiresAt);
-  // Past its own expiry the grant is over, whether or not this run would get to poll.
-  if (startedAt >= expiresAtMs) return { kind: 'expired' };
+  // Past its own expiry the grant is over, whether or not this run would get to poll. A pasted code is the exception
+  // (CAP-902): the human approved, so the service may still hold the approval; it is sent once and the service decides.
+  if (startedAt >= expiresAtMs && !confirmationCode) return { kind: 'expired' };
   const sleepUntil = async (at: number): Promise<void> => {
     const ms = at - clock.now();
     if (ms > 0) await clock.sleep(ms);
   };
   const schedule = async (intervalMs: number, at: number): Promise<WaitStep> => {
+    // CAP-902: a pasted code is always sent once, at once, before any expiry check.
+    if (confirmationCode !== undefined && !codeSent) return poll(intervalMs);
     // CAP-899: the link runs out before the next poll and within this run, so wait for that moment and renew it then.
     if (at >= expiresAtMs && expiresAtMs <= deadline) {
       await sleepUntil(expiresAtMs);
@@ -352,8 +355,11 @@ async function pollUntil(
     if (intervalMs < ceilingMs) await sleepUntil(deadline);
     return { kind: 'waiting', intervalMs, nextPollAt: at };
   };
+  let codeSent = false;
   const poll = async (intervalMs: number): Promise<WaitStep> => {
-    if (clock.now() >= expiresAtMs) return { kind: 'expired' };
+    const sendingCode = confirmationCode !== undefined && !codeSent;
+    codeSent = true;
+    if (clock.now() >= expiresAtMs && !sendingCode) return { kind: 'expired' };
     const timeout = Math.min(pollTimeoutMs, Math.max(deadline - clock.now(), 1000));
     const result = await pollOnceBounded(grant, timeout, confirmationCode);
     switch (result.status) {

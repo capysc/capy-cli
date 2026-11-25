@@ -204,6 +204,9 @@ describe('pairing contract', () => {
       expect(source).toContain(PAIR_LINK_TEXT_RULE);
     }
     expect(PAIR_LINK_INSTRUCTIONS.startsWith(PAIR_LINK_TEXT_RULE)).toBe(true);
+    // CAP-902: an agent that never saw the code form still knows what Keep's code looks like and where it goes.
+    expect(PAIR_LINK_INSTRUCTIONS).toContain('4-character one-time code, not the 8-character code in the link');
+    expect(PAIR_LINK_INSTRUCTIONS).toContain('`--code <code>`, even if the link has expired since');
     // The other two places an agent learns how to show a link say the same: the elicitation help and `capy pair --help`.
     expect(ELICITATION_HELP).toContain('write the `url` as a clickable link');
     expect(ELICITATION_HELP).toContain('only an addition, never the only way');

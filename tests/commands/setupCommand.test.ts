@@ -272,18 +272,19 @@ describe('setupOutcome', () => {
     expect(outcome).toEqual({ kind: 'refusal', refusal: failed });
   });
 
-  test('a code with a pairing whose link ran out is not sent to it; signed in, pairing is skipped', async () => {
+  // CAP-902: the service may still hold the approval after the link ran out on this machine's clock, so the code is sent.
+  test('a code with a pairing whose link ran out locally is still sent to it, and setup carries on', async () => {
     const { made, calls } = deps({ pending: 'expired' });
     const outcome = await setupOutcome({ ...OPTIONS, code: 'ABCD' }, made);
-    expect(calls).toEqual(['folder', 'agents apply=true']);
+    expect(calls).toEqual(['pair wait code=ABCD', 'folder', 'agents apply=true']);
     expect(outcome.kind).toBe('done');
   });
 
-  test('signed out with a pairing whose link ran out: the wait renews it, and no second pairing starts', async () => {
+  test('signed out with a pairing the service says is gone: the code is sent, the wait renews it, and no second pairing starts', async () => {
     const renewed: Refusal = { ...LINK, code: ERROR_CODES.PAIR_LINK_RENEWED };
     const { made, calls } = deps({ pending: 'expired', folder: [{ kind: 'refusal', refusal: NOT_SIGNED_IN }], pair: [{ kind: 'refusal', refusal: renewed }] });
     const outcome = await setupOutcome({ ...OPTIONS, code: 'ABCD' }, made);
-    expect(calls).toEqual(['folder', 'pair wait']);
+    expect(calls).toEqual(['pair wait code=ABCD']);
     if (outcome.kind !== 'refusal') throw new Error('expected a refusal');
     expect(outcome.refusal.code).toBe(ERROR_CODES.PAIR_LINK_RENEWED);
     expect(elicitationAnswer(outcome.refusal)).toEqual({ wait: 'capy setup --json' });

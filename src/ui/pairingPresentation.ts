@@ -32,7 +32,7 @@ export const PAIR_LINK_TEXT_RULE =
  */
 export const PAIR_LINK_INSTRUCTIONS =
   PAIR_LINK_TEXT_RULE +
-  ' Do that now and add the QR as an inline image if your client can show one (never as an attached file), then run `answer.wait` at once in the foreground, without waiting for a reply. It can take up to 9 minutes, because it returns only when something changes, so give it a tool timeout of at least 10 minutes. Run it again whenever it exits 3 with PAIR_STILL_WAITING, or if your tool stopped it early. If it exits 3 with PAIR_LINK_RENEWED, the old link expired and this is a new one: show the human the new link the same way and run its `answer.wait`. Never start a new `capy pair` for an expired link, and never fill in the one-time code yourself.'; // COPY-FLAG
+  ' Do that now and add the QR as an inline image if your client can show one (never as an attached file), then run `answer.wait` at once in the foreground, without waiting for a reply. It can take up to 9 minutes, because it returns only when something changes, so give it a tool timeout of at least 10 minutes. Run it again whenever it exits 3 with PAIR_STILL_WAITING, or if your tool stopped it early. If it exits 3 with PAIR_LINK_RENEWED, the old link expired and this is a new one: show the human the new link the same way and run its `answer.wait`. After the human approves, Keep shows them a 4-character one-time code, not the 8-character code in the link: ask them for it and run `answer.wait` with `--code <code>`, even if the link has expired since. Never start a new `capy pair` for an expired link, and never fill in the one-time code yourself.'; // COPY-FLAG
 
 export const PAIRING_PRESENTATION = {
   version: 1,
