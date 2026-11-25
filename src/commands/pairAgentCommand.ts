@@ -68,6 +68,11 @@ export interface PairAgentOptions extends PairOptions {
   readonly cancel?: boolean;
   /** `--code` (with `--wait`): the one-time code Keep showed the approver, as the human gave it. */
   readonly code?: string;
+  /**
+   * Internal (capy setup, CAP-902): when the service says the pairing is gone, drop it and refuse with PAIR_EXPIRED
+   * instead of renewing, so a caller that may already be signed in decides whether a new pairing is needed.
+   */
+  readonly noRenew?: boolean;
 }
 
 /** Clock and sleep, injectable so tests never really wait. */
@@ -333,7 +338,7 @@ async function pollUntil(
   const expiresAtMs = Date.parse(grant.expiresAt);
   // Past its own expiry the grant is over, whether or not this run would get to poll. A pasted code is the exception
   // (CAP-902): the human approved, so the service may still hold the approval; it is sent once and the service decides.
-  if (startedAt >= expiresAtMs && !confirmationCode) return { kind: 'expired' };
+  if (startedAt >= expiresAtMs && confirmationCode === undefined) return { kind: 'expired' };
   const sleepUntil = async (at: number): Promise<void> => {
     const ms = at - clock.now();
     if (ms > 0) await clock.sleep(ms);
@@ -342,7 +347,7 @@ async function pollUntil(
     // CAP-902: a pasted code is always sent once, at once, before any expiry check.
     if (confirmationCode !== undefined && !codeSent) return poll(intervalMs);
     // CAP-899: the link runs out before the next poll and within this run, so wait for that moment and renew it then.
-    if (at >= expiresAtMs && expiresAtMs <= deadline) {
+    if (confirmationCode === undefined && at >= expiresAtMs && expiresAtMs <= deadline) {
       await sleepUntil(expiresAtMs);
       return { kind: 'expired' };
     }
@@ -357,9 +362,9 @@ async function pollUntil(
   };
   let codeSent = false;
   const poll = async (intervalMs: number): Promise<WaitStep> => {
-    const sendingCode = confirmationCode !== undefined && !codeSent;
     codeSent = true;
-    if (clock.now() >= expiresAtMs && !sendingCode) return { kind: 'expired' };
+    // With a code, only the service's answer ends the grant (CAP-902): it may still hold the approval.
+    if (clock.now() >= expiresAtMs && confirmationCode === undefined) return { kind: 'expired' };
     const timeout = Math.min(pollTimeoutMs, Math.max(deadline - clock.now(), 1000));
     const result = await pollOnceBounded(grant, timeout, confirmationCode);
     switch (result.status) {
@@ -409,6 +414,10 @@ async function waitRun(options: PairAgentOptions, deps: PairAgentDeps): Promise<
     case 'approved':
       return completeApproved(grant, step.exchange, options);
     case 'expired':
+      if (options.noRenew === true) {
+        removePendingPairGrant();
+        throw new CapyError('Device pairing expired before it was approved', ERROR_CODES.PAIR_EXPIRED); // COPY-FLAG
+      }
       return renewExpired(grant, options, deps);
     case 'denied':
       removePendingPairGrant();

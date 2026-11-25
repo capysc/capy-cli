@@ -60,7 +60,7 @@ export interface SetupDeps {
   readonly localOnly: () => boolean;
   readonly pendingPair: () => PendingPair;
   /** Agent-mode `capy pair`: `wait` polls the pending pairing (with the code, when there is one); otherwise a new one starts. */
-  readonly pair: (step: { readonly wait: boolean; readonly code?: string }) => Promise<PairAgentOutcome>;
+  readonly pair: (step: { readonly wait: boolean; readonly code?: string; readonly noRenew?: boolean }) => Promise<PairAgentOutcome>;
   /** Agent-mode bare `capy`, with the answers that were typed, or with `answers` in their place. */
   readonly folder: (answers?: FolderAnswers) => Promise<FolderOutcome>;
   readonly linked: () => Promise<LinkedFolder>;
@@ -206,9 +206,13 @@ export async function setupOutcome(options: SetupCommandOptions, deps: SetupDeps
   // A code means the person has just approved a pairing: finish that one first, even when its link ran out on this
   // machine's clock, since the service may still hold the approval (CAP-902); the service decides. With no pairing
   // pending the code has been used already (a rerun), and the folder step says whether pairing is still needed.
-  if (code !== undefined && options.dryRun !== true && deps.pendingPair() !== 'none') {
-    const paired = await deps.pair({ wait: true, code });
-    if (paired.kind === 'refusal') return refusal(forSetup(paired.refusal, bin));
+  const pending = deps.pendingPair();
+  if (code !== undefined && options.dryRun !== true && pending !== 'none') {
+    // A pairing that ran out locally is not renewed here: someone may be signed in already. If the service says it is
+    // gone, it is dropped and the folder step decides, starting a new pairing only when nobody is signed in.
+    const paired = await deps.pair({ wait: true, code, ...(pending === 'expired' ? { noRenew: true } : {}) });
+    const gone = pending === 'expired' && paired.kind === 'refusal' && paired.refusal.code === ERROR_CODES.PAIR_EXPIRED;
+    if (paired.kind === 'refusal' && !gone) return refusal(forSetup(paired.refusal, bin));
   }
   return folderStep(options, deps, { mayPair: true, resumed: false });
 }
@@ -226,7 +230,7 @@ function realDeps(options: SetupCommandOptions): SetupDeps {
     },
     pair: async (step) => {
       const { pairAgentOutcome } = await import('./pairAgentCommand');
-      return pairAgentOutcome({ json: true, wait: step.wait, code: step.code, devMode, ...(options.apiUrl === undefined ? {} : { apiUrl: options.apiUrl }) });
+      return pairAgentOutcome({ json: true, wait: step.wait, code: step.code, noRenew: step.noRenew, devMode, ...(options.apiUrl === undefined ? {} : { apiUrl: options.apiUrl }) });
     },
     folder: async (answers) => {
       const { CapyCommand } = await import('./capyCommand');

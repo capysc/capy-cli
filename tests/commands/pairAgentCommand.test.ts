@@ -716,6 +716,28 @@ describe('capy pair, agent mode', () => {
       expect(callsTo(fetchMock, '/auth/device/authorize')).toHaveLength(1);
     });
 
+    test('--code after the link expired locally: a pending answer is not a renewal; it keeps waiting with the code', async () => {
+      const authorizedAt = 1_700_000_000_000;
+      stubFetch([PENDING], { ...AUTHORIZE_BODY, expires_in: 300 });
+      await run({ email: 'mike@example.com' }, fakeClock(authorizedAt));
+      const fetchMock = stubFetch([PENDING, CONFIRM_REQUIRED]);
+      const ran = await run({ wait: true, code: 'AB12' }, fakeClock(authorizedAt + 420_000));
+      expect(ran.json.code).toBe(ERROR_CODES.PAIR_CODE_REQUIRED);
+      expect(callsTo(fetchMock, '/auth/device/token')).toHaveLength(2);
+      expect(callsTo(fetchMock, '/auth/device/authorize')).toHaveLength(0);
+    });
+
+    test('noRenew (capy setup): a pairing the service says is gone is dropped with PAIR_EXPIRED, and no new link is made', async () => {
+      const authorizedAt = 1_700_000_000_000;
+      stubFetch([PENDING], { ...AUTHORIZE_BODY, expires_in: 300 });
+      await run({ email: 'mike@example.com' }, fakeClock(authorizedAt));
+      const fetchMock = stubFetch([EXPIRED], RENEWED_BODY);
+      const ran = await run({ wait: true, code: 'AB12', noRenew: true }, fakeClock(authorizedAt + 301_000));
+      expect(ran.json.code).toBe(ERROR_CODES.PAIR_EXPIRED);
+      expect(callsTo(fetchMock, '/auth/device/authorize')).toHaveLength(0);
+      expect(pendingExists()).toBe(false);
+    });
+
     test('an expired grant (its own expiry has passed): renewed without polling the old one', async () => {
       await startThenStub('mike@example.com', [APPROVED]);
       const fetchMock = stubFetch([APPROVED], RENEWED_BODY);
