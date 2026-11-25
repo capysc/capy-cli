@@ -18,7 +18,7 @@
  */
 import { describe, test, expect, jest, afterEach } from 'bun:test';
 import { authorizeDevice, pollDeviceTokenOnce, pollDeviceToken } from '../../src/auth/deviceGrant';
-import { pairingDeviceInfo } from '../../src/auth/pairing/deviceInfo';
+import { pairingDeviceInfo, requestedBy, runsIn } from '../../src/auth/pairing/deviceInfo';
 import { CapyError } from '../../src/types/index';
 
 const originalFetch = globalThis.fetch;
@@ -312,5 +312,41 @@ describe('the one-time code Keep shows the approver (CAP-877)', () => {
   test('too many wrong codes are refused with PAIR_CODE_FAILED', async () => {
     recordingFetch([REQUIRED, FAILED]);
     await expect(pollDeviceToken('https://api.example', 'dc', { ...opts, askConfirmationCode: async () => 'WRONG-ONE' })).rejects.toMatchObject({ code: 'PAIR_CODE_FAILED' });
+  });
+});
+
+describe('CAP-905: who asked, and where it runs', () => {
+  const input = (env: Record<string, string>, interactive = true, inContainer = false) => ({ env, interactive, inContainer });
+
+  test('an AI agent is named, with its version, from the AI_AGENT convention', () => {
+    expect(requestedBy(input({ AI_AGENT: 'claude-code_2-1-332_agent' }))).toBe('Claude Code 2.1.332 (AI agent)');
+    expect(requestedBy(input({ AI_AGENT: 'some-new-tool_3-0_agent' }))).toBe('Some New Tool 3.0 (AI agent)');
+    expect(requestedBy(input({ AI_AGENT: 'x$(rm)_1' }))).toBe('Xrm 1 (AI agent)');
+  });
+
+  test('agent-specific variables, then a person or a program', () => {
+    expect(requestedBy(input({ CLAUDECODE: '1' }))).toBe('Claude Code (AI agent)');
+    expect(requestedBy(input({ CURSOR_AGENT: '1' }))).toBe('Cursor (AI agent)');
+    expect(requestedBy(input({ GEMINI_CLI: '1' }))).toBe('Gemini CLI (AI agent)');
+    expect(requestedBy(input({}))).toBe('A person');
+    expect(requestedBy(input({}, false))).toBe('A program (not interactive)');
+    expect(requestedBy(input({ CLAUDECODE: '0' }))).toBe('A person');
+  });
+
+  test('where it runs', () => {
+    expect(runsIn(input({ CLAUDE_CODE_REMOTE: 'true', CI: 'true' }))).toBe('Claude Code cloud session');
+    expect(runsIn(input({ CODESPACES: 'true' }))).toBe('GitHub Codespaces');
+    expect(runsIn(input({ GITHUB_ACTIONS: 'true', CI: 'true' }))).toBe('GitHub Actions');
+    expect(runsIn(input({ CI: '1' }))).toBe('CI');
+    expect(runsIn(input({}, true, true))).toBe('A container');
+    expect(runsIn(input({ SSH_CONNECTION: '1.2.3.4 5 6.7.8.9 22' }))).toBe('Over SSH');
+    expect(runsIn(input({}))).toBe('Local machine');
+  });
+
+  test('only names leave the machine: no session id, token or username', () => {
+    const info = pairingDeviceInfo(input({ AI_AGENT: 'claude-code_2-1-332_agent', CLAUDE_CODE_REMOTE: 'true', CLAUDE_CODE_REMOTE_SESSION_ID: 'secret-session', USER: 'mabel' }));
+    expect(info.requested_by).toBe('Claude Code 2.1.332 (AI agent)');
+    expect(info.environment).toBe('Claude Code cloud session');
+    expect(JSON.stringify(info)).not.toMatch(/secret-session|mabel/);
   });
 });
