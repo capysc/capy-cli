@@ -1,5 +1,5 @@
 {
-  "lockfileVersion": 3,
+  "lockfileVersion": 1,
   "configVersion": 1,
   "workspaces": {
     "": {
@@ -28,11 +28,6 @@
         "pngjs": "5.0.0",
         "typescript": "^5.0.0",
       },
-    },
-  },
-  "overrides": {
-    "@yao-pkg/pkg-fetch": {
-      "undici": "^7.29.0",
     },
   },
   "packages": {

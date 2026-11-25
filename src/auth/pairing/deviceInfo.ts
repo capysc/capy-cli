@@ -17,12 +17,15 @@ export interface PairingDeviceInfo {
   readonly client: string;
 }
 
+/** Cut by code point, so no surrogate pair is split. */
+const cap = (value: string): string => Array.from(value).slice(0, 64).join('');
+
 const PLATFORM_NAMES: Readonly<Record<string, string>> = { darwin: 'macOS', linux: 'Linux', win32: 'Windows', freebsd: 'FreeBSD' };
 
 export function pairingDeviceInfo(): PairingDeviceInfo {
   const name = (() => {
     try {
-      return hostname().trim().slice(0, 64);
+      return cap(hostname().trim());
     } catch {
       return '';
     }
@@ -31,6 +34,6 @@ export function pairingDeviceInfo(): PairingDeviceInfo {
   return {
     ...(name ? { name } : {}),
     system: `${PLATFORM_NAMES[os] ?? os} (${arch()})`,
-    client: `Capy CLI ${cliVersion}`.slice(0, 64),
+    client: cap(`Capy CLI ${cliVersion}`),
   };
 }
