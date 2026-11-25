@@ -234,8 +234,9 @@ pairing, saves it, and exits
 `instructions`, a fixed sentence that says what to do next, so an agent with no
 AGENTS block yet still waits and renews).
 
-Always show the human the link, the code and the expiry. Show the QR in this
-order:
+Every time you show a link (the first one and each PAIR_LINK_RENEWED), write the `url` as a clickable link, with the `code`, `fingerprint` and `expires_at`, as plain text in your reply. The QR is an addition, never the only way: not every client can show images.
+
+Show the QR in this order:
 
 1. Show the QR as an image the human can scan right in the conversation: if your client can show images or HTML widgets, show the PNG inline with `qr.image.data_uri` as the image source (a wait response has no data URI, so read `qr.image.file` and show it inline the same way). An attached file, a download link or a file path is not showing the QR.
 2. If you cannot show an image, show `qr.text` only if your client is a real
