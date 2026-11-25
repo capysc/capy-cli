@@ -5,7 +5,7 @@ import { tmpdir } from 'os';
 import path from 'path';
 import jsQR from 'jsqr';
 import { PNG } from 'pngjs';
-import { PAIRING_PRESENTATION, PAIRING_QR_IMAGE_RULE, PAIR_LINK_INSTRUCTIONS, createPairingQrImage, removePairingQrImage } from '../../src/ui/pairingPresentation';
+import { PAIRING_PRESENTATION, PAIRING_QR_IMAGE_RULE, PAIR_LINK_INSTRUCTIONS, PAIR_LINK_TEXT_RULE, createPairingQrImage, removePairingQrImage } from '../../src/ui/pairingPresentation';
 import { ELICITATION_HELP } from '../../src/ui/elicitation';
 import { AGENTS_BLOCK } from '../../src/core/agentsBlockPlan';
 
@@ -197,8 +197,22 @@ describe('pairing contract', () => {
     const readmeSection = readme.slice(readme.indexOf('### Pairing from an agent'), readme.indexOf('## Syncing'));
     expect(text).toContain('without asking the human anything first');
     expect(text).not.toMatch(/email/i);
-    expect(text).toContain('Always show the human its `url`, `code` and `expires_at`.');
+    expect(text).toContain('Always show the human its `url`, `code`, `fingerprint` and `expires_at`.');
     expect(text).toContain('Run it again whenever it exits 3 with PAIR_STILL_WAITING');
+    // CAP-900: the link always reaches the human as text, in the same sentence everywhere; the QR is only an addition.
+    for (const source of [text, AGENTS_BLOCK, PAIR_LINK_INSTRUCTIONS, readmeSection.replace(/\s*\n\s*/g, ' ')]) {
+      expect(source).toContain(PAIR_LINK_TEXT_RULE);
+    }
+    expect(PAIR_LINK_INSTRUCTIONS.startsWith(PAIR_LINK_TEXT_RULE)).toBe(true);
+    // The other two places an agent learns how to show a link say the same: the elicitation help and `capy pair --help`.
+    expect(ELICITATION_HELP).toContain('write the `url` as a clickable link');
+    expect(ELICITATION_HELP).toContain('only an addition, never the only way');
+    const cli = readFileSync(path.join(import.meta.dir, '../../src/index.ts'), 'utf8');
+    const pairHelp = cli.slice(cli.indexOf('Agents: run `capy pair --json`'), cli.indexOf('\n', cli.indexOf('Agents: run `capy pair --json`')));
+    expect(pairHelp).toContain('write the url as a clickable link, with the code, fingerprint and expires_at, as plain text');
+    expect(pairHelp).toContain('PAIR_LINK_RENEWED');
+    expect(PAIR_LINK_TEXT_RULE).toContain('clickable link');
+    expect(PAIR_LINK_TEXT_RULE).toContain('never the only way');
     // CAP-899: one wait can take up to 9 minutes, and every source says to give it a long enough tool timeout.
     for (const source of [text, AGENTS_BLOCK, ELICITATION_HELP, PAIR_LINK_INSTRUCTIONS]) {
       expect(source).toContain('up to 9 minutes');
@@ -223,7 +237,7 @@ describe('pairing contract', () => {
     expect(ELICITATION_HELP).toContain('PAIR_CODE_REQUIRED');
     expect(readmeSection).toContain('capy pair --wait --code <code>');
     expect(AGENTS_BLOCK).toContain('"keys": "already_present"');
-    expect(ELICITATION_HELP).toContain('show the human the `url`, the `code`, the `fingerprint` (the page shows the same one) and `expires_at`');
+    expect(ELICITATION_HELP).toContain('write the `url` as a clickable link, with the `code`, the `fingerprint` (the page shows the same one) and `expires_at`, as plain text');
     expect(readmeSection).toContain('Run `capy pair --json` without asking the human anything first, and add no');
     expect(readmeSection).not.toContain('PAIR_ACCOUNT_MISMATCH');
     expect(readmeSection).toContain('`"keys": "already_present"`');

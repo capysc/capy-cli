@@ -721,7 +721,7 @@ program
   .option('--org <id>', 'prefer this organization when your account has several and the folder does not say (no keep.lock); the organization you approve in Keep decides') // COPY-FLAG
   .option('--title <text>', 'short summary of why you are pairing, shown as the Keep pairing heading (max 120 chars)') // COPY-FLAG
   .option('--description <text>', 'what you will do once paired, shown under it on the Keep pairing page (max 600 chars)') // COPY-FLAG
-  .addHelpText('after', '\nIn a terminal, after you approve in Keep: Enter the code shown in Keep.\nAgents: run `capy pair --json` without asking anything first, show the human the url, code and expires_at, then run `capy pair --wait`. When it answers PAIR_CODE_REQUIRED, ask the human for the code Keep shows and run `capy pair --wait --code <code>`. Never fill in the code yourself.\n') // COPY-FLAG
+  .addHelpText('after', '\nIn a terminal, after you approve in Keep: Enter the code shown in Keep.\nAgents: run `capy pair --json` without asking anything first, write the url as a clickable link, with the code, fingerprint and expires_at, as plain text (the QR is only an addition), then run `capy pair --wait`. Do the same for every renewed link (PAIR_LINK_RENEWED). When it answers PAIR_CODE_REQUIRED, ask the human for the code Keep shows and run `capy pair --wait --code <code>`. Never fill in the code yourself.\n') // COPY-FLAG
   .action(async (options, command) => {
     assertNotLocalOnly('pair');
     const { pairEntry } = await import('./commands/pairEntry');
