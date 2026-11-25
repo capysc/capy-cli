@@ -230,11 +230,11 @@ sign-in: an existing user approves the handover of their organization's keys,
 and a new user signs up, which creates the organization. It asks for the
 pairing, saves it, and exits
 **3** at once with `PAIR_APPROVAL_PENDING` and an elicitation of kind `link`
-(`url`, `code`, `purpose`, `expires_at`, `answer.wait`, a `qr`, and
+(`url`, `code`, `fingerprint`, `purpose`, `expires_at`, `answer.wait`, a `qr`, and
 `instructions`, a fixed sentence that says what to do next, so an agent with no
 AGENTS block yet still waits and renews).
 
-Every time you show a link (the first one and each PAIR_LINK_RENEWED), write the `url` as a clickable link, with the `code`, `fingerprint` and `expires_at`, as plain text in your reply. The QR is an addition, never the only way: not every client can show images.
+Every time you show a link (the first one and each PAIR_LINK_RENEWED), write the `url` as a clickable link, with the `code`, `fingerprint` and `expires_at`, as plain text in your reply. The QR is an addition, never the only way: not every agent or client can show images.
 
 Show the QR in this order:
 

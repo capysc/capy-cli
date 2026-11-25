@@ -23,7 +23,7 @@ export const PAIRING_QR_IMAGE_RULE =
  * the README all carry this exact sentence, and a test fails if they drift apart.
  */
 export const PAIR_LINK_TEXT_RULE =
-  'Every time you show a link (the first one and each PAIR_LINK_RENEWED), write the `url` as a clickable link, with the `code`, `fingerprint` and `expires_at`, as plain text in your reply. The QR is an addition, never the only way: not every client can show images.'; // COPY-FLAG
+  'Every time you show a link (the first one and each PAIR_LINK_RENEWED), write the `url` as a clickable link, with the `code`, `fingerprint` and `expires_at`, as plain text in your reply. The QR is an addition, never the only way: not every agent or client can show images.'; // COPY-FLAG
 
 /**
  * CAP-897: what every `link` elicitation says to do next, in its own `instructions` field. An agent in a fresh folder
@@ -32,14 +32,14 @@ export const PAIR_LINK_TEXT_RULE =
  */
 export const PAIR_LINK_INSTRUCTIONS =
   PAIR_LINK_TEXT_RULE +
-  ' Do that now and add the QR, then run `answer.wait` at once in the foreground, without waiting for a reply. It can take up to 9 minutes, because it returns only when something changes, so give it a tool timeout of at least 10 minutes. Run it again whenever it exits 3 with PAIR_STILL_WAITING, or if your tool stopped it early. If it exits 3 with PAIR_LINK_RENEWED, the old link expired and this is a new one: show the human the new link the same way and run its `answer.wait`. Never start a new `capy pair` for an expired link, and never fill in the one-time code yourself.'; // COPY-FLAG
+  ' Do that now and add the QR as an inline image if your client can show one (never as an attached file), then run `answer.wait` at once in the foreground, without waiting for a reply. It can take up to 9 minutes, because it returns only when something changes, so give it a tool timeout of at least 10 minutes. Run it again whenever it exits 3 with PAIR_STILL_WAITING, or if your tool stopped it early. If it exits 3 with PAIR_LINK_RENEWED, the old link expired and this is a new one: show the human the new link the same way and run its `answer.wait`. Never start a new `capy pair` for an expired link, and never fill in the one-time code yourself.'; // COPY-FLAG
 
 export const PAIRING_PRESENTATION = {
   version: 1,
   command: 'capy pair --json',
   instructions: [
     'Run `capy pair --json` without asking the human anything first, and add no flags. It gives one approval link: Keep signs the human in or up and decides whether this machine gets their organization keys or a new organization.', // COPY-FLAG
-    'The refusal PAIR_APPROVAL_PENDING carries an elicitation of kind "link". Always show the human its `url`, `code` and `expires_at`.', // COPY-FLAG
+    'The refusal PAIR_APPROVAL_PENDING carries an elicitation of kind "link". Always show the human its `url`, `code`, `fingerprint` and `expires_at`.', // COPY-FLAG
     PAIR_LINK_TEXT_RULE, // CAP-900: the same sentence as the link instructions, the AGENTS block and the README
     PAIRING_QR_IMAGE_RULE, // CAP-888: the same sentence as the AGENTS block and the README
     'If you cannot show an image, show `qr.text` only if your client is a real terminal with a monospace grid and no extra line spacing.', // COPY-FLAG
