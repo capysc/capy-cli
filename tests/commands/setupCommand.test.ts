@@ -57,13 +57,15 @@ function deps(over: Stand) {
   const calls: string[] = [];
   const count = (prefix: string) => calls.filter((c) => c.startsWith(prefix)).length;
   const at = <T,>(list: readonly T[], index: number): T => list[Math.min(index, list.length - 1)] as T;
-  const pending: PendingPair = over.pending === true ? 'waiting' : over.pending === false || over.pending === undefined ? 'none' : over.pending;
+  let pending: PendingPair = over.pending === true ? 'waiting' : over.pending === false || over.pending === undefined ? 'none' : over.pending;
   const made: SetupDeps = {
     localOnly: () => over.localOnly === true,
     pendingPair: () => pending,
     pair: async (step) => {
       const answer = at(over.pair ?? [paired], count('pair'));
-      calls.push(`pair ${step.wait ? 'wait' : 'start'}${step.code === undefined ? '' : ` code=${step.code}`}`);
+      calls.push(`pair ${step.wait ? 'wait' : 'start'}${step.code === undefined ? '' : ` code=${step.code}`}${step.noRenew === true ? ' no-renew' : ''}`);
+      // As the real wait does: a pairing the service says is gone is dropped (CAP-902).
+      if (answer.kind === 'refusal' && answer.refusal.code === ERROR_CODES.PAIR_EXPIRED) pending = 'none';
       return answer;
     },
     folder: async (answers) => {
@@ -272,21 +274,30 @@ describe('setupOutcome', () => {
     expect(outcome).toEqual({ kind: 'refusal', refusal: failed });
   });
 
-  test('a code with a pairing whose link ran out is not sent to it; signed in, pairing is skipped', async () => {
+  // CAP-902: the service may still hold the approval after the link ran out on this machine's clock, so the code is sent.
+  test('a code with a pairing whose link ran out locally is still sent to it, and setup carries on', async () => {
     const { made, calls } = deps({ pending: 'expired' });
     const outcome = await setupOutcome({ ...OPTIONS, code: 'ABCD' }, made);
-    expect(calls).toEqual(['folder', 'agents apply=true']);
+    expect(calls).toEqual(['pair wait code=ABCD no-renew', 'folder', 'agents apply=true']);
     expect(outcome.kind).toBe('done');
   });
 
-  test('signed out with a pairing whose link ran out: the wait renews it, and no second pairing starts', async () => {
-    const renewed: Refusal = { ...LINK, code: ERROR_CODES.PAIR_LINK_RENEWED };
-    const { made, calls } = deps({ pending: 'expired', folder: [{ kind: 'refusal', refusal: NOT_SIGNED_IN }], pair: [{ kind: 'refusal', refusal: renewed }] });
+  test('signed in, a code, and a pairing the service says is gone: it is dropped, no new link, and setup carries on', async () => {
+    const gone: Refusal = { code: ERROR_CODES.PAIR_EXPIRED, message: 'expired', exitCode: 1 };
+    const { made, calls } = deps({ pending: 'expired', pair: [{ kind: 'refusal', refusal: gone }] });
     const outcome = await setupOutcome({ ...OPTIONS, code: 'ABCD' }, made);
-    expect(calls).toEqual(['folder', 'pair wait']);
+    expect(calls).toEqual(['pair wait code=ABCD no-renew', 'folder', 'agents apply=true']);
+    expect(outcome.kind).toBe('done');
+  });
+
+  test('signed out with a pairing the service says is gone: the code is sent, it is dropped, and one new pairing starts', async () => {
+    const gone: Refusal = { code: ERROR_CODES.PAIR_EXPIRED, message: 'expired', exitCode: 1 };
+    const fresh: Refusal = { ...LINK, code: ERROR_CODES.PAIR_APPROVAL_PENDING };
+    const { made, calls } = deps({ pending: 'expired', folder: [{ kind: 'refusal', refusal: NOT_SIGNED_IN }], pair: [{ kind: 'refusal', refusal: gone }, { kind: 'refusal', refusal: fresh }] });
+    const outcome = await setupOutcome({ ...OPTIONS, code: 'ABCD' }, made);
+    expect(calls).toEqual(['pair wait code=ABCD no-renew', 'folder', 'pair start']);
     if (outcome.kind !== 'refusal') throw new Error('expected a refusal');
-    expect(outcome.refusal.code).toBe(ERROR_CODES.PAIR_LINK_RENEWED);
-    expect(elicitationAnswer(outcome.refusal)).toEqual({ wait: 'capy setup --json' });
+    expect(outcome.refusal.code).toBe(ERROR_CODES.PAIR_APPROVAL_PENDING);
   });
 
   test('a dry run starts no pairing, writes no file and says so', async () => {

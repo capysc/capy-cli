@@ -677,14 +677,65 @@ describe('capy pair, agent mode', () => {
       expect(clock.now()).toBe(authorizedAt + 300_000);
     });
 
-    test('--code on a link that already expired: the code is not sent, and the link is renewed', async () => {
+    // CAP-902: the human approved, so the service may still hold the approval after the link ran out on this machine.
+    test('--code after the link expired locally: the code is still sent once, and an approval finishes the pairing', async () => {
+      const authorizedAt = 1_700_000_000_000;
+      const startFetch = stubFetch([PENDING], { ...AUTHORIZE_BODY, expires_in: 300 });
+      await run({ email: 'mike@example.com' }, fakeClock(authorizedAt));
+      const publicKey = sentPublicKey(startFetch);
+      mockPickupDevicePairing.mockImplementation(async () => ({ sealed: await sealAsBrowser(PAYLOAD, publicKey) }));
+      const fetchMock = stubFetch([APPROVED]);
+      const clock = fakeClock(authorizedAt + 420_000);
+      const ran = await run({ wait: true, code: 'AB12' }, clock);
+      expect(ran.exit).toBe(0);
+      const polls = callsTo(fetchMock, '/auth/device/token');
+      expect(polls).toHaveLength(1);
+      expect(JSON.stringify(polls[0])).toContain('AB12');
+      expect(callsTo(fetchMock, '/auth/device/authorize')).toHaveLength(0);
+      expect(clock.sleep).not.toHaveBeenCalled();
+    });
+
+    test('--code after the link expired locally: a wrong code gets PAIR_CODE_MISMATCH and keeps the pairing', async () => {
       const authorizedAt = 1_700_000_000_000;
       stubFetch([PENDING], { ...AUTHORIZE_BODY, expires_in: 300 });
       await run({ email: 'mike@example.com' }, fakeClock(authorizedAt));
-      const fetchMock = stubFetch([CONFIRM_REQUIRED], RENEWED_BODY);
+      stubFetch([CONFIRM_MISMATCH]);
+      const ran = await run({ wait: true, code: 'ZZZZ' }, fakeClock(authorizedAt + 420_000));
+      expect(ran.json.code).toBe(ERROR_CODES.PAIR_CODE_MISMATCH);
+      expect(pendingExists()).toBe(true);
+    });
+
+    test('--code after the link expired locally: only when the service says it is gone is the link renewed', async () => {
+      const authorizedAt = 1_700_000_000_000;
+      stubFetch([PENDING], { ...AUTHORIZE_BODY, expires_in: 300 });
+      await run({ email: 'mike@example.com' }, fakeClock(authorizedAt));
+      const fetchMock = stubFetch([EXPIRED], RENEWED_BODY);
       const ran = await run({ wait: true, code: 'AB12' }, fakeClock(authorizedAt + 301_000));
       expect(ran.json.code).toBe(ERROR_CODES.PAIR_LINK_RENEWED);
-      expect(callsTo(fetchMock, '/auth/device/token')).toHaveLength(0);
+      expect(callsTo(fetchMock, '/auth/device/token')).toHaveLength(1);
+      expect(callsTo(fetchMock, '/auth/device/authorize')).toHaveLength(1);
+    });
+
+    test('--code after the link expired locally: a pending answer is not a renewal; it keeps waiting with the code', async () => {
+      const authorizedAt = 1_700_000_000_000;
+      stubFetch([PENDING], { ...AUTHORIZE_BODY, expires_in: 300 });
+      await run({ email: 'mike@example.com' }, fakeClock(authorizedAt));
+      const fetchMock = stubFetch([PENDING, CONFIRM_REQUIRED]);
+      const ran = await run({ wait: true, code: 'AB12' }, fakeClock(authorizedAt + 420_000));
+      expect(ran.json.code).toBe(ERROR_CODES.PAIR_CODE_REQUIRED);
+      expect(callsTo(fetchMock, '/auth/device/token')).toHaveLength(2);
+      expect(callsTo(fetchMock, '/auth/device/authorize')).toHaveLength(0);
+    });
+
+    test('noRenew (capy setup): a pairing the service says is gone is dropped with PAIR_EXPIRED, and no new link is made', async () => {
+      const authorizedAt = 1_700_000_000_000;
+      stubFetch([PENDING], { ...AUTHORIZE_BODY, expires_in: 300 });
+      await run({ email: 'mike@example.com' }, fakeClock(authorizedAt));
+      const fetchMock = stubFetch([EXPIRED], RENEWED_BODY);
+      const ran = await run({ wait: true, code: 'AB12', noRenew: true }, fakeClock(authorizedAt + 301_000));
+      expect(ran.json.code).toBe(ERROR_CODES.PAIR_EXPIRED);
+      expect(callsTo(fetchMock, '/auth/device/authorize')).toHaveLength(0);
+      expect(pendingExists()).toBe(false);
     });
 
     test('an expired grant (its own expiry has passed): renewed without polling the old one', async () => {
