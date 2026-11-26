@@ -14,6 +14,11 @@ import { CapyError, ConnectorMetadata, ERROR_CODES, KeepFile } from '../types/in
 import { TargetConfig } from '../deploy/adapter';
 import { staleTargets } from '../deploy/targetsGate';
 import { isInteractive, refuseNonInteractive } from '../ui/interactive';
+import { refusePick } from './agentConfirm';
+
+// The terminal's questions, shared with the forms that ask them with nobody at a terminal (spec 3l).
+const ROTATE_VAR_QUESTION = 'Which variable to rotate:';
+const PROVIDER_QUESTION = 'Integration:';
 import { conflictFlagsOrExit } from '../sync/conflicts';
 import { gateFirst, type GateOptions } from '../sync/gate';
 import type { RotatePlanStop } from '../ui/screens/contract';
@@ -234,17 +239,24 @@ export class RotateCommand {
         return { stop: true };
       }
       if (!isInteractive(opts.nonTty)) {
-        refuseNonInteractive(
-          'no variable specified and the picker needs a prompt',
-          `Pass the variable name: capy rotate <VAR> (available: ${allVars.join(', ')}).`,
-        );
+        refusePick({
+          code: ERROR_CODES.ROTATE_VARIABLE_REQUIRED,
+          command: 'capy rotate',
+          lead: 'No variable was named.', // COPY-FLAG
+          field: { name: 'variable', question: ROTATE_VAR_QUESTION, options: allVars.map((v) => ({ value: v, label: v })) },
+          rows: [['Branch', branch], ['Variables', allVars.join(', ')]], // COPY-FLAG
+          details: { branch, variables: allVars },
+          add: '<variable>',
+          devMode: this.devMode,
+          tail: '--non-tty',
+        });
       }
       const inquirer = (await import('inquirer')).default;
       const answer = await inquirer.prompt([
         {
           type: 'list',
           name: 'picked',
-          message: 'Which variable to rotate:',
+          message: ROTATE_VAR_QUESTION,
           choices: buildRotatePickerChoices(allVars, keep, branch).map(
             ({ name, value }) => ({ name, value }),
           ),
@@ -305,10 +317,17 @@ export class RotateCommand {
         return opts.provider;
       }
       if (linkableProviders.length === 1) return linkableProviders[0].name;
-      refuseNonInteractive(
-        `${B(varName)} isn't connected to an integration yet, and several are available`,
-        `Pass --provider <name> (one of: ${linkableProviders.map((p) => p.name).join(', ')}).`,
-      );
+      refusePick({
+        code: ERROR_CODES.ROTATE_PROVIDER_REQUIRED,
+        command: 'capy rotate',
+        lead: `${varName} isn't connected to an integration yet, and several are available.`, // COPY-FLAG
+        field: { name: 'provider', question: PROVIDER_QUESTION, options: linkableProviders.map((p) => ({ value: p.name, label: `${p.name} — ${p.description}` })) },
+        rows: [['Variable', varName], ['Integrations', linkableProviders.map((p) => p.name).join(', ')]], // COPY-FLAG
+        details: { variable: varName, providers: linkableProviders.map((p) => p.name) },
+        add: '--provider <provider>',
+        devMode: this.devMode,
+        tail: '--non-tty',
+      });
     }
 
     console.log('');
@@ -321,7 +340,7 @@ export class RotateCommand {
       {
         type: 'list',
         name: 'provider',
-        message: 'Integration:',
+        message: PROVIDER_QUESTION,
         choices: [
           ...linkableProviders.map((p) => ({ name: `${B(p.name)} — ${p.description}`, value: p.name })),
           new inquirer.Separator(),

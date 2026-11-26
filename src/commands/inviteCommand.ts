@@ -10,7 +10,14 @@ import {
   resolveInviteTtlMs,
   MAX_INVITE_TTL_MS,
 } from '../crypto/inviteCrypto';
-import { isInteractive, refuseNonInteractive } from '../ui/interactive';
+import { isInteractive } from '../ui/interactive';
+import { refusePick } from './agentConfirm';
+import { ERROR_CODES } from '../types/index';
+
+/** The terminal's question, shared with the form that asks it with nobody at a terminal (spec 3l). */
+function inviteProjectsQuestion(role: string): string {
+  return `Grant ${role === 'project-admin' ? 'Project Admin' : 'Member'} access to which projects?`;
+}
 import { excludeSystemProject } from '../system/reservedProjectName';
 import {
   invitePlan,
@@ -553,17 +560,24 @@ export class InviteCommand {
       if (cwdProjectId) {
         return { projectId: cwdProjectId, extraProjectIds: [], projectSource: 'this directory' };
       }
-      refuseNonInteractive(
-        `role "${role}" needs project access and none was given`,
-        `Pass --project <id|name> (available: ${projects.map((p) => p.name).join(', ')}).`,
-      );
+      refusePick({
+        code: ERROR_CODES.INVITE_PROJECT_REQUIRED,
+        command: 'capy invite',
+        lead: `Role "${role}" needs project access and none was given.`, // COPY-FLAG
+        // The terminal lets the human tick several; the form asks for one, and more can be granted after (spec 3l).
+        field: { name: 'project', question: inviteProjectsQuestion(role), options: projects.map((p) => ({ value: p.id, label: p.name })) },
+        rows: [['Role', role], ['Projects', projects.map((p) => p.name).join(', ')]], // COPY-FLAG
+        details: { role, projects: projects.map((p) => ({ id: p.id, name: p.name })) },
+        add: '--project <project>',
+        devMode: this.devMode,
+      });
     }
 
     const { SEARCHABLE_CHECKBOX_INSTRUCTIONS, CHECKBOX_THEME } = await import('../ui/promptStyle');
     const { searchableCheckbox } = await import('../ui/searchableCheckbox');
     const ordered = [...projects.filter((p) => p.id === cwdProjectId), ...projects.filter((p) => p.id !== cwdProjectId)];
     const ids = await searchableCheckbox<string>({
-      message: `Grant ${role === 'project-admin' ? 'Project Admin' : 'Member'} access to which projects?`,
+      message: inviteProjectsQuestion(role),
       instructions: SEARCHABLE_CHECKBOX_INSTRUCTIONS,
       theme: CHECKBOX_THEME,
       choices: ordered.map((p) => ({

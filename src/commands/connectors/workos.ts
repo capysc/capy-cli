@@ -3,9 +3,13 @@ import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 import { ConnectorModule, ConnectResult, RotateResult, ConnectOpts, RotateOpts } from './registry';
-import { ConnectorMetadata } from '../../types/index';
+import { ConnectorMetadata, ERROR_CODES } from '../../types/index';
 import { ResolvedContext, fingerprint, keyTypePrefix, findManagedConnector } from './shared';
 import { isInteractive, refuseNonInteractive } from '../../ui/interactive';
+import { refusePick } from '../agentConfirm';
+
+/** The terminal's question, shared with the form that asks it with nobody at a terminal (spec 3l). */
+const WORKOS_VAR_QUESTION = 'Which variable holds your WorkOS API key?';
 import type { Blocked } from '../../ui/screens/contract';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
@@ -653,10 +657,16 @@ async function chooseApiKeyVar(ctx: ResolvedContext, opts: ConnectOpts): Promise
   }
 
   if (!isInteractive(opts.nonTty)) {
-    refuseNonInteractive(
-      'which variable holds your WorkOS key is ambiguous without a prompt',
-      `Pass --var <NAME> (candidates: ${candidates.map((c) => c.name).join(', ')}).`,
-    );
+    refusePick({
+      code: ERROR_CODES.CONNECTOR_VAR_REQUIRED,
+      command: 'capy connect workos',
+      lead: 'Which variable holds your WorkOS API key is not clear.', // COPY-FLAG
+      field: { name: 'var', question: WORKOS_VAR_QUESTION, options: candidates.map((c) => ({ value: c.name, label: c.name })) },
+      rows: [['Branch', ctx.branch], ['Candidates', candidates.map((c) => c.name).join(', ')]], // COPY-FLAG
+      details: { branch: ctx.branch, variables: candidates.map((c) => c.name) },
+      add: '--var <var>',
+      devMode: !!opts.devMode,
+    });
   }
 
   const inquirer = (await import('inquirer')).default;
@@ -664,7 +674,7 @@ async function chooseApiKeyVar(ctx: ResolvedContext, opts: ConnectOpts): Promise
     {
       type: 'list',
       name: 'picked',
-      message: 'Which variable holds your WorkOS API key?',
+      message: WORKOS_VAR_QUESTION,
       choices: candidates.map((c) => ({
         name: c.byName ? `${c.name}  ${DIM('(looks like a WorkOS var)')}` : c.name,
         value: c.name,
