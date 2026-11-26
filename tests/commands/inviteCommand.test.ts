@@ -389,6 +389,23 @@ describe('InviteCommand', () => {
       expect(piped.projectId).toBe('p1');
       expect(mockSearchableCheckbox).not.toHaveBeenCalled();
     });
+
+    test('nobody at a terminal and nothing to fall back on: INVITE_PROJECT_REQUIRED with the checkbox question as a form (spec 3l)', async () => {
+      const lines: string[] = [];
+      const log = spyOn(console, 'log').mockImplementation(((l: unknown) => { lines.push(String(l)); }) as never);
+      try {
+        await expect(askProjects({}, false)).rejects.toThrow('process.exit');
+      } finally {
+        log.mockRestore();
+      }
+      expect(mockExit).toHaveBeenCalledWith(3);
+      const body = JSON.parse(lines[0]);
+      expect(body.code).toBe('INVITE_PROJECT_REQUIRED');
+      expect(body.elicitation.fields[0].question).toBe('Grant Member access to which projects?');
+      expect(body.elicitation.fields[0].options).toEqual([{ value: 'p1', label: 'storefront' }, { value: 'p2', label: 'warehouse' }]);
+      expect(body.elicitation.answer.rerun).toMatch(/ --project <project> --json$/);
+      expect(mockSearchableCheckbox).not.toHaveBeenCalled();
+    });
   });
 });
 

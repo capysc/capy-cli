@@ -656,7 +656,8 @@ async function chooseApiKeyVar(ctx: ResolvedContext, opts: ConnectOpts): Promise
     return unambiguous.name;
   }
 
-  if (!isInteractive(opts.nonTty)) {
+  // Under `--json` nothing prompts, even on a terminal (spec 3l).
+  if (!isInteractive(opts.nonTty || opts.json)) {
     refusePick({
       code: ERROR_CODES.CONNECTOR_VAR_REQUIRED,
       command: 'capy connect workos',

@@ -37,7 +37,7 @@ describe('agentConfirm (CAP-909)', () => {
     expect(folderWords(['remove', 'X', '--folder'])).toEqual([]);
   });
 
-  it('refusePick prints a coded JSON refusal with a one-field form and exits 3; unsafe choices are left out', () => {
+  it('refusePick prints a coded JSON refusal with a one-field form and exits 3; an unsafe choice is offered quoted', () => {
     const lines: string[] = [];
     const log = spyOn(console, 'log').mockImplementation(((l: unknown) => { lines.push(String(l)); }) as never);
     const exit = spyOn(process, 'exit').mockImplementation(((code: number) => { throw new Error(`exit ${code}`); }) as never);
@@ -64,7 +64,28 @@ describe('agentConfirm (CAP-909)', () => {
     expect(body.code).toBe('ROTATE_VARIABLE_REQUIRED');
     expect(body.error).not.toContain('--');
     expect(body.elicitation.fields[0].question).toBe('Which variable to rotate:');
-    expect(body.elicitation.fields[0].options).toEqual([{ value: 'A_KEY', label: 'A_KEY' }]);
+    expect(body.elicitation.fields[0].options).toEqual([{ value: 'A_KEY', label: 'A_KEY' }, { value: "'B; rm'", label: 'B; rm' }]);
     expect(body.elicitation.answer.rerun).toBe('capy --folder apps/api rotate <variable> --non-tty');
+  });
+
+  it('refusePick offers a choice the shell would split quoted, never drops it, and its pattern matches every choice', () => {
+    const lines: string[] = [];
+    const log = spyOn(console, 'log').mockImplementation(((l: unknown) => { lines.push(String(l)); }) as never);
+    const exit = spyOn(process, 'exit').mockImplementation(((code: number) => { throw new Error(`exit ${code}`); }) as never);
+    try {
+      expect(() => refusePick({
+        code: 'STRIPE_ACCOUNT_REQUIRED', command: 'capy connect stripe', lead: 'Two accounts.',
+        field: { name: 'account', question: 'Stripe account:', options: [{ value: 'my proj', label: 'a' }, { value: 'default', label: 'b' }] },
+        rows: [], details: {}, add: '--account <account>', devMode: true,
+      })).toThrow('exit 3');
+    } finally {
+      log.mockRestore();
+      exit.mockRestore();
+    }
+    const field = JSON.parse(lines[0]).elicitation.fields[0];
+    expect(field.options.map((o: { value: string }) => o.value)).toEqual(["'my proj'", 'default']);
+    for (const o of field.options) expect(new RegExp(field.pattern).test(o.value)).toBe(true);
+    expect(new RegExp(field.pattern).test('$(x)')).toBe(false);
+    expect(JSON.parse(lines[0]).elicitation.answer.rerun.startsWith('capy-dev ')).toBe(true);
   });
 });

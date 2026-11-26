@@ -114,7 +114,7 @@ export function needsHumanChoice(command: string): string {
 /**
  * A pick the terminal would ask, with nobody to ask (spec 3l): prints the coded JSON refusal with a one-field `form`
  * whose options are the terminal's choices, then exits 3. `add` is what the rerun adds, with `<field>` in it. A
- * command with no `--json` reruns with `--non-tty`. Choices whose value is not a plain shell word are left out.
+ * command with no `--json` reruns with `--non-tty`. A choice that is not a plain shell word is offered quoted.
  */
 export function refusePick(input: {
   readonly code: string;
@@ -127,8 +127,12 @@ export function refusePick(input: {
   readonly devMode: boolean;
   readonly tail?: '--json' | '--non-tty';
 }): never {
+  // A value the shell would split or expand goes in quoted, so no choice is ever dropped; the pattern then lists them.
+  const options = input.field.options.map((o) => ({ value: shellWord(o.value), label: o.label }));
   const safe = new RegExp(SHELL_SAFE_PATTERN);
-  const options = input.field.options.filter((o) => safe.test(o.value));
+  const pattern = options.every((o) => safe.test(o.value))
+    ? SHELL_SAFE_PATTERN
+    : `^(${options.map((o) => o.value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})$`;
   console.log(JSON.stringify({
     ok: false,
     code: input.code,
@@ -137,7 +141,7 @@ export function refusePick(input: {
       question: input.field.question,
       rows: input.rows,
       details: input.details,
-      fields: [{ name: input.field.name, type: 'string', pattern: SHELL_SAFE_PATTERN, question: input.field.question, options }],
+      fields: [{ name: input.field.name, type: 'string', pattern, question: input.field.question, options }],
       rerun: rerunAdding(input.devMode, input.add, process.argv.slice(2), input.tail ?? '--json'),
     }),
   }, null, 2));

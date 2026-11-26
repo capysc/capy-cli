@@ -235,7 +235,8 @@ export class InviteCommand {
   }
 
   async execute(email: string, opts: InviteOpts = {}): Promise<void> {
-    const interactive = isInteractive(opts.nonTty);
+    // Under `--json` nothing prompts, even on a terminal (spec 3l).
+    const interactive = isInteractive(opts.nonTty || opts.json);
     try {
       const { orgId, userId, userEmail, serviceClient } = await resolveOrgContext(this.apiUrl, this.devMode);
 

@@ -243,7 +243,8 @@ export class RotateCommand {
           code: ERROR_CODES.ROTATE_VARIABLE_REQUIRED,
           command: 'capy rotate',
           lead: 'No variable was named.', // COPY-FLAG
-          field: { name: 'variable', question: ROTATE_VAR_QUESTION, options: allVars.map((v) => ({ value: v, label: v })) },
+          // The terminal's labels (connector or "(unmanaged)"), without colour.
+          field: { name: 'variable', question: ROTATE_VAR_QUESTION, options: buildRotatePickerChoices(allVars, keep, branch).map((c) => ({ value: c.value, label: c.name.replace(/\x1b\[[0-9;]*m/g, '') })) },
           rows: [['Branch', branch], ['Variables', allVars.join(', ')]], // COPY-FLAG
           details: { branch, variables: allVars },
           add: '<variable>',
