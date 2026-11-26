@@ -32,6 +32,7 @@
  * how you refresh it, and `capy rotate` refuses on a dokploy-managed var
  * (see `rotateCommand.ts`).
  */
+import { confirmFromTerminalMessage, needsHumanYes } from '../agentConfirm';
 import { TargetConfig } from '../../deploy/adapter';
 import { dokployKeyHelp, keyHelpFields } from '../../deploy/keyHelp';
 import { baseUrlProblem } from '../../deploy/adapters/dokploy';
@@ -659,7 +660,10 @@ async function runOverwriteImport(args: {
       return {
         ok: false,
         code: 'DOKPLOY_CONFIRMATION_REQUIRED',
-        message: 'Pass --yes to overwrite non-interactively, or run this interactively.',
+        message: needsHumanYes('capy connect dokploy --overwrite'),
+        elicitation: confirmFromTerminalMessage(overwriteConfirmMessage(plan, dollarWarnedNames, quotedNames), !!opts.devMode, {
+          import: plan.toImport.map((e) => e.name), replace: plan.toReplace.map((e) => e.name), clear: [...plan.toClear],
+        }),
       };
     }
   }
@@ -1078,7 +1082,10 @@ export function createDokployConnector(deps: DokployConnectorDeps = {}): Connect
         return {
           ok: false,
           code: 'DOKPLOY_CONFIRMATION_REQUIRED',
-          message: 'Pass --yes to apply non-interactively, or run this interactively.',
+          message: needsHumanYes('capy connect dokploy --discover'),
+          elicitation: confirmFromTerminalMessage(discoveryConfirmMessage(resolvedFolders, !!opts.overwrite, environmentFilter), !!opts.devMode, {
+            folders: resolvedFolders.map((f) => f.folder || '.'),
+          }),
         };
       }
 

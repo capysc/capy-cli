@@ -16,6 +16,7 @@ import inquirer from 'inquirer';
 import { ProjectManager } from '../core/projectManager';
 import { resolveContext, removeAndSync, listAllVarsOnBranch, ResolvedContext } from './connectors/shared';
 import { isInteractive, EXIT_NEEDS_INPUT } from '../ui/interactive';
+import { commandLine, confirmElicitation, needsHumanYes, prFlagWords } from './agentConfirm';
 import { DRY_RUN_UNSUPPORTED_MESSAGES } from './pipedValue';
 import { listTargets } from '../deploy/config';
 import { CapyError, ERROR_CODES } from '../types/index';
@@ -231,12 +232,17 @@ export class RemoveCommand {
     // A dry run never asks and never needs `--yes`: it only says what would be removed.
     if (!opts.yes && opts.dryRun !== true) {
       if (json || !isInteractive(opts.nonTty)) {
+        // Agent mode: always JSON, with a confirm asking the terminal's question (spec 3l, CAP-909).
         refuse(
-          json,
-          new CapyError(
-            '`capy remove` needs confirmation — pass --yes or run this in a terminal.', // COPY-FLAG
-            ERROR_CODES.REMOVE_NEEDS_TTY,
-          ),
+          true,
+          new CapyError(needsHumanYes('capy remove'), ERROR_CODES.REMOVE_NEEDS_TTY, {
+            elicitation: confirmElicitation({
+              question: confirmationMessage(names, branch, removingAll),
+              rows: [['Branch', branch], ['Variables', names.join(', ')], ...(removingAll ? [['Note', 'this removes every variable on this branch'] as const] : [])], // COPY-FLAG
+              details: { branch, variables: [...names], removing_all: removingAll },
+              yes: commandLine(this.devMode, ['remove', ...names, ...prFlagWords(opts.pr), '--yes', '--json']),
+            }),
+          }),
           EXIT_NEEDS_INPUT,
         );
       }

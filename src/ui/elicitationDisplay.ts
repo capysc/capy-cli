@@ -232,3 +232,8 @@ export function agentsFilesDisplay(
   if (files.length === 0) return table(['File', 'Change'], [['AGENTS.md / CLAUDE.md', 'none found in this repo']]);
   return table(['File', 'Change'], files.map((f) => [f.path, outcome[f.action] ?? f.action] as const));
 }
+
+/** A two-column summary table from label/value rows: what a confirm acts on. */
+export function rowsDisplay(rows: ReadonlyArray<readonly [string, string]>): string {
+  return table(['', ''], rows);
+}

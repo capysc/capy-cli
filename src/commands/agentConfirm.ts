@@ -1,0 +1,62 @@
+/**
+ * Spec 3l (CAP-909): a yes/no the terminal asks is, with nobody to ask, a `confirm` elicitation on the refusal. The
+ * question is the terminal's, word for word; `display` lists what the yes acts on; `answer.yes` is the same command
+ * with the flag that answers it. The refusal's message never tells the agent to add that flag itself.
+ */
+import type { ElicitationConfirm } from '../ui/elicitation';
+import { rowsDisplay } from '../ui/elicitationDisplay';
+import { binName } from './binName';
+
+/** A word as the shell takes it: as it is when it is plain, else in single quotes. */
+export function shellWord(value: string): string {
+  return /^[A-Za-z0-9_@%+=:,./-]+$/.test(value) ? value : `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+/** A command line from words, each quoted for the shell, starting with the binary this process runs as. */
+export function commandLine(devMode: boolean, words: readonly string[]): string {
+  return [binName(devMode), ...words.map(shellWord)].join(' ');
+}
+
+/**
+ * This run's own command, as typed, with each `add` group (a flag, or a flag and its value) set once and `--json` at
+ * the end: the command that answers the question. A group's flag already typed is replaced, not repeated. `argv` is
+ * the words after the binary.
+ */
+export function rerunWith(devMode: boolean, add: ReadonlyArray<readonly string[]>, argv: readonly string[] = process.argv.slice(2)): string {
+  let words = argv.filter((w) => w !== '--json' && w !== '--non-tty');
+  for (const group of add) {
+    const at = words.indexOf(group[0]);
+    if (at >= 0) words = [...words.slice(0, at), ...words.slice(at + group.length)];
+  }
+  return commandLine(devMode, [...words, ...add.flat(), '--json']);
+}
+
+export function confirmElicitation(input: {
+  readonly question: string;
+  readonly rows: ReadonlyArray<readonly [string, string]>;
+  readonly details: Readonly<Record<string, unknown>>;
+  readonly yes: string;
+}): ElicitationConfirm {
+  return { kind: 'confirm', question: input.question, details: input.details, display: rowsDisplay(input.rows), answer: { yes: input.yes } };
+}
+
+/** The refusal message under `--json`: says a human must answer, never which flag to add. */
+export function needsHumanYes(command: string): string {
+  return `\`${command}\` needs a yes from the human first. Ask the elicitation's question.`; // COPY-FLAG
+}
+
+/** The keep.lock PR flags as typed, for a command that repeats them. */
+export function prFlagWords(pr: { readonly pr?: boolean; readonly noPr?: boolean; readonly prBase?: string } | undefined): string[] {
+  if (pr === undefined) return [];
+  return [...(pr.pr === true ? ['--pr'] : []), ...(pr.noPr === true ? ['--no-pr'] : []), ...(pr.prBase !== undefined ? ['--pr-base', pr.prBase] : [])];
+}
+
+/**
+ * A connector's yes/no, with nobody to ask: the terminal's multi-line message becomes the confirm. Its first line is
+ * the question; every following line is one row of the table, as the terminal lists it.
+ */
+export function confirmFromTerminalMessage(message: string, devMode: boolean, details: Readonly<Record<string, unknown>>): ElicitationConfirm {
+  const [question, ...lines] = message.split('\n');
+  const rows = lines.map((l) => l.trim()).filter((l) => l.length > 0).map((l, i) => [String(i + 1), l] as const);
+  return confirmElicitation({ question, rows: rows.length > 0 ? rows : [['', question]], details, yes: rerunWith(devMode, [['--yes']]) });
+}

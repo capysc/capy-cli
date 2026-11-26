@@ -485,15 +485,23 @@ describe('RemoveCommand.execute local refusals', () => {
     expect(r.exitCode).toBe(3); // EXIT_NEEDS_INPUT
     const parsed = JSON.parse(r.stdout.trim());
     expect(parsed.code).toBe('REMOVE_NEEDS_TTY');
+    // CAP-909: the terminal's question as a confirm; the message never tells the agent to add --yes.
+    expect(parsed.error).not.toContain('--yes');
+    expect(parsed.elicitation).toMatchObject({
+      kind: 'confirm',
+      question: 'Remove DATABASE_URL from development — this removes EVERY variable on this branch?',
+      details: { branch: 'development', variables: ['DATABASE_URL'], removing_all: true },
+      answer: { yes: 'capy remove DATABASE_URL --yes --json' },
+    });
   });
 
-  test('non-interactive (--non-tty) without --yes is refused the same way, in human mode', async () => {
+  test('non-interactive (--non-tty) without --yes is refused the same way: agent mode answers in JSON', async () => {
     writeFixture({ branch: 'development', vars: [{ name: 'DATABASE_URL', branch: 'development' }] });
     process.chdir(TEST_DIR);
 
     const r = await run(['DATABASE_URL'], { nonTty: true });
     expect(r.exitCode).toBe(3);
-    expect(r.stderr).toContain('needs confirmation');
+    expect(JSON.parse(r.stdout.trim())).toMatchObject({ code: 'REMOVE_NEEDS_TTY', elicitation: { kind: 'confirm' } });
   });
 
   test('no keep.lock at all → NO_KEEP_FILE, before anything else', async () => {

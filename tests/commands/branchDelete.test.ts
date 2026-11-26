@@ -120,23 +120,26 @@ describe('needsConfirmation', () => {
 });
 
 describe('refuseNeedsConfirmation', () => {
-  test('--json: pure JSON on stdout with CONFIRMATION_REQUIRED, exit 3, nothing on stderr', async () => {
-    const r = await capture(() => refuseNeedsConfirmation(true));
+  test('pure JSON on stdout with CONFIRMATION_REQUIRED and a confirm asking the terminal question, exit 3, nothing on stderr (CAP-909)', async () => {
+    const r = await capture(() => refuseNeedsConfirmation('staging', false));
     expect(r.exitCode).toBe(3);
     expect(r.stderr).toBe('');
     const body = JSON.parse(r.stdout);
     expect(body.ok).toBe(false);
     expect(body.code).toBe(ERROR_CODES.CONFIRMATION_REQUIRED);
-    expect(body.code).toBe('CONFIRMATION_REQUIRED');
-    expect(typeof body.error).toBe('string');
+    expect(body.error).not.toContain('--yes');
+    expect(body.elicitation).toMatchObject({
+      kind: 'confirm',
+      question: deletePromptMessage('staging'),
+      details: { branch: { name: 'staging' } },
+      answer: { yes: 'capy branch -D staging --yes --json' },
+    });
+    expect(body.elicitation.display).toContain('| Branch | staging |');
   });
 
-  test('human mode: the message on stderr, nothing on stdout, exit 3', async () => {
-    const r = await capture(() => refuseNeedsConfirmation(false));
-    expect(r.exitCode).toBe(3);
-    expect(r.stdout).toBe('');
-    expect(r.stderr).not.toBe('');
-    expect(r.stderr).not.toContain('(y/N)');
+  test('capy-dev and a name the shell would split', async () => {
+    const r = await capture(() => refuseNeedsConfirmation("my branch", true));
+    expect(JSON.parse(r.stdout).elicitation.answer.yes).toBe("capy-dev branch -D 'my branch' --yes --json");
   });
 });
 
@@ -279,10 +282,11 @@ describe.each([
   test('stdin not a terminal, no --yes: refuses CONFIRMATION_REQUIRED (exit 3), no prompt, even when "y" is piped in', () => {
     const r = run(cli, ['branch', '-D', 'preview'], 'y\n');
     expect(r.code).toBe(3);
-    expect(r.stdout).not.toContain('Delete branch');
+    // Agent mode answers in JSON: the question rides as a confirm elicitation, never as a prompt (CAP-909).
+    const body = JSON.parse(r.stdout);
+    expect(body).toMatchObject({ ok: false, code: 'CONFIRMATION_REQUIRED', elicitation: { kind: 'confirm' } });
     expect(r.stdout).not.toContain('(y/N)');
     expect(r.stderr).not.toContain('(y/N)');
-    expect(r.stderr).toContain('--yes');
   });
 
   test('--json without --yes: pure JSON refusal on stdout, exit 3', () => {

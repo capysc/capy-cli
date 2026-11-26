@@ -16,6 +16,7 @@ import type { Branch } from '../types/index';
 import { CapyError, ERROR_CODES } from '../types/index';
 import { isInteractive, EXIT_NEEDS_INPUT } from '../ui/interactive';
 import { refuse, settle, type Refusal } from './projectLifecycleCommand';
+import { commandLine, confirmElicitation, needsHumanYes } from './agentConfirm';
 
 export interface BranchDeleteOpts {
   readonly yes?: boolean;
@@ -48,12 +49,23 @@ export function needsConfirmation(opts: BranchDeleteOpts): boolean {
   return opts.json === true || !isInteractive(opts.nonTty);
 }
 
-/** The refusal for `needsConfirmation`: nothing is printed as a prompt, nothing is sent, nothing is deleted. Never returns. */
-export function refuseNeedsConfirmation(json: boolean): never {
-  return refuse(json, {
+/**
+ * The refusal for `needsConfirmation`: nothing is printed as a prompt, nothing is sent, nothing is deleted. Never
+ * returns. Agent mode, so always JSON, with a `confirm` asking the terminal's question (spec 3l, CAP-909).
+ */
+export function refuseNeedsConfirmation(name: string, devMode: boolean): never {
+  return refuse(true, {
     code: ERROR_CODES.CONFIRMATION_REQUIRED,
-    message: '`capy branch -D` needs confirmation. Pass --yes, or run it in a terminal.', // COPY-FLAG
+    message: needsHumanYes('capy branch -D'),
     exitCode: EXIT_NEEDS_INPUT,
+    extra: {
+      elicitation: confirmElicitation({
+        question: deletePromptMessage(name),
+        rows: [['Branch', name], ['Secrets', 'all of this branch\'s values are deleted']], // COPY-FLAG
+        details: { branch: { name } },
+        yes: commandLine(devMode, ['branch', '-D', name, '--yes', '--json']),
+      }),
+    },
   });
 }
 

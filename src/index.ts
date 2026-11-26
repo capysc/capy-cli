@@ -186,7 +186,7 @@ program
     if (options.D) {
       // Nobody to ask and no --yes: refused here, before any prompt, sign-in or request.
       const { needsConfirmation, refuseNeedsConfirmation } = await import('./commands/branchDeleteCommand');
-      if (needsConfirmation(deleteOpts)) refuseNeedsConfirmation(options.json === true);
+      if (needsConfirmation(deleteOpts)) refuseNeedsConfirmation(options.D, false);
     }
     const { AuthService } = await import('./auth/authService');
     const { ServiceClient } = await import('./service/serviceClient');

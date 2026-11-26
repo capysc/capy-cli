@@ -12,6 +12,7 @@
  * killing the runner) needs that throw to propagate rather than be caught a
  * second time by a surrounding try/catch and re-coded as a generic failure.
  */
+import { commandLine, confirmElicitation, needsHumanYes } from './agentConfirm';
 import inquirer from 'inquirer';
 import { isInteractive, EXIT_NEEDS_INPUT } from '../ui/interactive';
 import { openSystemStore, assertValidConnectorName } from '../system/systemStore';
@@ -100,12 +101,17 @@ async function promptForHiddenValue(name: string, json: boolean): Promise<string
   return String(value).trim();
 }
 
+/** The terminal's question, and the elicitation's. */
+export function removalQuestion(name: string): string {
+  return `Remove ${name} from this org's system store?`; // COPY-FLAG
+}
+
 async function promptForRemovalConfirmation(name: string, json: boolean): Promise<boolean> {
   const { confirmed } = await promptModuleFor(json)([
     {
       type: 'confirm',
       name: 'confirmed',
-      message: `Remove ${name} from this org's system store?`, // COPY-FLAG
+      message: removalQuestion(name),
       default: false,
     },
   ]);
@@ -179,8 +185,20 @@ export async function systemRmCommand(name: string, opts: SystemRmOpts): Promise
 
   // Before any network call — see docs/org-system-store.md Proof 3.
   requireValidName(name, json);
-  if (!opts.yes) {
-    requireTty(json, `\`capy system rm\` needs confirmation — pass --yes or run this in a terminal.`); // COPY-FLAG
+  if (!opts.yes && (json || !isInteractive())) {
+    // Agent mode: always JSON, with a confirm asking the terminal's question (spec 3l, CAP-909). Nothing is sent.
+    console.log(JSON.stringify({
+      ok: false,
+      code: ERROR_CODES.SYSTEM_STORE_NEEDS_TTY,
+      error: needsHumanYes('capy system rm'),
+      elicitation: confirmElicitation({
+        question: removalQuestion(name),
+        rows: [['Key', name], ...(opts.org !== undefined ? [['Org', opts.org] as const] : [])], // COPY-FLAG
+        details: { name, ...(opts.org !== undefined ? { org: opts.org } : {}) },
+        yes: commandLine(opts.devMode === true, ['system', 'rm', name, ...(opts.org !== undefined ? ['--org', opts.org] : []), '--yes', '--json']),
+      }),
+    }, null, 2));
+    process.exit(EXIT_NEEDS_INPUT);
   }
 
   const confirmed = opts.yes === true || (await promptForRemovalConfirmation(name, json));

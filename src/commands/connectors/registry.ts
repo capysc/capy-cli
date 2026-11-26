@@ -364,6 +364,8 @@ export interface ConnectFailure {
   remedy?: string;
   /** CAP-703: what a caller must still supply, as flags (`DOKPLOY_SETTINGS_MISSING`). */
   unanswered?: ReadonlyArray<{ readonly id: string; readonly flag: string; readonly hint: string; readonly alternative?: string }>;
+  /** Spec 3l (CAP-909): the terminal's question, for the human, when nobody can be asked here. */
+  elicitation?: import('../../ui/elicitation').Elicitation;
 }
 
 export interface ConnectorModule {
