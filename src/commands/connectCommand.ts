@@ -24,6 +24,7 @@ function printFailure(outcome: ConnectFailure, json: boolean): void {
         code: outcome.code,
         message: outcome.message,
         ...(outcome.unanswered === undefined ? {} : { unanswered: outcome.unanswered }),
+        ...(outcome.elicitation === undefined ? {} : { elicitation: outcome.elicitation }),
         ...(outcome.link ? { link: outcome.link } : {}),
         ...(outcome.remedy ? { remedy: outcome.remedy } : {}),
       }),
@@ -39,7 +40,7 @@ function printFailure(outcome: ConnectFailure, json: boolean): void {
 
 /** A refusal that only a flag (or a person) can answer exits `EXIT_NEEDS_INPUT`, so an agent branches on it; every other refusal exits 1. */
 function exitCodeForRefusalCode(code: string): number {
-  return code === 'DOKPLOY_SETTINGS_MISSING' ? EXIT_NEEDS_INPUT : 1;
+  return code === 'DOKPLOY_SETTINGS_MISSING' || code === 'DOKPLOY_CONFIRMATION_REQUIRED' || code === ERROR_CODES.VERCEL_CONFIRMATION_REQUIRED ? EXIT_NEEDS_INPUT : 1;
 }
 
 /**
@@ -259,7 +260,8 @@ export class ConnectCommand {
     const label = mod.displayName ?? 'Dokploy';
 
     if (!outcome.ok) {
-      printFailure(outcome, !!opts.json);
+      // A refusal that asks a question always answers in JSON: the elicitation is only there (spec 3l).
+      printFailure(outcome, !!opts.json || outcome.elicitation !== undefined);
       process.exitCode = exitCodeForRefusalCode(outcome.code);
       return { linked: false };
     }
@@ -372,7 +374,8 @@ export class ConnectCommand {
     const outcome = await mod.discover!(ctx, opts);
 
     if (!outcome.ok) {
-      printFailure(outcome, !!opts.json);
+      // A refusal that asks a question always answers in JSON: the elicitation is only there (spec 3l).
+      printFailure(outcome, !!opts.json || outcome.elicitation !== undefined);
       process.exitCode = exitCodeForRefusalCode(outcome.code);
       return { linked: false };
     }

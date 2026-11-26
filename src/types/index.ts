@@ -573,7 +573,7 @@ export const ERROR_CODES = {
   SYSTEM_STORE_ADMIN_ONLY: 'SYSTEM_STORE_ADMIN_ONLY',
   /** Entry name doesn't match `^_CONNECTOR_[A-Z0-9]+_[A-Z0-9_]+$`. */
   SYSTEM_STORE_BAD_NAME: 'SYSTEM_STORE_BAD_NAME',
-  /** `capy system set/rm` needs a human (hidden prompt / confirmation) and there is no TTY. */
+  /** `capy system set/rm` needs a human (hidden prompt / confirmation) and there is no TTY. For `rm` in agent mode the refusal carries a `confirm` elicitation. Exit 3. */
   SYSTEM_STORE_NEEDS_TTY: 'SYSTEM_STORE_NEEDS_TTY',
   /** `_system` is reserved for the org's system store and can't be used as a project name. */
   PROJECT_NAME_RESERVED: 'PROJECT_NAME_RESERVED',
@@ -759,7 +759,7 @@ export const ERROR_CODES = {
   // --- capy remove (CAP-686) ---
   /** `capy remove NAME...`: one or more names given are not on the active branch. */
   VAR_NOT_FOUND: 'VAR_NOT_FOUND',
-  /** `capy remove` needs a human (confirmation) and there is no TTY, and `--yes` wasn't passed. */
+  /** `capy remove` needs a human (confirmation), nobody can be asked here, and `--yes` wasn't passed. The refusal carries a `confirm` elicitation. Exit 3. */
   REMOVE_NEEDS_TTY: 'REMOVE_NEEDS_TTY',
   // --- One commit path (CAP-712) ---
   /**
@@ -864,7 +864,7 @@ export const ERROR_CODES = {
   VERCEL_ENVIRONMENT_REQUIRED: 'VERCEL_ENVIRONMENT_REQUIRED',
   /** `--environment` names no environment of the project (single import), or none the plan has (discover). */
   VERCEL_ENVIRONMENT_NOT_FOUND: 'VERCEL_ENVIRONMENT_NOT_FOUND',
-  /** A real write needs a yes (`--yes`) and this run cannot ask. */
+  /** A real write needs a yes (`--yes`) and this run cannot ask. The refusal carries a `confirm` elicitation. Exit 3. */
   VERCEL_CONFIRMATION_REQUIRED: 'VERCEL_CONFIRMATION_REQUIRED',
   /** Several Vercel projects map to the same repo, folder and branch, and this run cannot ask which wins. */
   VERCEL_MAPPING_COLLISION: 'VERCEL_MAPPING_COLLISION',

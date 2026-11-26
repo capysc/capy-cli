@@ -44,6 +44,7 @@
  * values and NEVER creates, offers or writes a deploy target.
  * `capy deploy vercel --discover` is what creates targets, and it pushes no values.
  */
+import { confirmFromTerminalMessage, needsHumanYes } from '../agentConfirm';
 import { syncFolder, type FolderSync, type GateOptions } from '../../sync/gate';
 import { classifyImportCandidates } from '../../deploy/dokployApi';
 import {
@@ -552,7 +553,14 @@ export function createVercelConnector(deps: VercelConnectorDeps = {}): Connector
         }
       } else if (!promptable && !opts.yes) {
         // COPY-FLAG: new user-facing string, minimal/neutral wording.
-        return { ok: false, code: ERROR_CODES.VERCEL_CONFIRMATION_REQUIRED, message: 'Pass --yes to overwrite non-interactively, or run this interactively.' };
+        return {
+          ok: false,
+          code: ERROR_CODES.VERCEL_CONFIRMATION_REQUIRED,
+          message: needsHumanYes('capy connect vercel --overwrite'),
+          elicitation: confirmFromTerminalMessage(overwriteConfirmMessage(plan), !!opts.devMode, {
+            import: plan.toImport.map((e) => e.name), replace: plan.toReplace.map((e) => e.name), clear: [...plan.toClear],
+          }),
+        };
       }
     }
 
@@ -731,7 +739,14 @@ export function createVercelConnector(deps: VercelConnectorDeps = {}): Connector
       if (!proceed) return { ok: true, dryRun: false, plan, applied: [], cancelled: true };
     } else if (!promptable && !opts.yes) {
       // COPY-FLAG: new user-facing string, minimal/neutral wording.
-      return { ok: false, code: ERROR_CODES.VERCEL_CONFIRMATION_REQUIRED, message: 'Pass --yes to apply non-interactively, or run this interactively.' };
+      return {
+        ok: false,
+        code: ERROR_CODES.VERCEL_CONFIRMATION_REQUIRED,
+        message: needsHumanYes('capy connect vercel --discover'),
+        elicitation: confirmFromTerminalMessage(discoveryConfirmMessage(resolvedFolders, !!opts.overwrite, environmentFilter), !!opts.devMode, {
+          folders: resolvedFolders.map((f) => f.folder || '.'),
+        }),
+      };
     }
 
     const trackedFolders = resolvedFolders.filter(tracksDiscoveryFolder);

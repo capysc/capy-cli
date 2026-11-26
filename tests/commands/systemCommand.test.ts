@@ -251,37 +251,42 @@ describe('systemCommand', () => {
       expect(JSON.parse(stdout)).toEqual({ ok: true, name: '_CONNECTOR_FOO_KEY' });
     });
 
-    it('without --yes, non-interactive refuses with SYSTEM_STORE_NEEDS_TTY', async () => {
+    it('without --yes, non-interactive refuses with SYSTEM_STORE_NEEDS_TTY and a confirm asking the terminal question (CAP-909)', async () => {
       setTTY(false);
       const { exitCode, stdout } = await capture(() =>
-        systemRmCommand('_CONNECTOR_FOO_KEY', { json: true }),
+        systemRmCommand('_CONNECTOR_FOO_KEY', {}),
       );
       expect(exitCode).toBe(3);
-      expect(JSON.parse(stdout)).toMatchObject({ code: 'SYSTEM_STORE_NEEDS_TTY' });
+      const body = JSON.parse(stdout);
+      expect(body).toMatchObject({
+        code: 'SYSTEM_STORE_NEEDS_TTY',
+        elicitation: { kind: 'confirm', question: "Remove _CONNECTOR_FOO_KEY from this org's system store?", answer: { yes: 'capy system rm _CONNECTOR_FOO_KEY --yes --json' } },
+      });
+      expect(body.error).not.toContain('--yes');
+      expect(removeCalls).toEqual([]);
+    });
+
+    it('--json on a terminal is agent mode too: no prompt, the same confirm, --org repeated', async () => {
+      setTTY(true);
+      const { exitCode, stdout } = await capture(() => systemRmCommand('_CONNECTOR_FOO_KEY', { json: true, org: 'org-1' }));
+      expect(exitCode).toBe(3);
+      expect(JSON.parse(stdout).elicitation.answer.yes).toBe('capy system rm _CONNECTOR_FOO_KEY --org org-1 --yes --json');
+      expect(createPromptModuleCalls).toEqual([]);
       expect(removeCalls).toEqual([]);
     });
 
     it('without --yes, interactive default-no: declining leaves the entry untouched', async () => {
       setTTY(true);
       promptQueue.push({ confirmed: false });
-      const { stdout } = await capture(() => systemRmCommand('_CONNECTOR_FOO_KEY', { json: true }));
+      await capture(() => systemRmCommand('_CONNECTOR_FOO_KEY', {}));
       expect(removeCalls).toEqual([]);
-      expect(JSON.parse(stdout)).toMatchObject({ ok: false, code: 'CANCELLED' });
     });
 
     it('without --yes, interactive confirm: removes', async () => {
       setTTY(true);
       promptQueue.push({ confirmed: true });
-      const { stdout } = await capture(() => systemRmCommand('_CONNECTOR_FOO_KEY', { json: true }));
+      await capture(() => systemRmCommand('_CONNECTOR_FOO_KEY', {}));
       expect(removeCalls).toEqual(['_CONNECTOR_FOO_KEY']);
-      expect(JSON.parse(stdout)).toEqual({ ok: true, name: '_CONNECTOR_FOO_KEY' });
-    });
-
-    it('--json routes the removal-confirmation prompt to stderr too', async () => {
-      setTTY(true);
-      promptQueue.push({ confirmed: true });
-      await capture(() => systemRmCommand('_CONNECTOR_FOO_KEY', { json: true }));
-      expect(createPromptModuleCalls).toEqual([{ output: process.stderr }]);
     });
   });
 });
