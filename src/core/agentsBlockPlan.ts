@@ -43,7 +43,7 @@ export const AGENTS_BLOCK = [
   "- Only when the human asks to rename a project, run `capy projects rename <new-name> --json` in the project's folder, or add `--project-id <id>` to run it anywhere. Only an org owner or admin can rename a project.", // COPY-FLAG
   '- Only when the human asks to delete a Capy branch, run `capy branch -D <name> --json` without `--yes`. It deletes nothing and returns an `elicitation`: that is how you ask the human, so do not ask your own question first.', // COPY-FLAG
   "- In a folder that has `keep.lock` and no `.env` (a fresh clone or worktree), run `capy checkout <branch> --json` with the branch the human names. It writes that branch's `.env`.", // COPY-FLAG
-  '- `capy users`, `capy projects`, `capy secrets` and `capy invite` need no project folder. `ORG_SELECTION_REQUIRED` means the account is in several organizations and the folder names none: show the human the `orgs` it lists and stop.', // COPY-FLAG
+  '- `capy users`, `capy projects`, `capy secrets` and `capy invite` need no project folder. `ORG_SELECTION_REQUIRED` means the account is in several organizations and the folder names none: it returns an `elicitation` asking which, so ask the human and never pick one yourself.', // COPY-FLAG
   '- Never print, log, or commit secret values.',
   '- To set a value, pipe it from the command that produces it: `<cmd> | capy edit NAME --json`. Never put a value in a command argument, an `echo`, or a heredoc — it would land in your context and the shell history.',
   AGENTS_BLOCK_END,

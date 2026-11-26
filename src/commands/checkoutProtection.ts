@@ -6,6 +6,7 @@
  */
 import type { ElicitationForm } from '../ui/elicitation';
 import { binName } from './binName';
+import { ASK_FOR_CHOICE } from './agentConfirm';
 
 export const PROTECT_FLAG = '--protected';
 export const OPEN_FLAG = '--no-protected';
@@ -47,7 +48,7 @@ export function protectionRefusal(branchName: string, devMode: boolean, route: {
   return {
     ok: false,
     code: 'BRANCH_PROTECTION_REQUIRED',
-    error: `\`capy checkout -b\` needs to know whether "${branchName}" is protected. Ask the human the elicitation's question.`, // COPY-FLAG
+    error: `\`capy checkout -b\` needs to know whether "${branchName}" is protected. ${ASK_FOR_CHOICE}`, // COPY-FLAG
     ...route,
     elicitation: protectionElicitation(branchName, devMode),
   };

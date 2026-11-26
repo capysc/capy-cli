@@ -4,6 +4,8 @@
  * Enables mock authentication for local testing.
  * This file is NOT included in production builds or npm packages.
  */
+import { setCommandShape, setRequestedOrg } from './core/requestedOrg';
+import { exitIfOrgRefusal } from './core/orgSelection';
 import { config } from 'dotenv';
 import { resolve } from 'path';
 import { Command, Option } from 'commander';
@@ -34,6 +36,7 @@ process.on('uncaughtException', (error: any) => {
     console.log('\nCancelled.');
     process.exit(0);
   }
+  if (exitIfOrgRefusal(error)) return;
   console.error(error);
   process.exit(1);
 });
@@ -42,6 +45,7 @@ process.on('unhandledRejection', (error: any) => {
     console.log('\nCancelled.');
     process.exit(0);
   }
+  if (exitIfOrgRefusal(error)) return;
   console.error(error);
   process.exit(1);
 });
@@ -104,6 +108,10 @@ program
     const opts = actionCommand.optsWithGlobals();
     if (opts.web === true) refuseWebMode(opts.json === true);
     if (opts.folder !== undefined) process.chdir(opts.folder);
+    // `--org` on a command that works on an organization (spec 3l): picks among the account's own organizations.
+    const takes = (flag: string): boolean => actionCommand.options.some((o: { long?: string }) => o.long === flag);
+    setCommandShape({ org: takes('--org'), json: takes('--json'), nonTty: takes('--non-tty') });
+    if (typeof opts.org === 'string' && takes('--org')) setRequestedOrg(opts.org);
   })
   .action(async (options, cmd) => {
     if (cmd.args.length > 0) {
@@ -133,7 +141,7 @@ program
   .command('branch')
   .description('List secret branches')
   .option('-D <name>', 'Delete a branch')
-  .option('--yes', 'skip the confirmation prompt')
+  .option('--yes', 'the human\'s yes to the confirmation. An agent never adds it on its own: run without it to get the question to ask the human') // COPY-FLAG
   .option('--json', 'emit machine-readable JSON instead of the human UI')
   .option('--non-tty', 'treat stdin as not a terminal; never prompt (agents/CI)')
   .action(async (options, command) => {
@@ -454,6 +462,7 @@ deploy
 
 program
   .command('invite <email>')
+  .option('--org <id|name>', 'the organization, when your account has several and the folder has no keep.lock') // COPY-FLAG
   .description('Invite a teammate to your organization')
   .option('--role <role>', 'invitee role: member | project-admin | admin')
   .option('--project <id|name>', 'grant project access (repeatable, comma-ok)', collectProjects, [])
@@ -542,8 +551,9 @@ program
 
 program
   .command('kick <email>')
+  .option('--org <id|name>', 'the organization, when your account has several and the folder has no keep.lock') // COPY-FLAG
   .description('Remove a teammate from this organization')
-  .option('--yes', 'skip the confirmation question')
+  .option('--yes', 'the human\'s yes to the confirmation. An agent never adds it on its own: run without it to get the question to ask the human') // COPY-FLAG
   .option('--non-tty', 'same as --json: never ask, and answer in JSON (agents/CI)') // COPY-FLAG
   .option('--json', 'emit machine-readable JSON instead of the human UI')
   .action(async (email, _options, command) => {
@@ -582,7 +592,7 @@ systemCmd
   .command('rm <name>')
   .description('Remove a connector credential (asks for confirmation; owners/admins only)')
   .option('--org <id>', 'org id, if you belong to more than one')
-  .option('--yes', 'skip the confirmation prompt')
+  .option('--yes', 'the human\'s yes to the confirmation. An agent never adds it on its own: run without it to get the question to ask the human') // COPY-FLAG
   .option('--json', 'emit machine-readable JSON instead of the human UI')
   .action(async (name: string, options: any) => {
     const { systemRmCommand } = await import('./commands/systemCommand');
@@ -607,7 +617,7 @@ program
   .description('Tell AI coding agents in this repo how to use Capy (writes AGENTS.md / CLAUDE.md)')
   .option('--print', 'print the block to stdout without writing anything')
   .option('--remove', 'remove the block from AGENTS.md / CLAUDE.md')
-  .option('-y, --yes', 'skip the confirmation prompt (required non-interactively)')
+  .option('-y, --yes', 'the human\'s yes to the confirmation. An agent never adds it on its own: run without it to get the question to ask the human') // COPY-FLAG
   .option('--non-tty', 'never prompt; resolve from flags or fail fast (agents/CI)')
   .option('--json', 'emit machine-readable JSON instead of the human UI')
   .addHelpText(
@@ -808,6 +818,7 @@ const projectCmd = program
 
 projectCmd
   .command('create [name]')
+  .option('--org <id|name>', 'the organization, when your account has several and the folder has no keep.lock') // COPY-FLAG
   .description('Create a project and its first branch in the active organization (owners and admins only; does not link this folder)') // COPY-FLAG
   .option('--branch <name>', 'the first branch; a Capy branch works like a git branch (offered by default: development)') // COPY-FLAG
   .option('--protected <yes|no>', 'whether the first branch is protected (invite-only)') // COPY-FLAG
@@ -821,9 +832,10 @@ projectCmd
 
 projectCmd
   .command('delete <name-or-id>')
+  .option('--org <id|name>', 'the organization, when your account has several and the folder has no keep.lock') // COPY-FLAG
   .description('Delete a project (owners and admins only; hidden, not destroyed; an owner or admin can restore it)') // COPY-FLAG
   .option('--force', 'delete even if the project has live deploy tokens (those deploys stop on their next restart)') // COPY-FLAG
-  .option('--yes', 'skip the confirmation question')
+  .option('--yes', 'the human\'s yes to the confirmation. An agent never adds it on its own: run without it to get the question to ask the human') // COPY-FLAG
   .option('--non-tty', 'same as --json: never ask, and answer in JSON (agents/CI)') // COPY-FLAG
   .option('--json', 'emit machine-readable JSON instead of the human UI')
   .action(async (ref: string, _options: any, command: any) => {
@@ -834,8 +846,9 @@ projectCmd
 
 projectCmd
   .command('restore <name-or-id>')
+  .option('--org <id|name>', 'the organization, when your account has several and the folder has no keep.lock') // COPY-FLAG
   .description('Restore a deleted project (owners and admins only)') // COPY-FLAG
-  .option('--yes', 'skip the confirmation question')
+  .option('--yes', 'the human\'s yes to the confirmation. An agent never adds it on its own: run without it to get the question to ask the human') // COPY-FLAG
   .option('--non-tty', 'same as --json: never ask, and answer in JSON (agents/CI)') // COPY-FLAG
   .option('--json', 'emit machine-readable JSON instead of the human UI')
   .action(async (ref: string, _options: any, command: any) => {
@@ -866,6 +879,7 @@ program
 
 program
   .command('users')
+  .option('--org <id|name>', 'the organization, when your account has several and the folder has no keep.lock') // COPY-FLAG
   .description('List organization users and their project access')
   .option('--json', 'emit machine-readable JSON instead of the human UI')
   .action(async (options) => {
@@ -876,6 +890,7 @@ program
 
 const projectsCmd = program
   .command('projects')
+  .option('--org <id|name>', 'the organization, when your account has several and the folder has no keep.lock') // COPY-FLAG
   .description('List projects in the active organization and their branches')
   .option('--deleted', 'also list deleted projects, marked as deleted, with the date (owners and admins only)') // COPY-FLAG
   .option('--json', 'emit machine-readable JSON instead of the human UI')
@@ -887,6 +902,7 @@ const projectsCmd = program
 
 projectsCmd
   .command('rename [new-name]')
+  .option('--org <id|name>', 'the organization, when your account has several and the folder has no keep.lock') // COPY-FLAG
   .description("Rename a project and update its keep.lock: this folder's project, or the one --project-id names (owners and admins only)") // COPY-FLAG
   .option('--project-id <id>', 'rename the project with this id instead of the one this folder belongs to') // COPY-FLAG
   .option('--non-tty', 'same as --json: never ask, and answer in JSON (agents/CI)') // COPY-FLAG
@@ -899,6 +915,7 @@ projectsCmd
 
 const secretsCmd = program
   .command('secrets')
+  .option('--org <id|name>', 'the organization, when your account has several and the folder has no keep.lock') // COPY-FLAG
   .description('List every secret name across the active organization, grouped by value (read-only, never shows a value)')
   .option('--json', 'emit machine-readable JSON instead of the human UI')
   .option('--project <name>', 'only rows with a location in this project')
@@ -913,6 +930,7 @@ const secretsCmd = program
 
 secretsCmd
   .command('set <name>')
+  .option('--org <id|name>', 'the organization, when your account has several and the folder has no keep.lock') // COPY-FLAG
   // COPY-FLAG: minimal-neutral. Agent mode: never prompts; the value is read from stdin only.
   .description('Set one secret to a new value (read from stdin) in several locations and open keep.lock PRs. Never prompts.')
   .option('--json', 'emit machine-readable JSON instead of the human UI')
@@ -961,6 +979,7 @@ secretsCmd
 
 secretsCmd
   .command('deploy <names...>')
+  .option('--org <id|name>', 'the organization, when your account has several and the folder has no keep.lock') // COPY-FLAG
   // COPY-FLAG: minimal-neutral. Agent mode: never prompts; takes no value.
   .description('Deploy the Dokploy targets of one or more secrets with no project folder, and open one keep.lock PR per target. Never prompts.')
   .option('--json', 'emit machine-readable JSON instead of the human UI')
@@ -1005,6 +1024,7 @@ secretsCmd
 
 program
   .command('grant-branch <email> <project> <branch>')
+  .option('--org <id|name>', 'the organization, when your account has several and the folder has no keep.lock') // COPY-FLAG
   .description('Grant a user wildcard access to a protected branch')
   .action(async (email: string, project: string, branch: string) => {
     const { UsersCommand } = await import('./commands/usersCommand');
@@ -1014,6 +1034,7 @@ program
 
 program
   .command('revoke-branch <email> <project> <branch>')
+  .option('--org <id|name>', 'the organization, when your account has several and the folder has no keep.lock') // COPY-FLAG
   .description("Revoke a user's wildcard access to a protected branch")
   .action(async (email: string, project: string, branch: string) => {
     const { UsersCommand } = await import('./commands/usersCommand');
@@ -1193,7 +1214,7 @@ program
 program
   .command('remove <vars...>')
   .description('Delete one or more secret values from the active branch (encrypts + syncs)')
-  .option('-y, --yes', 'skip the confirmation prompt (required non-interactively)')
+  .option('-y, --yes', 'the human\'s yes to the confirmation. An agent never adds it on its own: run without it to get the question to ask the human') // COPY-FLAG
   .option('--json', 'emit machine-readable JSON instead of the human UI')
   .option('--non-tty', 'never prompt; resolve from flags or fail fast (agents/CI)')
   .option('--pr', 'create a PR with the keep.lock change (answers the prompt)') // COPY-FLAG

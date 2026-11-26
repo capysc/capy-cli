@@ -1031,6 +1031,8 @@ export const ERROR_CODES = {
   KEEP_LOCK_UPDATE_FAILED: 'KEEP_LOCK_UPDATE_FAILED',
   /** A command that acts on "the active organization" has none (no keep.lock here) and the person belongs to several, with nobody to ask. Exit 3. */
   ORG_SELECTION_REQUIRED: 'ORG_SELECTION_REQUIRED',
+  /** `--org` names another organization than this folder's keep.lock: the folder decides (spec 3l). */
+  ORG_FOLDER_MISMATCH: 'ORG_FOLDER_MISMATCH',
   /** `GET /orgs/:orgId/repos` answered 404: the service predates project -> repo links. Never a failure of the command that asked. */
   REPO_LINKS_UNSUPPORTED: 'REPO_LINKS_UNSUPPORTED',
   /** `--dry-run` on a path that would prompt (the `capy edit` TUI, an interactive `capy add`, `capy remove`'s confirmation): it cannot preview, and a dry run never runs for real. Exit 1. */

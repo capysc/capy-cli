@@ -10,6 +10,7 @@
  * The terminal path is the original one. `execute(email)` with no options is that path.
  */
 import { resolveOrgContext } from '../core/orgContext';
+import { needsHumanYes } from './agentConfirm';
 import type { ServiceClient } from '../service/serviceClient';
 import { CapyError, ERROR_CODES } from '../types/index';
 import { isInteractive, EXIT_NEEDS_INPUT } from '../ui/interactive';
@@ -127,7 +128,7 @@ export class KickCommand {
     if (outcome.kind === 'needs-confirmation') {
       return refuse(true, {
         code: ERROR_CODES.CONFIRMATION_REQUIRED,
-        message: '`capy kick` needs confirmation. Pass --yes, or run it in a terminal.', // COPY-FLAG
+        message: needsHumanYes('capy kick'),
         exitCode: EXIT_NEEDS_INPUT,
         extra: { elicitation: outcome.elicitation },
       });
