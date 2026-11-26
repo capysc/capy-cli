@@ -1191,6 +1191,8 @@ describe("capy rotate's link-first picker excludes import connectors", () => {
       throw new Error(`__exit_${code}__`);
     }) as never);
     const errSpy = spyOn(console, 'error').mockImplementation(record as never);
+    // Spec 3l: the refusal is JSON on stdout, with the integrations as the form's options.
+    const logSpy = spyOn(console, 'log').mockImplementation(record as never);
 
     try {
       const { RotateCommand } = await import('../../src/commands/rotateCommand');
@@ -1203,6 +1205,7 @@ describe("capy rotate's link-first picker excludes import connectors", () => {
     } finally {
       exitSpy.mockRestore();
       errSpy.mockRestore();
+      logSpy.mockRestore();
     }
 
     expect(out).toContain('stripe');

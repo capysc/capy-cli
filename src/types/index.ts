@@ -584,6 +584,16 @@ export const ERROR_CODES = {
    * `dokploy`) — there is nothing to rotate through a one-time import.
    */
   ROTATE_NOT_SUPPORTED_IMPORTED: 'ROTATE_NOT_SUPPORTED_IMPORTED',
+  /** `capy rotate` with no variable and nobody at a terminal to pick one (spec 3l: a form). */
+  ROTATE_VARIABLE_REQUIRED: 'ROTATE_VARIABLE_REQUIRED',
+  /** `capy rotate VAR` for an unmanaged variable, several integrations, no `--provider`, nobody to pick (spec 3l: a form). */
+  ROTATE_PROVIDER_REQUIRED: 'ROTATE_PROVIDER_REQUIRED',
+  /** `capy invite` for a role that needs project access, none given or to fall back on, nobody to pick (spec 3l: a form). */
+  INVITE_PROJECT_REQUIRED: 'INVITE_PROJECT_REQUIRED',
+  /** `capy connect stripe` with several accounts, no `--account`, nobody to pick (spec 3l: a form). */
+  STRIPE_ACCOUNT_REQUIRED: 'STRIPE_ACCOUNT_REQUIRED',
+  /** `capy connect stripe|workos`: which variable holds the key is ambiguous, no `--var`, nobody to pick (spec 3l: a form). */
+  CONNECTOR_VAR_REQUIRED: 'CONNECTOR_VAR_REQUIRED',
   // --- Deploy targets (CAP-679) ---
   /**
    * A Dokploy Compose service has `createEnvFile: false` — writing Capy's

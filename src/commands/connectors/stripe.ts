@@ -3,9 +3,14 @@ import { existsSync, readFileSync, writeSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 import { ConnectorModule, ConnectResult, RotateResult, ConnectOpts, RotateOpts } from './registry';
-import { ConnectorMetadata } from '../../types/index';
+import { ConnectorMetadata, ERROR_CODES } from '../../types/index';
 import { ResolvedContext, fingerprint, keyTypePrefix } from './shared';
 import { isInteractive, refuseNonInteractive } from '../../ui/interactive';
+import { refusePick } from '../agentConfirm';
+
+// The terminal's questions, shared with the forms that ask them with nobody at a terminal (spec 3l).
+const STRIPE_ACCOUNT_QUESTION = 'Stripe account:';
+const STRIPE_VAR_QUESTION = 'Which variable holds your Stripe key?';
 import type { Blocked } from '../../ui/screens/contract';
 
 type StripeMode = 'test' | 'live';
@@ -420,6 +425,9 @@ async function pickAccount(
   sections: StripeConfigSection[],
   requested?: string,
   nonTty?: boolean,
+  devMode?: boolean,
+  /** False when another command runs this one (`capy rotate`): its rerun could not carry `--account`. */
+  asPick: boolean = true,
 ): Promise<StripeConfigSection> {
   if (requested) {
     const match = sections.find(
@@ -434,17 +442,34 @@ async function pickAccount(
   if (sections.length === 1) return sections[0];
 
   if (!isInteractive(nonTty)) {
-    refuseNonInteractive(
-      `${sections.length} Stripe accounts in config.toml; can't pick one without a prompt`,
-      `Pass --account <id> (one of: ${sections.map((s) => s.account_id ?? s.name).join(', ')}).`,
-    );
+    if (!asPick) {
+      refuseNonInteractive(
+        `${sections.length} Stripe accounts in config.toml; can't pick one without a prompt`,
+        `Run \`capy connect stripe --var <NAME>\` first to pick the account, then rotate.`, // COPY-FLAG
+      );
+    }
+    refusePick({
+      code: ERROR_CODES.STRIPE_ACCOUNT_REQUIRED,
+      command: 'capy connect stripe',
+      lead: `${sections.length} Stripe accounts are in config.toml.`, // COPY-FLAG
+      field: {
+        name: 'account',
+        question: STRIPE_ACCOUNT_QUESTION,
+        // The profile name, as the terminal picks it: profiles can share one account_id. Quoted when it must be.
+        options: sections.map((s) => ({ value: s.name, label: `${s.display_name ?? s.name} (${s.account_id ?? 'no account_id'})` })),
+      },
+      rows: [['Stripe accounts', sections.map((s) => s.display_name ?? s.name).join(', ')]], // COPY-FLAG
+      details: { accounts: sections.map((s) => ({ name: s.name, account_id: s.account_id ?? null })) },
+      add: '--account <account>',
+      devMode: !!devMode,
+    });
   }
 
   const inquirer = (await import('inquirer')).default;
   const { picked } = await inquirer.prompt([{
     type: 'list',
     name: 'picked',
-    message: 'Stripe account:',
+    message: STRIPE_ACCOUNT_QUESTION,
     choices: sections.map((s) => ({
       name: `${s.display_name ?? s.name} (${s.account_id ?? 'no account_id'})`,
       value: s.name,
@@ -585,11 +610,18 @@ async function pickVarName(ctx: ResolvedContext, opts: ConnectOpts): Promise<str
     process.exit(1);
   }
 
-  if (!isInteractive(opts.nonTty)) {
-    refuseNonInteractive(
-      'which variable holds your Stripe key is ambiguous without a prompt',
-      `Pass --var <NAME> (existing: ${existing.join(', ')}).`,
-    );
+  // Under `--json` nothing prompts, even on a terminal (spec 3l).
+  if (!isInteractive(opts.nonTty || opts.json)) {
+    refusePick({
+      code: ERROR_CODES.CONNECTOR_VAR_REQUIRED,
+      command: 'capy connect stripe',
+      lead: 'Which variable holds your Stripe key is not clear.', // COPY-FLAG
+      field: { name: 'var', question: STRIPE_VAR_QUESTION, options: existing.map((n) => ({ value: n, label: n })) },
+      rows: [['Branch', ctx.branch], ['Variables', existing.join(', ')]], // COPY-FLAG
+      details: { branch: ctx.branch, variables: existing },
+      add: '--var <var>',
+      devMode: !!opts.devMode,
+    });
   }
 
   const { matches, others } = rankStripeVars(existing);
@@ -604,7 +636,7 @@ async function pickVarName(ctx: ResolvedContext, opts: ConnectOpts): Promise<str
   const { picked } = await inquirer.prompt([{
     type: 'list',
     name: 'picked',
-    message: 'Which variable holds your Stripe key?',
+    message: STRIPE_VAR_QUESTION,
     choices,
     default: matches[0] ?? existing[0],
   }]);
@@ -669,11 +701,9 @@ async function signInFor(
       : reason === 'none'
         ? 'No Stripe CLI session found'
         : `No usable ${mode}-mode key in the Stripe CLI config (missing or expired)`;
-  console.log(
-    isInteractive(opts.nonTty)
-      ? `${why}. Running ${B('stripe login')}...`
-      : `  ${why} — starting browser pairing.`,
-  );
+  // Off a terminal stdout may carry a JSON refusal after this, so the notice goes to stderr.
+  if (isInteractive(opts.nonTty) && !opts.json) console.log(`${why}. Running ${B('stripe login')}...`);
+  else console.error(`  ${why} — starting browser pairing.`);
   const outcome = await runStripeLogin({ projectName: opts.account, nonTty: opts.nonTty });
 
   const sections = readStripeConfig();
@@ -741,7 +771,7 @@ async function connect(ctx: ResolvedContext, opts: ConnectOpts): Promise<Connect
         ? 'unusable'
         : null;
   const sections = reason === null ? initialSections : await signInFor(opts, mode, varName, reason);
-  const section = await pickAccount(sections, opts.account, opts.nonTty);
+  const section = await pickAccount(sections, opts.account, opts.nonTty || opts.json, opts.devMode, opts.subStep !== true);
 
   // NO NEAR-EXPIRY REFRESH OFFER. It used to live here, and it re-ran
   // `stripe login` — which rewrites the user's Stripe pairing and can make

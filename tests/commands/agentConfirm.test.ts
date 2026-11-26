@@ -1,5 +1,5 @@
-import { describe, it, expect } from 'bun:test';
-import { answerLine, commandLine, folderWords, confirmFromTerminalMessage, needsHumanYes, prFlagWords, rerunWith } from '../../src/commands/agentConfirm';
+import { describe, it, expect, spyOn } from 'bun:test';
+import { answerLine, commandLine, folderWords, refusePick, confirmFromTerminalMessage, needsHumanYes, prFlagWords, rerunWith } from '../../src/commands/agentConfirm';
 
 describe('agentConfirm (CAP-909)', () => {
   it('rerunWith repeats the typed command, sets each flag once, and ends with --json', () => {
@@ -35,5 +35,57 @@ describe('agentConfirm (CAP-909)', () => {
     expect(answerLine(true, ['system', 'rm', 'K', '--yes', '--json'], ['system', 'rm', 'K', '--folder=projA'])).toBe('capy-dev --folder projA system rm K --yes --json');
     expect(answerLine(false, ['remove', 'X', '--yes', '--json'], ['remove', 'X'])).toBe('capy remove X --yes --json');
     expect(folderWords(['remove', 'X', '--folder'])).toEqual([]);
+  });
+
+  it('refusePick prints a coded JSON refusal with a one-field form and exits 3; an unsafe choice is offered quoted', () => {
+    const lines: string[] = [];
+    const log = spyOn(console, 'log').mockImplementation(((l: unknown) => { lines.push(String(l)); }) as never);
+    const exit = spyOn(process, 'exit').mockImplementation(((code: number) => { throw new Error(`exit ${code}`); }) as never);
+    const argv = process.argv;
+    process.argv = ['node', 'capy', '--folder', 'apps/api', 'rotate', '--non-tty'];
+    try {
+      expect(() => refusePick({
+        code: 'ROTATE_VARIABLE_REQUIRED',
+        command: 'capy rotate',
+        lead: 'No variable was named.',
+        field: { name: 'variable', question: 'Which variable to rotate:', options: [{ value: 'A_KEY', label: 'A_KEY' }, { value: 'B; rm', label: 'B; rm' }] },
+        rows: [['Branch', 'development']],
+        details: { branch: 'development' },
+        add: '<variable>',
+        devMode: false,
+        tail: '--non-tty',
+      })).toThrow('exit 3');
+    } finally {
+      process.argv = argv;
+      log.mockRestore();
+      exit.mockRestore();
+    }
+    const body = JSON.parse(lines[0]);
+    expect(body.code).toBe('ROTATE_VARIABLE_REQUIRED');
+    expect(body.error).not.toContain('--');
+    expect(body.elicitation.fields[0].question).toBe('Which variable to rotate:');
+    expect(body.elicitation.fields[0].options).toEqual([{ value: 'A_KEY', label: 'A_KEY' }, { value: "'B; rm'", label: 'B; rm' }]);
+    expect(body.elicitation.answer.rerun).toBe('capy --folder apps/api rotate <variable> --non-tty');
+  });
+
+  it('refusePick offers a choice the shell would split quoted, never drops it, and its pattern matches every choice', () => {
+    const lines: string[] = [];
+    const log = spyOn(console, 'log').mockImplementation(((l: unknown) => { lines.push(String(l)); }) as never);
+    const exit = spyOn(process, 'exit').mockImplementation(((code: number) => { throw new Error(`exit ${code}`); }) as never);
+    try {
+      expect(() => refusePick({
+        code: 'STRIPE_ACCOUNT_REQUIRED', command: 'capy connect stripe', lead: 'Two accounts.',
+        field: { name: 'account', question: 'Stripe account:', options: [{ value: 'my proj', label: 'a' }, { value: 'default', label: 'b' }] },
+        rows: [], details: {}, add: '--account <account>', devMode: true,
+      })).toThrow('exit 3');
+    } finally {
+      log.mockRestore();
+      exit.mockRestore();
+    }
+    const field = JSON.parse(lines[0]).elicitation.fields[0];
+    expect(field.options.map((o: { value: string }) => o.value)).toEqual(["'my proj'", 'default']);
+    for (const o of field.options) expect(new RegExp(field.pattern).test(o.value)).toBe(true);
+    expect(new RegExp(field.pattern).test('$(x)')).toBe(false);
+    expect(JSON.parse(lines[0]).elicitation.answer.rerun.startsWith('capy-dev ')).toBe(true);
   });
 });
