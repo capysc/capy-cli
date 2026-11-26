@@ -51,6 +51,11 @@ export interface PendingPairGrant {
     readonly intentTitle?: string;
     readonly intentDescription?: string;
   };
+  /**
+   * How many times this pairing's link has been renewed so far (CAP-913): 0 for the first link. The wait renews at most
+   * `PAIR_MAX_RENEWALS` times. Absent in a file written by an earlier build, which counts as 0.
+   */
+  readonly renewals?: number;
 }
 
 function parseRenew(value: unknown, mode: PairMode): PendingPairGrant['renew'] | undefined {
@@ -106,6 +111,7 @@ function parsePending(raw: string): PendingPairGrant | null {
   const nextPollAt = typeof data.next_poll_at === 'number' && Number.isFinite(data.next_poll_at) ? data.next_poll_at : undefined;
   const mode: PairMode = data.mode === 'session' ? 'session' : 'transport';
   const renew = parseRenew(data.renew, mode);
+  const renewals = typeof data.renewals === 'number' && Number.isInteger(data.renewals) && data.renewals > 0 ? data.renewals : undefined;
   if (!deviceCode || !privateKey || !publicKey || !userCode || !deviceLink || !apiUrl || !purpose || !expiresAt) return null;
   if (typeof interval !== 'number' || !Number.isFinite(interval) || interval <= 0) return null;
   if (Number.isNaN(Date.parse(expiresAt))) return null;
@@ -131,6 +137,7 @@ function parsePending(raw: string): PendingPairGrant | null {
     ...(qrFile !== undefined ? { qrFile } : {}),
     mode,
     ...(renew !== undefined ? { renew } : {}),
+    ...(renewals !== undefined ? { renewals } : {}),
   };
 }
 
@@ -161,6 +168,7 @@ export function savePendingPairGrant(grant: PendingPairGrant): void {
         ...(grant.renew.intentDescription !== undefined ? { intent_description: grant.renew.intentDescription } : {}),
       },
     } : {}),
+    ...(grant.renewals !== undefined && grant.renewals > 0 ? { renewals: grant.renewals } : {}),
   }));
 }
 

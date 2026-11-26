@@ -249,7 +249,9 @@ Then run `answer.wait` (`capy pair --wait`) at once in the foreground. It can
 take up to 9 minutes, because it returns only when something changes, so give it
 a tool timeout of at least 10 minutes. Run it again whenever it exits 3 with
 `PAIR_STILL_WAITING`, or if your tool stopped it early. That answer repeats the link
-and only the PNG's file path, not `qr.text` or `qr.image.data_uri`. After the
+and only the PNG's file path, not `qr.text` or `qr.image.data_uri`. If it exits
+3 with `PAIR_LINK_RENEWED`, the old link expired: show the new one the same way and
+run its `answer.wait`. Keep showing each new link and running its `answer.wait` without stopping to ask the human, however many links expire, until the human gives you the one-time code or tells you to stop. The CLI renews a link at most 4 times; when the last one expires it exits 3 with PAIR_EXPIRED and a confirm: only then ask the human whether to start again, and run `answer.yes` if they say yes. After the
 human approves, Keep shows them a one-time code, and the wait exits 3 with
 `PAIR_CODE_REQUIRED` and a form with one `code` field. Ask the human for the code
 and run `capy pair --wait --code <code>`; a wrong code returns

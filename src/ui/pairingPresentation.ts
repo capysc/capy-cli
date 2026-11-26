@@ -26,13 +26,22 @@ export const PAIR_LINK_TEXT_RULE =
   'Every time you show a link (the first one and each PAIR_LINK_RENEWED), write the `url` as a clickable link, with the `code`, `fingerprint` and `expires_at`, as plain text in your reply. The QR is an addition, never the only way: not every agent or client can show images.'; // COPY-FLAG
 
 /**
+ * CAP-913 (runs 9c to 10b: every fresh agent stopped to ask the human after the second renewal, so nothing renewed
+ * after that). The same sentence goes in the link instructions, the pairing presentation and the AGENTS block.
+ */
+export const PAIR_KEEP_WAITING_RULE =
+  'Keep showing each new link and running its `answer.wait` without stopping to ask the human, however many links expire, until the human gives you the one-time code or tells you to stop. The CLI renews a link at most 4 times; when the last one expires it exits 3 with PAIR_EXPIRED and a confirm: only then ask the human whether to start again, and run `answer.yes` if they say yes.'; // COPY-FLAG
+
+/**
  * CAP-897: what every `link` elicitation says to do next, in its own `instructions` field. An agent in a fresh folder
  * has no AGENTS block yet and may never read `capy help --json`, so the link response itself has to carry the wait and
  * renew rule (run 9: the agent showed the link, ended its turn and planned a new `capy pair` on expiry).
  */
 export const PAIR_LINK_INSTRUCTIONS =
   PAIR_LINK_TEXT_RULE +
-  ' Do that now and add the QR as an inline image if your client can show one (never as an attached file), then run `answer.wait` at once in the foreground, without waiting for a reply. It can take up to 9 minutes, because it returns only when something changes, so give it a tool timeout of at least 10 minutes. Run it again whenever it exits 3 with PAIR_STILL_WAITING, or if your tool stopped it early. If it exits 3 with PAIR_LINK_RENEWED, the old link expired and this is a new one: show the human the new link the same way and run its `answer.wait`. After the human approves, Keep shows them a 4-character one-time code, not the 8-character code in the link: ask them for it and run `answer.wait` with `--code <code>`, even if the link has expired since. Never start a new `capy pair` for an expired link, and never fill in the one-time code yourself.'; // COPY-FLAG
+  ' Do that now and add the QR as an inline image if your client can show one (never as an attached file), then run `answer.wait` at once in the foreground, without waiting for a reply. It can take up to 9 minutes, because it returns only when something changes, so give it a tool timeout of at least 10 minutes. Run it again whenever it exits 3 with PAIR_STILL_WAITING, or if your tool stopped it early. If it exits 3 with PAIR_LINK_RENEWED, the old link expired and this is a new one: show the human the new link the same way and run its `answer.wait`. ' +
+  PAIR_KEEP_WAITING_RULE +
+  ' After the human approves, Keep shows them a 4-character one-time code, not the 8-character code in the link: ask them for it and run `answer.wait` with `--code <code>`, even if the link has expired since. Never start a new `capy pair` for an expired link except through `answer.yes`, and never fill in the one-time code yourself.'; // COPY-FLAG
 
 export const PAIRING_PRESENTATION = {
   version: 1,
@@ -46,6 +55,7 @@ export const PAIRING_PRESENTATION = {
     'Otherwise say plainly that the QR cannot be shown here.', // COPY-FLAG
     'Never send the pairing link to an external QR service.', // COPY-FLAG
     'Then run `answer.wait` at once in the foreground. It can take up to 9 minutes, because it returns only when something changes, so give it a tool timeout of at least 10 minutes. Run it again whenever it exits 3 with PAIR_STILL_WAITING, or if your tool stopped it early. The wait response does not repeat `qr.text` or `qr.image.data_uri`. A wait that exits 3 with PAIR_LINK_RENEWED carries a new link with its full QR, because the old one expired: show the human the new link, code and QR, then run `answer.wait` again.', // COPY-FLAG
+    PAIR_KEEP_WAITING_RULE, // CAP-913: the same sentence as the link instructions and the AGENTS block
     'After the human approves, Keep shows them a one-time code and the wait exits 3 with PAIR_CODE_REQUIRED and a form with one `code` field: ask the human for that code and run `answer.rerun` (`capy pair --wait --code <code>`). Never fill in the code yourself; only the person who approved can see it. A wrong code returns PAIR_CODE_MISMATCH with the form again.', // COPY-FLAG
     'When the keys are already on this machine, the pairing only signs in: the result says `"keys": "already_present"`.', // COPY-FLAG
   ],
