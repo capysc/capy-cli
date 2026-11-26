@@ -77,8 +77,19 @@ describe('authorizeDevice', () => {
   test('CAP-892: describes this machine for Keep\'s Unlock Device screen', () => {
     const device = pairingDeviceInfo();
     expect(device.system).toMatch(/^.+ \(.+\)$/);
-    expect(device.client).toMatch(/^Capy CLI \S+$/);
+    expect(device.client).toMatch(/^Capy CLI \d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/);
     if (device.name !== undefined) expect(device.name.length).toBeLessThanOrEqual(64);
+  });
+
+  test('CAP-920: a build id goes in client_build, never in client', () => {
+    const input = { env: {}, interactive: false, inContainer: false };
+    const dev = pairingDeviceInfo(input, '20261126175046657.04f69f67');
+    expect(dev.client).not.toContain('+');
+    expect(dev.client).not.toContain('20261126175046657');
+    expect(dev.client_build).toBe('20261126175046657.04f69f67');
+    const release = pairingDeviceInfo(input, null);
+    expect(release.client).toMatch(/^Capy CLI \S+$/);
+    expect('client_build' in release).toBe(false);
   });
 
   test('returns the authorize response on success', async () => {

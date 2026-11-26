@@ -9,15 +9,17 @@
  */
 import { existsSync } from 'node:fs';
 import { arch, hostname, platform } from 'node:os';
-import { cliVersion } from '../../cliVersion';
+import { cliBuildId, cliReleaseVersion } from '../../cliVersion';
 
 export interface PairingDeviceInfo {
   /** The machine's hostname. */
   readonly name?: string;
   /** Operating system and architecture, e.g. `macOS (arm64)`. */
   readonly system: string;
-  /** e.g. `Capy CLI 0.9.18`. */
+  /** e.g. `Capy CLI 0.9.18`: the name and version only, so Keep's Client row doesn't wrap. */
   readonly client: string;
+  /** CAP-920: a test or dev build's id, e.g. `20261126175046657.04f69f67`. Keep shows it as Client Build. Left out for a release build. */
+  readonly client_build?: string;
   /** e.g. `Claude Code 2.1.332 (AI agent)`, `A person`, `A program (not interactive)`. */
   readonly requested_by: string;
   /** e.g. `Claude Code cloud session`, `GitHub Actions`, `Local machine`. */
@@ -99,7 +101,7 @@ function currentInput(): DetectionInput {
   return { env: process.env, interactive: Boolean(process.stdin.isTTY && process.stdout.isTTY), inContainer };
 }
 
-export function pairingDeviceInfo(input: DetectionInput = currentInput()): PairingDeviceInfo {
+export function pairingDeviceInfo(input: DetectionInput = currentInput(), buildId: string | null = cliBuildId): PairingDeviceInfo {
   const name = (() => {
     try {
       return cap(hostname().trim());
@@ -111,7 +113,8 @@ export function pairingDeviceInfo(input: DetectionInput = currentInput()): Pairi
   return {
     ...(name ? { name } : {}),
     system: `${PLATFORM_NAMES[os] ?? os} (${arch()})`,
-    client: cap(`Capy CLI ${cliVersion}`),
+    client: cap(`Capy CLI ${cliReleaseVersion}`),
+    ...(buildId ? { client_build: cap(buildId) } : {}),
     requested_by: cap(requestedBy(input)),
     environment: cap(runsIn(input)),
   };
