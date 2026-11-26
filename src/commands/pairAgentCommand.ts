@@ -39,8 +39,8 @@ import { pairKeyFingerprint } from '../crypto/pairFingerprint';
 import { resolveActiveUrl } from '../config/profileConfig';
 import { generatePairKeyPair } from '../crypto/pairCrypto';
 import { CapyError, ERROR_CODES } from '../types/index';
-import type { ElicitationForm, ElicitationLink, ElicitationLinkQr } from '../ui/elicitation';
-import { pairCodeDisplay } from '../ui/elicitationDisplay';
+import type { ElicitationConfirm, ElicitationForm, ElicitationLink, ElicitationLinkQr } from '../ui/elicitation';
+import { pairCodeDisplay, pairExpiredDisplay } from '../ui/elicitationDisplay';
 import { EXIT_NEEDS_INPUT } from '../ui/interactive';
 import { createPairingQrImage, PAIR_LINK_INSTRUCTIONS, removePairingQrImage, type PairingQrImage } from '../ui/pairingPresentation';
 import { buildTerminalQr } from '../ui/terminalQr';
@@ -57,6 +57,11 @@ import { refuse, settle, type Refusal } from './refusal';
  * gets PAIR_STILL_WAITING at the cap.
  */
 export const PAIR_WAIT_CEILING_MS = 9 * 60_000;
+/**
+ * CAP-913 (Vincent, 2026-11-26: "repeat 4 times max"): a pairing's link is renewed at most this many times, so an
+ * unapproved pairing shows 5 links in all. When the last one expires the wait stops and asks whether to start again.
+ */
+export const PAIR_MAX_RENEWALS = 4;
 
 /** The longest one device-token poll may take; a poll that takes longer is a poll error (the pending grant is kept). */
 export const PAIR_POLL_TIMEOUT_MS = 10_000;
@@ -203,6 +208,8 @@ interface GrantRequest {
   readonly scope: PairScope;
   readonly intent: PairingIntent;
   readonly force: boolean;
+  /** How many renewals came before this grant (CAP-913): 0 for a start run. */
+  readonly renewals: number;
 }
 
 /**
@@ -244,6 +251,7 @@ async function issueGrant(request: GrantRequest, deps: PairAgentDeps): Promise<{
       ...(intent.title ? { intentTitle: intent.title } : {}),
       ...(intent.description ? { intentDescription: intent.description } : {}),
     },
+    ...(request.renewals > 0 ? { renewals: request.renewals } : {}),
   };
   saveOrDiscardQr(grant);
   // The new grant replaced the old one: the old one's QR file goes with it.
@@ -258,6 +266,7 @@ async function startRun(options: PairAgentOptions, deps: PairAgentDeps): Promise
     scope: resolvePairScope(options),
     intent: pairIntent(options),
     force: options.force === true,
+    renewals: 0,
   }, deps);
   return {
     kind: 'refusal',
@@ -275,6 +284,8 @@ async function renewExpired(grant: PendingPairGrant, options: PairAgentOptions, 
     removePendingPairGrant();
     throw new CapyError('Device pairing expired before it was approved', ERROR_CODES.PAIR_EXPIRED); // COPY-FLAG
   }
+  const renewals = grant.renewals ?? 0;
+  if (renewals >= PAIR_MAX_RENEWALS) return renewalsUsedUp(options);
   const { grant: fresh, qr } = await issueGrant({
     apiUrl: grant.apiUrl,
     scope: grant.renew.scope,
@@ -283,10 +294,38 @@ async function renewExpired(grant: PendingPairGrant, options: PairAgentOptions, 
       ...(grant.renew.intentDescription ? { description: grant.renew.intentDescription } : {}),
     },
     force: grant.force,
+    renewals: renewals + 1,
   }, deps);
   return {
     kind: 'refusal',
     refusal: linkRefusal(ERROR_CODES.PAIR_LINK_RENEWED, 'The last link expired before it was approved, so here is a new one. Nothing was installed.', fresh, binName(options.devMode === true), qr), // COPY-FLAG
+  };
+}
+
+/**
+ * CAP-913: the last allowed link expired too. The pairing is dropped, and the agent asks the human whether to start
+ * again: `answer.yes` starts a fresh pairing with a new count. Nothing was installed.
+ */
+function renewalsUsedUp(options: PairAgentOptions): Outcome {
+  removePendingPairGrant();
+  const bin = binName(options.devMode === true);
+  const links = PAIR_MAX_RENEWALS + 1;
+  const question = `The pairing link expired ${links} times without being approved. Start again with a new link?`; // COPY-FLAG
+  const elicitation: ElicitationConfirm = {
+    kind: 'confirm',
+    question,
+    details: { links_shown: links },
+    display: pairExpiredDisplay(links),
+    answer: { yes: `${bin} pair --json` },
+  };
+  return {
+    kind: 'refusal',
+    refusal: {
+      code: ERROR_CODES.PAIR_EXPIRED,
+      message: `The pairing link expired ${links} times without being approved, so the CLI stopped making new ones. Nothing was installed.`, // COPY-FLAG
+      exitCode: EXIT_NEEDS_INPUT,
+      extra: { elicitation },
+    },
   };
 }
 

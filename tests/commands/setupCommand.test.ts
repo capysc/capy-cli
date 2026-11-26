@@ -94,6 +94,8 @@ describe('asSetupCommand', () => {
   test('the pairing wait, the pairing code and the folder answers all become capy setup', () => {
     expect(asSetupCommand('capy pair --wait', 'capy')).toBe('capy setup --json');
     expect(asSetupCommand('capy pair --wait --code <code>', 'capy')).toBe('capy setup --code <code> --json');
+    // CAP-913: starting again after the last link expired is setup again.
+    expect(asSetupCommand('capy pair --json', 'capy')).toBe('capy setup --json');
     expect(asSetupCommand('capy --org org_1 --project <project> --json', 'capy')).toBe('capy setup --org org_1 --project <project> --json');
     expect(asSetupCommand('capy-staging --env-path apps/web/.env --name <name> --json', 'capy-staging')).toBe('capy-staging setup --env-path apps/web/.env --name <name> --json');
   });

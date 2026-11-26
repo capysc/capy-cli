@@ -78,12 +78,14 @@ type Outcome =
 const refusal = (r: Refusal): Outcome => ({ kind: 'refusal', refusal: r });
 
 /**
- * A step's "run this next" as the `capy setup` run that does the same: the pairing wait, the pairing code, and the
- * folder answers. Anything else is left as it is.
+ * A step's "run this next" as the `capy setup` run that does the same: the pairing wait, the pairing code, a new
+ * pairing, and the folder answers. Anything else is left as it is.
  */
 export function asSetupCommand(command: string, bin: string): string {
   if (command.startsWith(`${bin} pair --wait --code `)) return `${bin} setup --code ${command.slice(`${bin} pair --wait --code `.length)} --json`;
   if (command === `${bin} pair --wait`) return `${bin} setup --json`;
+  // CAP-913: starting again after the last link expired is setup again, which starts a new pairing when signed out.
+  if (command === `${bin} pair --json`) return `${bin} setup --json`;
   if (command.startsWith(`${bin} -`)) return `${bin} setup ${command.slice(bin.length + 1)}`;
   return command;
 }

@@ -64,7 +64,7 @@ mock.module('../../src/service/serviceClient', () => ({
   })),
 }));
 
-const { pairAgentCommand, PAIR_WAIT_CEILING_MS } = await import('../../src/commands/pairAgentCommand');
+const { pairAgentCommand, PAIR_MAX_RENEWALS, PAIR_WAIT_CEILING_MS } = await import('../../src/commands/pairAgentCommand');
 const { getPairPendingPath, getGlobalCapyDir, getAuthSessionPath, getLocalRootPath, getOrgKeyPath, readLocalRoot, saveAuthSession, saveLocalRoot, savePairPendingRaw, writeOrgKeyFileRaw } = await import('../../src/config/globalConfig');
 const { PAIR_DEFAULT_PURPOSE, pairCommand, pairPurpose } = await import('../../src/commands/pairCommand');
 const { exportPairKeyPair, generatePairKeyPair, importPairKeyPair } = await import('../../src/crypto/pairCrypto');
@@ -576,6 +576,46 @@ describe('capy pair, agent mode', () => {
       expect(fresh.mode).toBe(old.mode);
       expect(callsTo(fetchMock, '/auth/device/authorize')).toHaveLength(1);
       expect(mockInstallDeviceGrantSession).not.toHaveBeenCalled();
+    });
+
+    // CAP-913 (Vincent, 2026-11-26: "repeat 4 times max"): a link is renewed at most 4 times, then the agent asks.
+    test('renewals 1 to 4 each give a new link and count up in the pending file', async () => {
+      await startThenStub('mike@example.com', [EXPIRED]);
+      expect(JSON.parse(pendingRaw()).renewals).toBeUndefined();
+      for (let n = 1; n <= PAIR_MAX_RENEWALS; n++) {
+        stubFetch([EXPIRED], { ...RENEWED_BODY, device_code: `device-r${n}`, user_code: `RNWD-000${n}` });
+        const ran = await run({ wait: true });
+        expect(ran.json.code).toBe(ERROR_CODES.PAIR_LINK_RENEWED);
+        expect(ran.json.elicitation.code).toBe(`RNWD-000${n}`);
+        expect(JSON.parse(pendingRaw()).renewals).toBe(n);
+      }
+    });
+
+    test('the link expiring after 4 renewals: PAIR_EXPIRED with a confirm to start again, no new link, the pairing dropped', async () => {
+      await startThenStub('mike@example.com', [EXPIRED]);
+      savePairPendingRaw(JSON.stringify({ ...JSON.parse(pendingRaw()), renewals: PAIR_MAX_RENEWALS }));
+      const fetchMock = stubFetch([EXPIRED], RENEWED_BODY);
+      const ran = await run({ wait: true });
+      expect(ran.exit).toBe(3);
+      expect(ran.json.code).toBe(ERROR_CODES.PAIR_EXPIRED);
+      expect(ran.json.elicitation.kind).toBe('confirm');
+      expect(ran.json.elicitation.question).toContain('5 times');
+      expect(ran.json.elicitation.answer).toEqual({ yes: `${BIN} pair --json` });
+      expect(callsTo(fetchMock, '/auth/device/authorize')).toHaveLength(0);
+      expect(pendingExists()).toBe(false);
+      expect(mockInstallDeviceGrantSession).not.toHaveBeenCalled();
+    });
+
+    test('the copy names the same renewal limit as the CLI', () => {
+      expect(PAIR_LINK_INSTRUCTIONS).toContain(`renews a link at most ${PAIR_MAX_RENEWALS} times`);
+    });
+
+    test('a pasted code still finishes a pairing whose renewals are used up (CAP-902 comes first)', async () => {
+      await startThenStub('mike@example.com', [EXPIRED]);
+      savePairPendingRaw(JSON.stringify({ ...JSON.parse(pendingRaw()), renewals: PAIR_MAX_RENEWALS }));
+      stubFetch([APPROVED]);
+      const ran = await run({ wait: true, code: 'AB12' }, fakeClock(Date.now() + 10_000_000));
+      expect(ran.exit).toBe(0);
     });
 
     // CAP-897: an agent with no AGENTS block learns the wait and renew rule from the link itself.
