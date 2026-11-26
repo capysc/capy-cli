@@ -141,6 +141,8 @@ export interface SetupDisplayInput {
   readonly projectChoice?: boolean;
   /** Whether the folder is being linked to an existing project: the branch is one of its own, nothing is protected here, and nothing is pushed. */
   readonly existingProject?: boolean;
+  /** Whether that existing project has no branch yet, so its first one is made here, open to the project. */
+  readonly firstBranchOfExisting?: boolean;
   /** What a branch is, shown under the table. */
   readonly branchDescription: string;
 }
@@ -159,6 +161,7 @@ function variablesCell(count: number, projectChoice: boolean): string {
  * many variables of the `.env` will be encrypted and pushed. It is the whole summary, so there is no second confirmation.
  */
 export function setupDisplay(input: SetupDisplayInput): string {
+  if (input.firstBranchOfExisting === true) return firstBranchDisplay(input);
   if (input.existingProject === true) return linkDisplay(input);
   const rows: ReadonlyArray<readonly [string, string]> = [
     ['Org', input.org ?? TO_CHOOSE],
@@ -166,6 +169,19 @@ export function setupDisplay(input: SetupDisplayInput): string {
     ['First branch', input.branch ?? TO_CHOOSE], // COPY-FLAG
     ['Protected', protectedCell(input.isProtected)], // COPY-FLAG
     ...(input.variables !== undefined && input.variables > 0 ? [['Variables', variablesCell(input.variables, input.projectChoice === true)] as const] : []),
+  ];
+  return `${table(['', ''], rows)}\n\n${input.branchDescription}`;
+}
+
+/** The table for linking the folder to an existing project that has no branch yet: its first branch is made, open to the project. */
+function firstBranchDisplay(input: SetupDisplayInput): string {
+  const count = input.variables ?? 0;
+  const rows: ReadonlyArray<readonly [string, string]> = [
+    ['Org', input.org ?? TO_CHOOSE],
+    ['Project', input.project ?? TO_CHOOSE],
+    ['First branch', input.branch ?? TO_CHOOSE], // COPY-FLAG
+    ['Protected', 'no (open to the project; it can be protected later)'], // COPY-FLAG
+    ...(count > 0 ? [['Variables', `${count} ${count === 1 ? 'variable' : 'variables'}: ${LINKED_PROJECT_OUTCOME}`] as const] : []),
   ];
   return `${table(['', ''], rows)}\n\n${input.branchDescription}`;
 }
@@ -198,4 +214,21 @@ export function renameProjectDisplay(input: {
 /** The table for a project linked to more than one repo: one row per (project, repo) to choose between. */
 export function chooseRepoDisplay(rows: ReadonlyArray<readonly [string, string]>): string {
   return table(['Project', 'Repo'], rows); // COPY-FLAG
+}
+
+/** The table for `capy agents` asking before it writes or removes its section: one row per file and what would happen to it. */
+export function agentsFilesDisplay(
+  files: ReadonlyArray<{ readonly path: string; readonly action: 'created' | 'updated' | 'unchanged' | 'removed' | 'absent' }>,
+  remove: boolean,
+): string {
+  // COPY-FLAG: minimal and neutral.
+  const outcome: Record<string, string> = {
+    created: 'Will be created with the Capy section',
+    updated: 'Capy section will be added or updated',
+    removed: 'Capy section will be removed (a file holding nothing else is deleted)',
+    unchanged: 'Already up to date',
+    absent: 'No Capy section',
+  };
+  if (files.length === 0) return table(['File', 'Change'], [['AGENTS.md / CLAUDE.md', 'none found in this repo']]);
+  return table(['File', 'Change'], files.map((f) => [f.path, outcome[f.action] ?? f.action] as const));
 }

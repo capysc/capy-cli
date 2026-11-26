@@ -607,7 +607,7 @@ export const ERROR_CODES = {
    */
   DEPLOY_BRANCH_UNKNOWN: 'DEPLOY_BRANCH_UNKNOWN',
   // --- Agent onboarding (CAP-681) ---
-  /** `capy agents` needs a terminal to confirm a write, and neither --print nor --remove was passed. */
+  /** `capy agents` (write or `--remove`) has nobody to confirm with and no `--yes`. Under `--json` the refusal carries a `confirm` elicitation. Exit 3. */
   AGENTS_SETUP_NEEDS_TTY: 'AGENTS_SETUP_NEEDS_TTY',
   /** Joining a project that has no branch yet, as someone who is not a project admin and so cannot create its first one. */
   FIRST_BRANCH_NEEDS_ADMIN: 'FIRST_BRANCH_NEEDS_ADMIN',
@@ -1013,7 +1013,7 @@ export const ERROR_CODES = {
   BRANCH_NAME_INVALID: 'BRANCH_NAME_INVALID',
   /** `capy project create`: the project was created but its first branch was not. The refusal carries the project. Exit 1. */
   BRANCH_CREATE_FAILED: 'BRANCH_CREATE_FAILED',
-  /** `capy project create` with a name and branch but no `--protected`, and nobody to ask (agent mode). The refusal carries an `elicitation` form. Exit 3. */
+  /** `capy project create` with a name and branch but no `--protected`, or `capy checkout NAME -b --json` with neither `--protected` nor `--no-protected`, and nobody to ask (agent mode). The refusal carries an `elicitation` form. Exit 3. */
   BRANCH_PROTECTION_REQUIRED: 'BRANCH_PROTECTION_REQUIRED',
   /** `capy project create --protected` with something other than yes or no. Nothing is created. Exit 1. */
   BRANCH_PROTECTION_INVALID: 'BRANCH_PROTECTION_INVALID',

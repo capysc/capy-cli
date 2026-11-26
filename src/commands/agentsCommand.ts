@@ -15,14 +15,17 @@
  * and `capy system rm`. `--non-tty` is accepted too (same meaning as every
  * other command's flag of that name: never prompt, even on a real TTY).
  * Without either, the refusal is coded `AGENTS_SETUP_NEEDS_TTY`, exits
- * `EXIT_NEEDS_INPUT` (3), and under `--json` names the flag that would answer
- * it via `unanswered`.
+ * `EXIT_NEEDS_INPUT` (3), always in JSON, with a `confirm` elicitation and the
+ * flag that would answer it in `unanswered` (CAP-909).
  */
 import { existsSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from 'fs';
 import { join, sep } from 'path';
 import { spawnSync } from 'child_process';
 import inquirer from 'inquirer';
 import { isInteractive, EXIT_NEEDS_INPUT } from '../ui/interactive';
+import type { ElicitationConfirm } from '../ui/elicitation';
+import { agentsFilesDisplay } from '../ui/elicitationDisplay';
+import { binName } from './binName';
 import { CapyError, ERROR_CODES } from '../types/index';
 import {
   AGENTS_BLOCK,
@@ -41,6 +44,8 @@ export interface AgentsCommandOpts {
   nonTty?: boolean;
   /** Report what write / `--remove` would change; touch no file and never prompt. */
   dryRun?: boolean;
+  /** True under `capy-dev`: the elicitation's `answer.yes` then names `capy-dev`. */
+  devMode?: boolean;
 }
 
 export interface AgentsFileResult {
@@ -166,24 +171,44 @@ function printJson(payload: unknown): void {
   console.log(JSON.stringify(payload, null, 2));
 }
 
+/** The terminal's questions, word for word: the elicitation asks the same ones (spec 3l, CAP-909). */
+export const WRITE_QUESTION = 'Tell AI coding agents in this repo how to use Capy? This adds a short section to AGENTS.md / CLAUDE.md.'; // COPY-FLAG (verbatim, spec-approved)
+export const REMOVE_QUESTION = 'Remove the Capy section from AGENTS.md / CLAUDE.md in this repo?'; // COPY-FLAG — wording not spec-approved, confirm with Vince
+
 /**
- * `unanswered` names the one stop a flag could have settled — `--yes` — in
- * the same shape `capy remove`/`capy system rm` spread onto a coded refusal
- * (`CapyError`'s `details`), so an agent parsing this refusal finds the exact
- * flag to retry with instead of guessing from the prose.
+ * The `confirm` elicitation for a write or `--remove` nobody can answer here: the terminal's question, the files it
+ * would change (the same plan `--dry-run` reports), and `answer.yes`, the command to run on a yes.
  */
-function refuseNeedsTty(json: boolean): never {
-  const message = '`capy agents` needs a terminal to confirm a write. Pass --yes to skip the prompt, or run `capy agents --print` to see the block without writing anything.'; // COPY-FLAG
-  if (json) {
-    printJson({
-      ok: false,
-      code: ERROR_CODES.AGENTS_SETUP_NEEDS_TTY,
-      error: message,
-      unanswered: [{ id: 'confirm', flag: '--yes' }],
-    });
-  } else {
-    console.error(`\n  ${message}\n`);
+export function agentsConfirmElicitation(files: readonly AgentsFileResult[], remove: boolean, devMode: boolean): ElicitationConfirm {
+  return {
+    kind: 'confirm',
+    question: remove ? REMOVE_QUESTION : WRITE_QUESTION,
+    details: { files: files.map((f) => ({ path: f.path, action: f.action })) },
+    display: agentsFilesDisplay(files, remove),
+    answer: { yes: `${binName(devMode)} agents${remove ? ' --remove' : ''} --yes --json` },
+  };
+}
+
+/**
+ * No terminal (or `--json`) and no `--yes`: nothing is written. Like `capy kick`, agent mode answers in JSON even
+ * without `--json`, and the refusal carries a `confirm` elicitation, so the agent asks the human the terminal's own
+ * question instead of adding `--yes` itself (spec 3l, CAP-909). `unanswered` stays for older callers.
+ */
+function refuseNeedsConfirmation(root: string, remove: boolean, devMode: boolean): never {
+  let files: AgentsFileResult[];
+  try {
+    files = remove ? removeAgentsBlockFromFiles(root, false) : writeAgentsBlock(root, false);
+  } catch (err) {
+    if (err instanceof CapyError) refuseCapyError(err, true);
+    throw err;
   }
+  printJson({
+    ok: false,
+    code: ERROR_CODES.AGENTS_SETUP_NEEDS_TTY,
+    error: '`capy agents` needs a yes before it changes AGENTS.md / CLAUDE.md. Ask the human the elicitation\'s question.', // COPY-FLAG
+    unanswered: [{ id: 'confirm', flag: '--yes' }],
+    elicitation: agentsConfirmElicitation(files, remove, devMode),
+  });
   process.exit(EXIT_NEEDS_INPUT);
 }
 
@@ -273,7 +298,7 @@ async function confirmWrite(json: boolean): Promise<boolean> {
     {
       type: 'confirm',
       name: 'confirmed',
-      message: 'Tell AI coding agents in this repo how to use Capy? This adds a short section to AGENTS.md / CLAUDE.md.', // COPY-FLAG (verbatim, spec-approved)
+      message: WRITE_QUESTION,
       default: true,
     },
   ]);
@@ -285,7 +310,7 @@ async function confirmRemove(json: boolean): Promise<boolean> {
     {
       type: 'confirm',
       name: 'confirmed',
-      message: 'Remove the Capy section from AGENTS.md / CLAUDE.md in this repo?', // COPY-FLAG — wording not spec-approved, confirm with Vince
+      message: REMOVE_QUESTION,
       default: false,
     },
   ]);
@@ -332,7 +357,7 @@ export async function agentsCommand(opts: AgentsCommandOpts): Promise<void> {
   }
 
   if (opts.remove) {
-    if (!opts.yes && !isInteractive(opts.nonTty)) refuseNeedsTty(json);
+    if (!opts.yes && (json || !isInteractive(opts.nonTty))) refuseNeedsConfirmation(root, true, opts.devMode === true);
     const confirmed = opts.yes === true || (await confirmRemove(json));
     if (!confirmed) {
       if (json) printJson({ ok: false, code: ERROR_CODES.CANCELLED, error: 'Cancelled.' });
@@ -354,7 +379,7 @@ export async function agentsCommand(opts: AgentsCommandOpts): Promise<void> {
   }
 
   // Default mode: write/update.
-  if (!opts.yes && !isInteractive(opts.nonTty)) refuseNeedsTty(json);
+  if (!opts.yes && (json || !isInteractive(opts.nonTty))) refuseNeedsConfirmation(root, false, opts.devMode === true);
   const confirmed = opts.yes === true || (await confirmWrite(json));
   if (!confirmed) {
     if (json) printJson({ ok: false, code: ERROR_CODES.CANCELLED, error: 'Cancelled.' });

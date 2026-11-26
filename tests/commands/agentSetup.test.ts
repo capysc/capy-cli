@@ -46,6 +46,7 @@ import { deriveResourceId } from '../../src/crypto/resourceId';
 import { hashValue } from '../../src/sync/compareSecrets';
 import { SyncEngine } from '../../src/sync/syncEngine';
 import { Encryptor } from '../../src/crypto/encryptor';
+import { FIRST_BRANCH_QUESTION } from '../../src/core/branchNameRule';
 
 const ORIGIN = process.cwd();
 const dirs = mock((_: string) => undefined);
@@ -400,12 +401,70 @@ describe('an existing project', () => {
     expect(existsSync(folder('keep.lock'))).toBe(false);
   });
 
-  test('a project with no branches is BRANCH_NOT_FOUND: no branch is created or assumed', async () => {
+  test('a project with no branches and no --branch: the form asks for its first branch, as the terminal does; nothing is created (CAP-909)', async () => {
     const calls = fakeWorld({ projects: [{ id: 'proj-web', name: 'web', organization_id: ORG.id }] });
+    const out = await run({ project: 'web' });
+    expect(out.exitCode).toBe(3);
+    expect(out.json).toMatchObject({ ok: false, code: 'INIT_INPUT_REQUIRED' });
+    expect(fieldNames(out.json)).toEqual(['branch']);
+    const field = out.json!.elicitation.fields[0];
+    expect(field.question).toBe(FIRST_BRANCH_QUESTION);
+    expect(field.default).toBe('development');
+    expect(field.options).toBeUndefined();
+    expect(out.json!.elicitation.details).toMatchObject({ project: { id: 'proj-web', name: 'web' } });
+    expect(out.json!.elicitation.answer.rerun).toContain('--project web --branch <branch> --json');
+    expect(calls.createBranch).not.toHaveBeenCalled();
+    expect(existsSync(folder('keep.lock'))).toBe(false);
+  });
+
+  test('a project with no branches and --branch: that branch is created open to the project, then the folder is linked to it (CAP-909)', async () => {
+    const calls = fakeWorld({ projects: [{ id: 'proj-web', name: 'web', organization_id: ORG.id }] });
+    spyOn(ServiceClient.prototype, 'getDecryptData').mockRejectedValue(
+      new CapyError('No secrets', ERROR_CODES.NO_SECRETS, { status: 404 }),
+    );
+    const out = await run({ project: 'web', branch: 'development' });
+    expect(out.exitCode).toBeUndefined();
+    expect(calls.createBranch).toHaveBeenCalledWith('proj-web', 'development', false);
+    expect(out.json).toMatchObject({ ok: true, created: false, project: { id: 'proj-web', name: 'web' }, branch: { name: 'development' } });
+    expect(readJson(folder('keep.lock'))).toMatchObject({ project_id: 'proj-web' });
+    expect(readFileSync(folder('.capy', 'branch'), 'utf-8').trim()).toBe('development');
+  });
+
+  test('a project with no branches: the form shows that a first branch is made, open to the project', async () => {
+    fakeWorld({ projects: [{ id: 'proj-web', name: 'web', organization_id: ORG.id }] });
+    const out = await run({ project: 'web' });
+    expect(out.json!.elicitation.display).toContain('| First branch |');
+    expect(out.json!.elicitation.display).toContain('open to the project');
+  });
+
+  test('a project with no branches, and answers given for a new project (--name, --protected): its own first-branch question is asked, nothing is created (CAP-909 review)', async () => {
+    const calls = fakeWorld({ projects: [{ id: 'proj-web', name: 'web', organization_id: ORG.id }] });
+    const out = await run({ project: 'web', name: 'demo', branch: 'development', protectedAnswer: 'yes' });
+    expect(out.exitCode).toBe(3);
+    expect(out.json).toMatchObject({ ok: false, code: 'INIT_INPUT_REQUIRED' });
+    expect(fieldNames(out.json)).toEqual(['branch']);
+    const rerun: string = out.json!.elicitation.answer.rerun;
+    expect(rerun).toContain('--project web --branch <branch> --json');
+    expect(rerun).not.toContain('--protected');
+    expect(rerun).not.toContain('--name');
+    expect(calls.createBranch).not.toHaveBeenCalled();
+    expect(existsSync(folder('keep.lock'))).toBe(false);
+  });
+
+  test('a project with no branches, --branch and --dry-run: says what would happen, creates nothing', async () => {
+    const calls = fakeWorld({ projects: [{ id: 'proj-web', name: 'web', organization_id: ORG.id }] });
+    const out = await run({ project: 'web', branch: 'development' }, { dryRun: true });
+    expect(out.json).toMatchObject({ ok: true, dry_run: true, branch: { name: 'development' } });
+    expect(calls.createBranch).not.toHaveBeenCalled();
+    expect(existsSync(folder('keep.lock'))).toBe(false);
+  });
+
+  test('a project with no branches, --branch, and not a project admin: FIRST_BRANCH_NEEDS_ADMIN, nothing linked', async () => {
+    const calls = fakeWorld({ projects: [{ id: 'proj-web', name: 'web', organization_id: ORG.id }] });
+    calls.createBranch.mockImplementation(async () => { throw new CapyError('Forbidden', ERROR_CODES.PERMISSION_DENIED, { status: 403 }); });
     const out = await run({ project: 'web', branch: 'development' });
     expect(out.exitCode).toBe(1);
-    expect(out.json).toMatchObject({ ok: false, code: 'BRANCH_NOT_FOUND', branches: [] });
-    expect(calls.createBranch).not.toHaveBeenCalled();
+    expect(out.json).toMatchObject({ ok: false, code: 'FIRST_BRANCH_NEEDS_ADMIN' });
     expect(existsSync(folder('keep.lock'))).toBe(false);
   });
 

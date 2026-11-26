@@ -418,20 +418,15 @@ async function act(deps: AgentSetupDeps, setup: SetupOptions, ctx: RunContext, p
  * An existing project: the branch is one of the project's own, and the human names it. No name is assumed, even when
  * the project has one branch: a project's first branch can have any name, and pulling or pushing a name the project
  * does not have splits its secrets across a branch nobody created. With no `--branch` the form asks; a `--branch` the
- * project does not have is BRANCH_NOT_FOUND; a project with no branch at all needs a terminal to create its first one.
+ * project does not have is BRANCH_NOT_FOUND. A project with no branch at all gets its first one the way the terminal
+ * makes it (spec 3l, CAP-909): the form asks the terminal's first-branch question, and the rerun's `--branch` creates
+ * that branch, open to the project, then links the folder to it.
  */
 async function actExisting(deps: AgentSetupDeps, setup: SetupOptions, ctx: RunContext, project: ProjectRef): Promise<AgentOutcome> {
   const listed = await settle(() => deps.serviceClient.listBranches(project.id));
   if (!listed.ok) return refusalOutcome({ ...refusalFor(listed.error), extra: { project, org: ctx.org } });
   const names = listed.value.map((b) => b.name);
-  if (names.length === 0) {
-    return refusalOutcome({
-      code: ERROR_CODES.BRANCH_NOT_FOUND,
-      message: `${project.name} has no branches yet. Ask the human to run \`capy\` in a terminal in this folder and create one there.`, // COPY-FLAG: the terminal's own wording
-      exitCode: 1,
-      extra: { project, org: ctx.org, branches: names },
-    });
-  }
+  if (names.length === 0) return firstBranchOfExisting(deps, setup, ctx, project);
   if (setup.branch === undefined) {
     return needsInput(setupForm({
       org: ctx.org,
@@ -454,6 +449,47 @@ async function actExisting(deps: AgentSetupDeps, setup: SetupOptions, ctx: RunCo
   }
   if (ctx.dryRun) return dryRunOutcome(ctx, project, branchJson(setup.branch, null), 0);
   return linkExisting(deps, ctx, project, setup.branch);
+}
+
+/**
+ * An existing project with no branch yet: its setup stopped after the project was made and before its first branch.
+ * No `--branch` (or answers given for a new project): the form asks for the first branch, as the terminal does. With one: the branch is created open to the
+ * project (protection is a later, separate action, as in the terminal) and the folder is linked to it. Only a project
+ * admin can create a branch; anyone else gets FIRST_BRANCH_NEEDS_ADMIN.
+ */
+async function firstBranchOfExisting(deps: AgentSetupDeps, setup: SetupOptions, ctx: RunContext, project: ProjectRef): Promise<AgentOutcome> {
+  // A `--name` or `--protected` alongside means the answers were given for a new project, so the human has not seen this
+  // project's own first-branch question: ask it, and create nothing (CAP-909 review). Those answers are not carried over.
+  const answeredForNewProject = setup.name !== undefined || setup.protectedAnswer !== undefined;
+  if (setup.branch === undefined || answeredForNewProject) {
+    return needsInput(setupForm({
+      org: ctx.org,
+      existingProject: project,
+      gaps: { name: false, branch: true, isProtected: false },
+      answers: answeredForNewProject ? { ...setup, name: undefined, protectedAnswer: undefined, branch: undefined } : setup,
+      variables: ctx.env.variables,
+      envPath: deps.options.envPath,
+      dryRun: ctx.dryRun,
+      devMode: deps.devMode,
+    }));
+  }
+  const branch = setup.branch;
+  if (ctx.dryRun) return dryRunOutcome(ctx, project, branchJson(branch, false), 0);
+  const made = await settle(() => deps.serviceClient.createBranch(project.id, branch, false));
+  if (!made.ok) {
+    const err = made.error;
+    // A 403 with no code of its own is "not a project admin"; one that carries a code is that refusal.
+    if (err instanceof CapyError && err.code === ERROR_CODES.PERMISSION_DENIED && err.details?.code === undefined) {
+      return refusalOutcome({
+        code: ERROR_CODES.FIRST_BRANCH_NEEDS_ADMIN,
+        message: `${project.name} has no branches yet, and only a project admin can create one. Ask a project admin to run \`capy\` in a folder for this project and create its first branch.`, // COPY-FLAG: the terminal's own wording
+        exitCode: 1,
+        extra: { project, org: ctx.org },
+      });
+    }
+    return refusalOutcome({ ...refusalFor(err), extra: { project, org: ctx.org, branch: branchJson(branch, false) } });
+  }
+  return linkExisting(deps, ctx, project, branch);
 }
 
 /** The organization's projects in the shape `existingProjectNamed` reads. */
