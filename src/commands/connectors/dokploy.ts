@@ -465,29 +465,46 @@ const BASE_URL_QUESTION = 'Dokploy URL:';
 const SOURCE_QUESTION = 'Import from a Dokploy Application or a Compose service:';
 // COPY-FLAG: new user-facing string, minimal/neutral wording.
 const SERVICE_ID_QUESTION = 'Dokploy application or compose service ID:';
+// COPY-FLAG: new user-facing string, minimal/neutral wording.
+const PICK_LEAD: Readonly<Record<string, string>> = {
+  DOKPLOY_TARGET_AMBIGUOUS: 'Several Dokploy deploy targets are configured. ',
+  DOKPLOY_SETTINGS_MISSING: 'No Dokploy settings found. ',
+};
 const URL_PATTERN = '^https?://[A-Za-z0-9._:/@%+=,-]+$';
 
-/** A saved target's flags, as one option value: the rerun with them reads the same Application the pick would. */
-function targetFlags(t: TargetConfig): string | undefined {
+/**
+ * A saved target's flags, as one option value: the rerun with them reads what the terminal pick would. A flag already
+ * given (typed, or the org's stored base URL) wins over the target in the terminal, so it is left out here too. A target
+ * whose flags would need quoting is not offered.
+ */
+function targetFlags(t: TargetConfig, opts: ConnectOpts): string | undefined {
   const o = t.options as DokployTargetOptions;
-  if (!o.baseUrl || !o.applicationId) return undefined;
-  return ['--base-url', o.baseUrl, '--application', o.applicationId, ...(o.tokenEnv ? ['--token-env', o.tokenEnv] : [])].map(shellWord).join(' ');
+  const words = [
+    ...(opts.baseUrl?.trim() ? [] : o.baseUrl ? ['--base-url', o.baseUrl] : [undefined]),
+    ...(opts.application?.trim() ? [] : o.applicationId ? ['--application', o.applicationId] : [undefined]),
+    ...(opts.tokenEnv?.trim() || !o.tokenEnv ? [] : ['--token-env', o.tokenEnv]),
+  ];
+  if (words.length === 0 || words.some((w) => w === undefined || !SAFE_WORD.test(w))) return undefined;
+  return words.join(' ');
 }
+
+const SAFE_WORD = /^[A-Za-z0-9._:/@%+=,-]+$/;
+const FLAGS_PATTERN = '^--[a-z-]+ [A-Za-z0-9._:/@%+=,-]+( --[a-z-]+ [A-Za-z0-9._:/@%+=,-]+)*$';
 
 /** `DOKPLOY_TARGET_AMBIGUOUS` / `DOKPLOY_SETTINGS_MISSING` with nobody to ask: the terminal's pick or questions, as a form. */
 export function settingsElicitation(code: string, opts: ConnectOpts, targets: readonly TargetConfig[]): ElicitationForm | undefined {
   const devMode = !!opts.devMode;
   if (code === 'DOKPLOY_TARGET_AMBIGUOUS') {
     const options = targets.flatMap((t) => {
-      const value = targetFlags(t);
+      const value = targetFlags(t, opts);
       return value === undefined ? [] : [{ value, label: t.name }];
     });
     if (options.length === 0) return undefined;
     return formElicitation({
       question: TARGET_QUESTION,
-      rows: [['Dokploy deploy targets', targets.map((t) => t.name).join(', ')]], // COPY-FLAG
-      details: { targets: targets.map((t) => t.name) },
-      fields: [{ name: 'target', type: 'string', pattern: '^--base-url \\S+ --application \\S+( --token-env \\S+)?$', question: TARGET_QUESTION, options }],
+      rows: [['Dokploy deploy targets', options.map((o) => o.label).join(', ')]], // COPY-FLAG
+      details: { targets: options.map((o) => o.label) },
+      fields: [{ name: 'target', type: 'string', pattern: FLAGS_PATTERN, question: TARGET_QUESTION, options }],
       rerun: rerunAdding(devMode, '<target>'),
     });
   }
@@ -845,7 +862,8 @@ export function createDokployConnector(deps: DokployConnectorDeps = {}): Connect
       // CAP-703: with no `--base-url`, the org system variable (`_CONNECTOR_DOKPLOY_BASE_URL`) comes before a saved
       // target and the interactive ask - the same shared resolver, read-only here (the discover commands save it).
       const storedBaseUrl = await storedBaseUrlFor(opts, ctx.orgId, deps.openBaseUrlStore);
-      const settings = await resolveDokployImportSource(storedBaseUrl === undefined ? opts : { ...opts, baseUrl: storedBaseUrl }, dokployTargets, interactive, {
+      // Under `--json` nothing prompts, even on a terminal (spec 3l): the refusal carries the question instead.
+      const settings = await resolveDokployImportSource(storedBaseUrl === undefined ? opts : { ...opts, baseUrl: storedBaseUrl }, dokployTargets, interactive && !opts.json, {
         pickTarget,
         askSettings,
         askComposeSettings,
@@ -857,7 +875,7 @@ export function createDokployConnector(deps: DokployConnectorDeps = {}): Connect
         return {
           ok: false,
           code: settings.code,
-          message: elicitation === undefined ? settings.message : `${settings.message.split('. ')[0]}. ${needsHumanChoice('capy connect dokploy')}`,
+          message: elicitation === undefined ? settings.message : `${PICK_LEAD[settings.code] ?? ''}${needsHumanChoice('capy connect dokploy')}`,
           ...(settings.unanswered === undefined ? {} : { unanswered: settings.unanswered }),
           ...(elicitation === undefined ? {} : { elicitation }),
         };

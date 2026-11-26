@@ -291,6 +291,7 @@ function chooseEnvironment(
   requested: string | undefined,
   branch: string,
   devMode: boolean,
+  promptable: boolean,
 ): { ok: true; environment: VercelEnvironmentInfo } | Failure {
   const names = available.map((e) => e.name).join(', ');
   const want = requested?.trim();
@@ -305,7 +306,13 @@ function chooseEnvironment(
   // COPY-FLAG: new user-facing string, minimal/neutral wording.
   return byBranch
     ? { ok: true, environment: byBranch }
-    : {
+    : promptable
+      ? {
+          ok: false,
+          code: ERROR_CODES.VERCEL_ENVIRONMENT_REQUIRED,
+          message: `The current branch "${branch}" is not a Vercel environment. Pass --environment <name>. Environments: ${names}.`,
+        }
+      : {
         ok: false,
         code: ERROR_CODES.VERCEL_ENVIRONMENT_REQUIRED,
         message: `The current branch "${branch}" is not a Vercel environment. ${needsHumanChoice('capy connect vercel')}`,
@@ -525,7 +532,7 @@ export function createVercelConnector(deps: VercelConnectorDeps = {}): Connector
 
     const custom = await guard<readonly VercelCustomEnvironment[]>(() => client.listCustomEnvironments(projectInfo.project.id, team.teamId));
     if (!custom.ok) return custom;
-    const chosen = chooseEnvironment(availableEnvironments(custom.value), opts.environment, ctx.branch, !!opts.devMode);
+    const chosen = chooseEnvironment(availableEnvironments(custom.value), opts.environment, ctx.branch, !!opts.devMode, promptable);
     if (!chosen.ok) return chosen;
     const list = await guard(() => client.listEnvs(projectInfo.project.id, team.teamId));
     if (!list.ok) return list;

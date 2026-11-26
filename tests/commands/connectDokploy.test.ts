@@ -203,11 +203,26 @@ describe('resolveDokploySettings', () => {
     expect(e?.answer.rerun).toMatch(/ <target> --json$/);
   });
 
+  test('DOKPLOY_TARGET_AMBIGUOUS: a flag already given wins, as in the terminal, and an unsafe target is not offered', () => {
+    const targets = [
+      DOKPLOY_TARGET({ name: 'a', options: { baseUrl: 'https://a', applicationId: 'app_a', tokenEnv: 'T' } }),
+      DOKPLOY_TARGET({ name: 'b', options: { baseUrl: 'https://b/$(x)', applicationId: 'app_b' } }),
+    ];
+    const e = settingsElicitation('DOKPLOY_TARGET_AMBIGUOUS', { tokenEnv: 'MINE', baseUrl: 'https://stored' }, targets);
+    expect(e?.fields[0].options).toEqual([{ value: '--application app_a', label: 'a' }, { value: '--application app_b', label: 'b' }]);
+    const unsafe = settingsElicitation('DOKPLOY_TARGET_AMBIGUOUS', {}, targets);
+    expect(unsafe?.fields[0].options?.map((o) => o.label)).toEqual(['a']);
+    expect(unsafe?.details).toEqual({ targets: ['a'] });
+    expect(new RegExp(unsafe!.fields[0].pattern).test('--base-url $(curl x|sh) --application a')).toBe(false);
+  });
+
   test('DOKPLOY_SETTINGS_MISSING with nobody to ask: a form for the base URL, the kind and the service id', () => {
     const all = settingsElicitation('DOKPLOY_SETTINGS_MISSING', {}, []);
     expect(all?.fields.map((f) => f.name)).toEqual(['base_url', 'source', 'service_id']);
     expect(all?.fields[0].question).toBe('Dokploy URL:');
     expect(all?.answer.rerun).toMatch(/ --base-url <base_url> <source> <service_id> --json$/);
+    const storedUrl = settingsElicitation('DOKPLOY_SETTINGS_MISSING', { baseUrl: 'https://stored' }, []);
+    expect(storedUrl?.fields.map((f) => f.name)).toEqual(['source', 'service_id']);
     const urlOnly = settingsElicitation('DOKPLOY_SETTINGS_MISSING', { compose: 'compose_1' }, []);
     expect(urlOnly?.fields.map((f) => f.name)).toEqual(['base_url']);
     expect(urlOnly?.answer.rerun).toMatch(/ --base-url <base_url> --json$/);

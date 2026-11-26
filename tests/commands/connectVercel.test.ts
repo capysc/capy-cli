@@ -254,6 +254,14 @@ describe('vercel import — environment mapping and skips', () => {
     expect(e?.answer.rerun).toMatch(/ --environment <environment> --json$/);
   });
 
+  test('at a terminal: VERCEL_ENVIRONMENT_REQUIRED stays the plain refusal naming --environment, with no form', async () => {
+    const { connector } = makeConnector();
+    const out = await withTTY(() => connector.import!(ctxWith({ branch: 'main' }), { ...BASE_OPTS, nonTty: false }));
+    expect((out as { code: string }).code).toBe(ERROR_CODES.VERCEL_ENVIRONMENT_REQUIRED);
+    expect(out).not.toHaveProperty('elicitation');
+    expect((out as { message: string }).message).toContain('--environment');
+  });
+
   test('--environment that does not exist: VERCEL_ENVIRONMENT_NOT_FOUND, listing what does', async () => {
     const { connector } = makeConnector();
     const out = await connector.import!(ctxWith(), { ...BASE_OPTS, environment: 'qa' });
