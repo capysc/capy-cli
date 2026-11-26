@@ -3,7 +3,7 @@
  * question is the terminal's, word for word; `display` lists what the yes acts on; `answer.yes` is the same command
  * with the flag that answers it. The refusal's message never tells the agent to add that flag itself.
  */
-import type { ElicitationConfirm } from '../ui/elicitation';
+import type { ElicitationConfirm, ElicitationField, ElicitationForm } from '../ui/elicitation';
 import { rowsDisplay } from '../ui/elicitationDisplay';
 import { binName } from './binName';
 
@@ -76,4 +76,32 @@ export function confirmFromTerminalMessage(message: string, devMode: boolean, de
   const [question, ...lines] = message.split('\n');
   const rows = lines.map((l) => l.trim()).filter((l) => l.length > 0).map((l, i) => [String(i + 1), l] as const);
   return confirmElicitation({ question, rows: rows.length > 0 ? rows : [['', question]], details, yes: rerunWith(devMode, [['--yes']]) });
+}
+
+/** A typed answer that goes into a command line as it is: only characters a shell word keeps as they are. */
+export const SHELL_SAFE_PATTERN = '^[A-Za-z0-9._:/@%+=,-]+$';
+
+/**
+ * This run's own command, as typed, with `raw` added before `--json`: `raw` holds a form's `<field>` placeholders,
+ * which are filled in by whoever runs it, so it is not quoted. Its flags must not be typed already.
+ */
+export function rerunAdding(devMode: boolean, raw: string, argv: readonly string[] = process.argv.slice(2)): string {
+  const base = rerunWith(devMode, [], argv);
+  return `${base.slice(0, -' --json'.length)} ${raw} --json`;
+}
+
+/** A pick or a typed answer the terminal asks, with nobody to ask (spec 3l): a `form` with the terminal's questions. */
+export function formElicitation(input: {
+  readonly question: string;
+  readonly rows: ReadonlyArray<readonly [string, string]>;
+  readonly details: Readonly<Record<string, unknown>>;
+  readonly fields: readonly ElicitationField[];
+  readonly rerun: string;
+}): ElicitationForm {
+  return { kind: 'form', question: input.question, details: input.details, display: rowsDisplay(input.rows), fields: input.fields, answer: { rerun: input.rerun } };
+}
+
+/** The refusal message of a pick: says a human must choose, never which flag answers it. */
+export function needsHumanChoice(command: string): string {
+  return `\`${command}\` needs the human to choose first. Ask the elicitation's question.`; // COPY-FLAG
 }

@@ -22,7 +22,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
-import {
+import { settingsElicitation,
   createDokployConnector,
   mapImportApiError,
   mapImportComposeApiError,
@@ -189,6 +189,30 @@ describe('resolveDokploySettings', () => {
     const r = await resolveDokploySettings({}, targets, false, deps);
     expect(r.ok).toBe(false);
     expect((r as { code: string }).code).toBe('DOKPLOY_TARGET_AMBIGUOUS');
+    // Spec 3l: the terminal's pick, as a form whose option values are each target's flags.
+    const e = settingsElicitation('DOKPLOY_TARGET_AMBIGUOUS', {}, [
+      DOKPLOY_TARGET({ name: 'a', options: { baseUrl: 'https://a', applicationId: 'app_a', tokenEnv: 'T' } }),
+      DOKPLOY_TARGET({ name: 'b', options: { baseUrl: 'https://b', applicationId: 'app_b' } }),
+    ]);
+    expect(e?.fields[0].question).toBe('Which Dokploy deploy target:');
+    expect(e?.fields[0].options).toEqual([
+      { value: '--base-url https://a --application app_a --token-env T', label: 'a' },
+      { value: '--base-url https://b --application app_b', label: 'b' },
+    ]);
+    for (const o of e?.fields[0].options ?? []) expect(new RegExp(e!.fields[0].pattern).test(o.value)).toBe(true);
+    expect(e?.answer.rerun).toMatch(/ <target> --json$/);
+  });
+
+  test('DOKPLOY_SETTINGS_MISSING with nobody to ask: a form for the base URL, the kind and the service id', () => {
+    const all = settingsElicitation('DOKPLOY_SETTINGS_MISSING', {}, []);
+    expect(all?.fields.map((f) => f.name)).toEqual(['base_url', 'source', 'service_id']);
+    expect(all?.fields[0].question).toBe('Dokploy URL:');
+    expect(all?.answer.rerun).toMatch(/ --base-url <base_url> <source> <service_id> --json$/);
+    const urlOnly = settingsElicitation('DOKPLOY_SETTINGS_MISSING', { compose: 'compose_1' }, []);
+    expect(urlOnly?.fields.map((f) => f.name)).toEqual(['base_url']);
+    expect(urlOnly?.answer.rerun).toMatch(/ --base-url <base_url> --json$/);
+    expect(new RegExp(all!.fields[0].pattern).test('https://dokploy.example.com')).toBe(true);
+    expect(new RegExp(all!.fields[0].pattern).test('https://x; rm -rf /')).toBe(false);
   });
 
   test('several targets, interactive: asks which one', async () => {

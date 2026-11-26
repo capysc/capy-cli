@@ -44,7 +44,7 @@
  * values and NEVER creates, offers or writes a deploy target.
  * `capy deploy vercel --discover` is what creates targets, and it pushes no values.
  */
-import { confirmFromTerminalMessage, needsHumanYes } from '../agentConfirm';
+import { SHELL_SAFE_PATTERN, confirmFromTerminalMessage, formElicitation, needsHumanChoice, needsHumanYes, rerunAdding } from '../agentConfirm';
 import { syncFolder, type FolderSync, type GateOptions } from '../../sync/gate';
 import { classifyImportCandidates } from '../../deploy/dokployApi';
 import {
@@ -155,7 +155,7 @@ async function defaultSelectVars(candidates: readonly string[]): Promise<readonl
 async function defaultPickTeam(teams: readonly VercelTeam[]): Promise<string> {
   const inquirer = (await import('inquirer')).default;
   const { picked } = await inquirer.prompt([
-    { type: 'list', name: 'picked', message: 'Which Vercel team:', choices: teams.map((t) => ({ name: t.slug, value: t.id })) },
+    { type: 'list', name: 'picked', message: TEAM_QUESTION, choices: teams.map((t) => ({ name: t.slug, value: t.id })) },
   ]);
   return picked;
 }
@@ -167,7 +167,7 @@ async function defaultAskProject(): Promise<string> {
     {
       type: 'input',
       name: 'project',
-      message: 'Vercel project (id or name):',
+      message: PROJECT_QUESTION,
       validate: (v: string) => (v.trim() ? true : 'required'),
       filter: (v: string) => v.trim(),
     },
@@ -290,6 +290,7 @@ function chooseEnvironment(
   available: readonly VercelEnvironmentInfo[],
   requested: string | undefined,
   branch: string,
+  devMode: boolean,
 ): { ok: true; environment: VercelEnvironmentInfo } | Failure {
   const names = available.map((e) => e.name).join(', ');
   const want = requested?.trim();
@@ -307,8 +308,42 @@ function chooseEnvironment(
     : {
         ok: false,
         code: ERROR_CODES.VERCEL_ENVIRONMENT_REQUIRED,
-        message: `The current branch "${branch}" is not a Vercel environment. Pass --environment <name>. Environments: ${names}.`,
+        message: `The current branch "${branch}" is not a Vercel environment. ${needsHumanChoice('capy connect vercel')}`,
+        // Spec 3l: the choice the terminal's refusal lists, as a pick.
+        elicitation: formElicitation({
+          question: ENVIRONMENT_QUESTION,
+          rows: [['Capy branch', branch], ['Vercel environments', names]], // COPY-FLAG
+          details: { branch, environments: available.map((e) => e.name) },
+          fields: [{
+            name: 'environment',
+            type: 'string',
+            pattern: SHELL_SAFE_PATTERN,
+            question: ENVIRONMENT_QUESTION,
+            options: available.map((e) => ({ value: e.name, label: e.name })),
+          }],
+          rerun: rerunAdding(devMode, '--environment <environment>'),
+        }),
       };
+}
+
+// COPY-FLAG: new user-facing string, minimal/neutral wording.
+const ENVIRONMENT_QUESTION = 'Which Vercel environment:';
+const TEAM_QUESTION = 'Which Vercel team:';
+const PROJECT_QUESTION = 'Vercel project (id or name):';
+
+/** The token sees several teams and none was named: the terminal's team pick, as a form (spec 3l). */
+function teamRequired(failure: Failure, teams: readonly VercelTeam[], devMode: boolean): Failure {
+  return {
+    ...failure,
+    message: `This token sees several Vercel teams (${teams.map((t) => t.slug).join(', ')}). ${needsHumanChoice('capy connect vercel')}`, // COPY-FLAG
+    elicitation: formElicitation({
+      question: TEAM_QUESTION,
+      rows: [['Vercel teams', teams.map((t) => t.slug).join(', ')]], // COPY-FLAG
+      details: { teams: teams.map((t) => ({ id: t.id, slug: t.slug })) },
+      fields: [{ name: 'team', type: 'string', pattern: SHELL_SAFE_PATTERN, question: TEAM_QUESTION, options: teams.map((t) => ({ value: t.slug, label: t.slug })) }],
+      rerun: rerunAdding(devMode, '--team <team>'),
+    }),
+  };
 }
 
 async function pickProjectArg(opts: ConnectOpts, promptable: boolean, askProject: () => Promise<string>): Promise<string | null> {
@@ -468,6 +503,7 @@ export function createVercelConnector(deps: VercelConnectorDeps = {}): Connector
     const teams = await guard(() => client.listTeams(), discovery);
     if (!teams.ok) return teams;
     const team = await resolveTeam(teams.value, opts.team, promptable ? pickTeam : null);
+    if (!team.ok && team.code === ERROR_CODES.VERCEL_TEAM_REQUIRED) return teamRequired(team, teams.value, !!opts.devMode);
     return team;
   };
 
@@ -489,7 +525,7 @@ export function createVercelConnector(deps: VercelConnectorDeps = {}): Connector
 
     const custom = await guard<readonly VercelCustomEnvironment[]>(() => client.listCustomEnvironments(projectInfo.project.id, team.teamId));
     if (!custom.ok) return custom;
-    const chosen = chooseEnvironment(availableEnvironments(custom.value), opts.environment, ctx.branch);
+    const chosen = chooseEnvironment(availableEnvironments(custom.value), opts.environment, ctx.branch, !!opts.devMode);
     if (!chosen.ok) return chosen;
     const list = await guard(() => client.listEnvs(projectInfo.project.id, team.teamId));
     if (!list.ok) return list;
@@ -515,7 +551,19 @@ export function createVercelConnector(deps: VercelConnectorDeps = {}): Connector
     const arg = await pickProjectArg(opts, promptable, askProject);
     if (!arg) {
       // COPY-FLAG: new user-facing string, minimal/neutral wording.
-      return { ok: false, code: ERROR_CODES.VERCEL_PROJECT_REQUIRED, message: 'No Vercel project. Pass --project <id|name>, or run this interactively.' };
+      return {
+        ok: false,
+        code: ERROR_CODES.VERCEL_PROJECT_REQUIRED,
+        message: `No Vercel project. ${needsHumanChoice('capy connect vercel')}`,
+        // Spec 3l: the terminal's typed question, as a form.
+        elicitation: formElicitation({
+          question: PROJECT_QUESTION,
+          rows: [['Vercel project', 'to choose']], // COPY-FLAG
+          details: {},
+          fields: [{ name: 'project', type: 'string', pattern: SHELL_SAFE_PATTERN, question: PROJECT_QUESTION }],
+          rerun: rerunAdding(!!opts.devMode, '--project <project>'),
+        }),
+      };
     }
     const found = await fetchProject(client, arg, teamId);
     if (!found.ok) return found;

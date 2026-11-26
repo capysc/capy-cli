@@ -32,7 +32,8 @@
  * how you refresh it, and `capy rotate` refuses on a dokploy-managed var
  * (see `rotateCommand.ts`).
  */
-import { confirmFromTerminalMessage, needsHumanYes } from '../agentConfirm';
+import { SHELL_SAFE_PATTERN, confirmFromTerminalMessage, formElicitation, needsHumanChoice, needsHumanYes, rerunAdding, shellWord } from '../agentConfirm';
+import type { ElicitationField, ElicitationForm } from '../../ui/elicitation';
 import { TargetConfig } from '../../deploy/adapter';
 import { dokployKeyHelp, keyHelpFields } from '../../deploy/keyHelp';
 import { baseUrlProblem } from '../../deploy/adapters/dokploy';
@@ -457,10 +458,71 @@ async function defaultSelectVars(candidates: readonly string[]): Promise<readonl
   return picked;
 }
 
+// The terminal's questions, shared with the forms that ask them with nobody at a terminal (spec 3l).
+const TARGET_QUESTION = 'Which Dokploy deploy target:';
+const BASE_URL_QUESTION = 'Dokploy URL:';
+// COPY-FLAG: new user-facing string, minimal/neutral wording.
+const SOURCE_QUESTION = 'Import from a Dokploy Application or a Compose service:';
+// COPY-FLAG: new user-facing string, minimal/neutral wording.
+const SERVICE_ID_QUESTION = 'Dokploy application or compose service ID:';
+const URL_PATTERN = '^https?://[A-Za-z0-9._:/@%+=,-]+$';
+
+/** A saved target's flags, as one option value: the rerun with them reads the same Application the pick would. */
+function targetFlags(t: TargetConfig): string | undefined {
+  const o = t.options as DokployTargetOptions;
+  if (!o.baseUrl || !o.applicationId) return undefined;
+  return ['--base-url', o.baseUrl, '--application', o.applicationId, ...(o.tokenEnv ? ['--token-env', o.tokenEnv] : [])].map(shellWord).join(' ');
+}
+
+/** `DOKPLOY_TARGET_AMBIGUOUS` / `DOKPLOY_SETTINGS_MISSING` with nobody to ask: the terminal's pick or questions, as a form. */
+export function settingsElicitation(code: string, opts: ConnectOpts, targets: readonly TargetConfig[]): ElicitationForm | undefined {
+  const devMode = !!opts.devMode;
+  if (code === 'DOKPLOY_TARGET_AMBIGUOUS') {
+    const options = targets.flatMap((t) => {
+      const value = targetFlags(t);
+      return value === undefined ? [] : [{ value, label: t.name }];
+    });
+    if (options.length === 0) return undefined;
+    return formElicitation({
+      question: TARGET_QUESTION,
+      rows: [['Dokploy deploy targets', targets.map((t) => t.name).join(', ')]], // COPY-FLAG
+      details: { targets: targets.map((t) => t.name) },
+      fields: [{ name: 'target', type: 'string', pattern: '^--base-url \\S+ --application \\S+( --token-env \\S+)?$', question: TARGET_QUESTION, options }],
+      rerun: rerunAdding(devMode, '<target>'),
+    });
+  }
+  if (code !== 'DOKPLOY_SETTINGS_MISSING') return undefined;
+  const needsBaseUrl = !opts.baseUrl?.trim();
+  const needsService = !opts.application?.trim() && !opts.compose?.trim();
+  if (!needsBaseUrl && !needsService) return undefined;
+  const fields: ElicitationField[] = [
+    ...(needsBaseUrl ? [{ name: 'base_url', type: 'string' as const, pattern: URL_PATTERN, question: BASE_URL_QUESTION }] : []),
+    ...(needsService
+      ? [
+          {
+            name: 'source',
+            type: 'string' as const,
+            pattern: '^(--application|--compose)$',
+            question: SOURCE_QUESTION,
+            options: [{ value: '--application', label: 'Application' }, { value: '--compose', label: 'Compose service' }], // COPY-FLAG
+          },
+          { name: 'service_id', type: 'string' as const, pattern: SHELL_SAFE_PATTERN, question: SERVICE_ID_QUESTION },
+        ]
+      : []),
+  ];
+  return formElicitation({
+    question: fields[0].question ?? BASE_URL_QUESTION,
+    rows: [['Dokploy URL', needsBaseUrl ? 'to type' : (opts.baseUrl ?? '').trim()], ['Service', needsService ? 'to choose' : (opts.application ?? opts.compose ?? '').trim()]], // COPY-FLAG
+    details: {},
+    fields,
+    rerun: rerunAdding(devMode, [...(needsBaseUrl ? ['--base-url <base_url>'] : []), ...(needsService ? ['<source> <service_id>'] : [])].join(' ')),
+  });
+}
+
 async function defaultPickTarget(names: readonly string[]): Promise<string> {
   const inquirer = (await import('inquirer')).default;
   const { picked } = await inquirer.prompt([
-    { type: 'list', name: 'picked', message: 'Which Dokploy deploy target:', choices: [...names] },
+    { type: 'list', name: 'picked', message: TARGET_QUESTION, choices: [...names] },
   ]);
   return picked;
 }
@@ -471,7 +533,7 @@ async function defaultAskSettings(): Promise<{ baseUrl: string; applicationId: s
     {
       type: 'input',
       name: 'baseUrl',
-      message: 'Dokploy URL:',
+      message: BASE_URL_QUESTION,
       validate: (v: string) => baseUrlProblem(v) ?? true,
       filter: (v: string) => v.trim(),
     },
@@ -492,7 +554,7 @@ async function defaultAskComposeSettings(): Promise<{ baseUrl: string; composeId
     {
       type: 'input',
       name: 'baseUrl',
-      message: 'Dokploy URL:',
+      message: BASE_URL_QUESTION,
       validate: (v: string) => baseUrlProblem(v) ?? true,
       filter: (v: string) => v.trim(),
     },
@@ -514,7 +576,7 @@ async function defaultAskSourceKind(): Promise<'application' | 'compose'> {
     {
       type: 'list',
       name: 'kind',
-      message: 'Import from a Dokploy Application or a Compose service:',
+      message: SOURCE_QUESTION,
       choices: [
         { name: 'Application', value: 'application' },
         { name: 'Compose service', value: 'compose' },
@@ -790,7 +852,15 @@ export function createDokployConnector(deps: DokployConnectorDeps = {}): Connect
         askSourceKind,
       });
       if (!settings.ok) {
-        return { ok: false, code: settings.code, message: settings.message, ...(settings.unanswered === undefined ? {} : { unanswered: settings.unanswered }) };
+        // Spec 3l: what the terminal would ask here, as a form (the message then names no flag).
+        const elicitation = settingsElicitation(settings.code, storedBaseUrl === undefined ? opts : { ...opts, baseUrl: storedBaseUrl }, dokployTargets);
+        return {
+          ok: false,
+          code: settings.code,
+          message: elicitation === undefined ? settings.message : `${settings.message.split('. ')[0]}. ${needsHumanChoice('capy connect dokploy')}`,
+          ...(settings.unanswered === undefined ? {} : { unanswered: settings.unanswered }),
+          ...(elicitation === undefined ? {} : { elicitation }),
+        };
       }
       const { baseUrl, source, tokenEnv } = settings;
 
