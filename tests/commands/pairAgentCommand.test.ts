@@ -606,6 +606,10 @@ describe('capy pair, agent mode', () => {
       expect(mockInstallDeviceGrantSession).not.toHaveBeenCalled();
     });
 
+    test('the copy names the same renewal limit as the CLI', () => {
+      expect(PAIR_LINK_INSTRUCTIONS).toContain(`renews a link at most ${PAIR_MAX_RENEWALS} times`);
+    });
+
     test('a pasted code still finishes a pairing whose renewals are used up (CAP-902 comes first)', async () => {
       await startThenStub('mike@example.com', [EXPIRED]);
       savePairPendingRaw(JSON.stringify({ ...JSON.parse(pendingRaw()), renewals: PAIR_MAX_RENEWALS }));

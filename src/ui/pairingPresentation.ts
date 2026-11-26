@@ -30,7 +30,7 @@ export const PAIR_LINK_TEXT_RULE =
  * after that). The same sentence goes in the link instructions, the pairing presentation and the AGENTS block.
  */
 export const PAIR_KEEP_WAITING_RULE =
-  'Keep showing each new link and running its `answer.wait` without stopping to ask the human, however many links expire, until the human gives you the one-time code or tells you to stop. The CLI renews a link at most 4 times; when the last one expires it exits 3 with PAIR_EXPIRED and a confirm: only then ask the human whether to start again, and run `answer.yes` if they say yes.'; // COPY-FLAG
+  'Keep showing each new link and running its `answer.wait` without stopping to ask the human, until the human gives you the one-time code or says stop, the pairing is denied, or the CLI answers PAIR_EXPIRED. The CLI renews a link at most 4 times; when the last one expires it exits 3 with PAIR_EXPIRED and a confirm: only then ask the human whether to start again, and run `answer.yes` if they say yes.'; // COPY-FLAG
 
 /**
  * CAP-897: what every `link` elicitation says to do next, in its own `instructions` field. An agent in a fresh folder

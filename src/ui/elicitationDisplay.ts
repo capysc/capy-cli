@@ -237,3 +237,11 @@ export function agentsFilesDisplay(
 export function rowsDisplay(rows: ReadonlyArray<readonly [string, string]>): string {
   return table(['', ''], rows);
 }
+
+/** CAP-913: the pairing link expired on every renewal, and nothing was installed. */
+export function pairExpiredDisplay(linksShown: number): string {
+  return table(['', ''], [
+    ['Pairing links shown', String(linksShown)], // COPY-FLAG
+    ['Installed', 'nothing'], // COPY-FLAG
+  ]);
+}

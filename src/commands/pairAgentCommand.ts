@@ -40,7 +40,7 @@ import { resolveActiveUrl } from '../config/profileConfig';
 import { generatePairKeyPair } from '../crypto/pairCrypto';
 import { CapyError, ERROR_CODES } from '../types/index';
 import type { ElicitationConfirm, ElicitationForm, ElicitationLink, ElicitationLinkQr } from '../ui/elicitation';
-import { pairCodeDisplay } from '../ui/elicitationDisplay';
+import { pairCodeDisplay, pairExpiredDisplay } from '../ui/elicitationDisplay';
 import { EXIT_NEEDS_INPUT } from '../ui/interactive';
 import { createPairingQrImage, PAIR_LINK_INSTRUCTIONS, removePairingQrImage, type PairingQrImage } from '../ui/pairingPresentation';
 import { buildTerminalQr } from '../ui/terminalQr';
@@ -315,7 +315,7 @@ function renewalsUsedUp(options: PairAgentOptions): Outcome {
     kind: 'confirm',
     question,
     details: { links_shown: links },
-    display: `Nothing was installed. ${links} pairing links expired before anyone approved one.`, // COPY-FLAG
+    display: pairExpiredDisplay(links),
     answer: { yes: `${bin} pair --json` },
   };
   return {
