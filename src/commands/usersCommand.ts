@@ -76,7 +76,7 @@ export class UsersCommand {
 
   /**
    * The org for `capy users`. With `--json` nothing is ever asked: when this folder names no org and the person
-   * belongs to several, the refusal is JSON on stdout with the code and the orgs, and the exit code is 1.
+   * belongs to several, the refusal is JSON on stdout with the code, the orgs and the pick as a form, and the exit code is 3.
    */
   private async orgContextOrExit(json: boolean): Promise<OrgContext> {
     try {

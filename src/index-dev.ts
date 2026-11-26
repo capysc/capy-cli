@@ -4,7 +4,7 @@
  * Enables mock authentication for local testing.
  * This file is NOT included in production builds or npm packages.
  */
-import { setRequestedOrg } from './core/requestedOrg';
+import { setCommandShape, setRequestedOrg } from './core/requestedOrg';
 import { exitIfOrgRefusal } from './core/orgSelection';
 import { config } from 'dotenv';
 import { resolve } from 'path';
@@ -109,7 +109,9 @@ program
     if (opts.web === true) refuseWebMode(opts.json === true);
     if (opts.folder !== undefined) process.chdir(opts.folder);
     // `--org` on a command that works on an organization (spec 3l): picks among the account's own organizations.
-    if (typeof opts.org === 'string' && actionCommand.options.some((o: { long?: string }) => o.long === '--org')) setRequestedOrg(opts.org);
+    const takes = (flag: string): boolean => actionCommand.options.some((o: { long?: string }) => o.long === flag);
+    setCommandShape({ org: takes('--org'), json: takes('--json'), nonTty: takes('--non-tty') });
+    if (typeof opts.org === 'string' && takes('--org')) setRequestedOrg(opts.org);
   })
   .action(async (options, cmd) => {
     if (cmd.args.length > 0) {
@@ -139,7 +141,7 @@ program
   .command('branch')
   .description('List secret branches')
   .option('-D <name>', 'Delete a branch')
-  .option('--yes', 'skip the confirmation prompt')
+  .option('--yes', 'the human\'s yes to the confirmation. An agent never adds it on its own: run without it to get the question to ask the human') // COPY-FLAG
   .option('--json', 'emit machine-readable JSON instead of the human UI')
   .option('--non-tty', 'treat stdin as not a terminal; never prompt (agents/CI)')
   .action(async (options, command) => {
@@ -551,7 +553,7 @@ program
   .command('kick <email>')
   .option('--org <id|name>', 'the organization, when your account has several and the folder has no keep.lock') // COPY-FLAG
   .description('Remove a teammate from this organization')
-  .option('--yes', 'skip the confirmation question')
+  .option('--yes', 'the human\'s yes to the confirmation. An agent never adds it on its own: run without it to get the question to ask the human') // COPY-FLAG
   .option('--non-tty', 'same as --json: never ask, and answer in JSON (agents/CI)') // COPY-FLAG
   .option('--json', 'emit machine-readable JSON instead of the human UI')
   .action(async (email, _options, command) => {
@@ -590,7 +592,7 @@ systemCmd
   .command('rm <name>')
   .description('Remove a connector credential (asks for confirmation; owners/admins only)')
   .option('--org <id>', 'org id, if you belong to more than one')
-  .option('--yes', 'skip the confirmation prompt')
+  .option('--yes', 'the human\'s yes to the confirmation. An agent never adds it on its own: run without it to get the question to ask the human') // COPY-FLAG
   .option('--json', 'emit machine-readable JSON instead of the human UI')
   .action(async (name: string, options: any) => {
     const { systemRmCommand } = await import('./commands/systemCommand');
@@ -615,7 +617,7 @@ program
   .description('Tell AI coding agents in this repo how to use Capy (writes AGENTS.md / CLAUDE.md)')
   .option('--print', 'print the block to stdout without writing anything')
   .option('--remove', 'remove the block from AGENTS.md / CLAUDE.md')
-  .option('-y, --yes', 'skip the confirmation prompt (required non-interactively)')
+  .option('-y, --yes', 'the human\'s yes to the confirmation. An agent never adds it on its own: run without it to get the question to ask the human') // COPY-FLAG
   .option('--non-tty', 'never prompt; resolve from flags or fail fast (agents/CI)')
   .option('--json', 'emit machine-readable JSON instead of the human UI')
   .addHelpText(
@@ -833,7 +835,7 @@ projectCmd
   .option('--org <id|name>', 'the organization, when your account has several and the folder has no keep.lock') // COPY-FLAG
   .description('Delete a project (owners and admins only; hidden, not destroyed; an owner or admin can restore it)') // COPY-FLAG
   .option('--force', 'delete even if the project has live deploy tokens (those deploys stop on their next restart)') // COPY-FLAG
-  .option('--yes', 'skip the confirmation question')
+  .option('--yes', 'the human\'s yes to the confirmation. An agent never adds it on its own: run without it to get the question to ask the human') // COPY-FLAG
   .option('--non-tty', 'same as --json: never ask, and answer in JSON (agents/CI)') // COPY-FLAG
   .option('--json', 'emit machine-readable JSON instead of the human UI')
   .action(async (ref: string, _options: any, command: any) => {
@@ -846,7 +848,7 @@ projectCmd
   .command('restore <name-or-id>')
   .option('--org <id|name>', 'the organization, when your account has several and the folder has no keep.lock') // COPY-FLAG
   .description('Restore a deleted project (owners and admins only)') // COPY-FLAG
-  .option('--yes', 'skip the confirmation question')
+  .option('--yes', 'the human\'s yes to the confirmation. An agent never adds it on its own: run without it to get the question to ask the human') // COPY-FLAG
   .option('--non-tty', 'same as --json: never ask, and answer in JSON (agents/CI)') // COPY-FLAG
   .option('--json', 'emit machine-readable JSON instead of the human UI')
   .action(async (ref: string, _options: any, command: any) => {
@@ -1212,7 +1214,7 @@ program
 program
   .command('remove <vars...>')
   .description('Delete one or more secret values from the active branch (encrypts + syncs)')
-  .option('-y, --yes', 'skip the confirmation prompt (required non-interactively)')
+  .option('-y, --yes', 'the human\'s yes to the confirmation. An agent never adds it on its own: run without it to get the question to ask the human') // COPY-FLAG
   .option('--json', 'emit machine-readable JSON instead of the human UI')
   .option('--non-tty', 'never prompt; resolve from flags or fail fast (agents/CI)')
   .option('--pr', 'create a PR with the keep.lock change (answers the prompt)') // COPY-FLAG

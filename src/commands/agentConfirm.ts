@@ -57,9 +57,18 @@ export function confirmElicitation(input: {
   return { kind: 'confirm', question: input.question, details: input.details, display: rowsDisplay(input.rows), answer: { yes: input.yes } };
 }
 
+/**
+ * How to ask, in the refusal itself: an agent that never read the AGENTS block (a repo without one) still shows the
+ * table, asks the question as written and waits (found by the real-agent eval, CAP-910).
+ */
+// COPY-FLAG
+export const ASK_FOR_YES = "Show the human the elicitation's `display` table exactly as given, ask its `question` word for word, and run its `answer.yes` only after the human says yes.";
+// COPY-FLAG
+export const ASK_FOR_CHOICE = "Show the human the elicitation's `display` table exactly as given, ask its `question` word for word, and run its `answer.rerun` with what the human chose.";
+
 /** The refusal message under `--json`: says a human must answer, never which flag to add. */
 export function needsHumanYes(command: string): string {
-  return `\`${command}\` needs a yes from the human first. Ask the elicitation's question.`; // COPY-FLAG
+  return `\`${command}\` needs a yes from the human first. ${ASK_FOR_YES}`;
 }
 
 /** The keep.lock PR flags as typed, for a command that repeats them. */
@@ -89,10 +98,10 @@ export function rerunAdding(
   devMode: boolean,
   raw: string,
   argv: readonly string[] = process.argv.slice(2),
-  tail: '--json' | '--non-tty' = '--json',
+  tail: '--json' | '--non-tty' | '' = '--json',
 ): string {
   const base = rerunWith(devMode, [], argv);
-  return `${base.slice(0, -' --json'.length)} ${raw} ${tail}`;
+  return [base.slice(0, -' --json'.length), raw, tail].filter((w) => w !== '').join(' ');
 }
 
 /** A pick or a typed answer the terminal asks, with nobody to ask (spec 3l): a `form` with the terminal's questions. */
@@ -108,7 +117,7 @@ export function formElicitation(input: {
 
 /** The refusal message of a pick: says a human must choose, never which flag answers it. */
 export function needsHumanChoice(command: string): string {
-  return `\`${command}\` needs the human to choose first. Ask the elicitation's question.`; // COPY-FLAG
+  return `\`${command}\` needs the human to choose first. ${ASK_FOR_CHOICE}`;
 }
 
 /**

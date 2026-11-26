@@ -7,7 +7,7 @@ import { describe, it, expect, spyOn, afterEach } from 'bun:test';
 import { AuthService } from '../../src/auth/authService';
 import { ProjectManager } from '../../src/core/projectManager';
 import { resolveOrgContext } from '../../src/core/orgContext';
-import { setRequestedOrg } from '../../src/core/requestedOrg';
+import { setCommandShape, setRequestedOrg } from '../../src/core/requestedOrg';
 import { CapyError } from '../../src/types/index';
 
 const ACME = { id: 'org_1', name: 'Acme' };
@@ -31,8 +31,11 @@ async function refusal(run: () => Promise<unknown>): Promise<CapyError> {
   throw new Error('expected a refusal');
 }
 
+const ARGV = process.argv;
 afterEach(() => {
   setRequestedOrg(undefined);
+  setCommandShape({ org: false, json: false, nonTty: false });
+  process.argv = ARGV;
 });
 
 describe('resolveOrgContext and --org', () => {
@@ -61,6 +64,8 @@ describe('resolveOrgContext and --org', () => {
 
   it('several orgs, no --org, nobody to ask: ORG_SELECTION_REQUIRED with the orgs and the terminal\'s pick as a form', async () => {
     world([ACME, OTHER]);
+    setCommandShape({ org: true, json: true, nonTty: false });
+    process.argv = ['node', 'capy-dev', 'users', '--json'];
     const err = await refusal(() => resolveOrgContext(undefined, true, { promptForOrg: false }));
     expect(err.code).toBe('ORG_SELECTION_REQUIRED');
     expect(err.details.orgs).toEqual([ACME, OTHER]);
@@ -68,7 +73,7 @@ describe('resolveOrgContext and --org', () => {
     expect(e.kind).toBe('form');
     expect(e.fields[0].question).toBe('Select organization:');
     expect(e.fields[0].options).toEqual([{ value: 'org_1', label: 'Acme' }, { value: 'org_2', label: 'Other' }]);
-    expect(e.answer.rerun).toMatch(/^capy-dev .* --org <org> --json$|^capy-dev --org <org> --json$/);
+    expect(e.answer.rerun).toBe('capy-dev users --org <org> --json');
     expect(err.message).not.toContain('--org');
   });
 
@@ -79,5 +84,43 @@ describe('resolveOrgContext and --org', () => {
     const err = await refusal(() => resolveOrgContext(undefined, false, { promptForOrg: false }));
     expect(err.code).toBe('ORG_SELECTION_REQUIRED');
     expect(err.details.orgs).toEqual([ACME, twin]);
+  });
+
+  it('the rerun sets --org once (the typed one is dropped), and ends as the command can: --json, --non-tty or nothing', async () => {
+    const twin = { id: 'org_3', name: 'Acme' };
+    world([ACME, OTHER, twin]);
+    setRequestedOrg('Acme');
+    setCommandShape({ org: true, json: false, nonTty: false });
+    process.argv = ['node', 'capy', 'grant-branch', 'a@b.co', 'web', 'prod', '--org', 'Acme'];
+    const err = await refusal(() => resolveOrgContext(undefined, false, { promptForOrg: false }));
+    expect(err.details.elicitation.answer.rerun).toBe('capy grant-branch a@b.co web prod --org <org>');
+  });
+
+  it('a command with no --org gets the orgs but no form: its rerun could not carry the answer', async () => {
+    world([ACME, OTHER]);
+    setCommandShape({ org: false, json: true, nonTty: true });
+    const err = await refusal(() => resolveOrgContext(undefined, false, { promptForOrg: false }));
+    expect(err.code).toBe('ORG_SELECTION_REQUIRED');
+    expect(err.details.orgs).toEqual([ACME, OTHER]);
+    expect(err.details.elicitation).toBeUndefined();
+  });
+
+  it('an org refusal that reaches the top uncaught is coded JSON on stdout (exit 3 for the pick, 1 otherwise), never a stack', async () => {
+    const { exitIfOrgRefusal } = await import('../../src/core/orgSelection');
+    const lines: string[] = [];
+    const log = spyOn(console, 'log').mockImplementation(((l: unknown) => { lines.push(String(l)); }) as never);
+    const codes: Array<number | undefined> = [];
+    const exit = spyOn(process, 'exit').mockImplementation(((c?: number) => { codes.push(c); return undefined as never; }) as never);
+    try {
+      exitIfOrgRefusal(new CapyError('pick', 'ORG_SELECTION_REQUIRED', { orgs: [ACME] }));
+      exitIfOrgRefusal(new CapyError('nope', 'ORG_NOT_FOUND', { orgs: [ACME] }));
+      expect(exitIfOrgRefusal(new Error('other'))).toBe(false);
+    } finally {
+      log.mockRestore();
+      exit.mockRestore();
+    }
+    expect(codes).toEqual([3, 1]);
+    expect(JSON.parse(lines[0])).toMatchObject({ ok: false, code: 'ORG_SELECTION_REQUIRED', orgs: [ACME] });
+    expect(JSON.parse(lines[1])).toMatchObject({ ok: false, code: 'ORG_NOT_FOUND' });
   });
 });

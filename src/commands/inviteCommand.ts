@@ -238,7 +238,7 @@ export class InviteCommand {
     // Under `--json` nothing prompts, even on a terminal (spec 3l).
     const interactive = isInteractive(opts.nonTty || opts.json);
     try {
-      const { orgId, userId, userEmail, serviceClient } = await resolveOrgContext(this.apiUrl, this.devMode);
+      const { orgId, userId, userEmail, serviceClient } = await resolveOrgContext(this.apiUrl, this.devMode, { promptForOrg: interactive });
 
       // Check if inviting yourself or an existing member
       if (userEmail && userEmail.toLowerCase() === email.toLowerCase()) {
@@ -403,6 +403,9 @@ export class InviteCommand {
         await promptCopyToClipboard(redeemCommand);
       }
     } catch (error) {
+      // Several organizations and nobody to ask (spec 3l): the coded JSON refusal with the org pick, not the error screen.
+      const { exitIfOrgRefusal } = await import('../core/orgSelection');
+      if (exitIfOrgRefusal(error)) return;
       const { displayErrorAndExit } = await import('../ui/errorScreen');
       await displayErrorAndExit(error);
     }

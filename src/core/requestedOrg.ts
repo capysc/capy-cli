@@ -12,3 +12,20 @@ export function setRequestedOrg(org: string | undefined): void {
 export function requestedOrg(): string | undefined {
   return typed;
 }
+
+/** What the running command accepts, for a rerun that adds `--org`: whether it takes `--org`, `--json` and `--non-tty`. */
+export interface CommandShape {
+  readonly org: boolean;
+  readonly json: boolean;
+  readonly nonTty: boolean;
+}
+
+let shape: CommandShape = { org: false, json: false, nonTty: false };
+
+export function setCommandShape(next: CommandShape): void {
+  shape = next;
+}
+
+export function commandShape(): CommandShape {
+  return shape;
+}

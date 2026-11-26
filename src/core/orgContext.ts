@@ -4,22 +4,39 @@ import { ServiceClient } from '../service/serviceClient';
 import { ProjectManager } from './projectManager';
 import { CapyError, ERROR_CODES } from '../types/index';
 import type { AuthResult, Organization } from '../types/index';
-import { formElicitation, rerunAdding, SHELL_SAFE_PATTERN } from '../commands/agentConfirm';
+import { ASK_FOR_CHOICE, formElicitation, rerunAdding, SHELL_SAFE_PATTERN } from '../commands/agentConfirm';
 import { isInteractive } from '../ui/interactive';
-import { requestedOrg } from './requestedOrg';
+import { commandShape, requestedOrg } from './requestedOrg';
 
 /** The terminal's question, shared with the form that asks it with nobody at a terminal (spec 3l). */
 export const ORG_QUESTION = 'Select organization:';
 
 
-/** The pick the terminal asks, as a form: one `org` field, the org ids labelled by name; the rerun adds `--org`. */
+/** This run's words without the `--org` typed, so the rerun sets it once. */
+function argvWithoutOrg(argv: readonly string[]): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === '--org') { i++; continue; }
+    if (argv[i].startsWith('--org=')) continue;
+    out.push(argv[i]);
+  }
+  return out;
+}
+
+/**
+ * The pick the terminal asks, as a form: one `org` field, the org ids labelled by name; the rerun is this command with
+ * `--org <org>`, ending in `--json` (or `--non-tty`) when the command takes it. A command with no `--org` gets none:
+ * there is nothing its rerun could carry, so the refusal lists the orgs only.
+ */
 export function orgElicitation(orgs: readonly Organization[], devMode: boolean) {
+  const shape = commandShape();
+  if (!shape.org) return undefined;
   return formElicitation({
     question: ORG_QUESTION,
     rows: [['Organizations', orgs.map((o) => o.name).join(', ')]], // COPY-FLAG
     details: { orgs: orgs.map((o) => ({ id: o.id, name: o.name })) },
     fields: [{ name: 'org', type: 'string', pattern: SHELL_SAFE_PATTERN, question: ORG_QUESTION, options: orgs.map((o) => ({ value: o.id, label: o.name })) }],
-    rerun: rerunAdding(devMode, '--org <org>'),
+    rerun: rerunAdding(devMode, '--org <org>', argvWithoutOrg(process.argv.slice(2)), shape.json ? '--json' : shape.nonTty ? '--non-tty' : ''),
   });
 }
 
@@ -98,9 +115,12 @@ async function chooseOrg(orgs: readonly Organization[], promptForOrg: boolean, c
 /** With several organizations and nobody to ask: the orgs, and the terminal's pick as a form (spec 3l). Exit 3. */
 function selectionRequired(orgs: readonly Organization[], devMode: boolean): CapyError {
   return new CapyError(
-    'More than one organization is available and this folder has none. Ask the human the elicitation\'s question.', // COPY-FLAG
+    `More than one organization is available and this folder has none. ${ASK_FOR_CHOICE}`, // COPY-FLAG
     ERROR_CODES.ORG_SELECTION_REQUIRED,
-    { orgs: orgs.map((o) => ({ id: o.id, name: o.name })), elicitation: orgElicitation(orgs, devMode) },
+    (() => {
+      const elicitation = orgElicitation(orgs, devMode);
+      return { orgs: orgs.map((o) => ({ id: o.id, name: o.name })), ...(elicitation === undefined ? {} : { elicitation }) };
+    })(),
   );
 }
 
@@ -108,12 +128,12 @@ function selectionRequired(orgs: readonly Organization[], devMode: boolean): Cap
  * `--org`, among the organizations the account belongs to: by id, else by name. A name two orgs share is the pick
  * again, of those two. Not one of them: ORG_NOT_FOUND. The membership itself still decides what the run may do.
  */
-function requestedAmong(orgs: readonly Organization[], wanted: string, devMode: boolean): string {
+async function requestedAmong(orgs: readonly Organization[], wanted: string, promptForOrg: boolean, devMode: boolean): Promise<string> {
   const byId = orgs.find((o) => o.id === wanted);
   if (byId) return byId.id;
   const byName = orgs.filter((o) => o.name === wanted);
   if (byName.length === 1) return byName[0].id;
-  if (byName.length > 1) throw selectionRequired(byName, devMode);
+  if (byName.length > 1) return chooseOrg(byName, promptForOrg, true, devMode);
   throw new CapyError(`You are not in an organization "${wanted}".`, ERROR_CODES.ORG_NOT_FOUND, { // COPY-FLAG
     orgs: orgs.map((o) => ({ id: o.id, name: o.name })),
   });
@@ -165,7 +185,7 @@ export async function resolveOrgContext(
   const orgId = folderOrgId
     ? folderOrgId
     : wanted !== undefined
-      ? requestedAmong(orgs, wanted, devMode)
+      ? await requestedAmong(orgs, wanted, promptForOrg, devMode)
       : await chooseOrg(orgs, promptForOrg, coded, devMode);
   const scoped = folderOrgId
     ? first

@@ -87,7 +87,7 @@ capy branch [options]
 | Option | Description | Default |
 |---|---|---|
 | `-D <name>` | Delete a branch |  |
-| `--yes` | skip the confirmation prompt |  |
+| `--yes` | the human's yes to the confirmation. An agent never adds it on its own: run without it to get the question to ask the human |  |
 | `--json` | emit machine-readable JSON instead of the human UI |  |
 | `--non-tty` | treat stdin as not a terminal; never prompt (agents/CI) |  |
 
@@ -353,7 +353,7 @@ capy agents [options]
 |---|---|---|
 | `--print` | print the block to stdout without writing anything |  |
 | `--remove` | remove the block from AGENTS.md / CLAUDE.md |  |
-| `-y, --yes` | skip the confirmation prompt (required non-interactively) |  |
+| `-y, --yes` | the human's yes to the confirmation. An agent never adds it on its own: run without it to get the question to ask the human |  |
 | `--non-tty` | never prompt; resolve from flags or fail fast (agents/CI) |  |
 | `--json` | emit machine-readable JSON instead of the human UI |  |
 
@@ -464,7 +464,7 @@ capy kick <email> [options]
 | Option | Description | Default |
 |---|---|---|
 | `--org <id|name>` | the organization, when your account has several and the folder has no keep.lock |  |
-| `--yes` | skip the confirmation question |  |
+| `--yes` | the human's yes to the confirmation. An agent never adds it on its own: run without it to get the question to ask the human |  |
 | `--non-tty` | same as --json: never ask, and answer in JSON (agents/CI) |  |
 | `--json` | emit machine-readable JSON instead of the human UI |  |
 
@@ -523,7 +523,7 @@ capy system rm <name> [options]
 | Option | Description | Default |
 |---|---|---|
 | `--org <id>` | org id, if you belong to more than one |  |
-| `--yes` | skip the confirmation prompt |  |
+| `--yes` | the human's yes to the confirmation. An agent never adds it on its own: run without it to get the question to ask the human |  |
 | `--json` | emit machine-readable JSON instead of the human UI |  |
 
 JSON support: yes (`--json`)
@@ -588,7 +588,7 @@ capy project delete <name-or-id> [options]
 |---|---|---|
 | `--org <id|name>` | the organization, when your account has several and the folder has no keep.lock |  |
 | `--force` | delete even if the project has live deploy tokens (those deploys stop on their next restart) |  |
-| `--yes` | skip the confirmation question |  |
+| `--yes` | the human's yes to the confirmation. An agent never adds it on its own: run without it to get the question to ask the human |  |
 | `--non-tty` | same as --json: never ask, and answer in JSON (agents/CI) |  |
 | `--json` | emit machine-readable JSON instead of the human UI |  |
 
@@ -607,7 +607,7 @@ capy project restore <name-or-id> [options]
 | Option | Description | Default |
 |---|---|---|
 | `--org <id|name>` | the organization, when your account has several and the folder has no keep.lock |  |
-| `--yes` | skip the confirmation question |  |
+| `--yes` | the human's yes to the confirmation. An agent never adds it on its own: run without it to get the question to ask the human |  |
 | `--non-tty` | same as --json: never ask, and answer in JSON (agents/CI) |  |
 | `--json` | emit machine-readable JSON instead of the human UI |  |
 
@@ -862,7 +862,7 @@ capy remove <vars...> [options]
 
 | Option | Description | Default |
 |---|---|---|
-| `-y, --yes` | skip the confirmation prompt (required non-interactively) |  |
+| `-y, --yes` | the human's yes to the confirmation. An agent never adds it on its own: run without it to get the question to ask the human |  |
 | `--json` | emit machine-readable JSON instead of the human UI |  |
 | `--non-tty` | never prompt; resolve from flags or fail fast (agents/CI) |  |
 | `--pr` | create a PR with the keep.lock change (answers the prompt) |  |

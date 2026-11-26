@@ -18,6 +18,7 @@
  * `EXIT_NEEDS_INPUT` (3), always in JSON, with a `confirm` elicitation and the
  * flag that would answer it in `unanswered` (CAP-909).
  */
+import { ASK_FOR_YES } from './agentConfirm';
 import { existsSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from 'fs';
 import { join, sep } from 'path';
 import { spawnSync } from 'child_process';
@@ -205,7 +206,7 @@ function refuseNeedsConfirmation(root: string, remove: boolean, devMode: boolean
   printJson({
     ok: false,
     code: ERROR_CODES.AGENTS_SETUP_NEEDS_TTY,
-    error: '`capy agents` needs a yes before it changes AGENTS.md / CLAUDE.md. Ask the human the elicitation\'s question.', // COPY-FLAG
+    error: `\`capy agents\` needs a yes before it changes AGENTS.md / CLAUDE.md. ${ASK_FOR_YES}`, // COPY-FLAG
     unanswered: [{ id: 'confirm', flag: '--yes' }],
     elicitation: agentsConfirmElicitation(files, remove, devMode),
   });
