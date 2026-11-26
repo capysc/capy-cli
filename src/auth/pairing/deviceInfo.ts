@@ -18,7 +18,7 @@ export interface PairingDeviceInfo {
   readonly system: string;
   /** e.g. `Capy CLI 0.9.18`: the name and version only, so Keep's Client row doesn't wrap. */
   readonly client: string;
-  /** CAP-920: a test or dev build's id, e.g. `20261126175046657.04f69f67`. Keep shows it as Client Build. Left out for a release build. */
+  /** CAP-920: the build id, e.g. `20261126175046657.04f69f67`. Keep shows it as Client Build. Left out when the CLI has none (run from source). */
   readonly client_build?: string;
   /** e.g. `Claude Code 2.1.332 (AI agent)`, `A person`, `A program (not interactive)`. */
   readonly requested_by: string;

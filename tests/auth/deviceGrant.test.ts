@@ -87,9 +87,9 @@ describe('authorizeDevice', () => {
     expect(dev.client).not.toContain('+');
     expect(dev.client).not.toContain('20261126175046657');
     expect(dev.client_build).toBe('20261126175046657.04f69f67');
-    const release = pairingDeviceInfo(input, null);
-    expect(release.client).toMatch(/^Capy CLI \S+$/);
-    expect('client_build' in release).toBe(false);
+    const fromSource = pairingDeviceInfo(input, null);
+    expect(fromSource.client).toMatch(/^Capy CLI \S+$/);
+    expect('client_build' in fromSource).toBe(false);
   });
 
   test('returns the authorize response on success', async () => {
