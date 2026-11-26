@@ -261,10 +261,24 @@ program
   .description('Switch to a secret branch')
   .option('-b, --create', 'Create the branch if it does not exist')
   .option('--protected', 'Mark as a protected branch (invite-only)')
+  .option('--no-protected', 'Create it open to the project')
+  .option('--json', 'describe the route of a create (-b) as JSON instead of travelling it')
   .option('--non-tty', 'treat stdin as not a terminal; differences from Capy stop the checkout with the conflict_id (agents/CI)') // COPY-FLAG
   .addOption(resolveOption())
   .addOption(conflictOption())
   .action(async (branch, options, command) => {
+    if (options.json && options.create) {
+      const { branchCreatePlan, unansweredStops } = await import('./core/branchCreatePlan');
+      const stops = branchCreatePlan({ branchName: branch, isProtected: options.protected });
+      const unanswered = unansweredStops(stops);
+      if (unanswered.includes('protection')) {
+        const { protectionRefusal } = await import('./commands/checkoutProtection');
+        console.log(JSON.stringify(protectionRefusal(branch, true, { stops, unanswered }), null, 2));
+        process.exit(3);
+      }
+      console.log(JSON.stringify({ stops, unanswered }, null, 2));
+      return;
+    }
     const { CheckoutCommand } = await import('./commands/checkoutCommand');
     const cmd = new CheckoutCommand(true);
     await cmd.execute(branch, {
@@ -621,6 +635,7 @@ program
       yes: options.yes,
       nonTty: options.nonTty,
       dryRun: command.optsWithGlobals().dryRun === true,
+      devMode: true,
     });
   });
 

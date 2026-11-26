@@ -327,7 +327,14 @@ program
       // typed; an untouched flag leaves it undefined, which is the difference
       // between "answered open" and "not answered".
       const stops = branchCreatePlan({ branchName: branch, isProtected: options.protected });
-      console.log(JSON.stringify({ stops, unanswered: unansweredStops(stops) }, null, 2));
+      const unanswered = unansweredStops(stops);
+      if (unanswered.includes('protection')) {
+        // Nobody can be asked here: the terminal's question goes to the human as an elicitation (spec 3l, CAP-909).
+        const { protectionRefusal } = await import('./commands/checkoutProtection');
+        console.log(JSON.stringify(protectionRefusal(branch, false, { stops, unanswered }), null, 2));
+        process.exit(3);
+      }
+      console.log(JSON.stringify({ stops, unanswered }, null, 2));
       return;
     }
 

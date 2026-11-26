@@ -11,6 +11,7 @@ import { hashValue } from './statusCommand';
 import { gateFirst, type GateOptions } from '../sync/gate';
 import { conflictFlagsOrExit, type RawConflictFlags } from '../sync/conflicts';
 import { pinnedHashes } from '../sync/commit';
+import { isInteractive } from '../ui/interactive';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -238,7 +239,7 @@ export class CheckoutCommand {
     }
 
     if (options.create) {
-      const created = await this.createBranch(projectId, branchName, options.protected);
+      const created = await this.createBranch(projectId, branchName, options.protected, options.nonTty);
       if (!created) {
         console.log('\nNo branch created.');
         return;
@@ -398,7 +399,14 @@ export class CheckoutCommand {
     projectId: string,
     branchName: string,
     isProtected: boolean | undefined,
+    nonTty?: boolean,
   ): Promise<{ name: string } | null> {
+    if (isProtected === undefined && !isInteractive(nonTty)) {
+      // Nobody to ask: stop before anything is created rather than open a prompt nobody can answer (CAP-909).
+      const { protectionNeedsFlagMessage } = await import('./checkoutProtection');
+      console.error(`\n  ${protectionNeedsFlagMessage(branchName)}\n`);
+      process.exit(3);
+    }
     const protect = isProtected ?? (await this.askProtected(branchName));
 
     const branchSpinner = ora(`Creating branch ${branchName}...`).start();

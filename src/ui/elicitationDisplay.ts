@@ -199,3 +199,20 @@ export function renameProjectDisplay(input: {
 export function chooseRepoDisplay(rows: ReadonlyArray<readonly [string, string]>): string {
   return table(['Project', 'Repo'], rows); // COPY-FLAG
 }
+
+/** The table for `capy agents` asking before it writes or removes its section: one row per file and what would happen to it. */
+export function agentsFilesDisplay(
+  files: ReadonlyArray<{ readonly path: string; readonly action: 'created' | 'updated' | 'unchanged' | 'removed' | 'absent' }>,
+  remove: boolean,
+): string {
+  // COPY-FLAG: minimal and neutral.
+  const outcome: Record<string, string> = {
+    created: 'Will be created with the Capy section',
+    updated: remove ? 'Capy section will be removed' : 'Capy section will be added or updated',
+    removed: 'Capy section will be removed',
+    unchanged: 'Already up to date',
+    absent: 'No Capy section',
+  };
+  if (files.length === 0) return table(['File', 'Change'], [['AGENTS.md / CLAUDE.md', 'none found in this repo']]);
+  return table(['File', 'Change'], files.map((f) => [f.path, outcome[f.action] ?? f.action] as const));
+}

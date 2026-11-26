@@ -45,6 +45,8 @@ const {
   removeAgentsBlockFromFiles,
   agentsBlockAlreadyPresent,
   offerAgentsSetupAfterInit,
+  WRITE_QUESTION,
+  REMOVE_QUESTION,
 } = await import('../../src/commands/agentsCommand');
 
 /** Sentinel thrown by the mocked `process.exit`, carrying the exit code — never lets a test actually exit the runner. */
@@ -401,27 +403,32 @@ describe('agentsCommand', () => {
       });
     });
 
-    it('TTY + confirmed yes + --json: writes and returns {ok:true, files:[...]}', async () => {
+    it('TTY + --json: agent mode never prompts; refuses with a confirm elicitation asking the terminal\'s question (CAP-909)', async () => {
       await withTempRootAsCwd(async (root) => {
         setTTY(true);
-        fakePrompt.mockImplementationOnce(async () => ({ confirmed: true }));
         const { exitCode, stdout } = await capture(() => agentsCommand({ json: true }));
-        expect(exitCode).toBeUndefined();
+        expect(exitCode).toBe(3);
+        expect(fakePrompt).not.toHaveBeenCalled();
         const payload = JSON.parse(stdout);
-        expect(payload).toEqual({ ok: true, files: [{ path: 'AGENTS.md', action: 'created' }, { path: 'CLAUDE.md', action: 'created' }] });
-        expect(existsSync(join(root, 'AGENTS.md'))).toBe(true);
-        // --json keeps stdout pure JSON, so the confirm prompt must not render there.
-        expect(createPromptModuleMock.mock.calls.length).toBeGreaterThan(0);
+        expect(payload).toMatchObject({ ok: false, code: 'AGENTS_SETUP_NEEDS_TTY', unanswered: [{ id: 'confirm', flag: '--yes' }] });
+        expect(payload.error).not.toContain('--yes');
+        expect(payload.elicitation).toMatchObject({
+          kind: 'confirm',
+          question: WRITE_QUESTION,
+          details: { files: [{ path: 'AGENTS.md', action: 'created' }, { path: 'CLAUDE.md', action: 'created' }] },
+          answer: { yes: 'capy agents --yes --json' },
+        });
+        expect(payload.elicitation.display).toContain('| AGENTS.md | Will be created with the Capy section |');
+        expect(existsSync(join(root, 'AGENTS.md'))).toBe(false);
       });
     });
 
-    it('TTY + declined: no write, {ok:false, code: CANCELLED} under --json', async () => {
+    it('TTY + declined (terminal): no write, Cancelled.', async () => {
       await withTempRootAsCwd(async (root) => {
         setTTY(true);
         fakePrompt.mockImplementationOnce(async () => ({ confirmed: false }));
-        const { stdout } = await capture(() => agentsCommand({ json: true }));
-        const payload = JSON.parse(stdout);
-        expect(payload).toMatchObject({ ok: false, code: 'CANCELLED' });
+        const { stdout } = await capture(() => agentsCommand({}));
+        expect(stdout).toContain('Cancelled.');
         expect(existsSync(join(root, 'AGENTS.md'))).toBe(false);
       });
     });
@@ -435,15 +442,25 @@ describe('agentsCommand', () => {
       });
     });
 
-    it('--remove, TTY confirmed: deletes the (Capy-created) file and reports via --json', async () => {
+    it('--remove, TTY confirmed (terminal): deletes the (Capy-created) file', async () => {
       await withTempRootAsCwd(async (root) => {
         writeAgentsBlock(root);
         setTTY(true);
         fakePrompt.mockImplementationOnce(async () => ({ confirmed: true }));
-        const { stdout } = await capture(() => agentsCommand({ remove: true, json: true }));
-        const payload = JSON.parse(stdout);
-        expect(payload).toEqual({ ok: true, files: [{ path: 'AGENTS.md', action: 'removed' }, { path: 'CLAUDE.md', action: 'removed' }] });
+        await capture(() => agentsCommand({ remove: true }));
         expect(existsSync(join(root, 'AGENTS.md'))).toBe(false);
+      });
+    });
+
+    it('--remove + --json: the confirm asks the remove question and answers with --remove --yes (CAP-909)', async () => {
+      await withTempRootAsCwd(async (root) => {
+        writeAgentsBlock(root);
+        setTTY(true);
+        const { exitCode, stdout } = await capture(() => agentsCommand({ remove: true, json: true, devMode: true }));
+        expect(exitCode).toBe(3);
+        const payload = JSON.parse(stdout);
+        expect(payload.elicitation).toMatchObject({ kind: 'confirm', question: REMOVE_QUESTION, answer: { yes: 'capy-dev agents --remove --yes --json' } });
+        expect(existsSync(join(root, 'AGENTS.md'))).toBe(true);
       });
     });
   });
