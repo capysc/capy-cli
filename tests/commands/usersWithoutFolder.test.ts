@@ -93,7 +93,7 @@ describe('in a folder with no keep.lock', () => {
     });
     const { UsersCommand } = await import('../../src/commands/usersCommand');
     const out = await capture(() => new UsersCommand().execute({ json: true }));
-    expect(out.exitCode).toBe(1);
+    expect(out.exitCode).toBe(3);
     expect(JSON.parse(out.stdout)).toMatchObject({ ok: false, code: 'ORG_SELECTION_REQUIRED', orgs });
   });
 

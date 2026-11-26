@@ -20,6 +20,7 @@
  */
 import inquirer from 'inquirer';
 import { resolveOrgContext } from '../core/orgContext';
+import { needsHumanYes } from './agentConfirm';
 import { excludeSystemProject } from '../system/reservedProjectName';
 import { isInteractive, EXIT_NEEDS_INPUT } from '../ui/interactive';
 import { CapyError, ERROR_CODES } from '../types/index';
@@ -127,7 +128,15 @@ export function refusalFor(err: unknown): Refusal {
     };
   }
   if (code === ERROR_CODES.ORG_SELECTION_REQUIRED) {
-    return { code, message: err.message, exitCode: EXIT_NEEDS_INPUT, extra: { orgs: Array.isArray(err.details?.orgs) ? err.details.orgs : [] } };
+    return {
+      code,
+      message: err.message,
+      exitCode: EXIT_NEEDS_INPUT,
+      extra: {
+        orgs: Array.isArray(err.details?.orgs) ? err.details.orgs : [],
+        ...(err.details?.elicitation === undefined ? {} : { elicitation: err.details.elicitation }),
+      },
+    };
   }
   return { code, message: err.message, exitCode: 1 };
 }
@@ -530,7 +539,7 @@ function emitDeleteOutcome(json: boolean, force: boolean, outcome: DeleteOutcome
   if (outcome.kind === 'needs-confirmation') {
     return refuse(json, {
       code: ERROR_CODES.CONFIRMATION_REQUIRED,
-      message: '`capy project delete` needs confirmation. Pass --yes, or run it in a terminal.', // COPY-FLAG
+      message: needsHumanYes('capy project delete'),
       exitCode: EXIT_NEEDS_INPUT,
       extra: { elicitation: outcome.elicitation },
       lines: outcome.lines,
@@ -622,7 +631,7 @@ function emitRestoreOutcome(json: boolean, outcome: RestoreOutcome): void {
   if (outcome.kind === 'needs-confirmation') {
     return refuse(json, {
       code: ERROR_CODES.CONFIRMATION_REQUIRED,
-      message: '`capy project restore` needs confirmation. Pass --yes, or run it in a terminal.', // COPY-FLAG
+      message: needsHumanYes('capy project restore'),
       exitCode: EXIT_NEEDS_INPUT,
       extra: { elicitation: outcome.elicitation },
     });

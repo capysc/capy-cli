@@ -51,7 +51,7 @@ describe('several organizations, no keep.lock, nobody to ask', () => {
     const { SecretsCommand } = await import('../../src/commands/secretsCommand');
     const out = await capture(() => new SecretsCommand().execute({ json: true }));
     expect(resolveOrgContext.mock.calls[0][2]).toEqual({ promptForOrg: false });
-    expect(out.exitCode).toBe(1);
+    expect(out.exitCode).toBe(3);
     expect(JSON.parse(out.stdout)).toEqual({ ok: false, code: 'ORG_SELECTION_REQUIRED', message: 'pick one', orgs: ORGS });
   });
 
@@ -59,7 +59,7 @@ describe('several organizations, no keep.lock, nobody to ask', () => {
     const { ProjectsCommand } = await import('../../src/commands/projectsCommand');
     const out = await capture(() => new ProjectsCommand().execute({ json: true }));
     expect(resolveOrgContext.mock.calls[0][2]).toEqual({ promptForOrg: false });
-    expect(out.exitCode).toBe(1);
+    expect(out.exitCode).toBe(3);
     expect(JSON.parse(out.stdout)).toEqual({ ok: false, code: 'ORG_SELECTION_REQUIRED', message: 'pick one', orgs: ORGS });
   });
 
@@ -67,7 +67,7 @@ describe('several organizations, no keep.lock, nobody to ask', () => {
     const { ProjectsCommand } = await import('../../src/commands/projectsCommand');
     const out = await capture(() => new ProjectsCommand().execute({}));
     expect(resolveOrgContext.mock.calls[0][2]).toEqual({ promptForOrg: false });
-    expect(out.exitCode).toBe(1);
+    expect(out.exitCode).toBe(3);
     expect(JSON.parse(out.stdout)).toEqual({ ok: false, code: 'ORG_SELECTION_REQUIRED', message: 'pick one', orgs: ORGS });
   });
 
@@ -75,7 +75,7 @@ describe('several organizations, no keep.lock, nobody to ask', () => {
     const { SecretsCommand } = await import('../../src/commands/secretsCommand');
     const out = await capture(() => new SecretsCommand().execute({}));
     expect(resolveOrgContext.mock.calls[0][2]).toEqual({ promptForOrg: false });
-    expect(out.exitCode).toBe(1);
+    expect(out.exitCode).toBe(3);
     expect(JSON.parse(out.stdout)).toEqual({ ok: false, code: 'ORG_SELECTION_REQUIRED', message: 'pick one', orgs: ORGS });
   });
 });
