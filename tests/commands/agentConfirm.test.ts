@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'bun:test';
-import { commandLine, confirmFromTerminalMessage, needsHumanYes, prFlagWords, rerunWith } from '../../src/commands/agentConfirm';
+import { answerLine, commandLine, folderWords, confirmFromTerminalMessage, needsHumanYes, prFlagWords, rerunWith } from '../../src/commands/agentConfirm';
 
 describe('agentConfirm (CAP-909)', () => {
   it('rerunWith repeats the typed command, sets each flag once, and ends with --json', () => {
@@ -28,5 +28,12 @@ describe('agentConfirm (CAP-909)', () => {
     expect(prFlagWords({ noPr: true })).toEqual(['--no-pr']);
     expect(prFlagWords({ pr: true, prBase: 'main' })).toEqual(['--pr', '--pr-base', 'main']);
     expect(prFlagWords(undefined)).toEqual([]);
+  });
+
+  it('answerLine repeats the typed --folder, so the yes acts on the same project', () => {
+    expect(answerLine(false, ['branch', '-D', 'staging', '--yes', '--json'], ['--folder', 'apps/api', 'branch', '-D', 'staging'])).toBe('capy --folder apps/api branch -D staging --yes --json');
+    expect(answerLine(true, ['system', 'rm', 'K', '--yes', '--json'], ['system', 'rm', 'K', '--folder=projA'])).toBe('capy-dev --folder projA system rm K --yes --json');
+    expect(answerLine(false, ['remove', 'X', '--yes', '--json'], ['remove', 'X'])).toBe('capy remove X --yes --json');
+    expect(folderWords(['remove', 'X', '--folder'])).toEqual([]);
   });
 });

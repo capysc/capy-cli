@@ -2181,6 +2181,10 @@ describe('dokploy import — --overwrite', () => {
     });
     expect(outcome.ok).toBe(false);
     expect((outcome as { code: string }).code).toBe('DOKPLOY_CONFIRMATION_REQUIRED');
+    // Spec 3l: the refusal carries the terminal's question as a confirm, answered by the same command with --yes.
+    const e = (outcome as { elicitation?: { kind: string; answer: { yes: string } } }).elicitation;
+    expect(e?.kind).toBe('confirm');
+    expect(e?.answer.yes.endsWith('--yes --json')).toBe(true);
   });
 
   test('--dry-run: shows the by-name lists, never prompts, and the caller writes nothing (Vince\'s rule)', async () => {

@@ -12,7 +12,7 @@
  * killing the runner) needs that throw to propagate rather than be caught a
  * second time by a surrounding try/catch and re-coded as a generic failure.
  */
-import { commandLine, confirmElicitation, needsHumanYes } from './agentConfirm';
+import { answerLine, confirmElicitation, needsHumanYes } from './agentConfirm';
 import inquirer from 'inquirer';
 import { isInteractive, EXIT_NEEDS_INPUT } from '../ui/interactive';
 import { openSystemStore, assertValidConnectorName } from '../system/systemStore';
@@ -195,7 +195,7 @@ export async function systemRmCommand(name: string, opts: SystemRmOpts): Promise
         question: removalQuestion(name),
         rows: [['Key', name], ...(opts.org !== undefined ? [['Org', opts.org] as const] : [])], // COPY-FLAG
         details: { name, ...(opts.org !== undefined ? { org: opts.org } : {}) },
-        yes: commandLine(opts.devMode === true, ['system', 'rm', name, ...(opts.org !== undefined ? ['--org', opts.org] : []), '--yes', '--json']),
+        yes: answerLine(opts.devMode === true, ['system', 'rm', name, ...(opts.org !== undefined ? ['--org', opts.org] : []), '--yes', '--json']),
       }),
     }, null, 2));
     process.exit(EXIT_NEEDS_INPUT);

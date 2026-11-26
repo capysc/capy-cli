@@ -22,6 +22,23 @@ export function commandLine(devMode: boolean, words: readonly string[]): string 
  * the end: the command that answers the question. A group's flag already typed is replaced, not repeated. `argv` is
  * the words after the binary.
  */
+/**
+ * The program-level `--folder` as typed (`--folder X` or `--folder=X`, before or after the subcommand), for an answer
+ * command built from scratch: without it the yes would run in the agent's own folder, on another project or org.
+ */
+export function folderWords(argv: readonly string[] = process.argv.slice(2)): string[] {
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === '--folder' && i + 1 < argv.length) return ['--folder', argv[i + 1]];
+    if (argv[i].startsWith('--folder=')) return ['--folder', argv[i].slice('--folder='.length)];
+  }
+  return [];
+}
+
+/** An answer command built from its words, repeating this run's `--folder` first so it acts on the same project. */
+export function answerLine(devMode: boolean, words: readonly string[], argv: readonly string[] = process.argv.slice(2)): string {
+  return commandLine(devMode, [...folderWords(argv), ...words]);
+}
+
 export function rerunWith(devMode: boolean, add: ReadonlyArray<readonly string[]>, argv: readonly string[] = process.argv.slice(2)): string {
   let words = argv.filter((w) => w !== '--json' && w !== '--non-tty');
   for (const group of add) {

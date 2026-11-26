@@ -291,6 +291,10 @@ describe('vercel import — conflicts, --var, --overwrite, --dry-run', () => {
     const { connector } = makeConnector();
     const out = await connector.import!(ctxWith({ localPlaintext: { LOCAL_ONLY: 'x' } }), { ...BASE_OPTS, overwrite: true });
     expect((out as { code: string }).code).toBe(ERROR_CODES.VERCEL_CONFIRMATION_REQUIRED);
+    // Spec 3l: the refusal carries the terminal's question as a confirm, answered by the same command with --yes.
+    const e = (out as { elicitation?: { kind: string; answer: { yes: string } } }).elicitation;
+    expect(e?.kind).toBe('confirm');
+    expect(e?.answer.yes.endsWith('--yes --json')).toBe(true);
   });
 
   test('--overwrite --yes: clears local-only names, replaces differing ones, imports new ones — and never clears a name Vercel has but will not show', async () => {

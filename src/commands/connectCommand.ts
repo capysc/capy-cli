@@ -260,7 +260,8 @@ export class ConnectCommand {
     const label = mod.displayName ?? 'Dokploy';
 
     if (!outcome.ok) {
-      printFailure(outcome, !!opts.json);
+      // A refusal that asks a question always answers in JSON: the elicitation is only there (spec 3l).
+      printFailure(outcome, !!opts.json || outcome.elicitation !== undefined);
       process.exitCode = exitCodeForRefusalCode(outcome.code);
       return { linked: false };
     }
@@ -373,7 +374,8 @@ export class ConnectCommand {
     const outcome = await mod.discover!(ctx, opts);
 
     if (!outcome.ok) {
-      printFailure(outcome, !!opts.json);
+      // A refusal that asks a question always answers in JSON: the elicitation is only there (spec 3l).
+      printFailure(outcome, !!opts.json || outcome.elicitation !== undefined);
       process.exitCode = exitCodeForRefusalCode(outcome.code);
       return { linked: false };
     }

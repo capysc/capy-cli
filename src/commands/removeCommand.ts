@@ -16,7 +16,7 @@ import inquirer from 'inquirer';
 import { ProjectManager } from '../core/projectManager';
 import { resolveContext, removeAndSync, listAllVarsOnBranch, ResolvedContext } from './connectors/shared';
 import { isInteractive, EXIT_NEEDS_INPUT } from '../ui/interactive';
-import { commandLine, confirmElicitation, needsHumanYes, prFlagWords } from './agentConfirm';
+import { answerLine, confirmElicitation, needsHumanYes, prFlagWords } from './agentConfirm';
 import { DRY_RUN_UNSUPPORTED_MESSAGES } from './pipedValue';
 import { listTargets } from '../deploy/config';
 import { CapyError, ERROR_CODES } from '../types/index';
@@ -240,7 +240,7 @@ export class RemoveCommand {
               question: confirmationMessage(names, branch, removingAll),
               rows: [['Branch', branch], ['Variables', names.join(', ')], ...(removingAll ? [['Note', 'this removes every variable on this branch'] as const] : [])], // COPY-FLAG
               details: { branch, variables: [...names], removing_all: removingAll },
-              yes: commandLine(this.devMode, ['remove', ...names, ...prFlagWords(opts.pr), '--yes', '--json']),
+              yes: answerLine(this.devMode, ['remove', ...names, ...prFlagWords(opts.pr), '--yes', '--json']),
             }),
           }),
           EXIT_NEEDS_INPUT,

@@ -16,7 +16,7 @@ import type { Branch } from '../types/index';
 import { CapyError, ERROR_CODES } from '../types/index';
 import { isInteractive, EXIT_NEEDS_INPUT } from '../ui/interactive';
 import { refuse, settle, type Refusal } from './projectLifecycleCommand';
-import { commandLine, confirmElicitation, needsHumanYes } from './agentConfirm';
+import { answerLine, confirmElicitation, needsHumanYes } from './agentConfirm';
 
 export interface BranchDeleteOpts {
   readonly yes?: boolean;
@@ -63,7 +63,7 @@ export function refuseNeedsConfirmation(name: string, devMode: boolean): never {
         question: deletePromptMessage(name),
         rows: [['Branch', name], ['Secrets', 'all of this branch\'s values are deleted']], // COPY-FLAG
         details: { branch: { name } },
-        yes: commandLine(devMode, ['branch', '-D', name, '--yes', '--json']),
+        yes: answerLine(devMode, ['branch', '-D', name, '--yes', '--json']),
       }),
     },
   });
