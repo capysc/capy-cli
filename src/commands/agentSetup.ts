@@ -453,17 +453,20 @@ async function actExisting(deps: AgentSetupDeps, setup: SetupOptions, ctx: RunCo
 
 /**
  * An existing project with no branch yet: its setup stopped after the project was made and before its first branch.
- * No `--branch`: the form asks for the first branch, as the terminal does. With one: the branch is created open to the
+ * No `--branch` (or answers given for a new project): the form asks for the first branch, as the terminal does. With one: the branch is created open to the
  * project (protection is a later, separate action, as in the terminal) and the folder is linked to it. Only a project
  * admin can create a branch; anyone else gets FIRST_BRANCH_NEEDS_ADMIN.
  */
 async function firstBranchOfExisting(deps: AgentSetupDeps, setup: SetupOptions, ctx: RunContext, project: ProjectRef): Promise<AgentOutcome> {
-  if (setup.branch === undefined) {
+  // A `--name` or `--protected` alongside means the answers were given for a new project, so the human has not seen this
+  // project's own first-branch question: ask it, and create nothing (CAP-909 review). Those answers are not carried over.
+  const answeredForNewProject = setup.name !== undefined || setup.protectedAnswer !== undefined;
+  if (setup.branch === undefined || answeredForNewProject) {
     return needsInput(setupForm({
       org: ctx.org,
       existingProject: project,
       gaps: { name: false, branch: true, isProtected: false },
-      answers: setup,
+      answers: answeredForNewProject ? { ...setup, name: undefined, protectedAnswer: undefined, branch: undefined } : setup,
       variables: ctx.env.variables,
       envPath: deps.options.envPath,
       dryRun: ctx.dryRun,

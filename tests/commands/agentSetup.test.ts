@@ -430,6 +430,35 @@ describe('an existing project', () => {
     expect(readFileSync(folder('.capy', 'branch'), 'utf-8').trim()).toBe('development');
   });
 
+  test('a project with no branches: the form shows that a first branch is made, open to the project', async () => {
+    fakeWorld({ projects: [{ id: 'proj-web', name: 'web', organization_id: ORG.id }] });
+    const out = await run({ project: 'web' });
+    expect(out.json!.elicitation.display).toContain('| First branch |');
+    expect(out.json!.elicitation.display).toContain('open to the project');
+  });
+
+  test('a project with no branches, and answers given for a new project (--name, --protected): its own first-branch question is asked, nothing is created (CAP-909 review)', async () => {
+    const calls = fakeWorld({ projects: [{ id: 'proj-web', name: 'web', organization_id: ORG.id }] });
+    const out = await run({ project: 'web', name: 'demo', branch: 'development', protectedAnswer: 'yes' });
+    expect(out.exitCode).toBe(3);
+    expect(out.json).toMatchObject({ ok: false, code: 'INIT_INPUT_REQUIRED' });
+    expect(fieldNames(out.json)).toEqual(['branch']);
+    const rerun: string = out.json!.elicitation.answer.rerun;
+    expect(rerun).toContain('--project web --branch <branch> --json');
+    expect(rerun).not.toContain('--protected');
+    expect(rerun).not.toContain('--name');
+    expect(calls.createBranch).not.toHaveBeenCalled();
+    expect(existsSync(folder('keep.lock'))).toBe(false);
+  });
+
+  test('a project with no branches, --branch and --dry-run: says what would happen, creates nothing', async () => {
+    const calls = fakeWorld({ projects: [{ id: 'proj-web', name: 'web', organization_id: ORG.id }] });
+    const out = await run({ project: 'web', branch: 'development' }, { dryRun: true });
+    expect(out.json).toMatchObject({ ok: true, dry_run: true, branch: { name: 'development' } });
+    expect(calls.createBranch).not.toHaveBeenCalled();
+    expect(existsSync(folder('keep.lock'))).toBe(false);
+  });
+
   test('a project with no branches, --branch, and not a project admin: FIRST_BRANCH_NEEDS_ADMIN, nothing linked', async () => {
     const calls = fakeWorld({ projects: [{ id: 'proj-web', name: 'web', organization_id: ORG.id }] });
     calls.createBranch.mockImplementation(async () => { throw new CapyError('Forbidden', ERROR_CODES.PERMISSION_DENIED, { status: 403 }); });

@@ -15,8 +15,8 @@
  * and `capy system rm`. `--non-tty` is accepted too (same meaning as every
  * other command's flag of that name: never prompt, even on a real TTY).
  * Without either, the refusal is coded `AGENTS_SETUP_NEEDS_TTY`, exits
- * `EXIT_NEEDS_INPUT` (3), and under `--json` names the flag that would answer
- * it via `unanswered`.
+ * `EXIT_NEEDS_INPUT` (3), always in JSON, with a `confirm` elicitation and the
+ * flag that would answer it in `unanswered` (CAP-909).
  */
 import { existsSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from 'fs';
 import { join, sep } from 'path';
@@ -190,30 +190,25 @@ export function agentsConfirmElicitation(files: readonly AgentsFileResult[], rem
 }
 
 /**
- * No terminal and no `--yes`: nothing is written. Under `--json` the refusal carries a `confirm` elicitation, so the
- * agent asks the human the terminal's own question instead of adding `--yes` itself. `unanswered` stays for older
- * callers. Off `--json` (a script, CI) the hint names the flag.
+ * No terminal (or `--json`) and no `--yes`: nothing is written. Like `capy kick`, agent mode answers in JSON even
+ * without `--json`, and the refusal carries a `confirm` elicitation, so the agent asks the human the terminal's own
+ * question instead of adding `--yes` itself (spec 3l, CAP-909). `unanswered` stays for older callers.
  */
-function refuseNeedsTty(json: boolean, root: string, remove: boolean, devMode: boolean): never {
-  if (json) {
-    let files: AgentsFileResult[];
-    try {
-      files = remove ? removeAgentsBlockFromFiles(root, false) : writeAgentsBlock(root, false);
-    } catch (err) {
-      if (err instanceof CapyError) refuseCapyError(err, json);
-      throw err;
-    }
-    printJson({
-      ok: false,
-      code: ERROR_CODES.AGENTS_SETUP_NEEDS_TTY,
-      error: '`capy agents` needs a yes before it changes AGENTS.md / CLAUDE.md. Ask the human the elicitation\'s question.', // COPY-FLAG
-      unanswered: [{ id: 'confirm', flag: '--yes' }],
-      elicitation: agentsConfirmElicitation(files, remove, devMode),
-    });
-  } else {
-    const message = '`capy agents` needs a terminal to confirm a write. Pass --yes to skip the prompt, or run `capy agents --print` to see the block without writing anything.'; // COPY-FLAG
-    console.error(`\n  ${message}\n`);
+function refuseNeedsConfirmation(root: string, remove: boolean, devMode: boolean): never {
+  let files: AgentsFileResult[];
+  try {
+    files = remove ? removeAgentsBlockFromFiles(root, false) : writeAgentsBlock(root, false);
+  } catch (err) {
+    if (err instanceof CapyError) refuseCapyError(err, true);
+    throw err;
   }
+  printJson({
+    ok: false,
+    code: ERROR_CODES.AGENTS_SETUP_NEEDS_TTY,
+    error: '`capy agents` needs a yes before it changes AGENTS.md / CLAUDE.md. Ask the human the elicitation\'s question.', // COPY-FLAG
+    unanswered: [{ id: 'confirm', flag: '--yes' }],
+    elicitation: agentsConfirmElicitation(files, remove, devMode),
+  });
   process.exit(EXIT_NEEDS_INPUT);
 }
 
@@ -362,7 +357,7 @@ export async function agentsCommand(opts: AgentsCommandOpts): Promise<void> {
   }
 
   if (opts.remove) {
-    if (!opts.yes && (json || !isInteractive(opts.nonTty))) refuseNeedsTty(json, root, true, opts.devMode === true);
+    if (!opts.yes && (json || !isInteractive(opts.nonTty))) refuseNeedsConfirmation(root, true, opts.devMode === true);
     const confirmed = opts.yes === true || (await confirmRemove(json));
     if (!confirmed) {
       if (json) printJson({ ok: false, code: ERROR_CODES.CANCELLED, error: 'Cancelled.' });
@@ -384,7 +379,7 @@ export async function agentsCommand(opts: AgentsCommandOpts): Promise<void> {
   }
 
   // Default mode: write/update.
-  if (!opts.yes && (json || !isInteractive(opts.nonTty))) refuseNeedsTty(json, root, false, opts.devMode === true);
+  if (!opts.yes && (json || !isInteractive(opts.nonTty))) refuseNeedsConfirmation(root, false, opts.devMode === true);
   const confirmed = opts.yes === true || (await confirmWrite(json));
   if (!confirmed) {
     if (json) printJson({ ok: false, code: ERROR_CODES.CANCELLED, error: 'Cancelled.' });

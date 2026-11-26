@@ -284,6 +284,7 @@ program
     await cmd.execute(branch, {
       create: options.create,
       protected: options.protected,
+      json: options.json === true,
       nonTty: options.nonTty === true,
       conflictFlags: rawConflictFlagsOf(command),
     });

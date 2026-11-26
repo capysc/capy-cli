@@ -187,6 +187,7 @@ export function setupForm(input: SetupFormInput): ElicitationForm {
       variables: input.variables,
       projectChoice: input.projects !== undefined,
       existingProject: input.existingProject !== undefined,
+      firstBranchOfExisting: input.existingProject !== undefined && input.gaps?.branch === true,
       branchDescription: BRANCH_DESCRIPTION,
     }),
     fields: fieldsOf(input),

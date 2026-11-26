@@ -32,7 +32,6 @@ export function protectionElicitation(branchName: string, devMode: boolean): Eli
       pattern: `^(${PROTECT_FLAG}|${OPEN_FLAG})$`,
       question: protectQuestion(branchName),
       description: 'A protected branch is invite-only; an open one is open to everyone on the project.', // COPY-FLAG
-      default: OPEN_FLAG, // the terminal's default is No
       options: [
         { value: PROTECT_FLAG, label: 'Yes' }, // COPY-FLAG
         { value: OPEN_FLAG, label: 'No' }, // COPY-FLAG
@@ -56,5 +55,5 @@ export function protectionRefusal(branchName: string, devMode: boolean, route: {
 
 /** Off a terminal, with no flag: the human-mode stop, naming the two flags. Exit 3. */
 export function protectionNeedsFlagMessage(branchName: string): string {
-  return `\`capy checkout -b ${branchName}\` needs ${PROTECT_FLAG} or ${OPEN_FLAG} when there is no terminal to ask.`; // COPY-FLAG
+  return `\`capy checkout ${shellWord(branchName)} -b\` has no terminal to ask whether the branch is protected. Run \`capy checkout ${shellWord(branchName)} -b --json\` to get the question for the human.`; // COPY-FLAG
 }

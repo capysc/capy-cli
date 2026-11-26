@@ -382,13 +382,24 @@ describe('agentsCommand', () => {
       });
     });
 
-    it('non-TTY, no --print, no --json: coded human refusal, exit 3, no write', async () => {
+    it('non-TTY, no --print, no --json: agent mode, so the same JSON refusal and confirm as --json, and nothing tells the agent to add --yes (CAP-909)', async () => {
       await withTempRootAsCwd(async (root) => {
         setTTY(false);
-        const { exitCode, stderr } = await capture(() => agentsCommand({}));
+        const { exitCode, stdout, stderr } = await capture(() => agentsCommand({}));
         expect(exitCode).toBe(3);
-        expect(stderr).toContain('needs a terminal');
+        const payload = JSON.parse(stdout);
+        expect(payload).toMatchObject({ ok: false, code: 'AGENTS_SETUP_NEEDS_TTY', elicitation: { kind: 'confirm', question: WRITE_QUESTION } });
+        expect(stdout + stderr).not.toContain('Pass --yes');
         expect(existsSync(join(root, 'AGENTS.md'))).toBe(false);
+      });
+    });
+
+    it('--remove confirm says a file holding nothing else is deleted', async () => {
+      await withTempRootAsCwd(async (root) => {
+        writeAgentsBlock(root);
+        setTTY(false);
+        const { stdout } = await capture(() => agentsCommand({ remove: true, json: true }));
+        expect(JSON.parse(stdout).elicitation.display).toContain('a file holding nothing else is deleted');
       });
     });
 
