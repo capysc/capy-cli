@@ -40,7 +40,17 @@ function printFailure(outcome: ConnectFailure, json: boolean): void {
 
 /** A refusal that only a flag (or a person) can answer exits `EXIT_NEEDS_INPUT`, so an agent branches on it; every other refusal exits 1. */
 function exitCodeForRefusalCode(code: string): number {
-  return code === 'DOKPLOY_SETTINGS_MISSING' || code === 'DOKPLOY_CONFIRMATION_REQUIRED' || code === ERROR_CODES.VERCEL_CONFIRMATION_REQUIRED ? EXIT_NEEDS_INPUT : 1;
+  return [
+    'DOKPLOY_SETTINGS_MISSING',
+    'DOKPLOY_CONFIRMATION_REQUIRED',
+    'DOKPLOY_TARGET_AMBIGUOUS',
+    ERROR_CODES.VERCEL_CONFIRMATION_REQUIRED,
+    ERROR_CODES.VERCEL_TEAM_REQUIRED,
+    ERROR_CODES.VERCEL_PROJECT_REQUIRED,
+    ERROR_CODES.VERCEL_ENVIRONMENT_REQUIRED,
+  ].includes(code)
+    ? EXIT_NEEDS_INPUT
+    : 1;
 }
 
 /**

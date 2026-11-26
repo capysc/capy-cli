@@ -131,6 +131,13 @@ describe('vercel import — token and request shape', () => {
     const { connector } = makeConnector();
     const out = await connector.import!(ctxWith(), { nonTty: true, tokenEnv: 'T' });
     expect((out as { code: string }).code).toBe(ERROR_CODES.VERCEL_PROJECT_REQUIRED);
+    // Spec 3l: the terminal's typed question, as a form; the message names no flag.
+    const e = (out as { elicitation?: { kind: string; fields: Array<{ name: string; question?: string; options?: Array<{ value: string }> }>; answer: { rerun: string } } }).elicitation;
+    expect(e?.kind).toBe('form');
+    expect(e?.fields.map((f) => f.name)).toEqual(['project']);
+    expect(e?.fields[0].question).toBe('Vercel project (id or name):');
+    expect(e?.answer.rerun).toMatch(/ --project <project> --json$/);
+    expect((out as { message: string }).message).not.toContain('--project');
   });
 });
 
@@ -158,6 +165,11 @@ describe('vercel import — team resolution', () => {
     expect((out as { message: string }).message).toContain('acme');
     expect((out as { message: string }).message).toContain('beta');
     expect(callsOf(fetchMock).map((c) => new URL(c.url).pathname)).toEqual(['/v2/teams']);
+    const e = (out as { elicitation?: { kind: string; fields: Array<{ name: string; question?: string; options?: Array<{ value: string }> }>; answer: { rerun: string } } }).elicitation;
+    expect(e?.kind).toBe('form');
+    expect(e?.fields[0].question).toBe('Which Vercel team:');
+    expect(e?.fields[0].options?.map((o) => o.value)).toEqual(['acme', 'beta']);
+    expect(e?.answer.rerun).toMatch(/ --team <team> --json$/);
   });
 
   test('several teams + --team <slug>: that team; --team nope: VERCEL_TEAM_NOT_FOUND', async () => {
@@ -235,6 +247,19 @@ describe('vercel import — environment mapping and skips', () => {
     const { connector } = makeConnector();
     const out = await connector.import!(ctxWith({ branch: 'main' }), BASE_OPTS);
     expect((out as { code: string }).code).toBe(ERROR_CODES.VERCEL_ENVIRONMENT_REQUIRED);
+    const e = (out as { elicitation?: { kind: string; fields: Array<{ name: string; question?: string; options?: Array<{ value: string }> }>; answer: { rerun: string } } }).elicitation;
+    expect(e?.kind).toBe('form');
+    expect(e?.fields[0].name).toBe('environment');
+    expect((e?.fields[0].options ?? []).length).toBeGreaterThan(0);
+    expect(e?.answer.rerun).toMatch(/ --environment <environment> --json$/);
+  });
+
+  test('at a terminal: VERCEL_ENVIRONMENT_REQUIRED stays the plain refusal naming --environment, with no form', async () => {
+    const { connector } = makeConnector();
+    const out = await withTTY(() => connector.import!(ctxWith({ branch: 'main' }), { ...BASE_OPTS, nonTty: false }));
+    expect((out as { code: string }).code).toBe(ERROR_CODES.VERCEL_ENVIRONMENT_REQUIRED);
+    expect(out).not.toHaveProperty('elicitation');
+    expect((out as { message: string }).message).toContain('--environment');
   });
 
   test('--environment that does not exist: VERCEL_ENVIRONMENT_NOT_FOUND, listing what does', async () => {

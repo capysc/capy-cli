@@ -443,6 +443,8 @@ describe('the single-service non-TTY refusal is structured, like every other Dok
         { id: 'base_url', flag: '--base-url', hint: 'your Dokploy dashboard URL, e.g. https://dokploy.example.com' },
         { id: 'service', flag: '--application', alternative: '--compose', hint: expect.any(String) },
       ],
+      // Spec 3l: the terminal's questions, as a form.
+      elicitation: expect.objectContaining({ kind: 'form' }),
     });
   });
 
@@ -475,12 +477,12 @@ describe('the single-service non-TTY refusal is structured, like every other Dok
     expect(JSON.parse(r.out[0])).toMatchObject({ ok: false, code: 'DOKPLOY_SETTINGS_MISSING', unanswered: [{ id: 'base_url', flag: '--base-url' }, { id: 'service' }] });
   });
 
-  test('human mode: the error and each hint on stderr, nothing on stdout, exit 3', async () => {
+  test('no terminal and no --json: still JSON, because the form is only there (spec 3l), exit 3', async () => {
     const r = await printed({});
     expect(r.exitCode).toBe(3);
-    expect(r.out).toEqual([]);
-    expect(r.err).toContain('--base-url');
-    expect(r.err).toContain('https://dokploy.example.com');
+    const body = JSON.parse(r.out[0]);
+    expect(body).toMatchObject({ ok: false, code: 'DOKPLOY_SETTINGS_MISSING', unanswered: [{ id: 'base_url', flag: '--base-url' }, { id: 'service' }] });
+    expect(body.elicitation.fields.map((f: { name: string }) => f.name)).toEqual(['base_url', 'source', 'service_id']);
   });
 
   test('another refusal still exits 1', async () => {

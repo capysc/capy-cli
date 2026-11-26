@@ -32,7 +32,8 @@
  * how you refresh it, and `capy rotate` refuses on a dokploy-managed var
  * (see `rotateCommand.ts`).
  */
-import { confirmFromTerminalMessage, needsHumanYes } from '../agentConfirm';
+import { SHELL_SAFE_PATTERN, confirmFromTerminalMessage, formElicitation, needsHumanChoice, needsHumanYes, rerunAdding, shellWord } from '../agentConfirm';
+import type { ElicitationField, ElicitationForm } from '../../ui/elicitation';
 import { TargetConfig } from '../../deploy/adapter';
 import { dokployKeyHelp, keyHelpFields } from '../../deploy/keyHelp';
 import { baseUrlProblem } from '../../deploy/adapters/dokploy';
@@ -457,10 +458,88 @@ async function defaultSelectVars(candidates: readonly string[]): Promise<readonl
   return picked;
 }
 
+// The terminal's questions, shared with the forms that ask them with nobody at a terminal (spec 3l).
+const TARGET_QUESTION = 'Which Dokploy deploy target:';
+const BASE_URL_QUESTION = 'Dokploy URL:';
+// COPY-FLAG: new user-facing string, minimal/neutral wording.
+const SOURCE_QUESTION = 'Import from a Dokploy Application or a Compose service:';
+// COPY-FLAG: new user-facing string, minimal/neutral wording.
+const SERVICE_ID_QUESTION = 'Dokploy application or compose service ID:';
+// COPY-FLAG: new user-facing string, minimal/neutral wording.
+const PICK_LEAD: Readonly<Record<string, string>> = {
+  DOKPLOY_TARGET_AMBIGUOUS: 'Several Dokploy deploy targets are configured. ',
+  DOKPLOY_SETTINGS_MISSING: 'No Dokploy settings found. ',
+};
+const URL_PATTERN = '^https?://[A-Za-z0-9._:/@%+=,-]+$';
+
+/**
+ * A saved target's flags, as one option value: the rerun with them reads what the terminal pick would. A flag already
+ * given (typed, or the org's stored base URL) wins over the target in the terminal, so it is left out here too. A target
+ * whose flags would need quoting is not offered.
+ */
+function targetFlags(t: TargetConfig, opts: ConnectOpts): string | undefined {
+  const o = t.options as DokployTargetOptions;
+  const words = [
+    ...(opts.baseUrl?.trim() ? [] : o.baseUrl ? ['--base-url', o.baseUrl] : [undefined]),
+    ...(opts.application?.trim() ? [] : o.applicationId ? ['--application', o.applicationId] : [undefined]),
+    ...(opts.tokenEnv?.trim() || !o.tokenEnv ? [] : ['--token-env', o.tokenEnv]),
+  ];
+  if (words.length === 0 || words.some((w) => w === undefined || !SAFE_WORD.test(w))) return undefined;
+  return words.join(' ');
+}
+
+const SAFE_WORD = /^[A-Za-z0-9._:/@%+=,-]+$/;
+const FLAGS_PATTERN = '^--[a-z-]+ [A-Za-z0-9._:/@%+=,-]+( --[a-z-]+ [A-Za-z0-9._:/@%+=,-]+)*$';
+
+/** `DOKPLOY_TARGET_AMBIGUOUS` / `DOKPLOY_SETTINGS_MISSING` with nobody to ask: the terminal's pick or questions, as a form. */
+export function settingsElicitation(code: string, opts: ConnectOpts, targets: readonly TargetConfig[]): ElicitationForm | undefined {
+  const devMode = !!opts.devMode;
+  if (code === 'DOKPLOY_TARGET_AMBIGUOUS') {
+    const options = targets.flatMap((t) => {
+      const value = targetFlags(t, opts);
+      return value === undefined ? [] : [{ value, label: t.name }];
+    });
+    if (options.length === 0) return undefined;
+    return formElicitation({
+      question: TARGET_QUESTION,
+      rows: [['Dokploy deploy targets', options.map((o) => o.label).join(', ')]], // COPY-FLAG
+      details: { targets: options.map((o) => o.label) },
+      fields: [{ name: 'target', type: 'string', pattern: FLAGS_PATTERN, question: TARGET_QUESTION, options }],
+      rerun: rerunAdding(devMode, '<target>'),
+    });
+  }
+  if (code !== 'DOKPLOY_SETTINGS_MISSING') return undefined;
+  const needsBaseUrl = !opts.baseUrl?.trim();
+  const needsService = !opts.application?.trim() && !opts.compose?.trim();
+  if (!needsBaseUrl && !needsService) return undefined;
+  const fields: ElicitationField[] = [
+    ...(needsBaseUrl ? [{ name: 'base_url', type: 'string' as const, pattern: URL_PATTERN, question: BASE_URL_QUESTION }] : []),
+    ...(needsService
+      ? [
+          {
+            name: 'source',
+            type: 'string' as const,
+            pattern: '^(--application|--compose)$',
+            question: SOURCE_QUESTION,
+            options: [{ value: '--application', label: 'Application' }, { value: '--compose', label: 'Compose service' }], // COPY-FLAG
+          },
+          { name: 'service_id', type: 'string' as const, pattern: SHELL_SAFE_PATTERN, question: SERVICE_ID_QUESTION },
+        ]
+      : []),
+  ];
+  return formElicitation({
+    question: fields[0].question ?? BASE_URL_QUESTION,
+    rows: [['Dokploy URL', needsBaseUrl ? 'to type' : (opts.baseUrl ?? '').trim()], ['Service', needsService ? 'to choose' : (opts.application ?? opts.compose ?? '').trim()]], // COPY-FLAG
+    details: {},
+    fields,
+    rerun: rerunAdding(devMode, [...(needsBaseUrl ? ['--base-url <base_url>'] : []), ...(needsService ? ['<source> <service_id>'] : [])].join(' ')),
+  });
+}
+
 async function defaultPickTarget(names: readonly string[]): Promise<string> {
   const inquirer = (await import('inquirer')).default;
   const { picked } = await inquirer.prompt([
-    { type: 'list', name: 'picked', message: 'Which Dokploy deploy target:', choices: [...names] },
+    { type: 'list', name: 'picked', message: TARGET_QUESTION, choices: [...names] },
   ]);
   return picked;
 }
@@ -471,7 +550,7 @@ async function defaultAskSettings(): Promise<{ baseUrl: string; applicationId: s
     {
       type: 'input',
       name: 'baseUrl',
-      message: 'Dokploy URL:',
+      message: BASE_URL_QUESTION,
       validate: (v: string) => baseUrlProblem(v) ?? true,
       filter: (v: string) => v.trim(),
     },
@@ -492,7 +571,7 @@ async function defaultAskComposeSettings(): Promise<{ baseUrl: string; composeId
     {
       type: 'input',
       name: 'baseUrl',
-      message: 'Dokploy URL:',
+      message: BASE_URL_QUESTION,
       validate: (v: string) => baseUrlProblem(v) ?? true,
       filter: (v: string) => v.trim(),
     },
@@ -514,7 +593,7 @@ async function defaultAskSourceKind(): Promise<'application' | 'compose'> {
     {
       type: 'list',
       name: 'kind',
-      message: 'Import from a Dokploy Application or a Compose service:',
+      message: SOURCE_QUESTION,
       choices: [
         { name: 'Application', value: 'application' },
         { name: 'Compose service', value: 'compose' },
@@ -783,14 +862,23 @@ export function createDokployConnector(deps: DokployConnectorDeps = {}): Connect
       // CAP-703: with no `--base-url`, the org system variable (`_CONNECTOR_DOKPLOY_BASE_URL`) comes before a saved
       // target and the interactive ask - the same shared resolver, read-only here (the discover commands save it).
       const storedBaseUrl = await storedBaseUrlFor(opts, ctx.orgId, deps.openBaseUrlStore);
-      const settings = await resolveDokployImportSource(storedBaseUrl === undefined ? opts : { ...opts, baseUrl: storedBaseUrl }, dokployTargets, interactive, {
+      // Under `--json` nothing prompts, even on a terminal (spec 3l): the refusal carries the question instead.
+      const settings = await resolveDokployImportSource(storedBaseUrl === undefined ? opts : { ...opts, baseUrl: storedBaseUrl }, dokployTargets, interactive && !opts.json, {
         pickTarget,
         askSettings,
         askComposeSettings,
         askSourceKind,
       });
       if (!settings.ok) {
-        return { ok: false, code: settings.code, message: settings.message, ...(settings.unanswered === undefined ? {} : { unanswered: settings.unanswered }) };
+        // Spec 3l: what the terminal would ask here, as a form (the message then names no flag).
+        const elicitation = settingsElicitation(settings.code, storedBaseUrl === undefined ? opts : { ...opts, baseUrl: storedBaseUrl }, dokployTargets);
+        return {
+          ok: false,
+          code: settings.code,
+          message: elicitation === undefined ? settings.message : `${PICK_LEAD[settings.code] ?? ''}${needsHumanChoice('capy connect dokploy')}`,
+          ...(settings.unanswered === undefined ? {} : { unanswered: settings.unanswered }),
+          ...(elicitation === undefined ? {} : { elicitation }),
+        };
       }
       const { baseUrl, source, tokenEnv } = settings;
 
