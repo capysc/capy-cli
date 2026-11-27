@@ -7,7 +7,7 @@
  * where an answer goes.
  */
 import type { ElicitationField, ElicitationForm } from '../ui/elicitation';
-import { SETUP_SHARING_QUESTION, SHARE_CHOICE, THIS_FOLDER_CHOICE, FOLDER_QUESTION } from '../ui/projectSetup';
+import { SETUP_SHARING_QUESTION, SHARE_CHOICE, THIS_FOLDER_CHOICE, FOLDER_QUESTION, type ProjectSubfolder } from '../ui/projectSetup';
 import { setupDisplay } from '../ui/elicitationDisplay';
 import type { SetupAnswers } from '../types/index';
 import { BRANCH_DESCRIPTION, BRANCH_NAME_PATTERN_SOURCE, DEFAULT_FIRST_BRANCH, FIRST_BRANCH_QUESTION } from '../core/branchNameRule';
@@ -52,10 +52,10 @@ export interface SetupFormInput {
   readonly askShare?: boolean;
 }
 
-/** The folder question's choices: this folder (its full path) and up to two subfolders, by their names. */
+/** The folder question's choices: this folder (its full path) and up to two subfolders, with what marks each. */
 export interface FolderChoices {
   readonly here: string;
-  readonly subfolders: readonly string[];
+  readonly subfolders: readonly ProjectSubfolder[];
 }
 
 /** What the encrypt confirm names: asked once the project's name and first branch are known, as the terminal asks it. */
@@ -212,7 +212,8 @@ function folderField(choices: FolderChoices): ElicitationField {
     description: 'Capy sets up the folder you choose: its .env, and keep.lock.', // COPY-FLAG
     options: [
       { value: '.', label: THIS_FOLDER_CHOICE, description: choices.here },
-      ...choices.subfolders.map((name) => ({ value: name, label: `${name}/`, description: 'Holds a .env or a package file' })), // COPY-FLAG
+      // What each holds, so the human can tell the folder with the .env from one with only a package file (run 17).
+      ...choices.subfolders.map(({ name, marker }) => ({ value: name, label: `${name}/`, description: marker === '.env' ? 'Has a .env' : `Has a ${marker}, no .env` })), // COPY-FLAG
     ],
     other: true,
   };
@@ -283,7 +284,7 @@ export function setupForm(input: SetupFormInput): ElicitationForm {
     kind: 'form',
     question: 'How should Capy set up this folder?', // COPY-FLAG
     details: {
-      ...(input.folderChoices === undefined ? {} : { folder: { here: input.folderChoices.here, subfolders: input.folderChoices.subfolders } }),
+      ...(input.folderChoices === undefined ? {} : { folder: { here: input.folderChoices.here, subfolders: input.folderChoices.subfolders.map((s) => s.name) } }),
       ...(input.org === undefined ? {} : { org: { id: input.org.id, name: input.org.name } }),
       ...(input.orgChoices === undefined ? {} : { orgs: input.orgChoices.map((o) => ({ id: o.id, name: o.name })) }),
       ...(input.projects === undefined ? {} : { projects: input.projects.map((p) => ({ id: p.id, name: p.name })) }),

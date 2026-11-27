@@ -77,16 +77,26 @@ export async function chooseSetupSharing(folder: string, human: boolean): Promis
 /** Files that mark a folder as a project, besides a `.env`. */
 const PROJECT_MARKERS: readonly string[] = ['.env', 'package.json', 'pyproject.toml', 'requirements.txt', 'go.mod', 'Cargo.toml', 'Gemfile', 'composer.json'];
 
+/** A subfolder that looks like a project, and the first marker file it holds (`.env` when it has one). */
+export interface ProjectSubfolder {
+  readonly name: string;
+  readonly marker: string;
+}
+
 /**
- * The subfolders of `folder` that look like a project (they hold a `.env` or a package file), by name, at most `limit`,
- * in name order. Read-only; skips hidden folders and node_modules, as the terminal's picker does.
+ * The subfolders of `folder` that look like a project (they hold a `.env` or a package file), at most `limit`: those
+ * with a `.env` first, since that is what setup encrypts, then by name. Read-only; skips hidden folders and
+ * node_modules, as the terminal's picker does.
  */
-export function projectSubfolders(folder: string, limit: number): readonly string[] {
+export function projectSubfolders(folder: string, limit: number): readonly ProjectSubfolder[] {
   return readdirSync(folder, { withFileTypes: true })
     .filter(entry => entry.isDirectory() && !entry.name.startsWith('.') && entry.name !== 'node_modules')
     .map(entry => entry.name)
     .filter(name => /^[A-Za-z0-9_@%+=:,.-]+$/.test(name))
-    .filter(name => PROJECT_MARKERS.some(marker => statSync(join(folder, name, marker), { throwIfNoEntry: false }) !== undefined))
-    .sort()
+    .flatMap(name => {
+      const marker = PROJECT_MARKERS.find(m => statSync(join(folder, name, m), { throwIfNoEntry: false }) !== undefined);
+      return marker === undefined ? [] : [{ name, marker }];
+    })
+    .sort((a, b) => Number(b.marker === '.env') - Number(a.marker === '.env') || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
     .slice(0, limit);
 }
