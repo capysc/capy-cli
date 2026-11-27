@@ -13,9 +13,6 @@ import { displayAndConfirmRecoveryPhrase } from '../ui/recoveryPhrase';
 /** The CLI's cap. */
 export const MAX_ORG_NAME_LENGTH = 100;
 
-/** Whether an organization name is free. A verdict, never a sentence to be parsed. */
-type OrgNameVerdict = 'available' | 'taken' | 'unreachable';
-
 // (recovery-phrase display + confirm lives in ../ui/recoveryPhrase)
 
 function keyServiceOpsFromClient(serviceClient: ServiceClient): KeyServiceOps {
@@ -25,49 +22,27 @@ function keyServiceOpsFromClient(serviceClient: ServiceClient): KeyServiceOps {
   };
 }
 
-/**
- * Is this name free?
- *
- * A verdict rather than a sentence, so nothing downstream decides anything by
- * reading prose. `unreachable` is its own answer because the CLI swallows a
- * failed check and carries on as though the name were free — which is a real
- * behaviour with a real consequence (the collision reappears as a 409 after
- * the recovery phrase has been shown), not a silence.
- */
-async function checkOrgNameAvailable(
-  authService: AuthService,
-  name: string,
-): Promise<OrgNameVerdict> {
-  try {
-    const { available } = await authService.checkOrgName(name);
-    return available ? 'available' : 'taken';
-  } catch {
-    return 'unreachable';
-  }
-}
-
-/** Shared name check, used by the TTY prompt. */
-async function validateOrgName(authService: AuthService, input: string): Promise<true | string> {
+// Shared name check, used by the TTY prompt. No "is this name taken" pre-check here (CAP-924): the service answers that
+// only for a signed-in user, and this prompt runs before the CLI holds an
+// access token. A taken name comes back as a 409 from create-org, which asks
+// for another name and keeps the same recovery phrase.
+function validateOrgName(input: string): true | string {
   const trimmed = input.trim();
   if (trimmed.length === 0) return 'Organization name cannot be empty';
   if (trimmed.length > MAX_ORG_NAME_LENGTH) {
     return `Organization name must be ${MAX_ORG_NAME_LENGTH} characters or fewer`;
   }
-  if ((await checkOrgNameAvailable(authService, trimmed)) === 'taken') {
-    return `"${trimmed}" is already taken. Org names must be unique to prevent impersonation — try a variant (e.g. "${trimmed} HQ", "${trimmed} Labs").`;
-  }
   return true;
 }
 
-export async function promptForAvailableOrgName(
-  authService: AuthService,
+export async function promptForOrgName(
   promptMessage = 'Organization name:',
 ): Promise<string> {
   const { orgName } = await inquirer.prompt([{
     type: 'input',
     name: 'orgName',
     message: promptMessage,
-    validate: (input: string) => validateOrgName(authService, input),
+    validate: (input: string) => validateOrgName(input),
   }]);
   return orgName.trim();
 }
@@ -102,7 +77,7 @@ export async function createNewOrganization(
   // after they had already written the first one down.
   const seedPhrase = generateSeedPhrase();
 
-  const orgName = await promptForAvailableOrgName(authService);
+  const orgName = await promptForOrgName();
   await displayAndConfirmRecoveryPhrase(seedPhrase, ORG_PHRASE_BOX);
 
   return createOrganizationNamed({ authService, serviceClient, refreshToken, userId, seedPhrase }, orgName);
@@ -136,8 +111,7 @@ async function createOrganizationNamed(
     orgSpinner.fail('Failed to create organization');
     if (err && err.status === 409) {
       console.log('');
-      const nextName = await promptForAvailableOrgName(
-        authService,
+      const nextName = await promptForOrgName(
         'That name was claimed while you were setting up. Pick another:',
       );
       return createOrganizationNamed(ctx, nextName);
