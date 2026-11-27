@@ -224,8 +224,11 @@ Good when you want to see drift across the whole branch, edit one variable witho
 
 ### Pairing from an agent
 
-Run `capy pair --json` without asking the human anything first, and add no
-flags. On a machine with no keys yet it asks for keys, and Keep decides after
+Run `capy pair --title "<what you are doing and why>" --description "<what you
+will do once approved>" --json`, in your own words, without asking the human
+anything first, and add no other flags. Keep shows the title and description to
+the human on the unlock request; `capy setup` takes the same two flags and
+refuses to start a pairing without them (`SETUP_INTENT_REQUIRED`). On a machine with no keys yet it asks for keys, and Keep decides after
 sign-in: an existing user approves the handover of their organization's keys,
 and a new user signs up, which creates the organization. It asks for the
 pairing, saves it, and exits

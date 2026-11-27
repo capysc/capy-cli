@@ -738,7 +738,7 @@ program
   .option('--org <id>', 'prefer this organization when your account has several and the folder does not say (no keep.lock); the organization you approve in Keep decides') // COPY-FLAG
   .option('--title <text>', 'short summary of why you are pairing, shown as the Keep pairing heading (max 120 chars)') // COPY-FLAG
   .option('--description <text>', 'what you will do once paired, shown under it on the Keep pairing page (max 600 chars)') // COPY-FLAG
-  .addHelpText('after', '\nIn a terminal, after you approve in Keep: Enter the code shown in Keep.\nAgents: run `capy pair --json` without asking anything first, write the url as a clickable link, with the code, fingerprint and expires_at, as plain text (the QR is only an addition), then run `capy pair --wait`. Do the same for every renewed link (PAIR_LINK_RENEWED). When it answers PAIR_CODE_REQUIRED, ask the human for the code Keep shows and run `capy pair --wait --code <code>`. Never fill in the code yourself.\n') // COPY-FLAG
+  .addHelpText('after', '\nIn a terminal, after you approve in Keep: Enter the code shown in Keep.\nAgents: run `capy pair --title "<what you are doing and why>" --description "<what you will do once approved>" --json`, in your own words (Keep shows them on the unlock request), without asking anything first, write the url as a clickable link, with the code, fingerprint and expires_at, as plain text (the QR is only an addition), then run `capy pair --wait`. Do the same for every renewed link (PAIR_LINK_RENEWED). When it answers PAIR_CODE_REQUIRED, ask the human for the code Keep shows and run `capy pair --wait --code <code>`. Never fill in the code yourself.\n') // COPY-FLAG
   .action(async (options, command) => {
     assertNotLocalOnly('pair');
     const { pairEntry } = await import('./commands/pairEntry');
@@ -751,6 +751,8 @@ program
   .command('setup')
   .description('Set this folder up with Capy in one command, for agents: pair, choose the organization, project and branch, write the agent instructions, and list the integrations found. Always answers in JSON; run it again after every stop until it says "setup": "complete"') // COPY-FLAG
   .option('--code <code>', 'the one-time code Keep shows the person who approved the pairing; ask them for it') // COPY-FLAG
+  .option('--title <text>', 'your short summary of what you are setting up and why, shown to the human on Keep\'s unlock request (max 120 chars); needed when setup starts a pairing') // COPY-FLAG
+  .option('--description <text>', 'what you will do once the request is approved, shown under the title (max 600 chars)') // COPY-FLAG
   .option('--org <id|name>', 'the organization to set this folder up in (asked when you belong to more than one)') // COPY-FLAG
   .option('--project <id|name>', 'link this folder to an existing project in the organization, or "new" to create one') // COPY-FLAG
   .option('--name <name>', 'the name of a new project') // COPY-FLAG
@@ -762,7 +764,7 @@ program
   .option('--encrypt-env [yes|no]', 'whether a new project encrypts this folder\'s .env and pushes its secrets (asked when the .env has any); no creates nothing') // COPY-FLAG
   .option('--no-encrypt-env', 'Create nothing and leave the .env as it is') // COPY-FLAG
   .option('--json', 'accepted for symmetry: setup always answers in JSON') // COPY-FLAG
-  .addHelpText('after', '\nAgents: run `capy setup --json`. On exit 3, show the human the elicitation and ask its questions, then run the command in its `answer`. Never answer for the human. The result with "setup": "complete" names the organization, project and branch, and lists under `integrations` what was found in this folder with the next command for each; discovery needs a provider token that an owner or admin saves with `capy system set`. A run that waits on a pairing can take up to 9 minutes, so give it a tool timeout of at least 10 minutes.\n') // COPY-FLAG
+  .addHelpText('after', '\nAgents: run `capy setup --title "<what you are setting up and why>" --description "<what you will do once approved>" --json`, in your own words: when setup starts a pairing, Keep shows them to the human on the unlock request (without them it refuses with SETUP_INTENT_REQUIRED). On exit 3, show the human the elicitation and ask its questions, then run the command in its `answer`. Never answer for the human. The result with "setup": "complete" names the organization, project and branch, and lists under `integrations` what was found in this folder with the next command for each; discovery needs a provider token that an owner or admin saves with `capy system set`. A run that waits on a pairing can take up to 9 minutes, so give it a tool timeout of at least 10 minutes.\n') // COPY-FLAG
   .action(async (options, command) => {
     const { setupCommand } = await import('./commands/setupCommand');
     const merged = command.optsWithGlobals();
@@ -770,6 +772,7 @@ program
     const { org, project, name, branch, protectedAnswer, shareAnswer, encryptAnswer, folder } = setupOptionsFrom({ ...options, folder: merged.folder });
     await setupCommand({
       code: options.code,
+      intent: { title: options.title, description: options.description },
       answers: { org, project, name, branch, protectedAnswer, shareAnswer, encryptAnswer, folder },
       envPath: merged.envPath,
       dryRun: merged.dryRun === true,

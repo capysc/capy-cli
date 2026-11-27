@@ -1039,6 +1039,8 @@ export const ERROR_CODES = {
   FOLDER_NOT_FOUND: 'FOLDER_NOT_FOUND',
   /** `--encrypt-env` was given a word other than yes or no. */
   ENCRYPT_ENV_INVALID: 'ENCRYPT_ENV_INVALID',
+  /** `capy setup` is about to start a pairing and the agent gave no `--title` / `--description` for Keep's unlock request. Nothing is started. Exit 1. */
+  SETUP_INTENT_REQUIRED: 'SETUP_INTENT_REQUIRED',
   /** `capy projects rename`: the service renamed the project but this folder's keep.lock could not be rewritten. The refusal carries the renamed project. Exit 1. */
   KEEP_LOCK_UPDATE_FAILED: 'KEEP_LOCK_UPDATE_FAILED',
   /** A command that acts on "the active organization" has none (no keep.lock here) and the person belongs to several, with nobody to ask. Exit 3. */
