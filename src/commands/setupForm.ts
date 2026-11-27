@@ -7,6 +7,7 @@
  * where an answer goes.
  */
 import type { ElicitationField, ElicitationForm } from '../ui/elicitation';
+import { SETUP_SHARING_QUESTION, SHARE_CHOICE, THIS_FOLDER_CHOICE, FOLDER_QUESTION } from '../ui/projectSetup';
 import { setupDisplay } from '../ui/elicitationDisplay';
 import type { SetupAnswers } from '../types/index';
 import { BRANCH_DESCRIPTION, BRANCH_NAME_PATTERN_SOURCE, DEFAULT_FIRST_BRANCH, FIRST_BRANCH_QUESTION } from '../core/branchNameRule';
@@ -39,7 +40,28 @@ export interface SetupFormInput {
   readonly dryRun?: boolean;
   /** True under `capy-dev`, which does not set `CAPY_BIN_NAME`: the rerun then names `capy-dev`. */
   readonly devMode?: boolean;
+  /** When "which folder" is the question (no `--folder` was typed): this folder and the subfolders offered. Asked alone. */
+  readonly folderChoices?: FolderChoices;
+  /** The folder being set up, as its full path (shown in the table). */
+  readonly folder?: string;
+  /** True inside a git repository, where keep.lock can be shared; with `askShare` false the answer is `answers.shareAnswer`. */
+  readonly inGit?: boolean;
+  /** True when "keep this setup to the folder, or share it through Git" is a question (a git repository, no `--share-setup`). */
+  readonly askShare?: boolean;
 }
+
+/** The folder question's choices: this folder (its full path) and up to two subfolders, by their names. */
+export interface FolderChoices {
+  readonly here: string;
+  readonly subfolders: readonly string[];
+}
+
+/** The answers `--share-setup` takes. */
+export const SHARE_YES = 'yes';
+export const SHARE_NO = 'no';
+
+/** A typed folder: a relative or absolute path with only characters that are safe in a shell word. */
+export const FOLDER_PATTERN_SOURCE = '^[A-Za-z0-9_@%+=:,./~-]+$';
 
 /** One of an existing project's branches, as the form offers it. */
 export interface BranchChoice {
@@ -53,7 +75,7 @@ function oneOf(values: readonly string[]): string {
 }
 
 /** A value as the shell takes it: as it is when it is plain, else in single quotes. */
-function shellWord(value: string): string {
+export function shellWord(value: string): string {
   return /^[A-Za-z0-9_@%+=:,./-]+$/.test(value) ? value : `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
@@ -67,6 +89,7 @@ function rerunCommand(input: SetupFormInput): string {
   const { answers, gaps } = input;
   return [
     binName(input.devMode === true),
+    ...flagWords('--folder', answers.folder, input.folderChoices === undefined ? undefined : '<folder>'),
     ...flagWords('--env-path', input.envPath, undefined),
     ...(input.dryRun === true ? ['--dry-run'] : []),
     ...flagWords('--org', answers.org, input.orgChoices === undefined ? undefined : '<org>'),
@@ -74,6 +97,7 @@ function rerunCommand(input: SetupFormInput): string {
     ...flagWords('--name', answers.name, gaps?.name === true ? '<name>' : undefined),
     ...flagWords('--branch', answers.branch, gaps?.branch === true || input.branchChoices !== undefined ? '<branch>' : undefined),
     ...flagWords('--protected', answers.protectedAnswer, gaps?.isProtected === true ? '<protected>' : undefined),
+    ...flagWords('--share-setup', answers.shareAnswer, input.askShare === true ? '<share>' : undefined),
     '--json',
   ].join(' ');
 }
@@ -107,6 +131,7 @@ function nameField(suggestedName: string | undefined): ElicitationField {
     type: 'string',
     pattern: PROJECT_NAME_PATTERN_SOURCE,
     question: 'What should the project be called?', // COPY-FLAG: project create's wording
+    description: 'The name your team sees in Keep. It can be renamed later.', // COPY-FLAG: spec 3l
     ...(suggestedName === undefined ? {} : { default: suggestedName }),
   };
 }
@@ -140,15 +165,51 @@ function protectedField(answers: SetupAnswers): ElicitationField {
     pattern: `^(${PROTECTED_YES}|${PROTECTED_NO})$`,
     question: protectedQuestion(answers.branch),
     default: answers.protectedAnswer === PROTECTED_YES ? PROTECTED_YES : PROTECTED_NO,
+    description: 'A protected branch is invite-only: only people added to the branch can read or change its secrets.', // COPY-FLAG: spec 3l
     options: [
-      { value: PROTECTED_YES, label: 'Yes' }, // COPY-FLAG
-      { value: PROTECTED_NO, label: 'No' }, // COPY-FLAG
+      { value: PROTECTED_YES, label: 'Yes', description: 'Invite-only. Only people you add to the branch can use its secrets' }, // COPY-FLAG
+      { value: PROTECTED_NO, label: 'No', description: 'Everyone on the project can use its secrets' }, // COPY-FLAG
+    ],
+  };
+}
+
+/**
+ * Which folder to set up, as the terminal's folder picker asks it: this folder, the subfolders that look like a
+ * project, or a path the human types. A typed path is checked on the rerun (`--folder` must be an existing folder).
+ */
+function folderField(choices: FolderChoices): ElicitationField {
+  return {
+    name: 'folder',
+    type: 'string',
+    pattern: FOLDER_PATTERN_SOURCE,
+    question: FOLDER_QUESTION,
+    description: 'Capy sets up the folder you choose: its .env, and keep.lock.', // COPY-FLAG
+    options: [
+      { value: '.', label: THIS_FOLDER_CHOICE, description: choices.here },
+      ...choices.subfolders.map((name) => ({ value: name, label: `${name}/`, description: 'Holds a .env or a package file' })), // COPY-FLAG
+    ],
+    other: true,
+  };
+}
+
+/** Keepless (this folder only) or shared through Git: the terminal's question, choices and descriptions, word for word. */
+function shareField(): ElicitationField {
+  return {
+    name: 'share',
+    type: 'string',
+    pattern: `^(${SHARE_YES}|${SHARE_NO})$`,
+    question: SETUP_SHARING_QUESTION,
+    options: [
+      { value: SHARE_NO, label: SHARE_CHOICE.folderOnly.label, description: SHARE_CHOICE.folderOnly.description },
+      { value: SHARE_YES, label: SHARE_CHOICE.shared.label, description: SHARE_CHOICE.shared.description },
     ],
   };
 }
 
 function fieldsOf(input: SetupFormInput): readonly ElicitationField[] {
   const { gaps } = input;
+  // The folder decides everything after it (its .env, whether it is in Git), so it is asked alone.
+  if (input.folderChoices !== undefined) return [folderField(input.folderChoices)];
   return [
     ...(input.orgChoices === undefined ? [] : [orgField(input.orgChoices)]),
     ...(input.projects === undefined ? [] : [projectField(input.projects)]),
@@ -156,6 +217,7 @@ function fieldsOf(input: SetupFormInput): readonly ElicitationField[] {
     ...(gaps?.name === true ? [nameField(input.suggestedName)] : []),
     ...(gaps?.branch === true ? [branchField(input.answers)] : []),
     ...(gaps?.isProtected === true ? [protectedField(input.answers)] : []),
+    ...(input.askShare === true ? [shareField()] : []),
   ];
 }
 
@@ -165,18 +227,26 @@ function projectCell(input: SetupFormInput): string | undefined {
   return input.existingProject?.name ?? input.answers.name;
 }
 
+/** The table's sharing row: still to choose, or the answer typed; none outside Git or while the folder is the question. */
+function sharingCell(input: SetupFormInput): { readonly sharing?: 'ask' | 'shared' | 'folder-only' } {
+  if (input.folderChoices !== undefined || input.inGit !== true) return {};
+  if (input.askShare === true) return { sharing: 'ask' };
+  return { sharing: input.answers.shareAnswer === SHARE_YES ? 'shared' : 'folder-only' };
+}
+
 export function setupForm(input: SetupFormInput): ElicitationForm {
   return {
     kind: 'form',
     question: 'How should Capy set up this folder?', // COPY-FLAG
     details: {
+      ...(input.folderChoices === undefined ? {} : { folder: { here: input.folderChoices.here, subfolders: input.folderChoices.subfolders } }),
       ...(input.org === undefined ? {} : { org: { id: input.org.id, name: input.org.name } }),
       ...(input.orgChoices === undefined ? {} : { orgs: input.orgChoices.map((o) => ({ id: o.id, name: o.name })) }),
       ...(input.projects === undefined ? {} : { projects: input.projects.map((p) => ({ id: p.id, name: p.name })) }),
       ...(input.existingProject === undefined ? {} : { project: { id: input.existingProject.id, name: input.existingProject.name } }),
       ...(input.branchChoices === undefined ? {} : { branches: input.branchChoices.map((b) => ({ name: b.name, protected: b.isProtected })) }),
       // Only a new project needs these; with an existing project chosen they are left out.
-      ...(input.projects !== undefined && input.gaps !== undefined ? { new_project_fields: fieldsOf({ ...input, orgChoices: undefined, projects: undefined }).map((f) => f.name) } : {}),
+      ...(input.projects !== undefined && input.gaps !== undefined ? { new_project_fields: fieldsOf({ ...input, orgChoices: undefined, projects: undefined, askShare: false }).map((f) => f.name) } : {}),
       variables: input.variables,
     },
     display: setupDisplay({
@@ -189,6 +259,8 @@ export function setupForm(input: SetupFormInput): ElicitationForm {
       existingProject: input.existingProject !== undefined,
       firstBranchOfExisting: input.existingProject !== undefined && input.gaps?.branch === true,
       branchDescription: BRANCH_DESCRIPTION,
+      ...(input.folderChoices === undefined ? { folder: input.folder } : {}),
+      ...sharingCell(input),
     }),
     fields: fieldsOf(input),
     answer: { rerun: rerunCommand(input) },

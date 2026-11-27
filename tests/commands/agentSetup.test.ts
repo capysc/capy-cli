@@ -9,7 +9,7 @@
  */
 import { describe, test, expect, mock, beforeEach, afterEach, spyOn } from 'bun:test';
 import { execFileSync } from 'child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import * as realKeyResolver from '../../src/crypto/keyResolver';
@@ -149,7 +149,9 @@ async function run(answers: Partial<SetupOptions> = {}, extra: Partial<CliOption
   }) as never);
   const logSpy = spyOn(console, 'log').mockImplementation(() => {});
   const errSpy = spyOn(console, 'error').mockImplementation(() => {});
-  const setup: SetupOptions = { json: true, nonTty: true, agentMode: true, ...answers };
+  // `--folder .` by default, and `--share-setup no` in a folder that is not set up yet: those questions have tests of their own.
+  const notSetUp = !existsSync(join(process.cwd(), 'keep.lock'));
+  const setup: SetupOptions = { json: true, nonTty: true, agentMode: true, folder: '.', ...(notSetUp ? { shareAnswer: 'no' } : {}), ...answers };
   const thrown: unknown = await new CapyCommand({ setup, protocol: true, ...extra }, devMode).execute().then(() => null, (err: unknown) => err);
   const stdout = logSpy.mock.calls.map((args) => args.map(String).join('\n')).join('\n');
   const stderr = errSpy.mock.calls.map((args) => args.map(String).join('\n')).join('\n');
@@ -179,7 +181,7 @@ describe('questions left: one INIT_INPUT_REQUIRED form, nothing created or writt
     expect(form.kind).toBe('form');
     expect(fieldNames(out.json)).toEqual(['project', 'name', 'branch', 'protected']);
     expect(form.fields[0].options).toEqual([{ value: 'new', label: 'New project' }, { value: 'proj-web', label: 'web' }]);
-    expect(form.answer.rerun).toBe('capy --project <project> --name <name> --branch <branch> --protected <protected> --json');
+    expect(form.answer.rerun).toBe('capy --folder . --project <project> --name <name> --branch <branch> --protected <protected> --share-setup no --json');
     expect(form.details).toMatchObject({ org: ORG, variables: 2 });
     expect(form.display).toContain('2 variables to encrypt and push');
     expect(form.display).toContain('Acme');
@@ -198,7 +200,7 @@ describe('questions left: one INIT_INPUT_REQUIRED form, nothing created or writt
     const out = await run();
     expect(out.exitCode).toBe(3);
     expect(fieldNames(out.json)).toEqual(['name', 'branch', 'protected']);
-    expect(out.json!.elicitation.answer.rerun).toBe('capy --name <name> --branch <branch> --protected <protected> --json');
+    expect(out.json!.elicitation.answer.rerun).toBe('capy --folder . --name <name> --branch <branch> --protected <protected> --share-setup no --json');
     const [name, branch, isProtected] = out.json!.elicitation.fields;
     // The same field names, wording, defaults and rules as `capy project create`.
     expect(name).toMatchObject({ name: 'name', pattern: '^[a-zA-Z0-9-_]+$', question: 'What should the project be called?' });
@@ -212,7 +214,7 @@ describe('questions left: one INIT_INPUT_REQUIRED form, nothing created or writt
     const out = await run({ name: 'demo', branch: 'main' });
     expect(out.exitCode).toBe(3);
     expect(fieldNames(out.json)).toEqual(['protected']);
-    expect(out.json!.elicitation.answer.rerun).toBe('capy --name demo --branch main --protected <protected> --json');
+    expect(out.json!.elicitation.answer.rerun).toBe('capy --folder . --name demo --branch main --protected <protected> --share-setup no --json');
   });
 
   test('under another binary (CAPY_BIN_NAME) the rerun command starts with that binary', async () => {
@@ -220,7 +222,7 @@ describe('questions left: one INIT_INPUT_REQUIRED form, nothing created or writt
     const env = spyOn(process, 'env', 'get' as never).mockReturnValue({ ...process.env, CAPY_BIN_NAME: 'capy-staging' } as never);
     const out = await run({ name: 'demo', branch: 'main' }).finally(() => env.mockRestore());
     expect(out.exitCode).toBe(3);
-    expect(out.json!.elicitation.answer.rerun).toBe('capy-staging --name demo --branch main --protected <protected> --json');
+    expect(out.json!.elicitation.answer.rerun).toBe('capy-staging --folder . --name demo --branch main --protected <protected> --share-setup no --json');
   });
 
   test('under capy-dev (no CAPY_BIN_NAME) the rerun command starts with capy-dev', async () => {
@@ -229,7 +231,7 @@ describe('questions left: one INIT_INPUT_REQUIRED form, nothing created or writt
     const env = spyOn(process, 'env', 'get' as never).mockReturnValue(rest as never);
     const out = await run({ name: 'demo', branch: 'main' }, {}, true).finally(() => env.mockRestore());
     expect(out.exitCode).toBe(3);
-    expect(out.json!.elicitation.answer.rerun).toBe('capy-dev --name demo --branch main --protected <protected> --json');
+    expect(out.json!.elicitation.answer.rerun).toBe('capy-dev --folder . --name demo --branch main --protected <protected> --share-setup no --json');
   });
 
   test('several organizations and no --org: the organization is asked first, alone, as options of id and name; no project is looked up', async () => {
@@ -239,7 +241,7 @@ describe('questions left: one INIT_INPUT_REQUIRED form, nothing created or writt
     expect(out.json).toMatchObject({ code: 'INIT_INPUT_REQUIRED' });
     expect(fieldNames(out.json)).toEqual(['org']);
     expect(out.json!.elicitation.fields[0].options).toEqual([{ value: 'org-1', label: 'Acme' }, { value: 'org-2', label: 'Other' }]);
-    expect(out.json!.elicitation.answer.rerun).toBe('capy --org <org> --json');
+    expect(out.json!.elicitation.answer.rerun).toBe('capy --folder . --org <org> --share-setup no --json');
     expect(calls.listProjects).not.toHaveBeenCalled();
     expect(calls.initializeProject).not.toHaveBeenCalled();
   });
@@ -265,6 +267,7 @@ describe('every answer given: create, then link, then push', () => {
     expect(calls.createBranch).toHaveBeenCalledWith('proj-new', 'development', true);
     expect(out.json).toEqual({
       ok: true,
+      shared_through_git: false,
       created: true,
       org: ORG,
       project: { id: 'proj-new', name: 'demo' },
@@ -337,7 +340,7 @@ describe('every answer given: create, then link, then push', () => {
       throw new ExitSignal(code);
     }) as never);
     const logSpy = spyOn(console, 'log').mockImplementation(() => {});
-    await new CapyCommand({ dryRun: true, setup: { json: true, nonTty: true, agentMode: true, ...ALL_ANSWERS } }, false).execute();
+    await new CapyCommand({ dryRun: true, setup: { json: true, nonTty: true, agentMode: true, folder: '.', shareAnswer: 'no', ...ALL_ANSWERS } }, false).execute();
     const printed = logSpy.mock.calls.map((a) => a.join('\n')).join('\n');
     logSpy.mockRestore();
     exitSpy.mockRestore();
@@ -378,7 +381,7 @@ describe('an existing project', () => {
     expect(field.options).toEqual([{ value: 'prod', label: 'prod' }]);
     expect(field.default).toBeUndefined();
     expect(out.json!.elicitation.details).toMatchObject({ project: { id: 'proj-web', name: 'web' }, branches: [{ name: 'prod', protected: false }] });
-    expect(out.json!.elicitation.answer.rerun).toContain('--project web --branch <branch> --json');
+    expect(out.json!.elicitation.answer.rerun).toContain('--project web --branch <branch> --share-setup no --json');
     expect(out.json!.elicitation.display).not.toContain('First branch');
     expect(read).not.toHaveBeenCalled();
     expect(existsSync(folder('keep.lock'))).toBe(false);
@@ -412,7 +415,7 @@ describe('an existing project', () => {
     expect(field.default).toBe('development');
     expect(field.options).toBeUndefined();
     expect(out.json!.elicitation.details).toMatchObject({ project: { id: 'proj-web', name: 'web' } });
-    expect(out.json!.elicitation.answer.rerun).toContain('--project web --branch <branch> --json');
+    expect(out.json!.elicitation.answer.rerun).toContain('--project web --branch <branch> --share-setup no --json');
     expect(calls.createBranch).not.toHaveBeenCalled();
     expect(existsSync(folder('keep.lock'))).toBe(false);
   });
@@ -444,7 +447,7 @@ describe('an existing project', () => {
     expect(out.json).toMatchObject({ ok: false, code: 'INIT_INPUT_REQUIRED' });
     expect(fieldNames(out.json)).toEqual(['branch']);
     const rerun: string = out.json!.elicitation.answer.rerun;
-    expect(rerun).toContain('--project web --branch <branch> --json');
+    expect(rerun).toContain('--project web --branch <branch> --share-setup no --json');
     expect(rerun).not.toContain('--protected');
     expect(rerun).not.toContain('--name');
     expect(calls.createBranch).not.toHaveBeenCalled();
@@ -1002,5 +1005,133 @@ describe('terminal mode (no setup flags)', () => {
     expect(name).not.toHaveBeenCalled();
     expect(initializeProject).toHaveBeenCalledWith('typed', 'org-2');
     expect(createBranch).toHaveBeenCalledWith('proj-1', 'main', true);
+  });
+});
+
+describe('which folder, and this folder only or shared through Git (spec 3l, CAP-909)', () => {
+  /** The commits that touched keep.lock; none in a repository with no commit yet. */
+  const gitCommits = (): string => {
+    try {
+      return execFileSync('git', ['log', '--oneline', '--', 'keep.lock'], { cwd: process.cwd(), encoding: 'utf-8', stdio: 'pipe' });
+    } catch {
+      return '';
+    }
+  };
+  const configureGitUser = (): void => {
+    execFileSync('git', ['config', 'user.email', 'dev@example.com'], { cwd: process.cwd() });
+    execFileSync('git', ['config', 'user.name', 'Dev'], { cwd: process.cwd() });
+    // The test's own repository: no hook from the machine's global Git config applies to its commits.
+    execFileSync('git', ['config', 'core.hooksPath', '/dev/null'], { cwd: process.cwd() });
+  };
+
+  test('no --folder: the folder is asked first and alone, before sign-in, with this folder, up to 2 project subfolders, and Other', async () => {
+    const calls = fakeWorld();
+    mkdirSync(folder('api'));
+    writeFileSync(folder('api', 'package.json'), '{}', 'utf-8');
+    mkdirSync(folder('web'));
+    writeFileSync(folder('web', '.env'), 'A=1\n', 'utf-8');
+    mkdirSync(folder('zzz'));
+    writeFileSync(folder('zzz', 'go.mod'), 'module x\n', 'utf-8');
+    mkdirSync(folder('docs'));
+    mkdirSync(folder('node_modules'));
+    writeFileSync(folder('node_modules', 'package.json'), '{}', 'utf-8');
+
+    const out = await run({ folder: undefined, shareAnswer: undefined });
+
+    expect(out.exitCode).toBe(3);
+    expect(out.json).toMatchObject({ code: 'INIT_INPUT_REQUIRED' });
+    expect(fieldNames(out.json)).toEqual(['folder']);
+    const [field] = out.json!.elicitation.fields;
+    expect(field.question).toBe('Which folder contains your project?');
+    expect(field.other).toBe(true);
+    expect(field.options).toEqual([
+      { value: '.', label: 'Use this folder', description: process.cwd() },
+      { value: 'api', label: 'api/', description: 'Holds a .env or a package file' },
+      { value: 'web', label: 'web/', description: 'Holds a .env or a package file' },
+    ]);
+    expect(new RegExp(field.pattern).test('apps/web')).toBe(true);
+    expect(new RegExp(field.pattern).test('a b; rm -rf')).toBe(false);
+    expect(out.json!.elicitation.answer.rerun).toBe('capy --folder <folder> --json');
+    expect(calls.authenticateSilent).not.toHaveBeenCalled();
+    expect(existsSync(folder('keep.lock'))).toBe(false);
+  });
+
+  test('in Git, with every other answer given and no --share-setup: only the sharing question is asked, with the terminal\'s choices and descriptions', async () => {
+    const calls = fakeWorld();
+    const out = await run({ ...ALL_ANSWERS, shareAnswer: undefined });
+    expect(out.exitCode).toBe(3);
+    expect(fieldNames(out.json)).toEqual(['share']);
+    const [field] = out.json!.elicitation.fields;
+    expect(field.question).toBe('How would you like to set up Capy for this project?');
+    expect(field.default).toBeUndefined();
+    expect(field.options).toEqual([
+      { value: 'no', label: 'Set up this folder only', description: 'When teammates set up their own copy of the app, they’ll need to choose this project in Capy to get its secrets.' },
+      { value: 'yes', label: 'Share the setup through Git', description: 'Capy commits keep.lock so copies of the same code point to the same Capy project and secret versions (this is useful for keeping larger teams or more complex projects in sync).' },
+    ]);
+    expect(out.json!.elicitation.answer.rerun).toBe('capy --folder . --name demo --branch development --protected no --share-setup <share> --json');
+    expect(calls.initializeProject).not.toHaveBeenCalled();
+    expect(existsSync(folder('keep.lock'))).toBe(false);
+  });
+
+  test('in Git, with project questions left: sharing is asked last in the same form', async () => {
+    fakeWorld();
+    const out = await run({ shareAnswer: undefined });
+    expect(fieldNames(out.json)).toEqual(['name', 'branch', 'protected', 'share']);
+    expect(out.json!.elicitation.answer.rerun).toBe('capy --folder . --name <name> --branch <branch> --protected <protected> --share-setup <share> --json');
+  });
+
+  test('outside Git: sharing is not asked, and keep.lock stays in this folder', async () => {
+    rmSync(folder('.git'), { recursive: true, force: true });
+    const calls = fakeWorld();
+    const out = await run({ ...ALL_ANSWERS, shareAnswer: undefined });
+    expect(out.exitCode).toBeUndefined();
+    expect(out.json).toMatchObject({ ok: true, created: true, shared_through_git: false });
+    expect(calls.initializeProject).toHaveBeenCalled();
+    expect(readFileSync(folder('.gitignore'), 'utf-8')).toContain('/keep.lock');
+  });
+
+  test('--share-setup yes: keep.lock is shared through Git and committed, as the terminal does', async () => {
+    configureGitUser();
+    fakeWorld();
+    const out = await run({ ...ALL_ANSWERS, shareAnswer: 'yes' });
+    expect(out.exitCode).toBeUndefined();
+    expect(out.json).toMatchObject({ ok: true, created: true, shared_through_git: true });
+    expect(readFileSync(folder('.gitignore'), 'utf-8').split('\n')).not.toContain('/keep.lock');
+    expect(gitCommits()).toContain('Set up Capy for this project');
+  });
+
+  test('--share-setup no: this folder only; keep.lock is ignored by Git and nothing is committed', async () => {
+    configureGitUser();
+    fakeWorld();
+    const out = await run({ ...ALL_ANSWERS, shareAnswer: 'no' });
+    expect(out.json).toMatchObject({ ok: true, shared_through_git: false });
+    expect(readFileSync(folder('.gitignore'), 'utf-8').split('\n')).toContain('/keep.lock');
+    expect(gitCommits()).toBe('');
+  });
+
+  test('--share-setup yes linking an existing project: shared and committed too', async () => {
+    configureGitUser();
+    fakeWorld({ projects: [{ id: 'proj-web', name: 'web', organization_id: ORG.id }], branches: [{ name: 'prod', is_protected: false }] });
+    spyOn(ServiceClient.prototype, 'getDecryptData').mockRejectedValue(new CapyError('No secrets', ERROR_CODES.NO_SECRETS, { status: 404 }) as never);
+    const out = await run({ project: 'web', branch: 'prod', shareAnswer: 'yes' });
+    expect(out.json).toMatchObject({ ok: true, created: false, shared_through_git: true });
+    expect(gitCommits()).toContain('Set up Capy for this project');
+  });
+
+  test('a --share-setup that is neither yes nor no is SHARE_SETUP_INVALID, before anything is read', async () => {
+    const calls = fakeWorld();
+    const out = await run({ ...ALL_ANSWERS, shareAnswer: 'maybe' });
+    expect(out.exitCode).toBe(1);
+    expect(out.json).toMatchObject({ ok: false, code: 'SHARE_SETUP_INVALID', options: ['yes', 'no'] });
+    expect(calls.authenticateSilent).not.toHaveBeenCalled();
+  });
+
+  test('--dry-run with --share-setup yes commits nothing', async () => {
+    configureGitUser();
+    fakeWorld();
+    const out = await run({ ...ALL_ANSWERS, shareAnswer: 'yes' }, { dryRun: true });
+    expect(out.json).toMatchObject({ ok: true, dry_run: true, shared_through_git: true });
+    expect(existsSync(folder('keep.lock'))).toBe(false);
+    expect(gitCommits()).toBe('');
   });
 });

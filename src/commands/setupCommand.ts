@@ -23,6 +23,7 @@ import { ERROR_CODES, type CliOptions, type SetupOptions } from '../types/index'
 import type { AgentOutcome } from './agentSetup';
 import { resolveRepoRoot, writeAgentsBlock, type AgentsFileResult } from './agentsCommand';
 import { binName } from './binName';
+import { shellWord } from './setupForm';
 import type { PairAgentOutcome } from './pairAgentCommand';
 import { refusalFor } from './projectLifecycleCommand';
 import { refuse, settle, type Refusal } from './refusal';
@@ -30,7 +31,7 @@ import { refuse, settle, type Refusal } from './refusal';
 export interface SetupCommandOptions {
   /** `--code`: the one-time code Keep showed the person who approved the pairing. */
   readonly code?: string;
-  /** The answers to the folder questions, as typed (`--org`, `--project`, `--name`, `--branch`, `--protected`). */
+  /** The answers to the folder questions, as typed (`--folder`, `--org`, `--project`, `--name`, `--branch`, `--protected`, `--share-setup`). */
   readonly answers: FolderAnswers;
   readonly envPath?: string;
   readonly dryRun?: boolean;
@@ -48,7 +49,7 @@ export interface LinkedFolder {
   readonly pendingSetup?: { readonly branch: string; readonly protected: boolean };
 }
 
-export type FolderAnswers = Pick<SetupOptions, 'org' | 'project' | 'name' | 'branch' | 'protectedAnswer'>;
+export type FolderAnswers = Pick<SetupOptions, 'org' | 'project' | 'name' | 'branch' | 'protectedAnswer' | 'shareAnswer' | 'folder'>;
 
 export type FolderOutcome = AgentOutcome | { readonly kind: 'sync'; readonly ignoredFlags?: readonly string[] } | undefined;
 
@@ -81,7 +82,23 @@ const refusal = (r: Refusal): Outcome => ({ kind: 'refusal', refusal: r });
  * A step's "run this next" as the `capy setup` run that does the same: the pairing wait, the pairing code, a new
  * pairing, and the folder answers. Anything else is left as it is.
  */
-export function asSetupCommand(command: string, bin: string): string {
+export function asSetupCommand(command: string, bin: string, folder?: string): string {
+  return withFolder(asSetupCommandIn(command, bin), bin, folder);
+}
+
+/**
+ * A `--folder` the human answered is repeated on every command handed back, so a run that pairs first (whose wait and
+ * code commands name no folder of their own) carries on in the folder they chose instead of asking again.
+ */
+export function withFolder(command: string, bin: string, folder: string | undefined): string {
+  if (folder === undefined || / --folder /.test(command)) return command;
+  for (const prefix of [`${bin} setup`, bin]) {
+    if (command === prefix || command.startsWith(`${prefix} -`)) return `${prefix} --folder ${shellWord(folder)}${command.slice(prefix.length)}`;
+  }
+  return command;
+}
+
+function asSetupCommandIn(command: string, bin: string): string {
   if (command.startsWith(`${bin} pair --wait --code `)) return `${bin} setup --code ${command.slice(`${bin} pair --wait --code `.length)} --json`;
   if (command === `${bin} pair --wait`) return `${bin} setup --json`;
   // CAP-913: starting again after the last link expired is setup again, which starts a new pairing when signed out.
@@ -95,13 +112,15 @@ function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
 }
 
 /** The refusal with the commands of its elicitation's `answer` rewritten to `capy setup`. */
-export function forSetup(r: Refusal, bin: string): Refusal {
-  const elicitation = r.extra?.elicitation;
-  if (!isRecord(elicitation) || !isRecord(elicitation.answer)) return r;
+export function forSetup(r: Refusal, bin: string, folder?: string): Refusal {
+  const next = r.extra?.next_command;
+  const withNext = folder === undefined || typeof next !== 'string' ? r : { ...r, extra: { ...r.extra, next_command: asSetupCommand(next, bin, folder) } };
+  const elicitation = withNext.extra?.elicitation;
+  if (!isRecord(elicitation) || !isRecord(elicitation.answer)) return withNext;
   const answer = Object.fromEntries(
-    Object.entries(elicitation.answer).map(([key, value]) => [key, typeof value === 'string' ? asSetupCommand(value, bin) : value]),
+    Object.entries(elicitation.answer).map(([key, value]) => [key, typeof value === 'string' ? asSetupCommand(value, bin, folder) : value]),
   );
-  return { ...r, extra: { ...r.extra, elicitation: { ...elicitation, answer } } };
+  return { ...withNext, extra: { ...withNext.extra, elicitation: { ...elicitation, answer } } };
 }
 
 /** Whether the folder step stopped only because nobody is signed in and pairing is the way in. */
@@ -110,17 +129,18 @@ function needsPairing(r: Refusal): boolean {
 }
 
 /** Not signed in, and this run starts no pairing: the same refusal, pointing at `capy setup` instead of `capy pair`. */
-function notPaired(r: Refusal, bin: string, dryRun: boolean): Refusal {
+function notPaired(r: Refusal, bin: string, dryRun: boolean, folder: string | undefined): Refusal {
+  const again = withFolder(`${bin} setup --json`, bin, folder);
   return {
     ...r,
     message: dryRun
-      ? `Not signed in. A dry run starts no pairing: run \`${bin} setup --json\` to pair.` // COPY-FLAG
-      : `Still not signed in after pairing. Run \`${bin} setup --json\` again.`, // COPY-FLAG
-    extra: { ...r.extra, next_command: `${bin} setup --json` },
+      ? `Not signed in. A dry run starts no pairing: run \`${again}\` to pair.` // COPY-FLAG
+      : `Still not signed in after pairing. Run \`${again}\` again.`, // COPY-FLAG
+    extra: { ...r.extra, next_command: again },
   };
 }
 
-function linkedResult(folder: LinkedFolder, ignoredFlags: readonly string[], bin: string, dryRun: boolean): Readonly<Record<string, unknown>> {
+function linkedResult(folder: LinkedFolder, ignoredFlags: readonly string[], bin: string, dryRun: boolean, typedFolder?: string): Readonly<Record<string, unknown>> {
   return {
     created: false,
     already_set_up: true,
@@ -129,7 +149,7 @@ function linkedResult(folder: LinkedFolder, ignoredFlags: readonly string[], bin
     branch: { name: folder.activeBranch, protected: null },
     ...(ignoredFlags.length === 0 ? {} : { ignored_flags: ignoredFlags }),
     // Setup links and reports; it does not sync. Bare `capy` brings the folder's variables up to date.
-    ...(dryRun ? {} : { next: `${bin} --json` }),
+    ...(dryRun ? {} : { next: withFolder(`${bin} --json`, bin, typedFolder) }),
   };
 }
 
@@ -160,11 +180,12 @@ interface Progress {
 /** Nobody is signed in: pairing comes first, then the folder again. A dry run changes nothing, so it starts no pairing. */
 async function pairThenFolder(options: SetupCommandOptions, deps: SetupDeps, signedOut: Refusal, progress: Progress): Promise<Outcome> {
   const bin = binName(options.devMode === true);
-  if (!needsPairing(signedOut)) return refusal(forSetup(signedOut, bin));
-  if (!progress.mayPair || options.dryRun === true) return refusal(notPaired(signedOut, bin, options.dryRun === true));
+  const folder = options.answers.folder;
+  if (!needsPairing(signedOut)) return refusal(forSetup(signedOut, bin, folder));
+  if (!progress.mayPair || options.dryRun === true) return refusal(notPaired(signedOut, bin, options.dryRun === true, folder));
   // A pairing that is waiting is waited on, and one whose link ran out is renewed by that wait; a second one never starts beside it.
   const paired = await deps.pair({ wait: deps.pendingPair() !== 'none' });
-  return paired.kind === 'refusal' ? refusal(forSetup(paired.refusal, bin)) : folderStep(options, deps, { ...progress, mayPair: false });
+  return paired.kind === 'refusal' ? refusal(forSetup(paired.refusal, bin, folder)) : folderStep(options, deps, { ...progress, mayPair: false });
 }
 
 /**
@@ -181,7 +202,7 @@ async function linkedStep(options: SetupCommandOptions, deps: SetupDeps, progres
     const again = await deps.folder({ ...options.answers, name: state.projectName, branch: pending.branch, protectedAnswer: pending.protected ? 'yes' : 'no' });
     return afterFolder(options, deps, again, { ...progress, resumed: true });
   }
-  return finish(options, deps, linkedResult(state, ignoredFlags, binName(options.devMode === true), options.dryRun === true));
+  return finish(options, deps, linkedResult(state, ignoredFlags, binName(options.devMode === true), options.dryRun === true, options.answers.folder));
 }
 
 async function afterFolder(options: SetupCommandOptions, deps: SetupDeps, folder: FolderOutcome, progress: Progress): Promise<Outcome> {
@@ -214,7 +235,7 @@ export async function setupOutcome(options: SetupCommandOptions, deps: SetupDeps
     // gone, it is dropped and the folder step decides, starting a new pairing only when nobody is signed in.
     const paired = await deps.pair({ wait: true, code, ...(pending === 'expired' ? { noRenew: true } : {}) });
     const gone = pending === 'expired' && paired.kind === 'refusal' && paired.refusal.code === ERROR_CODES.PAIR_EXPIRED;
-    if (paired.kind === 'refusal' && !gone) return refusal(forSetup(paired.refusal, bin));
+    if (paired.kind === 'refusal' && !gone) return refusal(forSetup(paired.refusal, bin, options.answers.folder));
   }
   return folderStep(options, deps, { mayPair: true, resumed: false });
 }

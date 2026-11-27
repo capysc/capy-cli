@@ -19,6 +19,9 @@
  * to stdout and prose to stderr. No value from the `.env` is ever written to either: names and counts only.
  */
 import { existsSync } from 'fs';
+import { isGitRepo } from '../deploy/git';
+import { tracksKeepLock } from '../git/keepTracking';
+import { projectSubfolders } from '../ui/projectSetup';
 import type { AuthResult, CliOptions, KeepFile, PendingSetup, ProjectInitResult, ProjectState, SetupOptions } from '../types/index';
 import { CapyError, ERROR_CODES, setSyncKeepHash } from '../types/index';
 import type { AuthService } from '../auth/authService';
@@ -47,7 +50,7 @@ import { EXIT_NEEDS_INPUT } from '../ui/interactive';
 import { refusalFor, settle, type Refusal } from './projectLifecycleCommand';
 import { PROTECTED_YES, createRefusalFor, existingProjectNamed, suggestedName } from './projectCreateCommand';
 import type { ElicitationForm } from '../ui/elicitation';
-import { setupForm } from './setupForm';
+import { SHARE_YES, setupForm } from './setupForm';
 
 /** The result of a push of the `.env`, as `CapyCommand.pushAndEncryptLocalEnv` reports it. */
 export type PushOutcome =
@@ -74,7 +77,10 @@ export interface AgentSetupDeps {
     project: ProjectInitResult,
     auth: AuthResult,
   ) => Promise<PushOutcome>;
-  readonly configureFolder: () => void;
+  /** Sets keep.lock's Git tracking before the first write: `share` commits it, otherwise it stays in this folder only. */
+  readonly configureFolder: (share: boolean) => void;
+  /** Commits keep.lock, once the setup is done, when the folder shares it through Git (as the terminal does). */
+  readonly commitSharedSetup: () => void;
   readonly installGitHooks: () => void;
 }
 
@@ -175,6 +181,12 @@ interface RunContext {
   readonly userId: string;
   readonly env: EnvFacts;
   readonly dryRun: boolean;
+  /** The folder is in a git repository, so keep.lock can be shared through Git. */
+  readonly inGit: boolean;
+  /** The folder is in Git and `--share-setup` was not typed: the human is asked before anything is written. */
+  readonly askShare: boolean;
+  /** `--share-setup yes`: keep.lock is committed so copies of the code share the setup. Otherwise keepless. */
+  readonly share: boolean;
 }
 
 /** The first branch's name and protection, as every JSON result reports it (`protected` is null when it was not asked). */
@@ -234,7 +246,7 @@ const pendingOf = (project: ProjectInitResult, plan: NewProject): PendingSetup =
 
 /** Creates the project, links the folder, creates the first branch and pushes the `.env`, in that order. */
 async function createAndLink(deps: AgentSetupDeps, ctx: RunContext, plan: NewProject): Promise<AgentOutcome> {
-  deps.configureFolder();
+  deps.configureFolder(ctx.share);
   const created = await settle(() => deps.serviceClient.initializeProject(plan.name, ctx.org.id));
   if (!created.ok) return refusalOutcome(createRefusalFor(created.error));
   const project = created.value;
@@ -317,7 +329,7 @@ async function finishSetup(
 
 /** The keep.lock of a project with no secrets yet; the folder is linked and nothing is pulled. */
 function linkEmptyProject(deps: AgentSetupDeps, ctx: RunContext, project: ProjectRef, branch: string): AgentOutcome {
-  deps.configureFolder();
+  deps.configureFolder(ctx.share);
   deps.fileManager.writeKeepFile({ version: '3.0', org_id: ctx.org.id, project_id: project.id, project_name: project.name, variables: {} });
   deps.projectManager.writeActiveBranch(branch);
   deps.fileManager.ensureCapyGitignore();
@@ -347,7 +359,7 @@ async function linkExisting(deps: AgentSetupDeps, ctx: RunContext, project: Proj
     // The folder's own plaintext variables are about to be replaced by the project's: keep a copy of them first.
     if (ctx.env.variables > 0) deps.fileManager.backupPlaintextEnv(deps.options.envPath, (line) => console.error(line));
     deps.projectManager.writeSyncStateUserId(ctx.userId);
-    deps.configureFolder();
+    deps.configureFolder(ctx.share);
     deps.fileManager.writeKeepFile(serverKeep);
     deps.projectManager.writeActiveBranch(branch);
     deps.fileManager.ensureCapyGitignore();
@@ -437,6 +449,9 @@ async function actExisting(deps: AgentSetupDeps, setup: SetupOptions, ctx: RunCo
       envPath: deps.options.envPath,
       dryRun: ctx.dryRun,
       devMode: deps.devMode,
+      askShare: ctx.askShare,
+      folder: process.cwd(),
+      inGit: ctx.inGit,
     }));
   }
   if (!names.includes(setup.branch)) {
@@ -447,6 +462,7 @@ async function actExisting(deps: AgentSetupDeps, setup: SetupOptions, ctx: RunCo
       extra: { project, org: ctx.org, branches: names },
     });
   }
+  if (ctx.askShare) return askShare(deps, setup, ctx, { existingProject: project });
   if (ctx.dryRun) return dryRunOutcome(ctx, project, branchJson(setup.branch, null), 0);
   return linkExisting(deps, ctx, project, setup.branch);
 }
@@ -471,9 +487,13 @@ async function firstBranchOfExisting(deps: AgentSetupDeps, setup: SetupOptions, 
       envPath: deps.options.envPath,
       dryRun: ctx.dryRun,
       devMode: deps.devMode,
+      askShare: ctx.askShare,
+      folder: process.cwd(),
+      inGit: ctx.inGit,
     }));
   }
   const branch = setup.branch;
+  if (ctx.askShare) return askShare(deps, setup, ctx, { existingProject: project });
   if (ctx.dryRun) return dryRunOutcome(ctx, project, branchJson(branch, false), 0);
   const made = await settle(() => deps.serviceClient.createBranch(project.id, branch, false));
   if (!made.ok) {
@@ -516,6 +536,9 @@ async function actNew(
       envPath: deps.options.envPath,
       dryRun: ctx.dryRun,
       devMode: deps.devMode,
+      askShare: ctx.askShare,
+      folder: process.cwd(),
+      inGit: ctx.inGit,
     }));
   }
   const name = setup.name as string;
@@ -529,8 +552,41 @@ async function actNew(
     });
   }
   const plan: NewProject = { name, branch: setup.branch as string, isProtected: setup.protectedAnswer === PROTECTED_YES };
+  if (ctx.askShare) return askShare(deps, setup, ctx, {});
   if (ctx.dryRun) return dryRunOutcome(ctx, { name }, branchJson(plan.branch, plan.isProtected), ctx.env.variables);
   return createAndLink(deps, ctx, plan);
+}
+
+/** Everything else is answered, and only "this folder only, or shared through Git" is left: the form asks it alone. */
+function askShare(deps: AgentSetupDeps, setup: SetupOptions, ctx: RunContext, at: { readonly existingProject?: ProjectRef }): AgentOutcome {
+  return needsInput(setupForm({
+    org: ctx.org,
+    ...at,
+    answers: setup,
+    variables: ctx.env.variables,
+    envPath: deps.options.envPath,
+    dryRun: ctx.dryRun,
+    devMode: deps.devMode,
+    askShare: true,
+    folder: process.cwd(),
+    inGit: ctx.inGit,
+  }));
+}
+
+/**
+ * A finished setup that shares keep.lock through Git commits it, as the terminal does; a dry run commits nothing.
+ * Every finished setup says which it is (`shared_through_git`).
+ */
+function committed(deps: AgentSetupDeps, outcome: AgentOutcome, share: boolean, dryRun: boolean): AgentOutcome {
+  if (outcome.kind !== 'done') return outcome;
+  const withSharing: AgentOutcome = { kind: 'done', result: { ...outcome.result, shared_through_git: share } };
+  if (!share || dryRun) return withSharing;
+  try {
+    deps.commitSharedSetup();
+    return withSharing;
+  } catch (error) {
+    return refusalOutcome({ ...refusalFor(error), extra: { org: outcome.result.org, project: outcome.result.project, branch: outcome.result.branch } });
+  }
 }
 
 /** The one refusal that hands every unanswered question to the agent. Exit 3. */
@@ -543,8 +599,23 @@ function needsInput(form: ElicitationForm): AgentOutcome {
   });
 }
 
+/** At most this many subfolders are offered beside "Use this folder" (spec 3l); any other is typed as Other. */
+const MAX_SUBFOLDER_CHOICES = 2;
+
+/** Whether keep.lock is shared through Git, and whether that is still to be asked. Outside Git it is never shared. */
+interface Sharing {
+  readonly inGit: boolean;
+  readonly askShare: boolean;
+  readonly share: boolean;
+}
+
+function sharingOf(setup: SetupOptions): Sharing {
+  if (!isGitRepo(process.cwd())) return { inGit: false, askShare: false, share: false };
+  return { inGit: true, askShare: setup.shareAnswer === undefined, share: setup.shareAnswer === SHARE_YES };
+}
+
 /** The organization is decided and the session is scoped to it: the key, the projects, then ask or act. */
-async function withOrg(deps: AgentSetupDeps, setup: SetupOptions, env: EnvFacts, org: OrgRef): Promise<AgentOutcome> {
+async function withOrg(deps: AgentSetupDeps, setup: SetupOptions, env: EnvFacts, org: OrgRef, sharing: Sharing): Promise<AgentOutcome> {
   const scoped = await scopeToOrg(deps, org);
   if (!scoped.ok) return refusalOutcome(scoped.refusal);
   const userId = scoped.auth.user_id;
@@ -566,7 +637,9 @@ async function withOrg(deps: AgentSetupDeps, setup: SetupOptions, env: EnvFacts,
     });
   }
   const projects: readonly ProjectRef[] = excludeSystemProject(listed.value.filter((p) => p.organization_id === org.id)).map((p) => ({ id: p.id, name: p.name }));
-  return act(deps, setup, { org, auth: scoped.auth, userId, env, dryRun: deps.options.dryRun === true }, projects);
+  const dryRun = deps.options.dryRun === true;
+  const outcome = await act(deps, setup, { org, auth: scoped.auth, userId, env, dryRun, ...sharing }, projects);
+  return committed(deps, outcome, sharing.share, dryRun);
 }
 
 /**
@@ -579,6 +652,20 @@ export async function agentSetup(deps: AgentSetupDeps, setup: SetupOptions): Pro
 
   const env = await settle(async () => envFactsOf(deps));
   if (!env.ok) return refusalOutcome(refusalFor(env.error));
+
+  // "Which folder contains your project?" comes first, as in the terminal, and alone: the answer decides the rest.
+  if (setup.folder === undefined) {
+    const subfolders = await settle(async () => projectSubfolders(process.cwd(), MAX_SUBFOLDER_CHOICES));
+    return needsInput(setupForm({
+      folderChoices: { here: process.cwd(), subfolders: subfolders.ok ? subfolders.value : [] },
+      answers: setup,
+      variables: env.value.variables,
+      envPath: deps.options.envPath,
+      dryRun: deps.options.dryRun === true,
+      devMode: deps.devMode,
+    }));
+  }
+  const sharing = sharingOf(setup);
 
   const signed = await signIn(deps, deps.projectManager.readSyncState()?.org_id);
   if (!signed.ok) return refusalOutcome(signed.refusal);
@@ -595,9 +682,12 @@ export async function agentSetup(deps: AgentSetupDeps, setup: SetupOptions): Pro
       envPath: deps.options.envPath,
       dryRun: deps.options.dryRun === true,
       devMode: deps.devMode,
+      askShare: sharing.askShare,
+      folder: process.cwd(),
+      inGit: sharing.inGit,
     }));
   }
-  return withOrg(deps, setup, env.value, choice.org);
+  return withOrg(deps, setup, env.value, choice.org, sharing);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -692,7 +782,9 @@ async function resumeSetup(deps: AgentSetupDeps, setup: SetupOptions, pending: P
   const branchMissing = !branches.value.some((b) => b.name === plan.branch);
   const noLocalBranch = deps.projectManager.readActiveBranch() === null;
   const envUnpushed = env.value.variables > 0 && deps.fileManager.readEnvMeta(deps.options.envPath).project_id !== pending.project_id;
-  const ctx: RunContext = { org, auth: scoped.auth, userId, env: env.value, dryRun: deps.options.dryRun === true };
+  // A setup that stopped half way already set keep.lock's tracking: the folder says whether it is shared.
+  const share = tracksKeepLock(process.cwd());
+  const ctx: RunContext = { org, auth: scoped.auth, userId, env: env.value, dryRun: deps.options.dryRun === true, inGit: isGitRepo(process.cwd()), askShare: false, share };
   if (!branchMissing && !noLocalBranch && !envUnpushed) {
     // Nothing is left to do: the setup is complete, so the marker goes (a dry run changes nothing) and the folder syncs.
     if (!ctx.dryRun) deps.projectManager.clearPendingSetup();
@@ -701,6 +793,6 @@ async function resumeSetup(deps: AgentSetupDeps, setup: SetupOptions, pending: P
 
   const project: ProjectInitResult = { org_id: org.id, project_id: pending.project_id, project_name: projectName, created: false };
   if (ctx.dryRun) return dryRunOutcome(ctx, { id: pending.project_id, name: projectName }, branchJson(plan.branch, plan.isProtected), envUnpushed ? env.value.variables : 0);
-  const finished = await finishSetup(deps, ctx, project, plan, branchMissing);
+  const finished = committed(deps, await finishSetup(deps, ctx, project, plan, branchMissing), share, ctx.dryRun);
   return finished.kind === 'done' ? { kind: 'done', result: { ...finished.result, created: false, resumed: true } } : finished;
 }

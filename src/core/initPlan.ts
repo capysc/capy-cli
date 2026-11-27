@@ -30,12 +30,20 @@ export interface Problem {
 }
 
 const PROTECTED_ANSWERS: readonly string[] = ['yes', 'no'];
+const SHARE_ANSWERS: readonly string[] = ['yes', 'no'];
 
 /**
  * The first typed answer that breaks a rule, before any network call, or null. A flag that cannot apply is not
  * checked: with `--project` naming an existing project, `--name` and `--protected` are ignored.
  */
 export function answerProblem(answers: SetupAnswers): Problem | null {
+  if (answers.shareAnswer !== undefined && !SHARE_ANSWERS.includes(answers.shareAnswer)) {
+    return {
+      code: ERROR_CODES.SHARE_SETUP_INVALID,
+      message: '--share-setup takes yes or no.', // COPY-FLAG
+      extra: { options: SHARE_ANSWERS },
+    };
+  }
   const linksExisting = answers.project !== undefined && answers.project !== NEW_PROJECT;
   const branchProblem = answers.branch === undefined ? null : branchNameProblem(answers.branch);
   if (branchProblem !== null) return { ...branchProblem, extra: { pattern: BRANCH_NAME_PATTERN_SOURCE } };

@@ -435,6 +435,10 @@ export interface SetupAnswers {
   readonly branch?: string;
   /** `--protected` / `--no-protected` as typed, as `yes` or `no`; anything else is refused with BRANCH_PROTECTION_INVALID. */
   readonly protectedAnswer?: string;
+  /** `--folder` as typed: the folder to set up. Absent: the agent is asked which folder, as the terminal asks. */
+  readonly folder?: string;
+  /** `--share-setup` / `--no-share-setup` as typed, as `yes` or `no`; anything else is refused with SHARE_SETUP_INVALID. */
+  readonly shareAnswer?: string;
 }
 
 export interface SetupOptions extends SetupAnswers {
@@ -1027,6 +1031,10 @@ export const ERROR_CODES = {
   BRANCH_PROTECTION_REQUIRED: 'BRANCH_PROTECTION_REQUIRED',
   /** `capy project create --protected` with something other than yes or no. Nothing is created. Exit 1. */
   BRANCH_PROTECTION_INVALID: 'BRANCH_PROTECTION_INVALID',
+  /** `--share-setup` was given a word other than yes or no. */
+  SHARE_SETUP_INVALID: 'SHARE_SETUP_INVALID',
+  /** `--folder` names something that is not an existing folder. */
+  FOLDER_NOT_FOUND: 'FOLDER_NOT_FOUND',
   /** `capy projects rename`: the service renamed the project but this folder's keep.lock could not be rewritten. The refusal carries the renamed project. Exit 1. */
   KEEP_LOCK_UPDATE_FAILED: 'KEEP_LOCK_UPDATE_FAILED',
   /** A command that acts on "the active organization" has none (no keep.lock here) and the person belongs to several, with nobody to ask. Exit 3. */

@@ -348,7 +348,8 @@ export class CapyCommand {
       keyServiceOps: this.keyServiceOps(),
       decryptLocalEnv: (raw, key) => this.resolveDecryptedLocalEnv(raw, key),
       pushEnv: (localEnv, key, branch, keep, project, auth) => this.pushAndEncryptLocalEnv(localEnv, key, branch, keep, project, auth),
-      configureFolder: () => configureSetupTracking(process.cwd(), false),
+      configureFolder: (share) => configureSetupTracking(process.cwd(), share),
+      commitSharedSetup: () => commitInitialKeep(process.cwd()),
       installGitHooks: () => this.installGitHooks(),
     };
   }

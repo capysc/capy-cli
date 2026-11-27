@@ -19,6 +19,8 @@ export function bareSetupOptions(): readonly Option[] {
     new Option('--branch <name>', 'the first branch of a new project (offered by default: development), or the branch of an existing project to use; a Capy branch works like a git branch'), // COPY-FLAG
     new Option('--protected [yes|no]', 'whether the first branch is protected (invite-only)'),
     new Option('--no-protected', 'Create it open to the project'),
+    new Option('--share-setup [yes|no]', 'whether keep.lock is committed so copies of the same code point to the same Capy project (asked in a git repository); no sets up this folder only'), // COPY-FLAG
+    new Option('--no-share-setup', 'Set up this folder only'), // COPY-FLAG
     new Option('--json', 'emit machine-readable JSON instead of the human UI'),
     new Option('--non-tty', 'same as --json: never ask, and answer in JSON (agents/CI)'),
   ];
@@ -62,8 +64,8 @@ export function registerBareSetupOptions(program: Command, argv: readonly string
   bareSetupOptions().forEach((option) => program.addOption(option));
 }
 
-/** `--protected` as the answer it stands for: bare `--protected` and `yes` are yes, `--no-protected` and `no` are no. */
-function protectedAnswerFrom(typed: unknown): string | undefined {
+/** A yes/no flag as the answer it stands for: bare `--flag` and `yes` are yes, `--no-flag` and `no` are no. */
+function yesNoAnswerFrom(typed: unknown): string | undefined {
   if (typed === true) return 'yes';
   if (typed === false) return 'no';
   return typeof typed === 'string' ? typed.trim().toLowerCase() : undefined;
@@ -82,13 +84,17 @@ export function setupOptionsFrom(opts: Readonly<Record<string, unknown>>): Setup
   const project = textFrom(opts.project);
   const name = textFrom(opts.name);
   const branch = textFrom(opts.branch);
-  const protectedAnswer = protectedAnswerFrom(opts.protected);
+  const protectedAnswer = yesNoAnswerFrom(opts.protected);
+  const shareAnswer = yesNoAnswerFrom(opts.shareSetup);
+  const folder = textFrom(opts.folder);
   return {
     ...(org === undefined ? {} : { org }),
     ...(project === undefined ? {} : { project }),
     ...(name === undefined ? {} : { name }),
     ...(branch === undefined ? {} : { branch }),
     ...(protectedAnswer === undefined ? {} : { protectedAnswer }),
+    ...(shareAnswer === undefined ? {} : { shareAnswer }),
+    ...(folder === undefined ? {} : { folder }),
     json,
     nonTty,
     agentMode: json || !isInteractive(nonTty),
