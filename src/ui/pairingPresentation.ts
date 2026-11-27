@@ -45,9 +45,9 @@ export const PAIR_LINK_INSTRUCTIONS =
 
 export const PAIRING_PRESENTATION = {
   version: 1,
-  command: 'capy pair --json',
+  command: 'capy pair --title <title> --description <description> --json',
   instructions: [
-    'Run `capy pair --json` without asking the human anything first, and add no flags. It gives one approval link: Keep signs the human in or up and decides whether this machine gets their organization keys or a new organization.', // COPY-FLAG
+    'Run `capy pair --title "<what you are doing and why>" --description "<what you will do once approved>" --json`, in your own words, without asking the human anything first, and add no other flags. Keep shows the title and description to the human on the unlock request. It gives one approval link: Keep signs the human in or up and decides whether this machine gets their organization keys or a new organization.', // COPY-FLAG
     'The refusal PAIR_APPROVAL_PENDING carries an elicitation of kind "link". Always show the human its `url`, `code`, `fingerprint` and `expires_at`.', // COPY-FLAG
     PAIR_LINK_TEXT_RULE, // CAP-900: the same sentence as the link instructions, the AGENTS block and the README
     PAIRING_QR_IMAGE_RULE, // CAP-888: the same sentence as the AGENTS block and the README
