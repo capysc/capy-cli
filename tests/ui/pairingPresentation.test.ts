@@ -185,7 +185,7 @@ describe('pairing contract', () => {
   const text = PAIRING_PRESENTATION.instructions.join('\n');
 
   test('names the one command and the QR order: image, then text in a real terminal, then say it cannot be shown', () => {
-    expect(PAIRING_PRESENTATION.command).toBe('capy pair --json');
+    expect(PAIRING_PRESENTATION.command).toBe('capy pair --title <title> --description <description> --json');
     expect(text.indexOf('show the PNG')).toBeGreaterThan(-1);
     expect(text.indexOf('show `qr.text` only if your client is a real terminal')).toBeGreaterThan(text.indexOf('show the PNG'));
     expect(text.indexOf('say plainly that the QR cannot be shown here')).toBeGreaterThan(text.indexOf('qr.text'));

@@ -51,6 +51,7 @@ interface Stand {
   readonly session?: readonly (Refusal | undefined)[];
   readonly agentsFiles?: SetupDeps['agentsFiles'];
   readonly localOnly?: boolean;
+  readonly pendingIntent?: { readonly title?: string; readonly description?: string };
 }
 
 /** Stand-in steps. Each answers from its list in order (the last answer repeats); `calls` is what was asked. */
@@ -63,6 +64,7 @@ function deps(over: Stand) {
   const made: SetupDeps = {
     localOnly: () => over.localOnly === true,
     pendingPair: () => pending,
+    pendingIntent: () => over.pendingIntent,
     pair: async (step) => {
       const answer = at(over.pair ?? [paired], count('pair'));
       intents.push(step.intent);
@@ -115,6 +117,27 @@ describe('the agent\'s intent for the unlock request (CAP-925)', () => {
       // Asked of the agent, never of the human: no elicitation.
       expect(outcome.refusal.extra?.elicitation).toBeUndefined();
     }
+  });
+
+  test('the rerun repeats every folder answer the agent typed, not only --folder', async () => {
+    const { made } = signedOut();
+    const outcome = await setupOutcome({ answers: { folder: 'My App', org: 'acme', project: 'web', branch: 'main', shareAnswer: 'no' } }, made);
+    if (outcome.kind !== 'refusal') throw new Error('expected a refusal');
+    expect(outcome.refusal.extra?.next_command).toBe("capy setup --folder 'My App' --org acme --project web --branch main --share-setup no --title <title> --description <description> --json");
+  });
+
+  test('when every link ran out, the human\'s yes to starting again carries the intent the pairing was started with', async () => {
+    const expired: Refusal = {
+      code: ERROR_CODES.PAIR_EXPIRED,
+      message: 'expired',
+      exitCode: 3,
+      extra: { elicitation: { kind: 'confirm', question: 'Start again with a new link?', answer: { yes: 'capy pair --json' } } },
+    };
+    const { made, intents } = deps({ pending: true, pendingIntent: { title: "Set up Capy's web app", description: 'Link it.' }, folder: [{ kind: 'refusal', refusal: NOT_SIGNED_IN }], pair: [{ kind: 'refusal', refusal: expired }] });
+    const outcome = await setupOutcome({ answers: { folder: 'my-api' } }, made);
+    expect(intents).toEqual([undefined]);
+    if (outcome.kind !== 'refusal') throw new Error('expected a refusal');
+    expect(elicitationAnswer(outcome.refusal)).toEqual({ yes: "capy setup --title 'Set up Capy'\\''s web app' --description 'Link it.' --folder my-api --json" });
   });
 
   test('either part alone is enough', async () => {
@@ -275,7 +298,7 @@ describe('setupOutcome', () => {
     const dry = deps({ folder: [{ kind: 'refusal', refusal: NOT_SIGNED_IN }] });
     const stopped = await setupOutcome({ ...withFolder, dryRun: true }, dry.made);
     if (stopped.kind !== 'refusal') throw new Error('expected a refusal');
-    expect(stopped.refusal.extra?.next_command).toBe('capy setup --folder my-api --json');
+    expect(stopped.refusal.extra?.next_command).toBe('capy setup --folder my-api --title <title> --description <description> --json');
 
     const linked = deps({ folder: [{ kind: 'sync' }] });
     const done = await setupOutcome(withFolder, linked.made);
@@ -387,7 +410,8 @@ describe('setupOutcome', () => {
     expect(signedOut.calls).toEqual(['folder']);
     if (stopped.kind !== 'refusal') throw new Error('expected a refusal');
     expect(stopped.refusal.code).toBe(ERROR_CODES.AUTH_FAILED);
-    expect(stopped.refusal.extra?.next_command).toBe('capy setup --json');
+    // The run that pairs needs the agent's intent.
+    expect(stopped.refusal.extra?.next_command).toBe('capy setup --title <title> --description <description> --json');
 
     const signedIn = deps({ folder: [{ kind: 'done', result: { ok: true, dry_run: true, org: { id: 'org_1', name: 'Acme' }, would_push: 2 } }] });
     const outcome = await setupOutcome({ ...OPTIONS, dryRun: true }, signedIn.made);

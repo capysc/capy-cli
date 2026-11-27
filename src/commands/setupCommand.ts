@@ -50,6 +50,44 @@ export interface SetupIntent {
 /** Placeholders for a rerun that still needs the agent's intent. The agent writes both; they are never the human's answers. */
 const INTENT_PLACEHOLDERS = '--title <title> --description <description>';
 
+/** The folder answers that were typed, as flags, so a command handed back repeats them. */
+function typedFlags(answers: FolderAnswers): readonly string[] {
+  const typed: ReadonlyArray<readonly [string, string | undefined]> = [
+    ['--folder', answers.folder],
+    ['--org', answers.org],
+    ['--project', answers.project],
+    ['--name', answers.name],
+    ['--branch', answers.branch],
+    ['--protected', answers.protectedAnswer],
+    ['--share-setup', answers.shareAnswer],
+    ['--encrypt-env', answers.encryptAnswer],
+  ];
+  return typed.flatMap(([flag, value]) => (value === undefined ? [] : [flag, shellWord(value)]));
+}
+
+/** `command` (a `capy setup` run) with the intent's flags, unless it has them already. */
+function withIntent(command: string, bin: string, intent: SetupIntent | undefined): string {
+  const prefix = `${bin} setup`;
+  if (intent === undefined || / --title | --description /.test(command) || !(command === prefix || command.startsWith(`${prefix} `))) return command;
+  const words = [
+    ...(intent.title === undefined ? [] : ['--title', shellWord(intent.title)]),
+    ...(intent.description === undefined ? [] : ['--description', shellWord(intent.description)]),
+  ];
+  return `${prefix} ${words.join(' ')}${command.slice(prefix.length)}`;
+}
+
+/**
+ * A pairing refusal as `capy setup` hands it back. When every link ran out (PAIR_EXPIRED), the saved pairing and its
+ * intent are gone, so the human's yes to starting again carries the intent the pairing was started with.
+ */
+function pairRefusal(r: Refusal, bin: string, folder: string | undefined, intent: SetupIntent | undefined): Refusal {
+  const back = forSetup(r, bin, folder);
+  const elicitation = back.extra?.elicitation;
+  if (back.code !== ERROR_CODES.PAIR_EXPIRED || !isRecord(elicitation) || !isRecord(elicitation.answer) || typeof elicitation.answer.yes !== 'string') return back;
+  const answer = { ...elicitation.answer, yes: withIntent(elicitation.answer.yes, bin, intent) };
+  return { ...back, extra: { ...back.extra, elicitation: { ...elicitation, answer } } };
+}
+
 /** The trimmed intent, or undefined when neither part says anything. */
 function intentOf(intent: SetupIntent | undefined): SetupIntent | undefined {
   const title = intent?.title?.trim();
@@ -63,8 +101,8 @@ function intentOf(intent: SetupIntent | undefined): SetupIntent | undefined {
  * see described (Vincent, 2026-11-27). Asked of the agent, never of the human, so this is a plain refusal, not an
  * elicitation. A pairing already waiting keeps the intent it was started with.
  */
-function intentRequired(bin: string, folder: string | undefined): Refusal {
-  const rerun = withFolder(`${bin} setup ${INTENT_PLACEHOLDERS} --json`, bin, folder);
+function intentRequired(bin: string, answers: FolderAnswers): Refusal {
+  const rerun = [`${bin} setup`, ...typedFlags(answers), INTENT_PLACEHOLDERS, '--json'].join(' ');
   return {
     code: ERROR_CODES.SETUP_INTENT_REQUIRED,
     message: `Setup is about to ask the human to approve an unlock request in Keep. Describe it in your own words: what you are setting up and why (--title, at most 120 characters), and what you will do once it is approved (--description, at most 600 characters). Then run \`${rerun}\`.`, // COPY-FLAG
@@ -94,6 +132,8 @@ export interface SetupDeps {
   /** Whether the active profile is local-only: no organization and no server, so there is nothing to set up against. */
   readonly localOnly: () => boolean;
   readonly pendingPair: () => PendingPair;
+  /** The intent the pending pairing was started with, if any (read before a wait, which may delete it). */
+  readonly pendingIntent?: () => SetupIntent | undefined;
   /** Agent-mode `capy pair`: `wait` polls the pending pairing (with the code, when there is one); otherwise a new one starts. */
   readonly pair: (step: { readonly wait: boolean; readonly code?: string; readonly noRenew?: boolean; readonly intent?: SetupIntent }) => Promise<PairAgentOutcome>;
   /** Agent-mode bare `capy`, with the answers that were typed, or with `answers` in their place. */
@@ -164,7 +204,8 @@ function needsPairing(r: Refusal): boolean {
 
 /** Not signed in, and this run starts no pairing: the same refusal, pointing at `capy setup` instead of `capy pair`. */
 function notPaired(r: Refusal, bin: string, dryRun: boolean, folder: string | undefined): Refusal {
-  const again = withFolder(`${bin} setup --json`, bin, folder);
+  // A run that pairs needs the agent's intent for the unlock request, so a dry run hands back the command with its placeholders.
+  const again = withFolder(dryRun ? `${bin} setup ${INTENT_PLACEHOLDERS} --json` : `${bin} setup --json`, bin, folder);
   return {
     ...r,
     message: dryRun
@@ -220,9 +261,10 @@ async function pairThenFolder(options: SetupCommandOptions, deps: SetupDeps, sig
   // A pairing that is waiting is waited on, and one whose link ran out is renewed by that wait; a second one never starts beside it.
   const wait = deps.pendingPair() !== 'none';
   const intent = intentOf(options.intent);
-  if (!wait && intent === undefined) return refusal(intentRequired(bin, folder));
+  if (!wait && intent === undefined) return refusal(intentRequired(bin, options.answers));
+  const started = wait ? intentOf(deps.pendingIntent?.()) : intent;
   const paired = await deps.pair(wait ? { wait } : { wait, intent });
-  return paired.kind === 'refusal' ? refusal(forSetup(paired.refusal, bin, folder)) : folderStep(options, deps, { ...progress, mayPair: false });
+  return paired.kind === 'refusal' ? refusal(pairRefusal(paired.refusal, bin, folder, started)) : folderStep(options, deps, { ...progress, mayPair: false });
 }
 
 /**
@@ -270,9 +312,10 @@ export async function setupOutcome(options: SetupCommandOptions, deps: SetupDeps
   if (code !== undefined && options.dryRun !== true && pending !== 'none') {
     // A pairing that ran out locally is not renewed here: someone may be signed in already. If the service says it is
     // gone, it is dropped and the folder step decides, starting a new pairing only when nobody is signed in.
+    const started = intentOf(deps.pendingIntent?.());
     const paired = await deps.pair({ wait: true, code, ...(pending === 'expired' ? { noRenew: true } : {}) });
     const gone = pending === 'expired' && paired.kind === 'refusal' && paired.refusal.code === ERROR_CODES.PAIR_EXPIRED;
-    if (paired.kind === 'refusal' && !gone) return refusal(forSetup(paired.refusal, bin, options.answers.folder));
+    if (paired.kind === 'refusal' && !gone) return refusal(pairRefusal(paired.refusal, bin, options.answers.folder, started));
   }
   return folderStep(options, deps, { mayPair: true, resumed: false });
 }
@@ -287,6 +330,10 @@ function realDeps(options: SetupCommandOptions): SetupDeps {
       const grant = readPendingPairGrant();
       if (grant === null) return 'none';
       return Date.now() < Date.parse(grant.expiresAt) ? 'waiting' : 'expired';
+    },
+    pendingIntent: () => {
+      const renew = readPendingPairGrant()?.renew;
+      return renew === undefined ? undefined : { title: renew.intentTitle, description: renew.intentDescription };
     },
     pair: async (step) => {
       const { pairAgentOutcome } = await import('./pairAgentCommand');
