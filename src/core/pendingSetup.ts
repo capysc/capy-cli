@@ -36,6 +36,7 @@ export function givenSetupFlags(setup: SetupAnswers): readonly string[] {
     ['--branch', setup.branch],
     ['--protected', setup.protectedAnswer],
     ['--share-setup', setup.shareAnswer],
+    ['--encrypt-env', setup.encryptAnswer],
   ];
   return given.filter(([, value]) => value !== undefined).map(([flag]) => flag);
 }

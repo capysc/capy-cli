@@ -59,12 +59,13 @@ describe.each(ENTRY_POINTS)('capy setup, %s entry point', (_name, cli, bin) => {
   });
 
   test('the rerun a folder form names parses: root options after the subcommand, and every answer flag', () => {
-    const run = setup(cli, ['--folder', '.', '--env-path', 'app/.env', '--dry-run', '--share-setup', 'no', '--org', 'org_1', '--project', 'new', '--name', 'web', '--branch', 'development', '--protected', 'yes', '--json']);
+    const run = setup(cli, ['--folder', '.', '--env-path', 'app/.env', '--dry-run', '--share-setup', 'no', '--encrypt-env', 'yes', '--org', 'org_1', '--project', 'new', '--name', 'web', '--branch', 'development', '--protected', 'yes', '--json']);
     const body = JSON.parse(run.stdout);
     // Nobody is signed in and a dry run starts no pairing: the refusal points back at setup.
-    expect(body).toMatchObject({ ok: false, code: 'AUTH_FAILED', next_command: `${bin} setup --json` });
+    // The typed --folder is repeated, so the next run stays in the folder the human chose.
+    expect(body).toMatchObject({ ok: false, code: 'AUTH_FAILED', next_command: `${bin} setup --folder . --json` });
     expect(run.code).toBe(1);
-    const open = setup(cli, ['--folder', '.', '--dry-run', '--name', 'web', '--no-protected', '--no-share-setup', '--json']);
+    const open = setup(cli, ['--folder', '.', '--dry-run', '--name', 'web', '--no-protected', '--no-share-setup', '--no-encrypt-env', '--json']);
     expect(JSON.parse(open.stdout)).toMatchObject({ ok: false, code: 'AUTH_FAILED' });
     // With no --folder, the folder is asked first, and its rerun parses too.
     const asked = JSON.parse(setup(cli, ['--dry-run', '--json']).stdout);

@@ -50,7 +50,7 @@ import { EXIT_NEEDS_INPUT } from '../ui/interactive';
 import { refusalFor, settle, type Refusal } from './projectLifecycleCommand';
 import { PROTECTED_YES, createRefusalFor, existingProjectNamed, suggestedName } from './projectCreateCommand';
 import type { ElicitationForm } from '../ui/elicitation';
-import { SHARE_YES, setupForm } from './setupForm';
+import { SHARE_NO, SHARE_YES, setupForm, type EncryptQuestion } from './setupForm';
 
 /** The result of a push of the `.env`, as `CapyCommand.pushAndEncryptLocalEnv` reports it. */
 export type PushOutcome =
@@ -552,13 +552,24 @@ async function actNew(
     });
   }
   const plan: NewProject = { name, branch: setup.branch as string, isProtected: setup.protectedAnswer === PROTECTED_YES };
-  if (ctx.askShare) return askShare(deps, setup, ctx, {});
+  // The terminal's last question before anything is created: encrypt the .env and push it, or create nothing.
+  const askEncrypt = ctx.env.variables > 0 && setup.encryptAnswer === undefined
+    ? { variables: ctx.env.variables, project: name, org: ctx.org.name, branch: plan.branch }
+    : undefined;
+  if (ctx.askShare || askEncrypt !== undefined) return askShare(deps, setup, ctx, {}, askEncrypt);
+  if (ctx.env.variables > 0 && setup.encryptAnswer === SHARE_NO) return skippedOutcome(ctx);
   if (ctx.dryRun) return dryRunOutcome(ctx, { name }, branchJson(plan.branch, plan.isProtected), ctx.env.variables);
   return createAndLink(deps, ctx, plan);
 }
 
 /** Everything else is answered, and only "this folder only, or shared through Git" is left: the form asks it alone. */
-function askShare(deps: AgentSetupDeps, setup: SetupOptions, ctx: RunContext, at: { readonly existingProject?: ProjectRef }): AgentOutcome {
+function askShare(
+  deps: AgentSetupDeps,
+  setup: SetupOptions,
+  ctx: RunContext,
+  at: { readonly existingProject?: ProjectRef },
+  askEncrypt?: EncryptQuestion,
+): AgentOutcome {
   return needsInput(setupForm({
     org: ctx.org,
     ...at,
@@ -567,10 +578,26 @@ function askShare(deps: AgentSetupDeps, setup: SetupOptions, ctx: RunContext, at
     envPath: deps.options.envPath,
     dryRun: ctx.dryRun,
     devMode: deps.devMode,
-    askShare: true,
+    askShare: ctx.askShare,
+    ...(askEncrypt === undefined ? {} : { askEncrypt }),
     folder: process.cwd(),
     inGit: ctx.inGit,
   }));
+}
+
+/** The human said No to encrypting the `.env`: as in the terminal, nothing is created and the `.env` is left as it is. */
+function skippedOutcome(ctx: RunContext): AgentOutcome {
+  return {
+    kind: 'done',
+    result: {
+      ok: true,
+      created: false,
+      skipped: true,
+      message: 'Skipped. Nothing was created and your .env was not modified.', // COPY-FLAG: the terminal's wording
+      org: ctx.org,
+      env_found: ctx.env.exists,
+    },
+  };
 }
 
 /**

@@ -450,7 +450,9 @@ export class FileManager {
         appendFileSync(gitignorePath, '\n', 'utf-8');
       }
 
-      appendFileSync(gitignorePath, '\n# Capy\n', 'utf-8');
+      // The file already ends in Capy's own block (for example the keep.lock rule written a moment earlier): add to it,
+      // so the file holds one "# Capy" block instead of two.
+      if (!endsWithCapyBlock(existingContent)) appendFileSync(gitignorePath, '\n# Capy\n', 'utf-8');
       appendFileSync(gitignorePath, contentToAppend + '\n', 'utf-8');
     } catch (error) {
       throw new CapyError(
@@ -723,4 +725,10 @@ export class FileManager {
     // Try decrypting as raw base64
     return Encryptor.decrypt(payload, decryptionKey);
   }
+}
+
+/** Whether the last heading in `.gitignore` text is Capy's own, so the lines after it are Capy's block. */
+function endsWithCapyBlock(content: string): boolean {
+  const headings = content.split(/\r?\n/).filter((line) => line.startsWith('#'));
+  return headings.length > 0 && headings[headings.length - 1].trim() === '# Capy';
 }

@@ -120,6 +120,9 @@ describe('what the options say', () => {
     expect(setupOptionsFrom({ shareSetup: ' Yes ' }).shareAnswer).toBe('yes');
     expect(setupOptionsFrom({ folder: ' apps/web ' }).folder).toBe('apps/web');
     expect(setupOptionsFrom({})).not.toHaveProperty('shareAnswer');
+    expect(setupOptionsFrom({ encryptEnv: true }).encryptAnswer).toBe('yes');
+    expect(setupOptionsFrom({ encryptEnv: false }).encryptAnswer).toBe('no');
+    expect(setupOptionsFrom({})).not.toHaveProperty('encryptAnswer');
     expect(setupOptionsFrom({})).not.toHaveProperty('folder');
   });
 });
