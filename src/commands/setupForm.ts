@@ -75,7 +75,7 @@ function oneOf(values: readonly string[]): string {
 }
 
 /** A value as the shell takes it: as it is when it is plain, else in single quotes. */
-function shellWord(value: string): string {
+export function shellWord(value: string): string {
   return /^[A-Za-z0-9_@%+=:,./-]+$/.test(value) ? value : `'${value.replace(/'/g, `'\\''`)}'`;
 }
 

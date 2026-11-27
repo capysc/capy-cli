@@ -1065,7 +1065,7 @@ describe('which folder, and this folder only or shared through Git (spec 3l, CAP
     expect(field.question).toBe('How would you like to set up Capy for this project?');
     expect(field.default).toBeUndefined();
     expect(field.options).toEqual([
-      { value: 'no', label: 'Set up this folder only (default)', description: 'When teammates set up their own copy of the app, they’ll need to choose this project in Capy to get its secrets.' },
+      { value: 'no', label: 'Set up this folder only', description: 'When teammates set up their own copy of the app, they’ll need to choose this project in Capy to get its secrets.' },
       { value: 'yes', label: 'Share the setup through Git', description: 'Capy commits keep.lock so copies of the same code point to the same Capy project and secret versions (this is useful for keeping larger teams or more complex projects in sync).' },
     ]);
     expect(out.json!.elicitation.answer.rerun).toBe('capy --folder . --name demo --branch development --protected no --share-setup <share> --json');

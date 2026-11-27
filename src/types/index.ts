@@ -1031,7 +1031,9 @@ export const ERROR_CODES = {
   BRANCH_PROTECTION_REQUIRED: 'BRANCH_PROTECTION_REQUIRED',
   /** `capy project create --protected` with something other than yes or no. Nothing is created. Exit 1. */
   BRANCH_PROTECTION_INVALID: 'BRANCH_PROTECTION_INVALID',
+  /** `--share-setup` was given a word other than yes or no. */
   SHARE_SETUP_INVALID: 'SHARE_SETUP_INVALID',
+  /** `--folder` names something that is not an existing folder. */
   FOLDER_NOT_FOUND: 'FOLDER_NOT_FOUND',
   /** `capy projects rename`: the service renamed the project but this folder's keep.lock could not be rewritten. The refusal carries the renamed project. Exit 1. */
   KEEP_LOCK_UPDATE_FAILED: 'KEEP_LOCK_UPDATE_FAILED',

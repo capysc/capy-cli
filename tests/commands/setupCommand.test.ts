@@ -209,6 +209,34 @@ describe('setupOutcome', () => {
     expect((outcome.refusal.extra?.elicitation as { fields: unknown }).fields).toEqual([{ name: 'project' }]);
   });
 
+  test('a folder the human chose is kept through pairing: the wait, the code and the sync name it again (CAP-909 review)', async () => {
+    const withFolder: SetupCommandOptions = { answers: { folder: 'my-api' } };
+    const link = deps({ folder: [{ kind: 'refusal', refusal: NOT_SIGNED_IN }], pair: [{ kind: 'refusal', refusal: LINK }] });
+    const waiting = await setupOutcome(withFolder, link.made);
+    if (waiting.kind !== 'refusal') throw new Error('expected a refusal');
+    expect(elicitationAnswer(waiting.refusal)).toEqual({ wait: 'capy setup --folder my-api --json' });
+
+    const code = deps({ pending: true, folder: [{ kind: 'refusal', refusal: NOT_SIGNED_IN }], pair: [{ kind: 'refusal', refusal: CODE_FORM }] });
+    const asked = await setupOutcome(withFolder, code.made);
+    if (asked.kind !== 'refusal') throw new Error('expected a refusal');
+    expect(elicitationAnswer(asked.refusal)).toEqual({ rerun: 'capy setup --folder my-api --code <code> --json' });
+
+    const dry = deps({ folder: [{ kind: 'refusal', refusal: NOT_SIGNED_IN }] });
+    const stopped = await setupOutcome({ ...withFolder, dryRun: true }, dry.made);
+    if (stopped.kind !== 'refusal') throw new Error('expected a refusal');
+    expect(stopped.refusal.extra?.next_command).toBe('capy setup --folder my-api --json');
+
+    const linked = deps({ folder: [{ kind: 'sync' }] });
+    const done = await setupOutcome(withFolder, linked.made);
+    if (done.kind !== 'done') throw new Error('expected a result');
+    expect(done.result.next).toBe('capy --folder my-api --json');
+  });
+
+  test('a rerun that names its own --folder is left as it is', () => {
+    expect(asSetupCommand('capy --folder <folder> --json', 'capy', 'api')).toBe('capy setup --folder <folder> --json');
+    expect(asSetupCommand('capy pair --wait', 'capy', 'My App')).toBe("capy setup --folder 'My App' --json");
+  });
+
   test('a folder that is a project already, signed in: the agent instructions and the integrations, and the sync to run next', async () => {
     const { made, calls } = deps({ folder: [{ kind: 'sync', ignoredFlags: ['--name'] }] });
     const outcome = await setupOutcome(OPTIONS, made);

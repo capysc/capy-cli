@@ -12,7 +12,9 @@ export const THIS_FOLDER_CHOICE = 'Use this folder'; // COPY-FLAG
 export const SETUP_SHARING_QUESTION = 'How would you like to set up Capy for this project?'; // COPY-FLAG
 export const SHARE_CHOICE = {
   folderOnly: {
-    label: 'Set up this folder only (default)', // COPY-FLAG
+    label: 'Set up this folder only', // COPY-FLAG
+    /** The terminal pre-selects it; an agent's form has no default, so "(default)" is the terminal's alone. */
+    terminalSuffix: ' (default)',
     description: 'When teammates set up their own copy of the app, they’ll need to choose this project in Capy to get its secrets.', // COPY-FLAG
   },
   shared: {
@@ -58,7 +60,7 @@ export async function chooseSetupSharing(folder: string, human: boolean): Promis
     default: false,
     choices: [
       {
-        name: `${SHARE_CHOICE.folderOnly.label}\n    ${SHARE_CHOICE.folderOnly.description}`,
+        name: `${SHARE_CHOICE.folderOnly.label}${SHARE_CHOICE.folderOnly.terminalSuffix}\n    ${SHARE_CHOICE.folderOnly.description}`,
         short: 'Set up this folder only',
         value: false,
       },
