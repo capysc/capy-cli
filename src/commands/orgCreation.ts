@@ -112,7 +112,7 @@ async function createOrganizationNamed(
     if (err && err.status === 409) {
       console.log('');
       const nextName = await promptForOrgName(
-        'That name was claimed while you were setting up. Pick another:',
+        'That organization name is already taken. Pick another:',
       );
       return createOrganizationNamed(ctx, nextName);
     }
