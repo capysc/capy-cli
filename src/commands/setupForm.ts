@@ -297,7 +297,8 @@ export function setupForm(input: SetupFormInput): ElicitationForm {
       org: input.org?.name,
       project: projectCell(input),
       branch: input.answers.branch,
-      isProtected: input.answers.protectedAnswer === undefined ? undefined : input.answers.protectedAnswer === PROTECTED_YES,
+      // Setup never asks protection: without --protected the first branch starts open, so the table says No, not "to choose".
+      isProtected: input.answers.protectedAnswer === PROTECTED_YES,
       variables: input.variables,
       projectChoice: input.projects !== undefined,
       existingProject: input.existingProject !== undefined,

@@ -750,7 +750,7 @@ function pendingMismatch(pending: PendingSetup, projectName: string, flags: read
 /**
  * The same command, run again in a folder that is already linked, after a run that stopped after the project was
  * created. It resumes only when the folder carries the pending-setup marker for the project keep.lock names, and
- * `--name`, `--branch` and `--protected` are all given and agree with it. It then finishes the missing steps: the
+ * `--name` and `--branch` are given and agree with it (a typed `--protected` must agree too). It then finishes the missing steps: the
  * first branch, the local branch file, the `.env` push.
  *
  * With the marker, and a typed flag that differs from it: a refusal (SETUP_PENDING_MISMATCH), nothing changed.

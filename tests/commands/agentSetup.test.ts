@@ -210,6 +210,9 @@ describe('questions left: one INIT_INPUT_REQUIRED form, nothing created or writt
     expect(name).toMatchObject({ name: 'name', pattern: '^[a-zA-Z0-9-_]+$', question: 'What should the project be called?' });
     expect(branch).toMatchObject({ name: 'branch', question: 'What should its first branch be called?', default: 'development' });
     expect(branch.description).toBe('A Capy branch works like a git branch. Capy branches can be used to set different variables for different environments.');
+    // Protection is not asked, so the summary says the branch starts open rather than "to choose".
+    expect(out.json!.elicitation.display).toMatch(/\| Protected \| no \|/);
+    expect(out.json!.elicitation.display).not.toMatch(/\| Protected \| to choose/);
   });
 
   test('only what is unanswered is asked, and the typed answers are repeated in the rerun', async () => {
