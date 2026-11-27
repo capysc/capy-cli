@@ -190,6 +190,19 @@ describe('discover: infrastructure', () => {
     expect(discover(input({ files: [file('docker-compose.yml', 'services: {}')] })).infrastructure).toEqual([]);
   });
 
+  test('code that reads a variable Vercel itself sets means the project runs on Vercel', () => {
+    const files = [file('apps/web/app/api/health/route.ts', 'const env = process.env.VERCEL_ENV ?? process.env.NODE_ENV;\nconst sha = process.env.VERCEL_GIT_COMMIT_SHA;\n')];
+    const [vercel] = discover(input({ files })).infrastructure;
+    expect(vercel.found).toEqual(['apps/web/app/api/health/route.ts:1 (VERCEL_ENV)', 'apps/web/app/api/health/route.ts:2 (VERCEL_GIT_COMMIT_SHA)']);
+    // They are Vercel's own, not the project's secrets.
+    expect(discover(input({ files })).unmapped).toEqual([]);
+  });
+
+  test('a compose file that names Dokploy in any case counts', () => {
+    const [dokploy] = discover(input({ files: [file('docker-compose.yml', '# Dokploy writes the variables to .env next to this file.\nservices: {}\n')] })).infrastructure;
+    expect(dokploy.found).toEqual(['docker-compose.yml:1']);
+  });
+
   test('Cloudflare names its environments and whether it is Workers or Pages', () => {
     const [worker] = discover(input({ files: [file('wrangler.toml', '[env.staging]\n[[env.production.kv_namespaces]]\n')] })).infrastructure;
     expect(worker.environments).toEqual(['production', 'staging']);

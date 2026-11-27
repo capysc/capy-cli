@@ -34,7 +34,8 @@ interface Catalog {
   readonly infrastructureNames: readonly string[];
   readonly services: readonly CatalogService[];
   readonly infrastructure: {
-    readonly vercel: { readonly label: string; readonly files: readonly string[] };
+    /** `systemNames`: variables Vercel itself sets on a deployment; code that reads one runs on Vercel. */
+    readonly vercel: { readonly label: string; readonly files: readonly string[]; readonly systemNames: readonly string[] };
     readonly dokploy: { readonly label: string; readonly composeMarker: string };
     readonly cloudflare: { readonly label: string; readonly files: readonly string[] };
     readonly 'aws-ssm': { readonly label: string; readonly textMarkers: readonly string[] };
@@ -342,24 +343,28 @@ function token(input: DiscoveryInput, name: string, env: string): IntegrationTok
 }
 
 /** `path:line` for each line of the file holding one of the markers. */
-function markerLines(file: ScanFile, markers: readonly string[]): string[] {
+function markerLines(file: ScanFile, markers: readonly string[], anyCase = false): string[] {
   const text = file.text();
   if (text === undefined) return [];
   const lines = text.split('\n');
   const hits: string[] = [];
   lines.forEach((line, i) => {
-    if (markers.some((marker) => line.includes(marker))) hits.push(`${file.path}:${i + 1}`);
+    const text = anyCase ? line.toLowerCase() : line;
+    if (markers.some((marker) => text.includes(anyCase ? marker.toLowerCase() : marker))) hits.push(`${file.path}:${i + 1}`);
   });
   return hits;
 }
 
 const VERCEL_NAMES = /^VERCEL_(TOKEN|ORG_ID|PROJECT_ID)$/i;
 
-function vercel(input: DiscoveryInput, catalog: Catalog): DiscoveredTarget[] {
+function vercel(input: DiscoveryInput, readByCode: Map<string, string[]>, catalog: Catalog): DiscoveredTarget[] {
   const rule = catalog.infrastructure.vercel;
+  const system = rule.systemNames.map((pattern) => new RegExp(pattern));
+  const readsSystem = [...readByCode].filter(([name]) => system.some((pattern) => pattern.test(name))).flatMap(([name, places]) => places.slice(0, 1).map((at) => `${at} (${name})`));
   const found = [
     ...input.files.filter((file) => rule.files.some((name) => isNamed(file.path, name))).map((file) => file.path),
     ...input.envNames.filter((name) => VERCEL_NAMES.test(name)).map((name) => `.env:${name}`),
+    ...readsSystem,
     ...(input.envIsSet(DEFAULT_VERCEL_TOKEN_ENV) ? [`env:${DEFAULT_VERCEL_TOKEN_ENV}`] : []),
   ];
   if (found.length === 0) return [];
@@ -383,7 +388,7 @@ function isCompose(path: string): boolean {
 function dokploy(input: DiscoveryInput, catalog: Catalog): DiscoveredTarget[] {
   const rule = catalog.infrastructure.dokploy;
   const found = [
-    ...input.files.filter((file) => isCompose(file.path)).flatMap((file) => markerLines(file, [rule.composeMarker])),
+    ...input.files.filter((file) => isCompose(file.path)).flatMap((file) => markerLines(file, [rule.composeMarker], true)),
     ...input.envNames.filter((name) => /DOKPLOY/i.test(name)).map((name) => `.env:${name}`),
     ...(input.envIsSet(DOKPLOY_TOKEN_ENV) ? [`env:${DOKPLOY_TOKEN_ENV}`] : []),
   ];
@@ -487,7 +492,7 @@ export function discover(input: DiscoveryInput, catalog: Catalog = CATALOG): Dis
     catalog_version: catalog.version,
     services: found.services,
     unmapped: found.unmapped,
-    infrastructure: [...dokploy(input, catalog), ...vercel(input, catalog), ...awsSsm(input, catalog), ...cloudflare(input, catalog)],
+    infrastructure: [...dokploy(input, catalog), ...vercel(input, read.places, catalog), ...awsSsm(input, catalog), ...cloudflare(input, catalog)],
     scanned: { files: input.files.length, truncated: input.truncated, names_capped: read.capped || found.capped },
   };
 }
