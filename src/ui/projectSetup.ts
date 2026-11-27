@@ -95,7 +95,14 @@ export function projectSubfolders(folder: string): readonly ProjectSubfolder[] {
     .map(entry => entry.name)
     .filter(name => /^[A-Za-z0-9_@%+=:,.-]+$/.test(name))
     .flatMap(name => {
-      const marker = PROJECT_MARKERS.find(m => statSync(join(folder, name, m), { throwIfNoEntry: false }) !== undefined);
+      // A subfolder that cannot be read is left out, rather than hiding every other one.
+      const marker = PROJECT_MARKERS.find(m => {
+        try {
+          return statSync(join(folder, name, m), { throwIfNoEntry: false }) !== undefined;
+        } catch {
+          return false;
+        }
+      });
       return marker === undefined ? [] : [{ name, marker }];
     })
     .sort((a, b) => Number(b.marker === '.env') - Number(a.marker === '.env') || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
