@@ -63,7 +63,7 @@ describe.each(ENTRY_POINTS)('capy setup, %s entry point', (_name, cli, bin) => {
     const body = JSON.parse(run.stdout);
     // Nobody is signed in and a dry run starts no pairing: the refusal points back at setup.
     // The typed --folder is repeated, so the next run stays in the folder the human chose.
-    expect(body).toMatchObject({ ok: false, code: 'AUTH_FAILED', next_command: `${bin} setup --folder . --json` });
+    expect(body).toMatchObject({ ok: false, code: 'AUTH_FAILED', next_command: `${bin} setup --folder . --title <title> --description <description> --json` });
     expect(run.code).toBe(1);
     const open = setup(cli, ['--folder', '.', '--dry-run', '--name', 'web', '--no-protected', '--no-share-setup', '--no-encrypt-env', '--json']);
     expect(JSON.parse(open.stdout)).toMatchObject({ ok: false, code: 'AUTH_FAILED' });
@@ -77,7 +77,7 @@ describe.each(ENTRY_POINTS)('capy setup, %s entry point', (_name, cli, bin) => {
 
   test('a dry run in a linked folder with nobody signed in writes nothing', () => {
     const run = setup(cli, ['--dry-run', '--json'], linkedProject);
-    expect(JSON.parse(run.stdout)).toMatchObject({ ok: false, code: 'AUTH_FAILED', next_command: `${bin} setup --json` });
+    expect(JSON.parse(run.stdout)).toMatchObject({ ok: false, code: 'AUTH_FAILED', next_command: `${bin} setup --title <title> --description <description> --json` });
     expect(existsSync(join(run.folder, 'AGENTS.md'))).toBe(false);
   });
 });
