@@ -189,8 +189,8 @@ interface RunContext {
   readonly share: boolean;
 }
 
-/** The first branch's name and protection, as every JSON result reports it (`protected` is null when it was not asked). */
-const branchJson = (name: string, isProtected: boolean | null) => ({ name, protected: isProtected });
+/** The first branch's name and protection, as every JSON result reports it. */
+const branchJson = (name: string, isProtected: boolean) => ({ name, protected: isProtected });
 
 /** The folder's keep.lock for a project, with no variables yet. */
 const identityKeep = (project: ProjectInitResult): KeepFile => ({
@@ -328,29 +328,29 @@ async function finishSetup(
 // ---------------------------------------------------------------------------------------------------------------------
 
 /** The keep.lock of a project with no secrets yet; the folder is linked and nothing is pulled. */
-function linkEmptyProject(deps: AgentSetupDeps, ctx: RunContext, project: ProjectRef, branch: string): AgentOutcome {
+function linkEmptyProject(deps: AgentSetupDeps, ctx: RunContext, project: ProjectRef, branch: string, isProtected: boolean): AgentOutcome {
   deps.configureFolder(ctx.share);
   deps.fileManager.writeKeepFile({ version: '3.0', org_id: ctx.org.id, project_id: project.id, project_name: project.name, variables: {} });
   deps.projectManager.writeActiveBranch(branch);
   deps.fileManager.ensureCapyGitignore();
   deps.installGitHooks();
-  return linkedResult(ctx, project, branch, 0);
+  return linkedResult(ctx, project, branch, isProtected, 0);
 }
 
-function linkedResult(ctx: RunContext, project: ProjectRef, branch: string, pulled: number): AgentOutcome {
+function linkedResult(ctx: RunContext, project: ProjectRef, branch: string, isProtected: boolean, pulled: number): AgentOutcome {
   return {
     kind: 'done',
-    result: { ok: true, created: false, org: ctx.org, project, branch: branchJson(branch, null), pushed: 0, pulled, env_found: ctx.env.exists },
+    result: { ok: true, created: false, org: ctx.org, project, branch: branchJson(branch, isProtected), pushed: 0, pulled, env_found: ctx.env.exists },
   };
 }
 
 /** Pulls `branch` of an existing project into the folder, as the terminal does: keep.lock, the branch file and an encrypted `.env`. */
-async function linkExisting(deps: AgentSetupDeps, ctx: RunContext, project: ProjectRef, branch: string): Promise<AgentOutcome> {
+async function linkExisting(deps: AgentSetupDeps, ctx: RunContext, project: ProjectRef, branch: string, isProtected: boolean): Promise<AgentOutcome> {
   const key = await settle(() => resolveProjectKey(ctx.org.id, project.id, ctx.userId, deps.keyServiceOps));
   if (!key.ok) return refusalOutcome(refusalFor(key.error));
   const fetched = await settle(() => deps.serviceClient.getDecryptData(project.id, branch, undefined, true));
-  if (!fetched.ok) return pullFailed(deps, ctx, project, branch, fetched.error);
-  if (!fetched.value.keep_file) return outcomeOf(() => linkEmptyProject(deps, ctx, project, branch));
+  if (!fetched.ok) return pullFailed(deps, ctx, project, branch, isProtected, fetched.error);
+  if (!fetched.value.keep_file) return outcomeOf(() => linkEmptyProject(deps, ctx, project, branch, isProtected));
 
   const data = fetched.value;
   const written = await settle(async () => {
@@ -374,7 +374,7 @@ async function linkExisting(deps: AgentSetupDeps, ctx: RunContext, project: Proj
     deps.installGitHooks();
     return Object.keys(plaintext).length;
   });
-  return written.ok ? linkedResult(ctx, project, branch, written.value) : refusalOutcome(refusalFor(written.error));
+  return written.ok ? linkedResult(ctx, project, branch, isProtected, written.value) : refusalOutcome(refusalFor(written.error));
 }
 
 /** The variables the person may read, decrypted. One they lack permission for is skipped, as the terminal skips it. */
@@ -404,9 +404,9 @@ async function outcomeOf(step: () => AgentOutcome): Promise<AgentOutcome> {
 }
 
 /** A project with no secrets answers a pull with a coded 404 (NO_SECRETS): the folder is linked and nothing is pulled. Anything else is a refusal. */
-async function pullFailed(deps: AgentSetupDeps, ctx: RunContext, project: ProjectRef, branch: string, error: unknown): Promise<AgentOutcome> {
+async function pullFailed(deps: AgentSetupDeps, ctx: RunContext, project: ProjectRef, branch: string, isProtected: boolean, error: unknown): Promise<AgentOutcome> {
   const empty = error instanceof CapyError && error.details?.status === 404 && error.code === ERROR_CODES.NO_SECRETS;
-  if (empty) return outcomeOf(() => linkEmptyProject(deps, ctx, project, branch));
+  if (empty) return outcomeOf(() => linkEmptyProject(deps, ctx, project, branch, isProtected));
   return refusalOutcome({ ...refusalFor(error), extra: { project, org: ctx.org } });
 }
 
@@ -463,8 +463,10 @@ async function actExisting(deps: AgentSetupDeps, setup: SetupOptions, ctx: RunCo
     });
   }
   if (ctx.askShare) return askShare(deps, setup, ctx, { existingProject: project });
-  if (ctx.dryRun) return dryRunOutcome(ctx, project, branchJson(setup.branch, null), 0);
-  return linkExisting(deps, ctx, project, setup.branch);
+  // The branch's own protection, as the form's options showed it.
+  const isProtected = listed.value.find((b) => b.name === setup.branch)?.is_protected === true;
+  if (ctx.dryRun) return dryRunOutcome(ctx, project, branchJson(setup.branch, isProtected), 0);
+  return linkExisting(deps, ctx, project, setup.branch, isProtected);
 }
 
 /**
@@ -509,7 +511,7 @@ async function firstBranchOfExisting(deps: AgentSetupDeps, setup: SetupOptions, 
     }
     return refusalOutcome({ ...refusalFor(err), extra: { project, org: ctx.org, branch: branchJson(branch, false) } });
   }
-  return linkExisting(deps, ctx, project, branch);
+  return linkExisting(deps, ctx, project, branch, false);
 }
 
 /** The organization's projects in the shape `existingProjectNamed` reads. */

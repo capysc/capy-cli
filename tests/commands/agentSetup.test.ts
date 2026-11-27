@@ -373,7 +373,7 @@ describe('an existing project', () => {
     const read = ServiceClient.prototype.getDecryptData as unknown as ReturnType<typeof spyOn>;
     const out = await run({ project: 'web', branch: 'prod' });
     expect(out.exitCode).toBeUndefined();
-    expect(out.json).toMatchObject({ ok: true, created: false, project: { id: 'proj-web', name: 'web' }, branch: { name: 'prod' }, pushed: 0 });
+    expect(out.json).toMatchObject({ ok: true, created: false, project: { id: 'proj-web', name: 'web' }, branch: { name: 'prod', protected: false }, pushed: 0 });
     expect(read.mock.calls[0]?.[1]).toBe('prod');
     expect(calls.initializeProject).not.toHaveBeenCalled();
     expect(calls.createBranch).not.toHaveBeenCalled();
@@ -406,6 +406,13 @@ describe('an existing project', () => {
       { value: 'prod', label: 'prod', description: 'Everyone on the project can use its secrets' },
       { value: 'staging', label: 'staging (protected)', description: 'Invite-only: only people added to the branch can use its secrets' },
     ]);
+  });
+
+  test('the result reports the picked branch\'s own protection, as the form showed it, never null (run 15)', async () => {
+    fakeWorld({ projects: [{ id: 'proj-web', name: 'web', organization_id: ORG.id }], branches: PROD_AND_STAGING });
+    spyOn(ServiceClient.prototype, 'getDecryptData').mockRejectedValue(new CapyError('No secrets', ERROR_CODES.NO_SECRETS, { status: 404 }));
+    const out = await run({ project: 'web', branch: 'staging' });
+    expect(out.json).toMatchObject({ ok: true, created: false, branch: { name: 'staging', protected: true } });
   });
 
   test('--branch the project does not have is BRANCH_NOT_FOUND naming its branches: nothing read or written', async () => {
