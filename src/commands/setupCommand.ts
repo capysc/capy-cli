@@ -5,7 +5,8 @@
  *   1. Pair: `capy pair` in agent mode (the link, the wait, the one-time code Keep shows).
  *   2. Folder: bare `capy` in agent mode (organization, project, first branch).
  *   3. Agent instructions: the Capy block in AGENTS.md / CLAUDE.md.
- *   4. Pre-discovery: the integrations the folder shows signs of, and the next command for each (`core/preDiscovery.ts`).
+ *   4. Discovery: the services and deployment targets the folder shows signs of, from names and files only, and the
+ *      next command for each (`core/discovery/scan.ts`, spec 3k section 7).
  *
  * Every stop is the step's own coded refusal, with its elicitation unchanged except for the command to run next, which
  * names `capy setup` so the agent keeps running one command. Running it again is always safe: a step that is done is
@@ -13,11 +14,10 @@
  *
  * The steps are injected (`SetupDeps`), so the order and the rewriting are tested without a network.
  */
-import { existsSync } from 'fs';
-import { join } from 'path';
 import { readPendingPairGrant } from '../auth/pairing/pendingGrant';
 import { isLocalOnly } from '../config/profileConfig';
-import { preDiscover, type Integration } from '../core/preDiscovery';
+import { CATALOG, discover, type Discovery } from '../core/discovery/scan';
+import { walkFolder } from '../core/discovery/walk';
 import { FileManager } from '../files/fileManager';
 import { ERROR_CODES, type CliOptions, type SetupOptions } from '../types/index';
 import type { AgentOutcome } from './agentSetup';
@@ -143,7 +143,8 @@ export interface SetupDeps {
   readonly session: (orgId: string | undefined) => Promise<Refusal | undefined>;
   /** Writes the Capy block (or, with `apply` false, reports what it would write). */
   readonly agentsFiles: (apply: boolean) => readonly AgentsFileResult[];
-  readonly integrations: () => readonly Integration[];
+  /** Discovery over the folder (names and files only; never fails setup). */
+  readonly discovery: () => Discovery;
 }
 
 type Outcome =
@@ -228,7 +229,7 @@ function linkedResult(folder: LinkedFolder, ignoredFlags: readonly string[], bin
   };
 }
 
-/** Steps 3 and 4, once the folder is a project: the agent instructions and the integrations. */
+/** Steps 3 and 4, once the folder is a project: the agent instructions and discovery. */
 async function finish(options: SetupCommandOptions, deps: SetupDeps, folder: Readonly<Record<string, unknown>>): Promise<Outcome> {
   const dryRun = options.dryRun === true;
   const files = await settle(async () => deps.agentsFiles(!dryRun));
@@ -241,7 +242,7 @@ async function finish(options: SetupCommandOptions, deps: SetupDeps, folder: Rea
       setup: dryRun ? 'dry_run' : 'complete',
       ...rest,
       agents_files: files.value,
-      integrations: deps.integrations(),
+      discovery: discoveryOrNone(deps),
     },
   };
 }
@@ -353,10 +354,12 @@ function realDeps(options: SetupCommandOptions): SetupDeps {
       return new CapyCommand(cliOptions, devMode).signedOutRefusal(orgId);
     },
     agentsFiles: (apply) => writeAgentsBlock(resolveRepoRoot(process.cwd()), apply),
-    integrations: () => {
+    discovery: () => {
       const envNames = namesOrNone(() => Object.keys(new FileManager().readEnvFile(options.envPath)));
-      return preDiscover({
-        exists: (relativePath) => existsSync(join(process.cwd(), relativePath)),
+      const walk = walkOrNone(() => walkFolder(process.cwd()));
+      return discover({
+        files: walk.files,
+        truncated: walk.truncated,
         envNames,
         envIsSet: (name) => (process.env[name] ?? '') !== '',
         bin: binName(devMode),
@@ -365,7 +368,25 @@ function realDeps(options: SetupCommandOptions): SetupDeps {
   };
 }
 
-/** The names, or none when the `.env` cannot be read: pre-discovery is a hint and never fails setup. */
+/** Discovery is a hint and never fails setup: anything it throws gives an empty result. */
+function discoveryOrNone(deps: SetupDeps): Discovery {
+  try {
+    return deps.discovery();
+  } catch {
+    return { catalog_version: CATALOG.version, services: [], unmapped: [], infrastructure: [], scanned: { files: 0, truncated: false, names_capped: false } };
+  }
+}
+
+/** The folder's files, or none when it cannot be walked: discovery is a hint and never fails setup. */
+function walkOrNone(walk: () => ReturnType<typeof walkFolder>): ReturnType<typeof walkFolder> {
+  try {
+    return walk();
+  } catch {
+    return { files: [], truncated: false };
+  }
+}
+
+/** The names, or none when the `.env` cannot be read: discovery is a hint and never fails setup. */
 function namesOrNone(names: () => readonly string[]): readonly string[] {
   try {
     return names();

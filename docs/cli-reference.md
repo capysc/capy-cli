@@ -436,7 +436,7 @@ JSON support: yes (`--json`)
 
 ## `capy setup`
 
-Set this folder up with Capy in one command, for agents: pair, choose the organization, project and branch, write the agent instructions, and list the integrations found. Always answers in JSON; run it again after every stop until it says "setup": "complete"
+Set this folder up with Capy in one command, for agents: pair, choose the organization, project and branch, write the agent instructions, and list the services and deployment targets found. Always answers in JSON; run it again after every stop until it says "setup": "complete"
 
 ```
 capy setup [options]

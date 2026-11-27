@@ -526,7 +526,7 @@ program
 
 program
   .command('setup')
-  .description('Set this folder up with Capy in one command, for agents: pair, choose the organization, project and branch, write the agent instructions, and list the integrations found. Always answers in JSON; run it again after every stop until it says "setup": "complete"') // COPY-FLAG
+  .description('Set this folder up with Capy in one command, for agents: pair, choose the organization, project and branch, write the agent instructions, and list the services and deployment targets found. Always answers in JSON; run it again after every stop until it says "setup": "complete"') // COPY-FLAG
   .option('--code <code>', 'the one-time code Keep shows the person who approved the pairing; ask them for it') // COPY-FLAG
   .option('--title <text>', 'your short summary of what you are setting up and why, shown to the human on Keep\'s unlock request (max 120 chars); needed when setup starts a pairing') // COPY-FLAG
   .option('--description <text>', 'what you will do once the request is approved, shown under the title (max 600 chars)') // COPY-FLAG
@@ -541,7 +541,7 @@ program
   .option('--encrypt-env [yes|no]', 'whether a new project encrypts this folder\'s .env and pushes its secrets (asked when the .env has any); no creates nothing') // COPY-FLAG
   .option('--no-encrypt-env', 'Create nothing and leave the .env as it is') // COPY-FLAG
   .option('--json', 'accepted for symmetry: setup always answers in JSON') // COPY-FLAG
-  .addHelpText('after', '\nAgents: run `capy setup --title "<what you are setting up and why>" --description "<what you will do once approved>" --json`, in your own words: when setup starts a pairing, Keep shows them to the human on the unlock request (without them it refuses with SETUP_INTENT_REQUIRED). On exit 3, show the human the elicitation and ask its questions, then run the command in its `answer`. Never answer for the human. The result with "setup": "complete" names the organization, project and branch, and lists under `integrations` what was found in this folder with the next command for each; discovery needs a provider token that an owner or admin saves with `capy system set`.\n') // COPY-FLAG
+  .addHelpText('after', '\nAgents: run `capy setup --title "<what you are setting up and why>" --description "<what you will do once approved>" --json`, in your own words: when setup starts a pairing, Keep shows them to the human on the unlock request (without them it refuses with SETUP_INTENT_REQUIRED). On exit 3, show the human the elicitation and ask its questions, then run the command in its `answer`. Never answer for the human. The result with "setup": "complete" names the organization, project and branch, and ends with `discovery`: the application services found from variable names, code and dependencies (`services`), names that match no provider (`unmapped`), and the deployment targets found (`infrastructure`: Dokploy, Vercel, AWS SSM, Cloudflare) with what each needs and the next command. Names and file paths only, never values. Show it to the human as a table and run nothing in it until they choose. If you can see a service or target it missed, say so, with the file and variable name. Discovery against a provider needs a token that an owner or admin saves with `capy system set`.\n') // COPY-FLAG
   .action(async (options, command) => {
     const { setupCommand } = await import('./commands/setupCommand');
     const merged = command.optsWithGlobals();
