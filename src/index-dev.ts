@@ -15,6 +15,7 @@ import { cliVersion } from './cliVersion';
 import { conflictOption, rawConflictFlagsOf, resolveOption } from './sync/conflicts';
 import { answersByProtocol } from './sync/gate';
 import { registerBareSetupOptions, setupOptionsFrom } from './core/bareSetupFlags';
+import { enterFolder } from './core/folderFlag';
 import { refuseWebMode } from './core/webModeRemoved';
 import { ACCENT } from './ui/colors';
 
@@ -107,7 +108,7 @@ program
   .hook('preAction', (_thisCommand, actionCommand) => {
     const opts = actionCommand.optsWithGlobals();
     if (opts.web === true) refuseWebMode(opts.json === true);
-    if (opts.folder !== undefined) process.chdir(opts.folder);
+    if (opts.folder !== undefined) enterFolder(opts.folder, opts);
     // `--org` on a command that works on an organization (spec 3l): picks among the account's own organizations.
     const takes = (flag: string): boolean => actionCommand.options.some((o: { long?: string }) => o.long === flag);
     setCommandShape({ org: takes('--org'), json: takes('--json'), nonTty: takes('--non-tty') });
@@ -533,15 +534,18 @@ program
   .option('--branch <name>', 'the first branch of a new project (offered by default: development), or the branch of an existing project to use') // COPY-FLAG
   .option('--protected [yes|no]', 'whether the first branch is protected (invite-only)')
   .option('--no-protected', 'Create it open to the project')
+  .option('--share-setup [yes|no]', 'whether keep.lock is committed so copies of the same code point to the same Capy project (asked in a git repository); no sets up this folder only') // COPY-FLAG
+  .option('--no-share-setup', 'Set up this folder only') // COPY-FLAG
   .option('--json', 'accepted for symmetry: setup always answers in JSON') // COPY-FLAG
   .addHelpText('after', '\nAgents: run `capy setup --json`. On exit 3, show the human the elicitation and ask its questions, then run the command in its `answer`. Never answer for the human. The result with "setup": "complete" names the organization, project and branch, and lists under `integrations` what was found in this folder with the next command for each; discovery needs a provider token that an owner or admin saves with `capy system set`.\n') // COPY-FLAG
   .action(async (options, command) => {
     const { setupCommand } = await import('./commands/setupCommand');
     const merged = command.optsWithGlobals();
-    const { org, project, name, branch, protectedAnswer } = setupOptionsFrom(options);
+    // `--folder` is the program's own option, so it is read from the merged options.
+    const { org, project, name, branch, protectedAnswer, shareAnswer, folder } = setupOptionsFrom({ ...options, folder: merged.folder });
     await setupCommand({
       code: options.code,
-      answers: { org, project, name, branch, protectedAnswer },
+      answers: { org, project, name, branch, protectedAnswer, shareAnswer, folder },
       envPath: merged.envPath,
       dryRun: merged.dryRun === true,
       devMode: true,

@@ -71,6 +71,13 @@ describe('registration', () => {
     expect(program([]).root).not.toHaveProperty('protected');
   });
 
+  test('--share-setup alone, with yes and with no, and --no-share-setup', () => {
+    expect(program(['--share-setup']).root).toMatchObject({ shareSetup: true });
+    expect(program(['--share-setup', 'yes', '--json']).root).toMatchObject({ shareSetup: 'yes', json: true });
+    expect(program(['--no-share-setup']).root).toMatchObject({ shareSetup: false });
+    expect(program([]).root).not.toHaveProperty('shareSetup');
+  });
+
   test('a subcommand keeps its own flags of the same names', () => {
     expect(program(['status', '--json']).status).toEqual({ json: true });
     expect(program(['project', 'create', 'demo', '--branch', 'main', '--protected', 'yes', '--json']).create)
@@ -105,5 +112,14 @@ describe('what the options say', () => {
     expect(setupOptionsFrom({ protected: false }).protectedAnswer).toBe('no');
     expect(setupOptionsFrom({ protected: ' NO ' }).protectedAnswer).toBe('no');
     expect(setupOptionsFrom({})).not.toHaveProperty('protectedAnswer');
+  });
+
+  test('--share-setup is yes or no, and --folder is the folder as typed', () => {
+    expect(setupOptionsFrom({ shareSetup: true }).shareAnswer).toBe('yes');
+    expect(setupOptionsFrom({ shareSetup: false }).shareAnswer).toBe('no');
+    expect(setupOptionsFrom({ shareSetup: ' Yes ' }).shareAnswer).toBe('yes');
+    expect(setupOptionsFrom({ folder: ' apps/web ' }).folder).toBe('apps/web');
+    expect(setupOptionsFrom({})).not.toHaveProperty('shareAnswer');
+    expect(setupOptionsFrom({})).not.toHaveProperty('folder');
   });
 });

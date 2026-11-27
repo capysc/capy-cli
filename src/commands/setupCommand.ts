@@ -30,7 +30,7 @@ import { refuse, settle, type Refusal } from './refusal';
 export interface SetupCommandOptions {
   /** `--code`: the one-time code Keep showed the person who approved the pairing. */
   readonly code?: string;
-  /** The answers to the folder questions, as typed (`--org`, `--project`, `--name`, `--branch`, `--protected`). */
+  /** The answers to the folder questions, as typed (`--folder`, `--org`, `--project`, `--name`, `--branch`, `--protected`, `--share-setup`). */
   readonly answers: FolderAnswers;
   readonly envPath?: string;
   readonly dryRun?: boolean;
@@ -48,7 +48,7 @@ export interface LinkedFolder {
   readonly pendingSetup?: { readonly branch: string; readonly protected: boolean };
 }
 
-export type FolderAnswers = Pick<SetupOptions, 'org' | 'project' | 'name' | 'branch' | 'protectedAnswer'>;
+export type FolderAnswers = Pick<SetupOptions, 'org' | 'project' | 'name' | 'branch' | 'protectedAnswer' | 'shareAnswer' | 'folder'>;
 
 export type FolderOutcome = AgentOutcome | { readonly kind: 'sync'; readonly ignoredFlags?: readonly string[] } | undefined;
 

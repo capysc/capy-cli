@@ -145,6 +145,22 @@ export interface SetupDisplayInput {
   readonly firstBranchOfExisting?: boolean;
   /** What a branch is, shown under the table. */
   readonly branchDescription: string;
+  /** The folder being set up (its full path); absent while it is the question. */
+  readonly folder?: string;
+  /** Inside a git repository: whether keep.lock is shared through Git, or still to choose. Absent outside Git. */
+  readonly sharing?: 'ask' | 'shared' | 'folder-only';
+}
+
+/** The first row: the folder being set up. */
+function folderRow(input: SetupDisplayInput): readonly [string, string] {
+  return ['Folder', input.folder ?? TO_CHOOSE]; // COPY-FLAG
+}
+
+/** The sharing row, inside a git repository only. */
+function sharingRows(input: SetupDisplayInput): ReadonlyArray<readonly [string, string]> {
+  if (input.sharing === undefined) return [];
+  const cells = { ask: TO_CHOOSE, shared: 'shared through Git (keep.lock is committed)', 'folder-only': 'this folder only' } as const; // COPY-FLAG
+  return [['Setup', cells[input.sharing]]]; // COPY-FLAG
 }
 
 const LINKED_PROJECT_OUTCOME = 'nothing is pushed; if the project has secrets they replace these, and the old values are kept in a .pre-capy.old file.'; // COPY-FLAG: the wording of EXISTING_PROJECT_OUTCOME
@@ -164,10 +180,12 @@ export function setupDisplay(input: SetupDisplayInput): string {
   if (input.firstBranchOfExisting === true) return firstBranchDisplay(input);
   if (input.existingProject === true) return linkDisplay(input);
   const rows: ReadonlyArray<readonly [string, string]> = [
+    folderRow(input),
     ['Org', input.org ?? TO_CHOOSE],
     ['Project', input.project ?? TO_CHOOSE],
     ['First branch', input.branch ?? TO_CHOOSE], // COPY-FLAG
     ['Protected', protectedCell(input.isProtected)], // COPY-FLAG
+    ...sharingRows(input),
     ...(input.variables !== undefined && input.variables > 0 ? [['Variables', variablesCell(input.variables, input.projectChoice === true)] as const] : []),
   ];
   return `${table(['', ''], rows)}\n\n${input.branchDescription}`;
@@ -177,10 +195,12 @@ export function setupDisplay(input: SetupDisplayInput): string {
 function firstBranchDisplay(input: SetupDisplayInput): string {
   const count = input.variables ?? 0;
   const rows: ReadonlyArray<readonly [string, string]> = [
+    folderRow(input),
     ['Org', input.org ?? TO_CHOOSE],
     ['Project', input.project ?? TO_CHOOSE],
     ['First branch', input.branch ?? TO_CHOOSE], // COPY-FLAG
     ['Protected', 'no (open to the project; it can be protected later)'], // COPY-FLAG
+    ...sharingRows(input),
     ...(count > 0 ? [['Variables', `${count} ${count === 1 ? 'variable' : 'variables'}: ${LINKED_PROJECT_OUTCOME}`] as const] : []),
   ];
   return `${table(['', ''], rows)}\n\n${input.branchDescription}`;
@@ -190,9 +210,11 @@ function firstBranchDisplay(input: SetupDisplayInput): string {
 function linkDisplay(input: SetupDisplayInput): string {
   const count = input.variables ?? 0;
   const rows: ReadonlyArray<readonly [string, string]> = [
+    folderRow(input),
     ['Org', input.org ?? TO_CHOOSE],
     ['Project', input.project ?? TO_CHOOSE],
     ['Branch', input.branch ?? TO_CHOOSE], // COPY-FLAG
+    ...sharingRows(input),
     ...(count > 0 ? [['Variables', `${count} ${count === 1 ? 'variable' : 'variables'}: ${LINKED_PROJECT_OUTCOME}`] as const] : []),
   ];
   return `${table(['', ''], rows)}\n\n${input.branchDescription}`;
