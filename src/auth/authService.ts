@@ -823,13 +823,6 @@ export class AuthService {
     return this.currentOrgId;
   }
 
-  async checkOrgName(name: string): Promise<{ available: boolean; reason?: string }> {
-    return postJson<{ available: boolean; reason?: string }>(
-      `${this.serviceApiUrl}/auth/check-org-name`,
-      { name },
-    );
-  }
-
   async createOrganization(name: string, refreshToken: string, userId: string): Promise<Organization> {
     const data = await this.requestCreateOrg(name, refreshToken);
 
