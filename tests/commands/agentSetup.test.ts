@@ -1058,7 +1058,7 @@ describe('which folder, and this folder only or shared through Git (spec 3l, CAP
     execFileSync('git', ['config', 'core.hooksPath', '/dev/null'], { cwd: process.cwd() });
   };
 
-  test('no --folder: the folder is asked first and alone, before sign-in, with this folder, up to 2 project subfolders, and Other', async () => {
+  test('no --folder: the folder is asked first and alone, before sign-in, with this folder, every project subfolder, and Other', async () => {
     const calls = fakeWorld();
     mkdirSync(folder('api'));
     writeFileSync(folder('api', 'package.json'), '{}', 'utf-8');
@@ -1083,6 +1083,7 @@ describe('which folder, and this folder only or shared through Git (spec 3l, CAP
       // A folder with a .env comes first (run 17), and each says what it holds.
       { value: 'web', label: 'web/', description: 'Has a .env' },
       { value: 'api', label: 'api/', description: 'Has a package.json, no .env' },
+      { value: 'zzz', label: 'zzz/', description: 'Has a go.mod, no .env' },
     ]);
     expect(new RegExp(field.pattern).test('apps/web')).toBe(true);
     expect(new RegExp(field.pattern).test('a b; rm -rf')).toBe(false);

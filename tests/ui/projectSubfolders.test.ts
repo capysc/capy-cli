@@ -16,13 +16,17 @@ describe('projectSubfolders', () => {
     writeFileSync(join(root, name, file), '', 'utf-8');
   };
 
-  test('a subfolder with a .env is offered before ones with only a package file, even past the limit by name (run 17)', () => {
+  test('every project subfolder, with no cap; one with a .env before ones with only a package file (run 17)', () => {
     make('atlas-analytics', 'package.json');
     make('beacon-ci', 'package.json');
     make('northwind-commerce', '.env');
-    expect(projectSubfolders(root, 2)).toEqual([
+    make('orion-api', 'pyproject.toml');
+    mkdirSync(join(root, 'docs'));
+    expect(projectSubfolders(root)).toEqual([
       { name: 'northwind-commerce', marker: '.env' },
       { name: 'atlas-analytics', marker: 'package.json' },
+      { name: 'beacon-ci', marker: 'package.json' },
+      { name: 'orion-api', marker: 'pyproject.toml' },
     ]);
   });
 
@@ -31,7 +35,7 @@ describe('projectSubfolders', () => {
     make('api', '.env');
     make('api', 'package.json');
     make('tools', 'go.mod');
-    expect(projectSubfolders(root, 5)).toEqual([
+    expect(projectSubfolders(root)).toEqual([
       { name: 'api', marker: '.env' },
       { name: 'web', marker: '.env' },
       { name: 'tools', marker: 'go.mod' },
