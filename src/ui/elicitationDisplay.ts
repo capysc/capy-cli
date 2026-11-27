@@ -176,6 +176,15 @@ function variablesCell(count: number, projectChoice: boolean): string {
  * The table for bare `capy` setting up a folder with nobody to ask: where it goes, what is decided so far, and how
  * many variables of the `.env` will be encrypted and pushed. It is the whole summary, so there is no second confirmation.
  */
+/**
+ * While the folder is the question it is asked alone, before anything else is known, so the summary is just
+ * the folder Capy is running in: no org, project or branch rows and no branch line (Vincent, 2026-11-27: "why
+ * does it talk about branches when it's asking for folder picking").
+ */
+export function folderQuestionDisplay(here: string): string {
+  return table(['', ''], [['Running in', here]]); // COPY-FLAG
+}
+
 export function setupDisplay(input: SetupDisplayInput): string {
   if (input.firstBranchOfExisting === true) return firstBranchDisplay(input);
   if (input.existingProject === true) return linkDisplay(input);
