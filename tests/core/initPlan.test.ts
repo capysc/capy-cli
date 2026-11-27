@@ -65,7 +65,9 @@ describe('answerProblem', () => {
 
 describe('gaps', () => {
   test('only the answers not typed are gaps', () => {
-    expect(newProjectGaps({ name: 'demo' })).toEqual({ name: false, branch: true, isProtected: true });
+    expect(newProjectGaps({ name: 'demo' })).toEqual({ name: false, branch: true, isProtected: false });
     expect(hasGaps(newProjectGaps({ name: 'demo', branch: 'main', protectedAnswer: 'no' }))).toBe(false);
+    // Protection is never a gap: setup does not ask it, as the terminal (Vincent, 2026-11-27).
+    expect(hasGaps(newProjectGaps({ name: 'demo', branch: 'main' }))).toBe(false);
   });
 });

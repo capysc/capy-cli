@@ -767,7 +767,8 @@ export async function agentResume(deps: AgentSetupDeps, setup: SetupOptions, sta
   // A typed --org is checked whatever else was typed: another organization is a refusal, never a sync.
   const orgDiffers = await orgMismatch(deps, setup, pending, projectName);
   if (orgDiffers !== undefined) return orgDiffers;
-  const complete = setup.name === projectName && setup.branch !== undefined && setup.protectedAnswer !== undefined;
+  // Protection is not asked in setup, so the rerun of a stopped setup is complete with its name and branch.
+  const complete = setup.name === projectName && setup.branch !== undefined;
   if (!complete) return syncStep(typed);
 
   const problem = answerProblem(setup);

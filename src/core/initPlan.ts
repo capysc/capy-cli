@@ -135,7 +135,9 @@ export function newProjectGaps(answers: SetupAnswers): NewProjectGaps {
   return {
     name: answers.name === undefined,
     branch: answers.branch === undefined,
-    isProtected: answers.protectedAnswer === undefined,
+    // The terminal's setup never asks it: a new project's first branch starts open, and protection is a later action.
+    // `--protected` still sets it when typed (Vincent, 2026-11-27).
+    isProtected: false,
   };
 }
 
