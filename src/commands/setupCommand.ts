@@ -31,12 +31,46 @@ import { refuse, settle, type Refusal } from './refusal';
 export interface SetupCommandOptions {
   /** `--code`: the one-time code Keep showed the person who approved the pairing. */
   readonly code?: string;
+  /** `--title` / `--description`: the agent's intent, which Keep shows on the unlock request a new pairing makes (CAP-925). */
+  readonly intent?: SetupIntent;
   /** The answers to the folder questions, as typed (`--folder`, `--org`, `--project`, `--name`, `--branch`, `--protected`, `--share-setup`). */
   readonly answers: FolderAnswers;
   readonly envPath?: string;
   readonly dryRun?: boolean;
   readonly devMode?: boolean;
   readonly apiUrl?: string;
+}
+
+/** The agent's own words for what it is doing, as typed. Keep shows them to the human who approves the pairing. */
+export interface SetupIntent {
+  readonly title?: string;
+  readonly description?: string;
+}
+
+/** Placeholders for a rerun that still needs the agent's intent. The agent writes both; they are never the human's answers. */
+const INTENT_PLACEHOLDERS = '--title <title> --description <description>';
+
+/** The trimmed intent, or undefined when neither part says anything. */
+function intentOf(intent: SetupIntent | undefined): SetupIntent | undefined {
+  const title = intent?.title?.trim();
+  const description = intent?.description?.trim();
+  if (!title && !description) return undefined;
+  return { ...(title ? { title } : {}), ...(description ? { description } : {}) };
+}
+
+/**
+ * A new pairing needs the agent's intent: Keep's unlock request shows it to the human, who approves only what they can
+ * see described (Vincent, 2026-11-27). Asked of the agent, never of the human, so this is a plain refusal, not an
+ * elicitation. A pairing already waiting keeps the intent it was started with.
+ */
+function intentRequired(bin: string, folder: string | undefined): Refusal {
+  const rerun = withFolder(`${bin} setup ${INTENT_PLACEHOLDERS} --json`, bin, folder);
+  return {
+    code: ERROR_CODES.SETUP_INTENT_REQUIRED,
+    message: `Setup is about to ask the human to approve an unlock request in Keep. Describe it in your own words: what you are setting up and why (--title, at most 120 characters), and what you will do once it is approved (--description, at most 600 characters). Then run \`${rerun}\`.`, // COPY-FLAG
+    exitCode: 1,
+    extra: { next_command: rerun, fields: ['title', 'description'] },
+  };
 }
 
 /** The folder as it stands when it is a Capy project already. */
@@ -61,7 +95,7 @@ export interface SetupDeps {
   readonly localOnly: () => boolean;
   readonly pendingPair: () => PendingPair;
   /** Agent-mode `capy pair`: `wait` polls the pending pairing (with the code, when there is one); otherwise a new one starts. */
-  readonly pair: (step: { readonly wait: boolean; readonly code?: string; readonly noRenew?: boolean }) => Promise<PairAgentOutcome>;
+  readonly pair: (step: { readonly wait: boolean; readonly code?: string; readonly noRenew?: boolean; readonly intent?: SetupIntent }) => Promise<PairAgentOutcome>;
   /** Agent-mode bare `capy`, with the answers that were typed, or with `answers` in their place. */
   readonly folder: (answers?: FolderAnswers) => Promise<FolderOutcome>;
   readonly linked: () => Promise<LinkedFolder>;
@@ -184,7 +218,10 @@ async function pairThenFolder(options: SetupCommandOptions, deps: SetupDeps, sig
   if (!needsPairing(signedOut)) return refusal(forSetup(signedOut, bin, folder));
   if (!progress.mayPair || options.dryRun === true) return refusal(notPaired(signedOut, bin, options.dryRun === true, folder));
   // A pairing that is waiting is waited on, and one whose link ran out is renewed by that wait; a second one never starts beside it.
-  const paired = await deps.pair({ wait: deps.pendingPair() !== 'none' });
+  const wait = deps.pendingPair() !== 'none';
+  const intent = intentOf(options.intent);
+  if (!wait && intent === undefined) return refusal(intentRequired(bin, folder));
+  const paired = await deps.pair(wait ? { wait } : { wait, intent });
   return paired.kind === 'refusal' ? refusal(forSetup(paired.refusal, bin, folder)) : folderStep(options, deps, { ...progress, mayPair: false });
 }
 
@@ -253,7 +290,7 @@ function realDeps(options: SetupCommandOptions): SetupDeps {
     },
     pair: async (step) => {
       const { pairAgentOutcome } = await import('./pairAgentCommand');
-      return pairAgentOutcome({ json: true, wait: step.wait, code: step.code, noRenew: step.noRenew, devMode, ...(options.apiUrl === undefined ? {} : { apiUrl: options.apiUrl }) });
+      return pairAgentOutcome({ json: true, wait: step.wait, code: step.code, noRenew: step.noRenew, ...(step.intent ?? {}), devMode, ...(options.apiUrl === undefined ? {} : { apiUrl: options.apiUrl }) });
     },
     folder: async (answers) => {
       const { CapyCommand } = await import('./capyCommand');

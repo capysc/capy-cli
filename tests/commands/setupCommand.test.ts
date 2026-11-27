@@ -9,7 +9,8 @@ import type { PairAgentOutcome } from '../../src/commands/pairAgentCommand';
 import type { Refusal } from '../../src/commands/refusal';
 import { CapyError, ERROR_CODES } from '../../src/types/index';
 
-const OPTIONS: SetupCommandOptions = { answers: {} };
+const INTENT = { title: 'Set up Capy for the web app', description: 'Encrypt its .env and link it to a Capy project.' } as const;
+const OPTIONS: SetupCommandOptions = { answers: {}, intent: INTENT };
 
 const NOT_SIGNED_IN: Refusal = { code: ERROR_CODES.AUTH_FAILED, message: 'Not authenticated. Run `capy pair` to sign in.', exitCode: 1, extra: { reason: 'no_session', next_command: 'capy pair' } };
 
@@ -55,6 +56,7 @@ interface Stand {
 /** Stand-in steps. Each answers from its list in order (the last answer repeats); `calls` is what was asked. */
 function deps(over: Stand) {
   const calls: string[] = [];
+  const intents: unknown[] = [];
   const count = (prefix: string) => calls.filter((c) => c.startsWith(prefix)).length;
   const at = <T,>(list: readonly T[], index: number): T => list[Math.min(index, list.length - 1)] as T;
   let pending: PendingPair = over.pending === true ? 'waiting' : over.pending === false || over.pending === undefined ? 'none' : over.pending;
@@ -63,6 +65,7 @@ function deps(over: Stand) {
     pendingPair: () => pending,
     pair: async (step) => {
       const answer = at(over.pair ?? [paired], count('pair'));
+      intents.push(step.intent);
       calls.push(`pair ${step.wait ? 'wait' : 'start'}${step.code === undefined ? '' : ` code=${step.code}`}${step.noRenew === true ? ' no-renew' : ''}`);
       // As the real wait does: a pairing the service says is gone is dropped (CAP-902).
       if (answer.kind === 'refusal' && answer.refusal.code === ERROR_CODES.PAIR_EXPIRED) pending = 'none';
@@ -85,8 +88,56 @@ function deps(over: Stand) {
     }),
     integrations: () => [{ provider: 'stripe', found: ['.env:STRIPE_SECRET_KEY'], next: 'capy connect stripe' }],
   };
-  return { made, calls };
+  return { made, calls, intents };
 }
+
+describe('the agent\'s intent for the unlock request (CAP-925)', () => {
+  const signedOut = () => deps({ folder: [{ kind: 'refusal', refusal: NOT_SIGNED_IN }], pair: [{ kind: 'refusal', refusal: LINK }] });
+
+  test('a new pairing is sent the typed --title and --description, trimmed, for Keep to show the human', async () => {
+    const { made, calls, intents } = signedOut();
+    await setupOutcome({ ...OPTIONS, intent: { title: '  Set up Capy  ', description: ' Link this folder. ' } }, made);
+    expect(calls).toEqual(['folder', 'pair start']);
+    expect(intents).toEqual([{ title: 'Set up Capy', description: 'Link this folder.' }]);
+  });
+
+  test('with no intent, no pairing starts: SETUP_INTENT_REQUIRED, with the rerun that adds it (and the --folder answered)', async () => {
+    for (const intent of [undefined, { title: '  ', description: '' }]) {
+      const { made, calls } = signedOut();
+      const outcome = await setupOutcome({ answers: { folder: 'my-api' }, ...(intent === undefined ? {} : { intent }) }, made);
+      expect(calls).toEqual(['folder']);
+      if (outcome.kind !== 'refusal') throw new Error('expected a refusal');
+      expect(outcome.refusal).toMatchObject({
+        code: ERROR_CODES.SETUP_INTENT_REQUIRED,
+        exitCode: 1,
+        extra: { next_command: 'capy setup --folder my-api --title <title> --description <description> --json', fields: ['title', 'description'] },
+      });
+      // Asked of the agent, never of the human: no elicitation.
+      expect(outcome.refusal.extra?.elicitation).toBeUndefined();
+    }
+  });
+
+  test('either part alone is enough', async () => {
+    const { made, intents } = signedOut();
+    await setupOutcome({ answers: {}, intent: { title: 'Set up Capy' } }, made);
+    expect(intents).toEqual([{ title: 'Set up Capy' }]);
+  });
+
+  test('a pairing already waiting keeps the intent it started with: the wait needs none, and is sent none', async () => {
+    const { made, calls, intents } = deps({ pending: true, folder: [{ kind: 'refusal', refusal: NOT_SIGNED_IN }], pair: [{ kind: 'refusal', refusal: CODE_FORM }] });
+    const outcome = await setupOutcome({ answers: {} }, made);
+    expect(calls).toEqual(['folder', 'pair wait']);
+    expect(intents).toEqual([undefined]);
+    expect(outcome.kind).toBe('refusal');
+  });
+
+  test('someone signed in already needs no intent', async () => {
+    const { made, calls } = deps({});
+    const outcome = await setupOutcome({ answers: {} }, made);
+    expect(calls).not.toContain('pair start');
+    expect(outcome.kind).toBe('done');
+  });
+});
 
 const elicitationAnswer = (r: Refusal) => (r.extra?.elicitation as { answer: Record<string, string> }).answer;
 
@@ -210,7 +261,7 @@ describe('setupOutcome', () => {
   });
 
   test('a folder the human chose is kept through pairing: the wait, the code and the sync name it again (CAP-909 review)', async () => {
-    const withFolder: SetupCommandOptions = { answers: { folder: 'my-api' } };
+    const withFolder: SetupCommandOptions = { answers: { folder: 'my-api' }, intent: INTENT };
     const link = deps({ folder: [{ kind: 'refusal', refusal: NOT_SIGNED_IN }], pair: [{ kind: 'refusal', refusal: LINK }] });
     const waiting = await setupOutcome(withFolder, link.made);
     if (waiting.kind !== 'refusal') throw new Error('expected a refusal');

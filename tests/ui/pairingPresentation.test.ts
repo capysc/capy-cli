@@ -211,7 +211,7 @@ describe('pairing contract', () => {
     expect(ELICITATION_HELP).toContain('write the `url` as a clickable link');
     expect(ELICITATION_HELP).toContain('only an addition, never the only way');
     const cli = readFileSync(path.join(import.meta.dir, '../../src/index.ts'), 'utf8');
-    const pairHelp = cli.slice(cli.indexOf('Agents: run `capy pair --json`'), cli.indexOf('\n', cli.indexOf('Agents: run `capy pair --json`')));
+    const pairHelp = cli.slice(cli.indexOf('Agents: run `capy pair --title'), cli.indexOf('\n', cli.indexOf('Agents: run `capy pair --title')));
     expect(pairHelp).toContain('write the url as a clickable link, with the code, fingerprint and expires_at, as plain text');
     expect(pairHelp).toContain('PAIR_LINK_RENEWED');
     expect(PAIR_LINK_TEXT_RULE).toContain('clickable link');
@@ -227,7 +227,8 @@ describe('pairing contract', () => {
     expect(waitHelp).toContain('up to 9 minutes');
     expect(waitHelp).toContain('tool timeout of at least 10 minutes');
     expect(text).toContain('"keys": "already_present"');
-    expect(AGENTS_BLOCK).toContain('run `capy pair --json`. Do not ask the human anything first, and add no flags.');
+    expect(AGENTS_BLOCK).toContain('run `capy pair --title "<what you are doing and why>" --description "<what you will do once approved>" --json`, in your own words');
+    expect(AGENTS_BLOCK).toContain('Do not ask the human anything first, and add no other flags.');
     expect(AGENTS_BLOCK).not.toContain('--signup');
     expect(text).not.toContain('--signup');
     expect(AGENTS_BLOCK).toContain('show the human its `url`, `code`, `fingerprint` and `expires_at`');
@@ -241,7 +242,7 @@ describe('pairing contract', () => {
     expect(readmeSection).toContain('capy pair --wait --code <code>');
     expect(AGENTS_BLOCK).toContain('"keys": "already_present"');
     expect(ELICITATION_HELP).toContain('write the `url` as a clickable link, with the `code`, the `fingerprint` (the page shows the same one) and `expires_at`, as plain text');
-    expect(readmeSection).toContain('Run `capy pair --json` without asking the human anything first, and add no');
+    expect(readmeSection).toContain('in your own words, without asking the human\nanything first, and add no other flags.');
     expect(readmeSection).not.toContain('PAIR_ACCOUNT_MISMATCH');
     expect(readmeSection).toContain('`"keys": "already_present"`');
   });
