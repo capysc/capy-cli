@@ -7,6 +7,7 @@ import { describe, expect, test } from 'bun:test';
 import { asSetupCommand, forSetup, setupOutcome, type FolderOutcome, type LinkedFolder, type PendingPair, type SetupCommandOptions, type SetupDeps } from '../../src/commands/setupCommand';
 import type { PairAgentOutcome } from '../../src/commands/pairAgentCommand';
 import type { Refusal } from '../../src/commands/refusal';
+import type { Discovery } from '../../src/core/discovery/scan';
 import { CapyError, ERROR_CODES } from '../../src/types/index';
 
 const OPTIONS: SetupCommandOptions = { answers: {} };
@@ -83,10 +84,18 @@ function deps(over: Stand) {
       calls.push(`agents apply=${apply}`);
       return [{ path: 'AGENTS.md', action: 'created' }, { path: 'CLAUDE.md', action: 'unchanged' }];
     }),
-    integrations: () => [{ provider: 'stripe', found: ['.env:STRIPE_SECRET_KEY'], next: 'capy connect stripe' }],
+    discovery: () => DISCOVERY,
   };
   return { made, calls };
 }
+
+const DISCOVERY: Discovery = {
+  catalog_version: 1,
+  services: [{ provider: 'stripe', label: 'Stripe', variables: [{ name: 'STRIPE_SECRET_KEY', in_env: true, read_in: [] }], packages: [], status: 'discovered', next: 'capy connect stripe' }],
+  unmapped: [],
+  infrastructure: [],
+  scanned: { files: 1, truncated: false },
+};
 
 const elicitationAnswer = (r: Refusal) => (r.extra?.elicitation as { answer: Record<string, string> }).answer;
 
@@ -111,7 +120,7 @@ describe('asSetupCommand', () => {
 });
 
 describe('setupOutcome', () => {
-  test('signed in, questions answered: folder, agent instructions, then the finished setup with integrations', async () => {
+  test('signed in, questions answered: folder, agent instructions, then the finished setup with discovery', async () => {
     const { made, calls } = deps({});
     const outcome = await setupOutcome(OPTIONS, made);
     expect(calls).toEqual(['folder', 'agents apply=true']);
@@ -127,7 +136,7 @@ describe('setupOutcome', () => {
         pushed: 2,
         env_found: true,
         agents_files: [{ path: 'AGENTS.md', action: 'created' }, { path: 'CLAUDE.md', action: 'unchanged' }],
-        integrations: [{ provider: 'stripe', found: ['.env:STRIPE_SECRET_KEY'], next: 'capy connect stripe' }],
+        discovery: DISCOVERY,
       },
     });
   });
@@ -237,7 +246,7 @@ describe('setupOutcome', () => {
     expect(asSetupCommand('capy pair --wait', 'capy', 'My App')).toBe("capy setup --folder 'My App' --json");
   });
 
-  test('a folder that is a project already, signed in: the agent instructions and the integrations, and the sync to run next', async () => {
+  test('a folder that is a project already, signed in: the agent instructions and discovery, and the sync to run next', async () => {
     const { made, calls } = deps({ folder: [{ kind: 'sync', ignoredFlags: ['--name'] }] });
     const outcome = await setupOutcome(OPTIONS, made);
     expect(calls).toEqual(['folder', 'session org=org_1', 'agents apply=true']);
