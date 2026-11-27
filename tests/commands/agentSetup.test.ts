@@ -1080,8 +1080,9 @@ describe('which folder, and this folder only or shared through Git (spec 3l, CAP
     expect(field.other).toBe(true);
     expect(field.options).toEqual([
       { value: '.', label: 'Use this folder', description: process.cwd() },
-      { value: 'api', label: 'api/', description: 'Holds a .env or a package file' },
-      { value: 'web', label: 'web/', description: 'Holds a .env or a package file' },
+      // A folder with a .env comes first (run 17), and each says what it holds.
+      { value: 'web', label: 'web/', description: 'Has a .env' },
+      { value: 'api', label: 'api/', description: 'Has a package.json, no .env' },
     ]);
     expect(new RegExp(field.pattern).test('apps/web')).toBe(true);
     expect(new RegExp(field.pattern).test('a b; rm -rf')).toBe(false);
