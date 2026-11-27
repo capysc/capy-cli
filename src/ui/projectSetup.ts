@@ -84,19 +84,26 @@ export interface ProjectSubfolder {
 }
 
 /**
- * The subfolders of `folder` that look like a project (they hold a `.env` or a package file), at most `limit`: those
+ * Every subfolder of `folder` that looks like a project (it holds a `.env` or a package file), as the terminal lists
+ * them, with no cap (Vincent, 2026-11-27: "Can you not cap?"): those
  * with a `.env` first, since that is what setup encrypts, then by name. Read-only; skips hidden folders and
  * node_modules, as the terminal's picker does.
  */
-export function projectSubfolders(folder: string, limit: number): readonly ProjectSubfolder[] {
+export function projectSubfolders(folder: string): readonly ProjectSubfolder[] {
   return readdirSync(folder, { withFileTypes: true })
     .filter(entry => entry.isDirectory() && !entry.name.startsWith('.') && entry.name !== 'node_modules')
     .map(entry => entry.name)
     .filter(name => /^[A-Za-z0-9_@%+=:,.-]+$/.test(name))
     .flatMap(name => {
-      const marker = PROJECT_MARKERS.find(m => statSync(join(folder, name, m), { throwIfNoEntry: false }) !== undefined);
+      // A subfolder that cannot be read is left out, rather than hiding every other one.
+      const marker = PROJECT_MARKERS.find(m => {
+        try {
+          return statSync(join(folder, name, m), { throwIfNoEntry: false }) !== undefined;
+        } catch {
+          return false;
+        }
+      });
       return marker === undefined ? [] : [{ name, marker }];
     })
-    .sort((a, b) => Number(b.marker === '.env') - Number(a.marker === '.env') || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
-    .slice(0, limit);
+    .sort((a, b) => Number(b.marker === '.env') - Number(a.marker === '.env') || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 }

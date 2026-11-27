@@ -628,9 +628,6 @@ function needsInput(form: ElicitationForm): AgentOutcome {
   });
 }
 
-/** At most this many subfolders are offered beside "Use this folder" (spec 3l); any other is typed as Other. */
-const MAX_SUBFOLDER_CHOICES = 2;
-
 /** Whether keep.lock is shared through Git, and whether that is still to be asked. Outside Git it is never shared. */
 interface Sharing {
   readonly inGit: boolean;
@@ -684,7 +681,7 @@ export async function agentSetup(deps: AgentSetupDeps, setup: SetupOptions): Pro
 
   // "Which folder contains your project?" comes first, as in the terminal, and alone: the answer decides the rest.
   if (setup.folder === undefined) {
-    const subfolders = await settle(async () => projectSubfolders(process.cwd(), MAX_SUBFOLDER_CHOICES));
+    const subfolders = await settle(async () => projectSubfolders(process.cwd()));
     return needsInput(setupForm({
       folderChoices: { here: process.cwd(), subfolders: subfolders.ok ? subfolders.value : [] },
       answers: setup,

@@ -52,7 +52,7 @@ export interface SetupFormInput {
   readonly askShare?: boolean;
 }
 
-/** The folder question's choices: this folder (its full path) and up to two subfolders, with what marks each. */
+/** The folder question's choices: this folder (its full path) and every project subfolder, with what marks each. */
 export interface FolderChoices {
   readonly here: string;
   readonly subfolders: readonly ProjectSubfolder[];
