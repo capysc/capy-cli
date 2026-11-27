@@ -124,6 +124,14 @@ describe('folder tree on disk', () => {
     expect(s.error).toContain('outside where Capy can set up');
   });
 
+  test('a root reached through a symlink still accepts typed folders inside it, and the refusal names the root', () => {
+    make('real/child');
+    symlinkSync(join(root, 'real'), join(root, 'via'));
+    const s = initialFolderState(join(root, 'via'), diskFolders, join(root, 'via'));
+    expect(press({ ...s, typing: join(root, 'via', 'child') }, key('return')).base).toBe(join(root, 'real', 'child'));
+    expect(press({ ...s, typing: root }, key('return')).error).toContain(join(root, 'real'));
+  });
+
   test('a typed symlink is resolved to its real folder, which must be inside the root', () => {
     make('real/child');
     make('box');

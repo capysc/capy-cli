@@ -182,6 +182,7 @@ export type FolderStep =
   | { readonly kind: 'choose'; readonly path: string };
 
 export function initialFolderState(start: string, source: FolderSource, root: string = resolve(sep)): FolderState {
+  root = source.realFolder(root) ?? root;
   return {
     root, start, base: start, baseInfo: source.info(start), expanded: [], children: { [start]: source.list(start) },
     active: 0, query: '', typing: null, error: undefined,
@@ -264,7 +265,8 @@ function browse(state: FolderState, path: string, source: FolderSource, focus?: 
 }
 
 export const NO_FOLDER = 'No folder at that path. Check the path, or press Esc to browse.'; // COPY-FLAG
-export const OUTSIDE_ROOT = 'That folder is outside where Capy can set up. Choose a folder inside it, or press Esc to browse.'; // COPY-FLAG
+export const outsideRoot = (root: string): string =>
+  `That folder is outside where Capy can set up. Choose a folder inside ${displayPath(root)}, or press Esc to browse.`; // COPY-FLAG
 export const CANT_OPEN = "Can't open this folder. Check its permissions, or choose another."; // COPY-FLAG
 
 function stepTyping(state: FolderState, key: FolderKey, source: FolderSource): FolderStep {
@@ -273,7 +275,7 @@ function stepTyping(state: FolderState, key: FolderKey, source: FolderSource): F
   if (isEnterKey(key)) {
     const real = source.realFolder(resolveTyped(text, state.base));
     if (real === null) return same({ ...state, error: NO_FOLDER });
-    if (!isInside(state.root, real)) return same({ ...state, error: OUTSIDE_ROOT });
+    if (!isInside(state.root, real)) return same({ ...state, error: outsideRoot(state.root) });
     return same(browse(state, real, source));
   }
   if (key.name === 'tab') return same({ ...state, typing: completeTyped(text, state.base, source), error: undefined });
@@ -449,9 +451,6 @@ export const folderTree = createPrompt<string, FolderTreeConfig>((config, done) 
     const text = rowText(row, filtering, active);
     return fitLine(active ? `${ACCENT('❯')} ${text}` : `  ${row.info.readable ? text : DIM(text)}`, width);
   });
-  const baseNote = state.children[state.base] === null
-    ? `  ${DIM(CANT_OPEN)}`
-    : !filtering && rows.length === 1 ? `  ${DIM('No folders inside.')}` : ''; // COPY-FLAG
   const empty = filtering && rows.length === 0
     ? `  ${DIM('No loaded folder matches. Press Esc to clear the filter, then → to open more folders.')}` // COPY-FLAG
     : '';
@@ -464,15 +463,14 @@ export const folderTree = createPrompt<string, FolderTreeConfig>((config, done) 
 
   return [
     [prefix, message].filter(Boolean).join(' '),
-    `  ${DIM(displayPath(state.base))}`,
-    bar,
+    fitLine(`  ${DIM(displayPath(state.base))}`, width),
+    bar && fitLine(bar, width),
     ...lines,
-    baseNote,
-    empty,
+    empty && fitLine(empty, width),
     position,
-    state.error ? theme.style.error(state.error) : '',
+    state.error ? fitLine(theme.style.error(state.error), width) : '',
     ' ',
-    chooseLine(rows[state.active], state.base),
+    fitLine(chooseLine(rows[state.active], state.base), width),
     fitLine(FOLDER_KEYS_HELP, width),
   ].filter(Boolean).join('\n');
 }) as unknown as (config: FolderTreeConfig, context?: { input?: NodeJS.ReadableStream; output?: NodeJS.WritableStream }) => Promise<string>;
