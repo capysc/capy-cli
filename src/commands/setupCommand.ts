@@ -16,7 +16,7 @@
  */
 import { readPendingPairGrant } from '../auth/pairing/pendingGrant';
 import { isLocalOnly } from '../config/profileConfig';
-import { discover, type Discovery } from '../core/discovery/scan';
+import { CATALOG, discover, type Discovery } from '../core/discovery/scan';
 import { walkFolder } from '../core/discovery/walk';
 import { FileManager } from '../files/fileManager';
 import { ERROR_CODES, type CliOptions, type SetupOptions } from '../types/index';
@@ -167,7 +167,7 @@ async function finish(options: SetupCommandOptions, deps: SetupDeps, folder: Rea
       setup: dryRun ? 'dry_run' : 'complete',
       ...rest,
       agents_files: files.value,
-      discovery: deps.discovery(),
+      discovery: discoveryOrNone(deps),
     },
   };
 }
@@ -282,6 +282,15 @@ function realDeps(options: SetupCommandOptions): SetupDeps {
       });
     },
   };
+}
+
+/** Discovery is a hint and never fails setup: anything it throws gives an empty result. */
+function discoveryOrNone(deps: SetupDeps): Discovery {
+  try {
+    return deps.discovery();
+  } catch {
+    return { catalog_version: CATALOG.version, services: [], unmapped: [], infrastructure: [], scanned: { files: 0, truncated: false, names_capped: false } };
+  }
 }
 
 /** The folder's files, or none when it cannot be walked: discovery is a hint and never fails setup. */

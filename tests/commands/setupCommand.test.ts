@@ -94,7 +94,7 @@ const DISCOVERY: Discovery = {
   services: [{ provider: 'stripe', label: 'Stripe', variables: [{ name: 'STRIPE_SECRET_KEY', in_env: true, read_in: [] }], packages: [], status: 'discovered', next: 'capy connect stripe' }],
   unmapped: [],
   infrastructure: [],
-  scanned: { files: 1, truncated: false },
+  scanned: { files: 1, truncated: false, names_capped: false },
 };
 
 const elicitationAnswer = (r: Refusal) => (r.extra?.elicitation as { answer: Record<string, string> }).answer;

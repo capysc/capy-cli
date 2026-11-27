@@ -1,6 +1,6 @@
 /**
  * The files discovery looks at (CAP-927): a bounded walk of the folder that skips Git, dependencies, build output and
- * lockfiles and `.env*` files, and never follows a link. Each file's text is read at most once, and only when the scan asks for it.
+ * lockfiles and `.env*` files, and never follows a link. A file's text is read only when the scan asks for it, and is not kept.
  */
 import { lstatSync, readdirSync, readFileSync } from 'fs';
 import { join } from 'path';
@@ -27,21 +27,16 @@ function skipDir(relative: string, name: string): boolean {
   return SKIP_DIRS.has(name) || relative === '.vercel/output' || relative.endsWith('/.vercel/output');
 }
 
+/** Reads the file each time it is asked, and keeps nothing: a big folder never sits in memory at once. */
 function lazyText(absolute: string): () => string | undefined {
-  let read = false;
-  let text: string | undefined;
   return () => {
-    if (!read) {
-      read = true;
-      try {
-        const content = readFileSync(absolute);
-        // A NUL byte in the first few KB means a binary file: nothing to scan.
-        text = content.subarray(0, 8192).includes(0) ? undefined : content.toString('utf-8');
-      } catch {
-        text = undefined;
-      }
+    try {
+      const content = readFileSync(absolute);
+      // A NUL byte in the first few KB means a binary file: nothing to scan.
+      return content.subarray(0, 8192).includes(0) ? undefined : content.toString('utf-8');
+    } catch {
+      return undefined;
     }
-    return text;
   };
 }
 

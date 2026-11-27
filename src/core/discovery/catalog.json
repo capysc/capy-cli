@@ -1,12 +1,13 @@
 {
-  "version": 1,
-  "about": "Discovery rules for `capy setup` (spec 3k section 7, CAP-927). Names and files only: a rule never matches a value. `env` entries are regular expressions tested against a variable name after a framework prefix in `publicPrefixes` is removed. `packages` entries ending in `/` match a whole scope or path prefix. Improving detection is an edit here plus a test in tests/core/discovery.test.ts.",
+  "version": 2,
+  "about": "Discovery rules for `capy setup` (spec 3k section 7, CAP-927). Names and files only: a rule never matches a value. `env` entries are regular expressions tested against a variable name after a framework prefix in `publicPrefixes` is removed. `packages` entries ending in `/` match a whole scope or path prefix. Deployment targets (Dokploy, Vercel, AWS SSM, Cloudflare) live under `infrastructure`, not `services`; names that could belong to several providers (`DATABASE_URL`, `MONGO_URL`, `S3_BUCKET`) are left unmapped. Improving detection is an edit here plus a test in tests/core/discovery.test.ts.",
   "publicPrefixes": ["NEXT_PUBLIC_", "VITE_", "REACT_APP_", "EXPO_PUBLIC_", "NUXT_PUBLIC_", "PUBLIC_", "GATSBY_"],
   "ignore": [
     "NODE_ENV", "PORT", "HOST", "HOSTNAME", "CI", "HOME", "PATH", "PWD", "TZ", "LANG", "SHELL", "USER", "TERM", "TMPDIR",
     "DEBUG", "LOG_LEVEL", "NODE_OPTIONS", "ENV", "ENVIRONMENT", "APP_ENV", "RAILS_ENV", "RACK_ENV", "PYTHONPATH",
     "VERCEL_ENV", "VERCEL_URL", "VERCEL_REGION", "VERCEL_GIT_COMMIT_SHA", "NEXT_RUNTIME", "NEXT_PHASE", "MODE", "DEV", "PROD", "SSR", "BASE_URL"
   ],
+  "infrastructureNames": ["DOKPLOY", "^VERCEL_TOKEN$", "^VERCEL_ORG_ID$", "^VERCEL_PROJECT_ID$"],
   "services": [
     { "id": "stripe", "label": "Stripe", "connector": true, "env": ["^STRIPE_"], "packages": { "npm": ["stripe", "@stripe/"], "pypi": ["stripe"], "go": ["github.com/stripe/stripe-go"], "gem": ["stripe"] } },
     { "id": "workos", "label": "WorkOS", "connector": true, "env": ["^WORKOS_"], "packages": { "npm": ["@workos-inc/"], "pypi": ["workos"], "go": ["github.com/workos/workos-go"], "gem": ["workos"] } },
@@ -31,7 +32,7 @@
     { "id": "upstash", "label": "Upstash", "env": ["^UPSTASH_"], "packages": { "npm": ["@upstash/"], "pypi": ["upstash-redis"] } },
     { "id": "neon", "label": "Neon", "env": ["^NEON_"], "packages": { "npm": ["@neondatabase/"] } },
     { "id": "planetscale", "label": "PlanetScale", "env": ["^PLANETSCALE_"], "packages": { "npm": ["@planetscale/"] } },
-    { "id": "mongodb-atlas", "label": "MongoDB", "env": ["^MONGODB_", "^MONGO_URI$", "^MONGO_URL$"], "packages": { "npm": ["mongodb", "mongoose"], "pypi": ["pymongo"] } },
+    { "id": "mongodb-atlas", "label": "MongoDB", "env": ["^MONGODB_ATLAS_"], "packages": { "npm": ["mongodb", "mongoose"], "pypi": ["pymongo"] } },
     { "id": "pinecone", "label": "Pinecone", "env": ["^PINECONE_"], "packages": { "npm": ["@pinecone-database/"], "pypi": ["pinecone", "pinecone-client"] } },
     { "id": "replicate", "label": "Replicate", "env": ["^REPLICATE_"], "packages": { "npm": ["replicate"], "pypi": ["replicate"] } },
     { "id": "cloudinary", "label": "Cloudinary", "env": ["^CLOUDINARY_"], "packages": { "npm": ["cloudinary", "next-cloudinary"], "pypi": ["cloudinary"] } },
@@ -47,10 +48,9 @@
     { "id": "shopify", "label": "Shopify", "env": ["^SHOPIFY_"], "packages": { "npm": ["@shopify/"], "pypi": ["ShopifyAPI"] } },
     { "id": "hubspot", "label": "HubSpot", "env": ["^HUBSPOT_"], "packages": { "npm": ["@hubspot/"], "pypi": ["hubspot-api-client"] } },
     { "id": "launchdarkly", "label": "LaunchDarkly", "env": ["^LAUNCHDARKLY_", "^LD_SDK_KEY$"], "packages": { "npm": ["launchdarkly-node-server-sdk", "@launchdarkly/"], "pypi": ["launchdarkly-server-sdk"] } },
-    { "id": "aws", "label": "AWS", "env": ["^AWS_ACCESS_KEY_ID$", "^AWS_SECRET_ACCESS_KEY$", "^AWS_SESSION_TOKEN$", "^AWS_REGION$", "^AWS_DEFAULT_REGION$", "^AWS_PROFILE$", "^S3_"], "packages": { "npm": ["@aws-sdk/", "aws-sdk"], "pypi": ["boto3", "botocore"], "go": ["github.com/aws/aws-sdk-go"], "gem": ["aws-sdk"] } },
+    { "id": "aws", "label": "AWS", "env": ["^AWS_ACCESS_KEY_ID$", "^AWS_SECRET_ACCESS_KEY$", "^AWS_SESSION_TOKEN$", "^AWS_REGION$", "^AWS_DEFAULT_REGION$", "^AWS_PROFILE$"], "packages": { "npm": ["@aws-sdk/", "aws-sdk"], "pypi": ["boto3", "botocore"], "go": ["github.com/aws/aws-sdk-go"], "gem": ["aws-sdk"] } },
     { "id": "cloudflare", "label": "Cloudflare", "env": ["^CLOUDFLARE_", "^CF_API_TOKEN$", "^CF_ACCOUNT_ID$"], "packages": { "npm": ["cloudflare", "wrangler"], "pypi": ["cloudflare"] } },
-    { "id": "vercel", "label": "Vercel", "env": ["^VERCEL_TOKEN$", "^VERCEL_ORG_ID$", "^VERCEL_PROJECT_ID$", "^BLOB_READ_WRITE_TOKEN$", "^KV_REST_API_"], "packages": { "npm": ["@vercel/blob", "@vercel/kv", "@vercel/postgres", "@vercel/edge-config"] } },
-    { "id": "dokploy", "label": "Dokploy", "env": ["DOKPLOY"] }
+    { "id": "vercel", "label": "Vercel", "env": ["^BLOB_READ_WRITE_TOKEN$", "^KV_REST_API_", "^EDGE_CONFIG$"], "packages": { "npm": ["@vercel/blob", "@vercel/kv", "@vercel/postgres", "@vercel/edge-config"] } }
   ],
   "infrastructure": {
     "vercel": { "label": "Vercel", "files": ["vercel.json", ".vercel/project.json"] },

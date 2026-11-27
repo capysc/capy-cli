@@ -30,6 +30,8 @@ interface Catalog {
   readonly version: number;
   readonly publicPrefixes: readonly string[];
   readonly ignore: readonly string[];
+  /** Names that are signals for a deployment target (`infrastructure`), so they are neither a service nor unmapped. */
+  readonly infrastructureNames: readonly string[];
   readonly services: readonly CatalogService[];
   readonly infrastructure: {
     readonly vercel: { readonly label: string; readonly files: readonly string[] };
@@ -114,17 +116,26 @@ export interface Discovery {
   readonly services: readonly DiscoveredService[];
   readonly unmapped: readonly DiscoveredVariable[];
   readonly infrastructure: readonly DiscoveredTarget[];
-  readonly scanned: { readonly files: number; readonly truncated: boolean };
+  /** `truncated`: the walk stopped at its file cap. `names_capped`: a list below stopped at its cap. */
+  readonly scanned: { readonly files: number; readonly truncated: boolean; readonly names_capped: boolean };
 }
 
 const MAX_PLACES = 5;
+/** At most this many distinct names from one file (a bundled file can read thousands), and in `unmapped`. */
+const MAX_NAMES_PER_FILE = 100;
+const MAX_UNMAPPED = 100;
 
 const CODE_EXTENSIONS = new Set([
   '.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs', '.mts', '.cts', '.vue', '.svelte', '.astro',
   '.py', '.go', '.rb', '.rs', '.php', '.ex', '.exs',
 ]);
 
-const NAME = '([A-Za-z_][A-Za-z0-9_]*)';
+/**
+ * The usual environment-name shape only: upper case, digits and `_`. A lowercase or mixed-case capture is most likely
+ * a value pasted where the name belongs (`getenv("sk_live_...")`) or a method (`process.env.toString`), and is never
+ * reported.
+ */
+const NAME = '([A-Z_][A-Z0-9_]*)(?![A-Za-z0-9_])';
 const Q = `["'\`]`;
 /** The forms code reads an environment variable in. Each captures the NAME only. */
 const READ_PATTERNS: readonly RegExp[] = [
@@ -137,8 +148,8 @@ const READ_PATTERNS: readonly RegExp[] = [
   new RegExp(`os\\.getenv\\(\\s*${Q}${NAME}${Q}`, 'g'),
   new RegExp(`os\\.Getenv\\(\\s*${Q}${NAME}${Q}`, 'g'),
   new RegExp(`os\\.LookupEnv\\(\\s*${Q}${NAME}${Q}`, 'g'),
-  new RegExp(`ENV\\[\\s*${Q}${NAME}${Q}\\s*\\]`, 'g'),
-  new RegExp(`ENV\\.fetch\\(\\s*${Q}${NAME}${Q}`, 'g'),
+  new RegExp(`(?<![A-Za-z0-9_.])ENV\\[\\s*${Q}${NAME}${Q}\\s*\\]`, 'g'),
+  new RegExp(`(?<![A-Za-z0-9_.])ENV\\.fetch\\(\\s*${Q}${NAME}${Q}`, 'g'),
   new RegExp(`env::var(?:_os)?\\(\\s*${Q}${NAME}${Q}`, 'g'),
   new RegExp(`(?<![A-Za-z_.])getenv\\(\\s*${Q}${NAME}${Q}`, 'g'),
   new RegExp(`System\\.get_env\\(\\s*${Q}${NAME}${Q}`, 'g'),
@@ -169,31 +180,62 @@ function isNamed(path: string, file: string): boolean {
   return path === file || path.endsWith(`/${file}`);
 }
 
-function lineOf(text: string, index: number): number {
-  let line = 1;
-  for (let i = 0; i < index; i++) if (text.charCodeAt(i) === 10) line++;
-  return line;
+/** The offset each line starts at, so a match's line is a binary search, not a rescan of the file. */
+function lineStarts(text: string): number[] {
+  const starts = [0];
+  for (let i = text.indexOf('\n'); i !== -1; i = text.indexOf('\n', i + 1)) starts.push(i + 1);
+  return starts;
 }
 
-/** Every name the code reads, with up to five places each, in the order the files came. */
-export function namesReadByCode(files: readonly ScanFile[]): Map<string, string[]> {
+function lineAt(starts: readonly number[], index: number): number {
+  let low = 0;
+  let high = starts.length - 1;
+  while (low < high) {
+    const mid = (low + high + 1) >> 1;
+    if (starts[mid] <= index) low = mid;
+    else high = mid - 1;
+  }
+  return low + 1;
+}
+
+export interface NamesRead {
+  /** Each name, with up to five `file:line` places, in the order the files came. */
+  readonly places: Map<string, string[]>;
+  /** True when a file read more distinct names than the per-file cap, and the rest were left out. */
+  readonly capped: boolean;
+}
+
+export function namesReadByCode(files: readonly ScanFile[]): NamesRead {
   const places = new Map<string, string[]>();
+  let capped = false;
   for (const file of files) {
     if (!isCode(file.path)) continue;
     const text = file.text();
     if (text === undefined) continue;
+    let starts: number[] | undefined;
+    const inFile = new Set<string>();
     for (const pattern of READ_PATTERNS) {
       pattern.lastIndex = 0;
       for (const match of text.matchAll(pattern)) {
         const name = match[1];
-        const at = `${file.path}:${lineOf(text, match.index ?? 0)}`;
+        if (!inFile.has(name)) {
+          if (inFile.size >= MAX_NAMES_PER_FILE) {
+            capped = true;
+            continue;
+          }
+          inFile.add(name);
+        }
         const list = places.get(name) ?? [];
-        if (list.length < MAX_PLACES && !list.includes(at)) list.push(at);
+        if (list.length < MAX_PLACES) {
+          starts ??= lineStarts(text);
+          const at = `${file.path}:${lineAt(starts, match.index ?? 0)}`;
+          if (!list.includes(at)) list.push(at);
+        }
         places.set(name, list);
       }
     }
   }
-  return places;
+  return { places, capped };
 }
 
 /** The name with a framework's public prefix removed, so `NEXT_PUBLIC_STRIPE_KEY` matches `^STRIPE_`. */
@@ -253,8 +295,9 @@ function packageMatches(pattern: string, name: string, ecosystem: Ecosystem): bo
   return name === pattern;
 }
 
-function services(input: DiscoveryInput, readByCode: Map<string, string[]>, catalog: Catalog): { services: DiscoveredService[]; unmapped: DiscoveredVariable[] } {
+function services(input: DiscoveryInput, readByCode: Map<string, string[]>, catalog: Catalog): { services: DiscoveredService[]; unmapped: DiscoveredVariable[]; capped: boolean } {
   const ignored = new Set(catalog.ignore.map((name) => name.toUpperCase()));
+  const infrastructure = catalog.infrastructureNames.map((pattern) => new RegExp(pattern, 'i'));
   const inEnv = new Set(input.envNames);
   const names = [...new Set([...input.envNames, ...readByCode.keys()])].sort();
   const byService = new Map<string, DiscoveredVariable[]>();
@@ -263,7 +306,7 @@ function services(input: DiscoveryInput, readByCode: Map<string, string[]>, cata
     const variable: DiscoveredVariable = { name, in_env: inEnv.has(name), read_in: readByCode.get(name) ?? [] };
     const service = serviceFor(name, catalog);
     if (service !== undefined) byService.set(service.id, [...(byService.get(service.id) ?? []), variable]);
-    else if (!ignored.has(name.toUpperCase())) unmapped.push(variable);
+    else if (!ignored.has(name.toUpperCase()) && !infrastructure.some((pattern) => pattern.test(name))) unmapped.push(variable);
   }
   const deps = dependencies(input.files);
   const found: DiscoveredService[] = [];
@@ -282,7 +325,7 @@ function services(input: DiscoveryInput, readByCode: Map<string, string[]>, cata
       ...(service.connector === true ? { next: `${input.bin} connect ${service.id}` } : {}),
     });
   }
-  return { services: found, unmapped };
+  return { services: found, unmapped: unmapped.slice(0, MAX_UNMAPPED), capped: unmapped.length > MAX_UNMAPPED };
 }
 
 function token(input: DiscoveryInput, name: string, env: string): IntegrationToken {
@@ -347,13 +390,37 @@ function dokploy(input: DiscoveryInput, catalog: Catalog): DiscoveredTarget[] {
   }];
 }
 
+/** JSONC to JSON: drops line and block comments outside strings, and trailing commas. */
+export function withoutJsoncExtras(text: string): string {
+  let out = '';
+  let i = 0;
+  while (i < text.length) {
+    const c = text[i];
+    if (c === '"') {
+      let j = i + 1;
+      while (j < text.length && text[j] !== '"') j += text[j] === '\\' ? 2 : 1;
+      out += text.slice(i, j + 1);
+      i = j + 1;
+    } else if (c === '/' && text[i + 1] === '/') {
+      while (i < text.length && text[i] !== '\n') i++;
+    } else if (c === '/' && text[i + 1] === '*') {
+      const end = text.indexOf('*/', i + 2);
+      i = end === -1 ? text.length : end + 2;
+    } else {
+      out += c;
+      i++;
+    }
+  }
+  return out.replace(/,(\s*[}\]])/g, '$1');
+}
+
 /** Environment names a wrangler file declares: `[env.NAME]` in TOML, the keys of `"env"` in JSON. */
 export function wranglerEnvironments(path: string, text: string): string[] {
   if (path.endsWith('.toml')) {
     return [...new Set([...text.matchAll(/^\s*\[{1,2}env\.([A-Za-z0-9_-]+)/gm)].map((m) => m[1]))];
   }
   try {
-    const json = JSON.parse(text.replace(/^\s*\/\/.*$/gm, '')) as { env?: Record<string, unknown> };
+    const json = JSON.parse(withoutJsoncExtras(text)) as { env?: Record<string, unknown> };
     return json.env !== undefined && typeof json.env === 'object' ? Object.keys(json.env) : [];
   } catch {
     return [];
@@ -402,13 +469,13 @@ function awsSsm(input: DiscoveryInput, catalog: Catalog): DiscoveredTarget[] {
 
 /** What this folder shows signs of. Every list is empty when it shows none. */
 export function discover(input: DiscoveryInput, catalog: Catalog = CATALOG): Discovery {
-  const readByCode = namesReadByCode(input.files);
-  const found = services(input, readByCode, catalog);
+  const read = namesReadByCode(input.files);
+  const found = services(input, read.places, catalog);
   return {
     catalog_version: catalog.version,
     services: found.services,
     unmapped: found.unmapped,
     infrastructure: [...dokploy(input, catalog), ...vercel(input, catalog), ...awsSsm(input, catalog), ...cloudflare(input, catalog)],
-    scanned: { files: input.files.length, truncated: input.truncated },
+    scanned: { files: input.files.length, truncated: input.truncated, names_capped: read.capped || found.capped },
   };
 }

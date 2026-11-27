@@ -21,7 +21,7 @@ describe('discover: services', () => {
       services: [],
       unmapped: [],
       infrastructure: [],
-      scanned: { files: 0, truncated: false },
+      scanned: { files: 0, truncated: false, names_capped: false },
     });
   });
 
@@ -69,12 +69,40 @@ describe('discover: services', () => {
 
   test('the code scan keeps at most five places per name', () => {
     const text = Array.from({ length: 8 }, () => 'process.env.SENTRY_DSN').join('\n');
-    expect(namesReadByCode([file('a.ts', text)]).get('SENTRY_DSN')).toEqual(['a.ts:1', 'a.ts:2', 'a.ts:3', 'a.ts:4', 'a.ts:5']);
+    expect(namesReadByCode([file('a.ts', text)]).places.get('SENTRY_DSN')).toEqual(['a.ts:1', 'a.ts:2', 'a.ts:3', 'a.ts:4', 'a.ts:5']);
   });
 
   test('a file that is not code, and any .env file, is never scanned for names', () => {
     const files = [file('README.md', 'set process.env.STRIPE_KEY'), file('.env.example', 'process.env.STRIPE_KEY')];
-    expect(namesReadByCode(files).size).toBe(0);
+    expect(namesReadByCode(files).places.size).toBe(0);
+  });
+
+  test('a value pasted where the name belongs, or a method, is never reported', () => {
+    const files = [file('a.py', 'os.environ.get("sk_live_51Habc123")\nos.getenv("Mixed_Case")\n'), file('b.js', 'process.env.toString()\nprocess.env.STRIPE_KEYs\n')];
+    const read = namesReadByCode(files).places;
+    expect([...read.keys()]).toEqual([]);
+    expect(JSON.stringify(discover(input({ files })))).not.toContain('sk_live');
+  });
+
+  test('ENV[...] only as Ruby ENV, not inside another name', () => {
+    const read = namesReadByCode([file('a.rb', 'MY_ENV["NOT_A_READ"]\nENV["REAL_ONE"]\n')]).places;
+    expect([...read.keys()]).toEqual(['REAL_ONE']);
+  });
+
+  test('a bundled file with thousands of reads is capped, quick, and says so', () => {
+    const text = Array.from({ length: 15000 }, (_, i) => `process.env.V${i}`).join('\n');
+    const started = Date.now();
+    const found = discover(input({ files: [file('public/bundle.js', text)] }));
+    expect(Date.now() - started).toBeLessThan(1000);
+    expect(found.unmapped.length).toBe(100);
+    expect(found.scanned.names_capped).toBe(true);
+  });
+
+  test('more than 100 unmapped names across files are capped too', () => {
+    const files = Array.from({ length: 3 }, (_, f) => file(`f${f}.ts`, Array.from({ length: 50 }, (_, i) => `process.env.N${f}_${i}`).join('\n')));
+    const found = discover(input({ files }));
+    expect(found.unmapped.length).toBe(100);
+    expect(found.scanned.names_capped).toBe(true);
   });
 
   test('package dependencies point at providers even with no variable', () => {
@@ -93,6 +121,13 @@ describe('discover: services', () => {
       ['sentry', ['package.json: @sentry/node']],
       ['aws', ['api/requirements.txt: boto3']],
     ]);
+  });
+
+  test('names that could be several providers stay unmapped, and deployment names are not services', () => {
+    const found = discover(input({ envNames: ['MONGO_URL', 'S3_BUCKET', 'DOKPLOY_URL', 'VERCEL_TOKEN', 'MONGODB_ATLAS_PUBLIC_KEY'] }));
+    expect(found.services.map((s) => s.provider)).toEqual(['mongodb-atlas']);
+    expect(found.unmapped.map((v) => v.name)).toEqual(['MONGO_URL', 'S3_BUCKET']);
+    expect(found.infrastructure.map((t) => t.target)).toEqual(['dokploy']);
   });
 
   test('pyproject dependencies are read by name', () => {
@@ -156,6 +191,11 @@ describe('discover: infrastructure', () => {
 
   test('wrangler JSON that does not parse names no environments', () => {
     expect(wranglerEnvironments('wrangler.json', '{')).toEqual([]);
+  });
+
+  test('wrangler JSONC with trailing and block comments and trailing commas still names its environments', () => {
+    const text = '{\n  "name": "x", // trailing\n  /* block */ "route": "https://a.b/c",\n  "env": { "staging": {}, "production": {}, },\n}';
+    expect(wranglerEnvironments('wrangler.jsonc', text)).toEqual(['staging', 'production']);
   });
 
   test('AWS SSM from Terraform, Serverless and SDK use', () => {
