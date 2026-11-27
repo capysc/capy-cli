@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import inquirer from 'inquirer';
 import { isGitRepo } from '../deploy/git';
 import { isInteractive } from './interactive';
-import { folderTree, PACKAGE_MARKERS } from './folderTree';
+import { folderTree, isListedFolderName, PACKAGE_MARKERS } from './folderTree';
 
 /** The folder picker's question and first choice; the agent's form asks the same. */
 export const FOLDER_QUESTION = 'Which folder contains your project?'; // COPY-FLAG
@@ -67,12 +67,12 @@ export interface ProjectSubfolder {
 /**
  * Every subfolder of `folder` that looks like a project (it holds a `.env` or a package file), as the terminal lists
  * them, with no cap (Vincent, 2026-11-27: "Can you not cap?"): those
- * with a `.env` first, since that is what setup encrypts, then by name. Read-only; skips hidden folders and
- * node_modules, as the terminal's picker does.
+ * with a `.env` first, since that is what setup encrypts, then by name. Read-only; skips hidden and dependency
+ * folders, as the terminal's picker does.
  */
 export function projectSubfolders(folder: string): readonly ProjectSubfolder[] {
   return readdirSync(folder, { withFileTypes: true })
-    .filter(entry => entry.isDirectory() && !entry.name.startsWith('.') && entry.name !== 'node_modules')
+    .filter(entry => entry.isDirectory() && isListedFolderName(entry.name))
     .map(entry => entry.name)
     .filter(name => /^[A-Za-z0-9_@%+=:,.-]+$/.test(name))
     .flatMap(name => {
