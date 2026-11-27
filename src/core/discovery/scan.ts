@@ -198,6 +198,14 @@ function lineAt(starts: readonly number[], index: number): number {
   return low + 1;
 }
 
+/**
+ * Upper-case strings that are values, not names: AWS key ids (`AKIA...`), and any long run with no `_` at all, which
+ * env names almost always have. Such a capture is never reported.
+ */
+function looksLikeValue(name: string): boolean {
+  return /^(AKIA|ASIA|AGPA|AIDA|AROA|ANPA)[A-Z0-9]{12,}$/.test(name) || (name.length >= 20 && !name.includes('_'));
+}
+
 export interface NamesRead {
   /** Each name, with up to five `file:line` places, in the order the files came. */
   readonly places: Map<string, string[]>;
@@ -218,6 +226,7 @@ export function namesReadByCode(files: readonly ScanFile[]): NamesRead {
       pattern.lastIndex = 0;
       for (const match of text.matchAll(pattern)) {
         const name = match[1];
+        if (looksLikeValue(name)) continue;
         if (!inFile.has(name)) {
           if (inFile.size >= MAX_NAMES_PER_FILE) {
             capped = true;
@@ -344,10 +353,13 @@ function markerLines(file: ScanFile, markers: readonly string[]): string[] {
   return hits;
 }
 
+const VERCEL_NAMES = /^VERCEL_(TOKEN|ORG_ID|PROJECT_ID)$/i;
+
 function vercel(input: DiscoveryInput, catalog: Catalog): DiscoveredTarget[] {
   const rule = catalog.infrastructure.vercel;
   const found = [
     ...input.files.filter((file) => rule.files.some((name) => isNamed(file.path, name))).map((file) => file.path),
+    ...input.envNames.filter((name) => VERCEL_NAMES.test(name)).map((name) => `.env:${name}`),
     ...(input.envIsSet(DEFAULT_VERCEL_TOKEN_ENV) ? [`env:${DEFAULT_VERCEL_TOKEN_ENV}`] : []),
   ];
   if (found.length === 0) return [];

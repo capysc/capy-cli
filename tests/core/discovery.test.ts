@@ -84,6 +84,17 @@ describe('discover: services', () => {
     expect(JSON.stringify(discover(input({ files })))).not.toContain('sk_live');
   });
 
+  test('an upper-case value where the name belongs is not reported either', () => {
+    const read = namesReadByCode([file('a.py', 'os.getenv("AKIAIOSFODNN7EXAMPLE")\nos.getenv("ABCDEFGHIJKLMNOPQRSTUVWX")\nos.getenv("REAL_NAME")\n')]).places;
+    expect([...read.keys()]).toEqual(['REAL_NAME']);
+  });
+
+  test('Vercel deploy names in .env show under the Vercel target', () => {
+    const found = discover(input({ envNames: ['VERCEL_TOKEN', 'VERCEL_PROJECT_ID'] }));
+    expect(found.infrastructure.map((t) => [t.target, t.found])).toEqual([['vercel', ['.env:VERCEL_TOKEN', '.env:VERCEL_PROJECT_ID']]]);
+    expect(found.unmapped).toEqual([]);
+  });
+
   test('ENV[...] only as Ruby ENV, not inside another name', () => {
     const read = namesReadByCode([file('a.rb', 'MY_ENV["NOT_A_READ"]\nENV["REAL_ONE"]\n')]).places;
     expect([...read.keys()]).toEqual(['REAL_ONE']);
@@ -127,7 +138,7 @@ describe('discover: services', () => {
     const found = discover(input({ envNames: ['MONGO_URL', 'S3_BUCKET', 'DOKPLOY_URL', 'VERCEL_TOKEN', 'MONGODB_ATLAS_PUBLIC_KEY'] }));
     expect(found.services.map((s) => s.provider)).toEqual(['mongodb-atlas']);
     expect(found.unmapped.map((v) => v.name)).toEqual(['MONGO_URL', 'S3_BUCKET']);
-    expect(found.infrastructure.map((t) => t.target)).toEqual(['dokploy']);
+    expect(found.infrastructure.map((t) => t.target)).toEqual(['dokploy', 'vercel']);
   });
 
   test('pyproject dependencies are read by name', () => {
