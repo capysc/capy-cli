@@ -5,9 +5,9 @@
   "ignore": [
     "NODE_ENV", "PORT", "HOST", "HOSTNAME", "CI", "HOME", "PATH", "PWD", "TZ", "LANG", "SHELL", "USER", "TERM", "TMPDIR",
     "DEBUG", "LOG_LEVEL", "NODE_OPTIONS", "ENV", "ENVIRONMENT", "APP_ENV", "RAILS_ENV", "RACK_ENV", "PYTHONPATH",
-    "VERCEL_ENV", "VERCEL_URL", "VERCEL_REGION", "VERCEL_GIT_COMMIT_SHA", "NEXT_RUNTIME", "NEXT_PHASE", "MODE", "DEV", "PROD", "SSR", "BASE_URL", "GO_ENV", "RUST_LOG", "PYTHONUNBUFFERED", "FLASK_ENV", "DJANGO_SETTINGS_MODULE"
+    "NEXT_RUNTIME", "NEXT_PHASE", "MODE", "DEV", "PROD", "SSR", "BASE_URL", "GO_ENV", "RUST_LOG", "PYTHONUNBUFFERED", "FLASK_ENV", "DJANGO_SETTINGS_MODULE"
   ],
-  "infrastructureNames": ["DOKPLOY", "^VERCEL_TOKEN$", "^VERCEL_ORG_ID$", "^VERCEL_PROJECT_ID$"],
+  "infrastructureNames": ["DOKPLOY", "^VERCEL_TOKEN$", "^VERCEL_ORG_ID$", "^VERCEL_PROJECT_ID$", "^VERCEL_ENV$", "^VERCEL_URL$", "^VERCEL_REGION$", "^VERCEL_GIT_", "^VERCEL_BRANCH_URL$", "^VERCEL_PROJECT_PRODUCTION_URL$"],
   "services": [
     { "id": "stripe", "label": "Stripe", "connector": true, "env": ["^STRIPE_"], "packages": { "npm": ["stripe", "@stripe/"], "pypi": ["stripe"], "go": ["github.com/stripe/stripe-go"], "gem": ["stripe"] } },
     { "id": "workos", "label": "WorkOS", "connector": true, "env": ["^WORKOS_"], "packages": { "npm": ["@workos-inc/"], "pypi": ["workos"], "go": ["github.com/workos/workos-go"], "gem": ["workos"] } },
@@ -26,7 +26,7 @@
     { "id": "sentry", "label": "Sentry", "env": ["^SENTRY_"], "packages": { "npm": ["@sentry/"], "pypi": ["sentry-sdk"], "go": ["github.com/getsentry/sentry-go"], "gem": ["sentry-ruby"] } },
     { "id": "posthog", "label": "PostHog", "env": ["^POSTHOG_"], "packages": { "npm": ["posthog-js", "posthog-node"], "pypi": ["posthog"], "gem": ["posthog-ruby"] } },
     { "id": "segment", "label": "Segment", "env": ["^SEGMENT_"], "packages": { "npm": ["@segment/"], "pypi": ["segment-analytics-python"] } },
-    { "id": "datadog", "label": "Datadog", "env": ["^DATADOG_", "^DD_"], "packages": { "npm": ["dd-trace", "@datadog/"], "pypi": ["ddtrace", "datadog"] } },
+    { "id": "datadog", "label": "Datadog", "env": ["^DATADOG_", "^DD_(API_KEY|APP_KEY|SITE|SERVICE|ENV|VERSION|AGENT_HOST|TRACE_.*|LOGS_.*)$"], "packages": { "npm": ["dd-trace", "@datadog/"], "pypi": ["ddtrace", "datadog"] } },
     { "id": "algolia", "label": "Algolia", "env": ["^ALGOLIA_"], "packages": { "npm": ["algoliasearch"], "pypi": ["algoliasearch"] } },
     { "id": "pusher", "label": "Pusher", "env": ["^PUSHER_"], "packages": { "npm": ["pusher", "pusher-js"], "pypi": ["pusher"] } },
     { "id": "upstash", "label": "Upstash", "env": ["^UPSTASH_"], "packages": { "npm": ["@upstash/"], "pypi": ["upstash-redis"] } },

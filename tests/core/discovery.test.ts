@@ -45,6 +45,12 @@ describe('discover: services', () => {
     expect(found.unmapped).toEqual([{ name: 'DATABASE_URL', in_env: true, read_in: [] }]);
   });
 
+  test('only known DD_ names are Datadog', () => {
+    const found = discover(input({ envNames: ['DD_SERVICE', 'DD_CUSTOM_THING'] }));
+    expect(found.services.map((s) => [s.provider, s.variables.map((v) => v.name)])).toEqual([['datadog', ['DD_SERVICE']]]);
+    expect(found.unmapped.map((v) => v.name)).toEqual(['DD_CUSTOM_THING']);
+  });
+
   test('a framework public prefix is removed before matching', () => {
     const found = discover(input({ envNames: ['NEXT_PUBLIC_SUPABASE_URL', 'VITE_POSTHOG_KEY'] }));
     expect(found.services.map((s) => s.provider)).toEqual(['supabase', 'posthog']);
@@ -194,8 +200,8 @@ describe('discover: infrastructure', () => {
     const files = [file('apps/web/app/api/health/route.ts', 'const env = process.env.VERCEL_ENV ?? process.env.NODE_ENV;\nconst sha = process.env.VERCEL_GIT_COMMIT_SHA;\n')];
     const [vercel] = discover(input({ files })).infrastructure;
     expect(vercel.found).toEqual(['apps/web/app/api/health/route.ts:1 (VERCEL_ENV)', 'apps/web/app/api/health/route.ts:2 (VERCEL_GIT_COMMIT_SHA)']);
-    // They are Vercel's own, not the project's secrets.
-    expect(discover(input({ files })).unmapped).toEqual([]);
+    // They are Vercel's own, not the project's secrets, so never unmapped.
+    expect(discover(input({ files: [...files, file('b.ts', 'process.env.VERCEL_GIT_COMMIT_REF')] })).unmapped).toEqual([]);
   });
 
   test('a compose file that names Dokploy in any case counts', () => {
