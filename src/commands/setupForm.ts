@@ -235,7 +235,7 @@ function shareField(): ElicitationField {
 
 /** The terminal's confirm before a new project encrypts the `.env` and pushes it; No creates nothing. */
 function encryptField(q: EncryptQuestion): ElicitationField {
-  const secrets = `${q.variables} ${q.variables === 1 ? 'secret' : 'secrets'}`;
+  const secrets = `${q.variables} secrets`; // the terminal's own wording, whatever the count
   return {
     name: 'encrypt',
     type: 'string',

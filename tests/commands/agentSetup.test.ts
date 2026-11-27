@@ -865,6 +865,16 @@ describe('a marker and answers that differ from it: refused, nothing changed', (
     expectNoLeak(out);
   });
 
+  test('--no-encrypt-env on a setup that stopped after the project was made is refused, never pushed', async () => {
+    await strandedSetup();
+    const calls = fakeWorld();
+    const out = await run({ ...ALL_ANSWERS, encryptAnswer: 'no' });
+    expect(out.exitCode).toBe(1);
+    expect(out.json).toMatchObject({ ok: false, code: 'SETUP_PENDING_MISMATCH', differs: ['--encrypt-env'] });
+    expectStranded(calls);
+    expectNoLeak(out);
+  });
+
   test('several differences are all named, and an unknown --protected word is a difference too', async () => {
     await strandedSetup();
     const calls = fakeWorld();
@@ -1166,7 +1176,7 @@ describe('the terminal\'s encrypt confirm before a new project pushes the .env (
     writeFileSync(folder('.env'), 'A=1\n', 'utf-8');
     const out = await run({ ...ALL_ANSWERS, shareAnswer: undefined, encryptAnswer: undefined });
     expect(fieldNames(out.json)).toEqual(['share', 'encrypt']);
-    expect(out.json!.elicitation.fields[1].question).toBe('Encrypt these 1 secret and push to demo (Acme) on development?');
+    expect(out.json!.elicitation.fields[1].question).toBe('Encrypt these 1 secrets and push to demo (Acme) on development?');
   });
 
   test('--encrypt-env no: as in the terminal, nothing is created and the .env is left as it is', async () => {
