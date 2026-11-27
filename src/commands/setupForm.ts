@@ -46,6 +46,8 @@ export interface SetupFormInput {
   readonly folder?: string;
   /** True inside a git repository, where keep.lock can be shared; with `askShare` false the answer is `answers.shareAnswer`. */
   readonly inGit?: boolean;
+  /** When the terminal's encrypt confirm is the question: a new project, a `.env` with variables, no `--encrypt-env`. */
+  readonly askEncrypt?: EncryptQuestion;
   /** True when "keep this setup to the folder, or share it through Git" is a question (a git repository, no `--share-setup`). */
   readonly askShare?: boolean;
 }
@@ -54,6 +56,14 @@ export interface SetupFormInput {
 export interface FolderChoices {
   readonly here: string;
   readonly subfolders: readonly string[];
+}
+
+/** What the encrypt confirm names: asked once the project's name and first branch are known, as the terminal asks it. */
+export interface EncryptQuestion {
+  readonly variables: number;
+  readonly project: string;
+  readonly org: string;
+  readonly branch: string;
 }
 
 /** The answers `--share-setup` takes. */
@@ -98,6 +108,7 @@ function rerunCommand(input: SetupFormInput): string {
     ...flagWords('--branch', answers.branch, gaps?.branch === true || input.branchChoices !== undefined ? '<branch>' : undefined),
     ...flagWords('--protected', answers.protectedAnswer, gaps?.isProtected === true ? '<protected>' : undefined),
     ...flagWords('--share-setup', answers.shareAnswer, input.askShare === true ? '<share>' : undefined),
+    ...flagWords('--encrypt-env', answers.encryptAnswer, input.askEncrypt === undefined ? undefined : '<encrypt>'),
     '--json',
   ].join(' ');
 }
@@ -108,19 +119,29 @@ function orgField(orgs: readonly OrgRef[]): ElicitationField {
     type: 'string',
     pattern: oneOf(orgs.map((o) => o.id)),
     question: 'Select organization for project:', // the terminal's own wording
+    description: 'The organization this folder\'s project belongs to.', // COPY-FLAG: spec 3l
     options: orgs.map((o) => ({ value: o.id, label: o.name })),
   };
 }
 
-function projectField(projects: readonly ProjectRef[]): ElicitationField {
+function projectField(projects: readonly ProjectRef[], variables: number): ElicitationField {
   return {
     name: 'project',
     type: 'string',
     pattern: oneOf([NEW_PROJECT, ...projects.map((p) => p.id)]),
     question: 'Which project do you want to use?', // the terminal's own wording
+    description: 'The Capy project this folder links to.', // COPY-FLAG: spec 3l
     options: [
-      { value: NEW_PROJECT, label: 'New project' }, // the terminal's own wording
-      ...projects.map((p) => ({ value: p.id, label: p.name })),
+      {
+        value: NEW_PROJECT,
+        label: 'New project', // the terminal's own wording
+        description: variables > 0 ? 'Import this folder\'s .env into a new project' : 'Start a new project for this folder', // COPY-FLAG
+      },
+      ...projects.map((p) => ({
+        value: p.id,
+        label: p.name,
+        description: variables > 0 ? 'Link this folder to it. Its secrets replace this .env, and a copy of the old one is kept' : 'Link this folder to it', // COPY-FLAG
+      })),
     ],
   };
 }
@@ -154,7 +175,12 @@ function existingBranchField(branches: readonly BranchChoice[]): ElicitationFiel
     type: 'string',
     pattern: oneOf(branches.map((b) => b.name)),
     question: 'Which branch do you want to use?', // the terminal's own wording
-    options: branches.map((b) => ({ value: b.name, label: b.isProtected ? `${b.name} (protected)` : b.name })), // the terminal's own wording
+    description: 'The branch this folder reads its secrets from.', // COPY-FLAG: spec 3l
+    options: branches.map((b) => ({
+      value: b.name,
+      label: b.isProtected ? `${b.name} (protected)` : b.name, // the terminal's own wording
+      description: b.isProtected ? 'Invite-only: only people added to the branch can use its secrets' : 'Everyone on the project can use its secrets', // COPY-FLAG
+    })),
   };
 }
 
@@ -199,9 +225,26 @@ function shareField(): ElicitationField {
     type: 'string',
     pattern: `^(${SHARE_YES}|${SHARE_NO})$`,
     question: SETUP_SHARING_QUESTION,
+    description: 'Whether keep.lock, which names this folder\'s Capy project, is committed to Git.', // COPY-FLAG
     options: [
       { value: SHARE_NO, label: SHARE_CHOICE.folderOnly.label, description: SHARE_CHOICE.folderOnly.description },
       { value: SHARE_YES, label: SHARE_CHOICE.shared.label, description: SHARE_CHOICE.shared.description },
+    ],
+  };
+}
+
+/** The terminal's confirm before a new project encrypts the `.env` and pushes it; No creates nothing. */
+function encryptField(q: EncryptQuestion): ElicitationField {
+  const secrets = `${q.variables} secrets`; // the terminal's own wording, whatever the count
+  return {
+    name: 'encrypt',
+    type: 'string',
+    pattern: `^(${SHARE_YES}|${SHARE_NO})$`,
+    question: `Encrypt these ${secrets} and push to ${q.project} (${q.org}) on ${q.branch}?`, // COPY-FLAG: the terminal's wording
+    description: 'After this the .env holds ciphertext, so check this is the right project first.', // COPY-FLAG
+    options: [
+      { value: SHARE_YES, label: 'Yes', description: `Create ${q.project}, encrypt the .env and push its ${secrets}` }, // COPY-FLAG
+      { value: SHARE_NO, label: 'No', description: 'Nothing is created and the .env is not changed' }, // COPY-FLAG
     ],
   };
 }
@@ -212,12 +255,13 @@ function fieldsOf(input: SetupFormInput): readonly ElicitationField[] {
   if (input.folderChoices !== undefined) return [folderField(input.folderChoices)];
   return [
     ...(input.orgChoices === undefined ? [] : [orgField(input.orgChoices)]),
-    ...(input.projects === undefined ? [] : [projectField(input.projects)]),
+    ...(input.projects === undefined ? [] : [projectField(input.projects, input.variables)]),
     ...(input.branchChoices === undefined ? [] : [existingBranchField(input.branchChoices)]),
     ...(gaps?.name === true ? [nameField(input.suggestedName)] : []),
     ...(gaps?.branch === true ? [branchField(input.answers)] : []),
     ...(gaps?.isProtected === true ? [protectedField(input.answers)] : []),
     ...(input.askShare === true ? [shareField()] : []),
+    ...(input.askEncrypt === undefined ? [] : [encryptField(input.askEncrypt)]),
   ];
 }
 
@@ -246,14 +290,15 @@ export function setupForm(input: SetupFormInput): ElicitationForm {
       ...(input.existingProject === undefined ? {} : { project: { id: input.existingProject.id, name: input.existingProject.name } }),
       ...(input.branchChoices === undefined ? {} : { branches: input.branchChoices.map((b) => ({ name: b.name, protected: b.isProtected })) }),
       // Only a new project needs these; with an existing project chosen they are left out.
-      ...(input.projects !== undefined && input.gaps !== undefined ? { new_project_fields: fieldsOf({ ...input, orgChoices: undefined, projects: undefined, askShare: false }).map((f) => f.name) } : {}),
+      ...(input.projects !== undefined && input.gaps !== undefined ? { new_project_fields: fieldsOf({ ...input, orgChoices: undefined, projects: undefined, askShare: false, askEncrypt: undefined }).map((f) => f.name) } : {}),
       variables: input.variables,
     },
     display: setupDisplay({
       org: input.org?.name,
       project: projectCell(input),
       branch: input.answers.branch,
-      isProtected: input.answers.protectedAnswer === undefined ? undefined : input.answers.protectedAnswer === PROTECTED_YES,
+      // Setup never asks protection: without --protected the first branch starts open, so the table says No, not "to choose".
+      isProtected: input.answers.protectedAnswer === PROTECTED_YES,
       variables: input.variables,
       projectChoice: input.projects !== undefined,
       existingProject: input.existingProject !== undefined,

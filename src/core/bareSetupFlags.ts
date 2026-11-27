@@ -21,6 +21,8 @@ export function bareSetupOptions(): readonly Option[] {
     new Option('--no-protected', 'Create it open to the project'),
     new Option('--share-setup [yes|no]', 'whether keep.lock is committed so copies of the same code point to the same Capy project (asked in a git repository); no sets up this folder only'), // COPY-FLAG
     new Option('--no-share-setup', 'Set up this folder only'), // COPY-FLAG
+    new Option('--encrypt-env [yes|no]', 'whether a new project encrypts this folder\'s .env and pushes its secrets (asked when the .env has any); no creates nothing'), // COPY-FLAG
+    new Option('--no-encrypt-env', 'Create nothing and leave the .env as it is'), // COPY-FLAG
     new Option('--json', 'emit machine-readable JSON instead of the human UI'),
     new Option('--non-tty', 'same as --json: never ask, and answer in JSON (agents/CI)'),
   ];
@@ -86,6 +88,7 @@ export function setupOptionsFrom(opts: Readonly<Record<string, unknown>>): Setup
   const branch = textFrom(opts.branch);
   const protectedAnswer = yesNoAnswerFrom(opts.protected);
   const shareAnswer = yesNoAnswerFrom(opts.shareSetup);
+  const encryptAnswer = yesNoAnswerFrom(opts.encryptEnv);
   const folder = textFrom(opts.folder);
   return {
     ...(org === undefined ? {} : { org }),
@@ -94,6 +97,7 @@ export function setupOptionsFrom(opts: Readonly<Record<string, unknown>>): Setup
     ...(branch === undefined ? {} : { branch }),
     ...(protectedAnswer === undefined ? {} : { protectedAnswer }),
     ...(shareAnswer === undefined ? {} : { shareAnswer }),
+    ...(encryptAnswer === undefined ? {} : { encryptAnswer }),
     ...(folder === undefined ? {} : { folder }),
     json,
     nonTty,

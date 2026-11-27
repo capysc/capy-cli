@@ -50,7 +50,7 @@ import { EXIT_NEEDS_INPUT } from '../ui/interactive';
 import { refusalFor, settle, type Refusal } from './projectLifecycleCommand';
 import { PROTECTED_YES, createRefusalFor, existingProjectNamed, suggestedName } from './projectCreateCommand';
 import type { ElicitationForm } from '../ui/elicitation';
-import { SHARE_YES, setupForm } from './setupForm';
+import { SHARE_NO, SHARE_YES, setupForm, type EncryptQuestion } from './setupForm';
 
 /** The result of a push of the `.env`, as `CapyCommand.pushAndEncryptLocalEnv` reports it. */
 export type PushOutcome =
@@ -189,8 +189,8 @@ interface RunContext {
   readonly share: boolean;
 }
 
-/** The first branch's name and protection, as every JSON result reports it (`protected` is null when it was not asked). */
-const branchJson = (name: string, isProtected: boolean | null) => ({ name, protected: isProtected });
+/** The first branch's name and protection, as every JSON result reports it. */
+const branchJson = (name: string, isProtected: boolean) => ({ name, protected: isProtected });
 
 /** The folder's keep.lock for a project, with no variables yet. */
 const identityKeep = (project: ProjectInitResult): KeepFile => ({
@@ -328,29 +328,29 @@ async function finishSetup(
 // ---------------------------------------------------------------------------------------------------------------------
 
 /** The keep.lock of a project with no secrets yet; the folder is linked and nothing is pulled. */
-function linkEmptyProject(deps: AgentSetupDeps, ctx: RunContext, project: ProjectRef, branch: string): AgentOutcome {
+function linkEmptyProject(deps: AgentSetupDeps, ctx: RunContext, project: ProjectRef, branch: string, isProtected: boolean): AgentOutcome {
   deps.configureFolder(ctx.share);
   deps.fileManager.writeKeepFile({ version: '3.0', org_id: ctx.org.id, project_id: project.id, project_name: project.name, variables: {} });
   deps.projectManager.writeActiveBranch(branch);
   deps.fileManager.ensureCapyGitignore();
   deps.installGitHooks();
-  return linkedResult(ctx, project, branch, 0);
+  return linkedResult(ctx, project, branch, isProtected, 0);
 }
 
-function linkedResult(ctx: RunContext, project: ProjectRef, branch: string, pulled: number): AgentOutcome {
+function linkedResult(ctx: RunContext, project: ProjectRef, branch: string, isProtected: boolean, pulled: number): AgentOutcome {
   return {
     kind: 'done',
-    result: { ok: true, created: false, org: ctx.org, project, branch: branchJson(branch, null), pushed: 0, pulled, env_found: ctx.env.exists },
+    result: { ok: true, created: false, org: ctx.org, project, branch: branchJson(branch, isProtected), pushed: 0, pulled, env_found: ctx.env.exists },
   };
 }
 
 /** Pulls `branch` of an existing project into the folder, as the terminal does: keep.lock, the branch file and an encrypted `.env`. */
-async function linkExisting(deps: AgentSetupDeps, ctx: RunContext, project: ProjectRef, branch: string): Promise<AgentOutcome> {
+async function linkExisting(deps: AgentSetupDeps, ctx: RunContext, project: ProjectRef, branch: string, isProtected: boolean): Promise<AgentOutcome> {
   const key = await settle(() => resolveProjectKey(ctx.org.id, project.id, ctx.userId, deps.keyServiceOps));
   if (!key.ok) return refusalOutcome(refusalFor(key.error));
   const fetched = await settle(() => deps.serviceClient.getDecryptData(project.id, branch, undefined, true));
-  if (!fetched.ok) return pullFailed(deps, ctx, project, branch, fetched.error);
-  if (!fetched.value.keep_file) return outcomeOf(() => linkEmptyProject(deps, ctx, project, branch));
+  if (!fetched.ok) return pullFailed(deps, ctx, project, branch, isProtected, fetched.error);
+  if (!fetched.value.keep_file) return outcomeOf(() => linkEmptyProject(deps, ctx, project, branch, isProtected));
 
   const data = fetched.value;
   const written = await settle(async () => {
@@ -374,7 +374,7 @@ async function linkExisting(deps: AgentSetupDeps, ctx: RunContext, project: Proj
     deps.installGitHooks();
     return Object.keys(plaintext).length;
   });
-  return written.ok ? linkedResult(ctx, project, branch, written.value) : refusalOutcome(refusalFor(written.error));
+  return written.ok ? linkedResult(ctx, project, branch, isProtected, written.value) : refusalOutcome(refusalFor(written.error));
 }
 
 /** The variables the person may read, decrypted. One they lack permission for is skipped, as the terminal skips it. */
@@ -404,9 +404,9 @@ async function outcomeOf(step: () => AgentOutcome): Promise<AgentOutcome> {
 }
 
 /** A project with no secrets answers a pull with a coded 404 (NO_SECRETS): the folder is linked and nothing is pulled. Anything else is a refusal. */
-async function pullFailed(deps: AgentSetupDeps, ctx: RunContext, project: ProjectRef, branch: string, error: unknown): Promise<AgentOutcome> {
+async function pullFailed(deps: AgentSetupDeps, ctx: RunContext, project: ProjectRef, branch: string, isProtected: boolean, error: unknown): Promise<AgentOutcome> {
   const empty = error instanceof CapyError && error.details?.status === 404 && error.code === ERROR_CODES.NO_SECRETS;
-  if (empty) return outcomeOf(() => linkEmptyProject(deps, ctx, project, branch));
+  if (empty) return outcomeOf(() => linkEmptyProject(deps, ctx, project, branch, isProtected));
   return refusalOutcome({ ...refusalFor(error), extra: { project, org: ctx.org } });
 }
 
@@ -463,8 +463,10 @@ async function actExisting(deps: AgentSetupDeps, setup: SetupOptions, ctx: RunCo
     });
   }
   if (ctx.askShare) return askShare(deps, setup, ctx, { existingProject: project });
-  if (ctx.dryRun) return dryRunOutcome(ctx, project, branchJson(setup.branch, null), 0);
-  return linkExisting(deps, ctx, project, setup.branch);
+  // The branch's own protection, as the form's options showed it.
+  const isProtected = listed.value.find((b) => b.name === setup.branch)?.is_protected === true;
+  if (ctx.dryRun) return dryRunOutcome(ctx, project, branchJson(setup.branch, isProtected), 0);
+  return linkExisting(deps, ctx, project, setup.branch, isProtected);
 }
 
 /**
@@ -509,7 +511,7 @@ async function firstBranchOfExisting(deps: AgentSetupDeps, setup: SetupOptions, 
     }
     return refusalOutcome({ ...refusalFor(err), extra: { project, org: ctx.org, branch: branchJson(branch, false) } });
   }
-  return linkExisting(deps, ctx, project, branch);
+  return linkExisting(deps, ctx, project, branch, false);
 }
 
 /** The organization's projects in the shape `existingProjectNamed` reads. */
@@ -552,13 +554,24 @@ async function actNew(
     });
   }
   const plan: NewProject = { name, branch: setup.branch as string, isProtected: setup.protectedAnswer === PROTECTED_YES };
-  if (ctx.askShare) return askShare(deps, setup, ctx, {});
+  // The terminal's last question before anything is created: encrypt the .env and push it, or create nothing.
+  const askEncrypt = ctx.env.variables > 0 && setup.encryptAnswer === undefined
+    ? { variables: ctx.env.variables, project: name, org: ctx.org.name, branch: plan.branch }
+    : undefined;
+  if (ctx.askShare || askEncrypt !== undefined) return askShare(deps, setup, ctx, {}, askEncrypt);
+  if (ctx.env.variables > 0 && setup.encryptAnswer === SHARE_NO) return skippedOutcome(ctx);
   if (ctx.dryRun) return dryRunOutcome(ctx, { name }, branchJson(plan.branch, plan.isProtected), ctx.env.variables);
   return createAndLink(deps, ctx, plan);
 }
 
 /** Everything else is answered, and only "this folder only, or shared through Git" is left: the form asks it alone. */
-function askShare(deps: AgentSetupDeps, setup: SetupOptions, ctx: RunContext, at: { readonly existingProject?: ProjectRef }): AgentOutcome {
+function askShare(
+  deps: AgentSetupDeps,
+  setup: SetupOptions,
+  ctx: RunContext,
+  at: { readonly existingProject?: ProjectRef },
+  askEncrypt?: EncryptQuestion,
+): AgentOutcome {
   return needsInput(setupForm({
     org: ctx.org,
     ...at,
@@ -567,10 +580,26 @@ function askShare(deps: AgentSetupDeps, setup: SetupOptions, ctx: RunContext, at
     envPath: deps.options.envPath,
     dryRun: ctx.dryRun,
     devMode: deps.devMode,
-    askShare: true,
+    askShare: ctx.askShare,
+    ...(askEncrypt === undefined ? {} : { askEncrypt }),
     folder: process.cwd(),
     inGit: ctx.inGit,
   }));
+}
+
+/** The human said No to encrypting the `.env`: as in the terminal, nothing is created and the `.env` is left as it is. */
+function skippedOutcome(ctx: RunContext): AgentOutcome {
+  return {
+    kind: 'done',
+    result: {
+      ok: true,
+      created: false,
+      skipped: true,
+      message: 'Skipped. Nothing was created and your .env was not modified.', // COPY-FLAG: the terminal's wording
+      org: ctx.org,
+      env_found: ctx.env.exists,
+    },
+  };
 }
 
 /**
@@ -721,7 +750,7 @@ function pendingMismatch(pending: PendingSetup, projectName: string, flags: read
 /**
  * The same command, run again in a folder that is already linked, after a run that stopped after the project was
  * created. It resumes only when the folder carries the pending-setup marker for the project keep.lock names, and
- * `--name`, `--branch` and `--protected` are all given and agree with it. It then finishes the missing steps: the
+ * `--name` and `--branch` are given and agree with it (a typed `--protected` must agree too). It then finishes the missing steps: the
  * first branch, the local branch file, the `.env` push.
  *
  * With the marker, and a typed flag that differs from it: a refusal (SETUP_PENDING_MISMATCH), nothing changed.
@@ -740,7 +769,8 @@ export async function agentResume(deps: AgentSetupDeps, setup: SetupOptions, sta
   // A typed --org is checked whatever else was typed: another organization is a refusal, never a sync.
   const orgDiffers = await orgMismatch(deps, setup, pending, projectName);
   if (orgDiffers !== undefined) return orgDiffers;
-  const complete = setup.name === projectName && setup.branch !== undefined && setup.protectedAnswer !== undefined;
+  // Protection is not asked in setup, so the rerun of a stopped setup is complete with its name and branch.
+  const complete = setup.name === projectName && setup.branch !== undefined;
   if (!complete) return syncStep(typed);
 
   const problem = answerProblem(setup);

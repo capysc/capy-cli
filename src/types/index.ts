@@ -439,6 +439,8 @@ export interface SetupAnswers {
   readonly folder?: string;
   /** `--share-setup` / `--no-share-setup` as typed, as `yes` or `no`; anything else is refused with SHARE_SETUP_INVALID. */
   readonly shareAnswer?: string;
+  /** `--encrypt-env` / `--no-encrypt-env` as typed, as `yes` or `no`: the terminal's "Encrypt these N secrets and push…?". */
+  readonly encryptAnswer?: string;
 }
 
 export interface SetupOptions extends SetupAnswers {
@@ -1035,6 +1037,8 @@ export const ERROR_CODES = {
   SHARE_SETUP_INVALID: 'SHARE_SETUP_INVALID',
   /** `--folder` names something that is not an existing folder. */
   FOLDER_NOT_FOUND: 'FOLDER_NOT_FOUND',
+  /** `--encrypt-env` was given a word other than yes or no. */
+  ENCRYPT_ENV_INVALID: 'ENCRYPT_ENV_INVALID',
   /** `capy projects rename`: the service renamed the project but this folder's keep.lock could not be rewritten. The refusal carries the renamed project. Exit 1. */
   KEEP_LOCK_UPDATE_FAILED: 'KEEP_LOCK_UPDATE_FAILED',
   /** A command that acts on "the active organization" has none (no keep.lock here) and the person belongs to several, with nobody to ask. Exit 3. */

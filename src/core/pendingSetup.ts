@@ -36,6 +36,7 @@ export function givenSetupFlags(setup: SetupAnswers): readonly string[] {
     ['--branch', setup.branch],
     ['--protected', setup.protectedAnswer],
     ['--share-setup', setup.shareAnswer],
+    ['--encrypt-env', setup.encryptAnswer],
   ];
   return given.filter(([, value]) => value !== undefined).map(([flag]) => flag);
 }
@@ -68,6 +69,9 @@ export function pendingDisagreements(setup: SetupAnswers, pending: PendingSetup,
     ['--name', setup.name !== undefined && setup.name !== linked.projectName],
     ['--branch', setup.branch !== undefined && setup.branch !== pending.branch],
     ['--protected', protectedDiffers(setup.protectedAnswer, pending.protected)],
+    // A setup that stopped half way was answered yes (it created the project); finishing it pushes the .env, so a No is
+    // a different answer, never a push.
+    ['--encrypt-env', setup.encryptAnswer !== undefined && setup.encryptAnswer !== 'yes'],
   ];
   return differs.filter(([, differ]) => differ).map(([flag]) => flag);
 }

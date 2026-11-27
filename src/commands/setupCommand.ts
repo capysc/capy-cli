@@ -49,7 +49,7 @@ export interface LinkedFolder {
   readonly pendingSetup?: { readonly branch: string; readonly protected: boolean };
 }
 
-export type FolderAnswers = Pick<SetupOptions, 'org' | 'project' | 'name' | 'branch' | 'protectedAnswer' | 'shareAnswer' | 'folder'>;
+export type FolderAnswers = Pick<SetupOptions, 'org' | 'project' | 'name' | 'branch' | 'protectedAnswer' | 'shareAnswer' | 'encryptAnswer' | 'folder'>;
 
 export type FolderOutcome = AgentOutcome | { readonly kind: 'sync'; readonly ignoredFlags?: readonly string[] } | undefined;
 

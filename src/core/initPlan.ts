@@ -37,6 +37,13 @@ const SHARE_ANSWERS: readonly string[] = ['yes', 'no'];
  * checked: with `--project` naming an existing project, `--name` and `--protected` are ignored.
  */
 export function answerProblem(answers: SetupAnswers): Problem | null {
+  if (answers.encryptAnswer !== undefined && !SHARE_ANSWERS.includes(answers.encryptAnswer)) {
+    return {
+      code: ERROR_CODES.ENCRYPT_ENV_INVALID,
+      message: '--encrypt-env takes yes or no.', // COPY-FLAG
+      extra: { options: SHARE_ANSWERS },
+    };
+  }
   if (answers.shareAnswer !== undefined && !SHARE_ANSWERS.includes(answers.shareAnswer)) {
     return {
       code: ERROR_CODES.SHARE_SETUP_INVALID,
@@ -128,7 +135,9 @@ export function newProjectGaps(answers: SetupAnswers): NewProjectGaps {
   return {
     name: answers.name === undefined,
     branch: answers.branch === undefined,
-    isProtected: answers.protectedAnswer === undefined,
+    // The terminal's setup never asks it: a new project's first branch starts open, and protection is a later action.
+    // `--protected` still sets it when typed (Vincent, 2026-11-27).
+    isProtected: false,
   };
 }
 

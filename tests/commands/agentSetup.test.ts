@@ -149,9 +149,9 @@ async function run(answers: Partial<SetupOptions> = {}, extra: Partial<CliOption
   }) as never);
   const logSpy = spyOn(console, 'log').mockImplementation(() => {});
   const errSpy = spyOn(console, 'error').mockImplementation(() => {});
-  // `--folder .` by default, and `--share-setup no` in a folder that is not set up yet: those questions have tests of their own.
+  // `--folder .` by default, and `--share-setup no --encrypt-env yes` in a folder that is not set up yet: those questions have tests of their own.
   const notSetUp = !existsSync(join(process.cwd(), 'keep.lock'));
-  const setup: SetupOptions = { json: true, nonTty: true, agentMode: true, folder: '.', ...(notSetUp ? { shareAnswer: 'no' } : {}), ...answers };
+  const setup: SetupOptions = { json: true, nonTty: true, agentMode: true, folder: '.', ...(notSetUp ? { shareAnswer: 'no', encryptAnswer: 'yes' } : {}), ...answers };
   const thrown: unknown = await new CapyCommand({ setup, protocol: true, ...extra }, devMode).execute().then(() => null, (err: unknown) => err);
   const stdout = logSpy.mock.calls.map((args) => args.map(String).join('\n')).join('\n');
   const stderr = errSpy.mock.calls.map((args) => args.map(String).join('\n')).join('\n');
@@ -169,7 +169,7 @@ const ALL_ANSWERS = { name: 'demo', branch: 'development', protectedAnswer: 'no'
 const fieldNames = (json: Record<string, any> | undefined): string[] => (json?.elicitation.fields as Array<{ name: string }>).map((f) => f.name);
 
 describe('questions left: one INIT_INPUT_REQUIRED form, nothing created or written', () => {
-  test('one organization with projects: asks project, name, branch and protected; not the organization', async () => {
+  test('one organization with projects: asks project, name and branch; not the organization or protection', async () => {
     const calls = fakeWorld({ projects: [{ id: 'proj-web', name: 'web', organization_id: ORG.id }] });
     writeFileSync(folder('.env'), `API_KEY=${SENTINEL}\nDB_URL=other\n`, 'utf-8');
 
@@ -179,9 +179,13 @@ describe('questions left: one INIT_INPUT_REQUIRED form, nothing created or writt
     expect(out.json).toMatchObject({ ok: false, code: 'INIT_INPUT_REQUIRED' });
     const form = out.json!.elicitation;
     expect(form.kind).toBe('form');
-    expect(fieldNames(out.json)).toEqual(['project', 'name', 'branch', 'protected']);
-    expect(form.fields[0].options).toEqual([{ value: 'new', label: 'New project' }, { value: 'proj-web', label: 'web' }]);
-    expect(form.answer.rerun).toBe('capy --folder . --project <project> --name <name> --branch <branch> --protected <protected> --share-setup no --json');
+    expect(fieldNames(out.json)).toEqual(['project', 'name', 'branch']);
+    expect(form.fields[0].options).toEqual([
+      { value: 'new', label: 'New project', description: "Import this folder's .env into a new project" },
+      { value: 'proj-web', label: 'web', description: 'Link this folder to it. Its secrets replace this .env, and a copy of the old one is kept' },
+    ]);
+    expect(form.fields[0].description).toBe('The Capy project this folder links to.');
+    expect(form.answer.rerun).toBe('capy --folder . --project <project> --name <name> --branch <branch> --share-setup no --encrypt-env yes --json');
     expect(form.details).toMatchObject({ org: ORG, variables: 2 });
     expect(form.display).toContain('2 variables to encrypt and push');
     expect(form.display).toContain('Acme');
@@ -199,39 +203,49 @@ describe('questions left: one INIT_INPUT_REQUIRED form, nothing created or writt
     fakeWorld();
     const out = await run();
     expect(out.exitCode).toBe(3);
-    expect(fieldNames(out.json)).toEqual(['name', 'branch', 'protected']);
-    expect(out.json!.elicitation.answer.rerun).toBe('capy --folder . --name <name> --branch <branch> --protected <protected> --share-setup no --json');
-    const [name, branch, isProtected] = out.json!.elicitation.fields;
+    expect(fieldNames(out.json)).toEqual(['name', 'branch']);
+    expect(out.json!.elicitation.answer.rerun).toBe('capy --folder . --name <name> --branch <branch> --share-setup no --encrypt-env yes --json');
+    const [name, branch] = out.json!.elicitation.fields;
     // The same field names, wording, defaults and rules as `capy project create`.
     expect(name).toMatchObject({ name: 'name', pattern: '^[a-zA-Z0-9-_]+$', question: 'What should the project be called?' });
     expect(branch).toMatchObject({ name: 'branch', question: 'What should its first branch be called?', default: 'development' });
     expect(branch.description).toBe('A Capy branch works like a git branch. Capy branches can be used to set different variables for different environments.');
-    expect(isProtected).toMatchObject({ name: 'protected', default: 'no', options: [{ value: 'yes', label: 'Yes' }, { value: 'no', label: 'No' }] });
+    // Protection is not asked, so the summary says the branch starts open rather than "to choose".
+    expect(out.json!.elicitation.display).toMatch(/\| Protected \| no \|/);
+    expect(out.json!.elicitation.display).not.toMatch(/\| Protected \| to choose/);
   });
 
   test('only what is unanswered is asked, and the typed answers are repeated in the rerun', async () => {
     fakeWorld();
-    const out = await run({ name: 'demo', branch: 'main' });
+    const out = await run({ name: 'demo' });
     expect(out.exitCode).toBe(3);
-    expect(fieldNames(out.json)).toEqual(['protected']);
-    expect(out.json!.elicitation.answer.rerun).toBe('capy --folder . --name demo --branch main --protected <protected> --share-setup no --json');
+    expect(fieldNames(out.json)).toEqual(['branch']);
+    expect(out.json!.elicitation.answer.rerun).toBe('capy --folder . --name demo --branch <branch> --share-setup no --encrypt-env yes --json');
+  });
+
+  test('protection is never asked: without --protected the first branch starts open, as in the terminal (Vincent, 2026-11-27)', async () => {
+    const calls = fakeWorld();
+    const out = await run({ name: 'demo', branch: 'development' });
+    expect(out.exitCode).toBeUndefined();
+    expect(calls.createBranch).toHaveBeenCalledWith('proj-new', 'development', false);
+    expect(out.json).toMatchObject({ ok: true, created: true, branch: { name: 'development', protected: false } });
   });
 
   test('under another binary (CAPY_BIN_NAME) the rerun command starts with that binary', async () => {
     fakeWorld();
     const env = spyOn(process, 'env', 'get' as never).mockReturnValue({ ...process.env, CAPY_BIN_NAME: 'capy-staging' } as never);
-    const out = await run({ name: 'demo', branch: 'main' }).finally(() => env.mockRestore());
+    const out = await run({ name: 'demo' }).finally(() => env.mockRestore());
     expect(out.exitCode).toBe(3);
-    expect(out.json!.elicitation.answer.rerun).toBe('capy-staging --folder . --name demo --branch main --protected <protected> --share-setup no --json');
+    expect(out.json!.elicitation.answer.rerun).toBe('capy-staging --folder . --name demo --branch <branch> --share-setup no --encrypt-env yes --json');
   });
 
   test('under capy-dev (no CAPY_BIN_NAME) the rerun command starts with capy-dev', async () => {
     fakeWorld();
     const { CAPY_BIN_NAME: _unset, ...rest } = process.env;
     const env = spyOn(process, 'env', 'get' as never).mockReturnValue(rest as never);
-    const out = await run({ name: 'demo', branch: 'main' }, {}, true).finally(() => env.mockRestore());
+    const out = await run({ name: 'demo' }, {}, true).finally(() => env.mockRestore());
     expect(out.exitCode).toBe(3);
-    expect(out.json!.elicitation.answer.rerun).toBe('capy-dev --folder . --name demo --branch main --protected <protected> --share-setup no --json');
+    expect(out.json!.elicitation.answer.rerun).toBe('capy-dev --folder . --name demo --branch <branch> --share-setup no --encrypt-env yes --json');
   });
 
   test('several organizations and no --org: the organization is asked first, alone, as options of id and name; no project is looked up', async () => {
@@ -241,7 +255,7 @@ describe('questions left: one INIT_INPUT_REQUIRED form, nothing created or writt
     expect(out.json).toMatchObject({ code: 'INIT_INPUT_REQUIRED' });
     expect(fieldNames(out.json)).toEqual(['org']);
     expect(out.json!.elicitation.fields[0].options).toEqual([{ value: 'org-1', label: 'Acme' }, { value: 'org-2', label: 'Other' }]);
-    expect(out.json!.elicitation.answer.rerun).toBe('capy --folder . --org <org> --share-setup no --json');
+    expect(out.json!.elicitation.answer.rerun).toBe('capy --folder . --org <org> --share-setup no --encrypt-env yes --json');
     expect(calls.listProjects).not.toHaveBeenCalled();
     expect(calls.initializeProject).not.toHaveBeenCalled();
   });
@@ -340,7 +354,7 @@ describe('every answer given: create, then link, then push', () => {
       throw new ExitSignal(code);
     }) as never);
     const logSpy = spyOn(console, 'log').mockImplementation(() => {});
-    await new CapyCommand({ dryRun: true, setup: { json: true, nonTty: true, agentMode: true, folder: '.', shareAnswer: 'no', ...ALL_ANSWERS } }, false).execute();
+    await new CapyCommand({ dryRun: true, setup: { json: true, nonTty: true, agentMode: true, folder: '.', shareAnswer: 'no', encryptAnswer: 'yes', ...ALL_ANSWERS } }, false).execute();
     const printed = logSpy.mock.calls.map((a) => a.join('\n')).join('\n');
     logSpy.mockRestore();
     exitSpy.mockRestore();
@@ -362,7 +376,7 @@ describe('an existing project', () => {
     const read = ServiceClient.prototype.getDecryptData as unknown as ReturnType<typeof spyOn>;
     const out = await run({ project: 'web', branch: 'prod' });
     expect(out.exitCode).toBeUndefined();
-    expect(out.json).toMatchObject({ ok: true, created: false, project: { id: 'proj-web', name: 'web' }, branch: { name: 'prod' }, pushed: 0 });
+    expect(out.json).toMatchObject({ ok: true, created: false, project: { id: 'proj-web', name: 'web' }, branch: { name: 'prod', protected: false }, pushed: 0 });
     expect(read.mock.calls[0]?.[1]).toBe('prod');
     expect(calls.initializeProject).not.toHaveBeenCalled();
     expect(calls.createBranch).not.toHaveBeenCalled();
@@ -378,10 +392,10 @@ describe('an existing project', () => {
     expect(out.json).toMatchObject({ ok: false, code: 'INIT_INPUT_REQUIRED' });
     expect(fieldNames(out.json)).toEqual(['branch']);
     const field = out.json!.elicitation.fields[0];
-    expect(field.options).toEqual([{ value: 'prod', label: 'prod' }]);
+    expect(field.options).toEqual([{ value: 'prod', label: 'prod', description: 'Everyone on the project can use its secrets' }]);
     expect(field.default).toBeUndefined();
     expect(out.json!.elicitation.details).toMatchObject({ project: { id: 'proj-web', name: 'web' }, branches: [{ name: 'prod', protected: false }] });
-    expect(out.json!.elicitation.answer.rerun).toContain('--project web --branch <branch> --share-setup no --json');
+    expect(out.json!.elicitation.answer.rerun).toContain('--project web --branch <branch> --share-setup no --encrypt-env yes --json');
     expect(out.json!.elicitation.display).not.toContain('First branch');
     expect(read).not.toHaveBeenCalled();
     expect(existsSync(folder('keep.lock'))).toBe(false);
@@ -391,7 +405,17 @@ describe('an existing project', () => {
   test('several branches: the form offers each, and marks the protected one', async () => {
     fakeWorld({ projects: [{ id: 'proj-web', name: 'web', organization_id: ORG.id }], branches: PROD_AND_STAGING });
     const out = await run({ project: 'web' });
-    expect(out.json!.elicitation.fields[0].options).toEqual([{ value: 'prod', label: 'prod' }, { value: 'staging', label: 'staging (protected)' }]);
+    expect(out.json!.elicitation.fields[0].options).toEqual([
+      { value: 'prod', label: 'prod', description: 'Everyone on the project can use its secrets' },
+      { value: 'staging', label: 'staging (protected)', description: 'Invite-only: only people added to the branch can use its secrets' },
+    ]);
+  });
+
+  test('the result reports the picked branch\'s own protection, as the form showed it, never null (run 15)', async () => {
+    fakeWorld({ projects: [{ id: 'proj-web', name: 'web', organization_id: ORG.id }], branches: PROD_AND_STAGING });
+    spyOn(ServiceClient.prototype, 'getDecryptData').mockRejectedValue(new CapyError('No secrets', ERROR_CODES.NO_SECRETS, { status: 404 }));
+    const out = await run({ project: 'web', branch: 'staging' });
+    expect(out.json).toMatchObject({ ok: true, created: false, branch: { name: 'staging', protected: true } });
   });
 
   test('--branch the project does not have is BRANCH_NOT_FOUND naming its branches: nothing read or written', async () => {
@@ -415,7 +439,7 @@ describe('an existing project', () => {
     expect(field.default).toBe('development');
     expect(field.options).toBeUndefined();
     expect(out.json!.elicitation.details).toMatchObject({ project: { id: 'proj-web', name: 'web' } });
-    expect(out.json!.elicitation.answer.rerun).toContain('--project web --branch <branch> --share-setup no --json');
+    expect(out.json!.elicitation.answer.rerun).toContain('--project web --branch <branch> --share-setup no --encrypt-env yes --json');
     expect(calls.createBranch).not.toHaveBeenCalled();
     expect(existsSync(folder('keep.lock'))).toBe(false);
   });
@@ -447,7 +471,7 @@ describe('an existing project', () => {
     expect(out.json).toMatchObject({ ok: false, code: 'INIT_INPUT_REQUIRED' });
     expect(fieldNames(out.json)).toEqual(['branch']);
     const rerun: string = out.json!.elicitation.answer.rerun;
-    expect(rerun).toContain('--project web --branch <branch> --share-setup no --json');
+    expect(rerun).toContain('--project web --branch <branch> --share-setup no --encrypt-env yes --json');
     expect(rerun).not.toContain('--protected');
     expect(rerun).not.toContain('--name');
     expect(calls.createBranch).not.toHaveBeenCalled();
@@ -858,6 +882,16 @@ describe('a marker and answers that differ from it: refused, nothing changed', (
     expectNoLeak(out);
   });
 
+  test('--no-encrypt-env on a setup that stopped after the project was made is refused, never pushed', async () => {
+    await strandedSetup();
+    const calls = fakeWorld();
+    const out = await run({ ...ALL_ANSWERS, encryptAnswer: 'no' });
+    expect(out.exitCode).toBe(1);
+    expect(out.json).toMatchObject({ ok: false, code: 'SETUP_PENDING_MISMATCH', differs: ['--encrypt-env'] });
+    expectStranded(calls);
+    expectNoLeak(out);
+  });
+
   test('several differences are all named, and an unknown --protected word is a difference too', async () => {
     await strandedSetup();
     const calls = fakeWorld();
@@ -1036,7 +1070,7 @@ describe('which folder, and this folder only or shared through Git (spec 3l, CAP
     mkdirSync(folder('node_modules'));
     writeFileSync(folder('node_modules', 'package.json'), '{}', 'utf-8');
 
-    const out = await run({ folder: undefined, shareAnswer: undefined });
+    const out = await run({ folder: undefined, shareAnswer: undefined, encryptAnswer: undefined });
 
     expect(out.exitCode).toBe(3);
     expect(out.json).toMatchObject({ code: 'INIT_INPUT_REQUIRED' });
@@ -1068,7 +1102,7 @@ describe('which folder, and this folder only or shared through Git (spec 3l, CAP
       { value: 'no', label: 'Set up this folder only', description: 'When teammates set up their own copy of the app, they’ll need to choose this project in Capy to get its secrets.' },
       { value: 'yes', label: 'Share the setup through Git', description: 'Capy commits keep.lock so copies of the same code point to the same Capy project and secret versions (this is useful for keeping larger teams or more complex projects in sync).' },
     ]);
-    expect(out.json!.elicitation.answer.rerun).toBe('capy --folder . --name demo --branch development --protected no --share-setup <share> --json');
+    expect(out.json!.elicitation.answer.rerun).toBe('capy --folder . --name demo --branch development --protected no --share-setup <share> --encrypt-env yes --json');
     expect(calls.initializeProject).not.toHaveBeenCalled();
     expect(existsSync(folder('keep.lock'))).toBe(false);
   });
@@ -1076,8 +1110,8 @@ describe('which folder, and this folder only or shared through Git (spec 3l, CAP
   test('in Git, with project questions left: sharing is asked last in the same form', async () => {
     fakeWorld();
     const out = await run({ shareAnswer: undefined });
-    expect(fieldNames(out.json)).toEqual(['name', 'branch', 'protected', 'share']);
-    expect(out.json!.elicitation.answer.rerun).toBe('capy --folder . --name <name> --branch <branch> --protected <protected> --share-setup <share> --json');
+    expect(fieldNames(out.json)).toEqual(['name', 'branch', 'share']);
+    expect(out.json!.elicitation.answer.rerun).toBe('capy --folder . --name <name> --branch <branch> --share-setup <share> --encrypt-env yes --json');
   });
 
   test('outside Git: sharing is not asked, and keep.lock stays in this folder', async () => {
@@ -1133,5 +1167,78 @@ describe('which folder, and this folder only or shared through Git (spec 3l, CAP
     expect(out.json).toMatchObject({ ok: true, dry_run: true, shared_through_git: true });
     expect(existsSync(folder('keep.lock'))).toBe(false);
     expect(gitCommits()).toBe('');
+  });
+});
+
+describe('the terminal\'s encrypt confirm before a new project pushes the .env (spec 3l, CAP-909)', () => {
+  test('a .env with variables and no --encrypt-env: the confirm is asked in the terminal\'s words, once name and branch are known, and nothing is created', async () => {
+    const calls = fakeWorld();
+    writeFileSync(folder('.env'), `API_KEY=${SENTINEL}\nDB_URL=two\n`, 'utf-8');
+    const out = await run({ ...ALL_ANSWERS, encryptAnswer: undefined });
+    expect(out.exitCode).toBe(3);
+    expect(fieldNames(out.json)).toEqual(['encrypt']);
+    const [field] = out.json!.elicitation.fields;
+    expect(field.question).toBe('Encrypt these 2 secrets and push to demo (Acme) on development?');
+    expect(field.default).toBeUndefined();
+    expect(field.options.map((o: { value: string; label: string }) => [o.value, o.label])).toEqual([['yes', 'Yes'], ['no', 'No']]);
+    expect(field.options[1].description).toBe('Nothing is created and the .env is not changed');
+    expect(out.json!.elicitation.answer.rerun).toBe('capy --folder . --name demo --branch development --protected no --share-setup no --encrypt-env <encrypt> --json');
+    expect(calls.initializeProject).not.toHaveBeenCalled();
+    expect(out.stdout).not.toContain(SENTINEL);
+    expect(readFileSync(folder('.env'), 'utf-8')).toBe(`API_KEY=${SENTINEL}\nDB_URL=two\n`);
+  });
+
+  test('with the sharing question still open, both are asked together, sharing first', async () => {
+    fakeWorld();
+    writeFileSync(folder('.env'), 'A=1\n', 'utf-8');
+    const out = await run({ ...ALL_ANSWERS, shareAnswer: undefined, encryptAnswer: undefined });
+    expect(fieldNames(out.json)).toEqual(['share', 'encrypt']);
+    expect(out.json!.elicitation.fields[1].question).toBe('Encrypt these 1 secrets and push to demo (Acme) on development?');
+  });
+
+  test('--encrypt-env no: as in the terminal, nothing is created and the .env is left as it is', async () => {
+    const calls = fakeWorld();
+    writeFileSync(folder('.env'), `API_KEY=${SENTINEL}\n`, 'utf-8');
+    const out = await run({ ...ALL_ANSWERS, encryptAnswer: 'no' });
+    expect(out.exitCode).toBeUndefined();
+    expect(out.json).toMatchObject({ ok: true, created: false, skipped: true, message: 'Skipped. Nothing was created and your .env was not modified.' });
+    expect(calls.initializeProject).not.toHaveBeenCalled();
+    expect(existsSync(folder('keep.lock'))).toBe(false);
+    expect(readFileSync(folder('.env'), 'utf-8')).toBe(`API_KEY=${SENTINEL}\n`);
+  });
+
+  test('no .env: the confirm is not asked, as in the terminal', async () => {
+    const calls = fakeWorld();
+    const out = await run({ ...ALL_ANSWERS, encryptAnswer: undefined });
+    expect(out.json).toMatchObject({ ok: true, created: true });
+    expect(calls.initializeProject).toHaveBeenCalled();
+  });
+
+  test('linking an existing project asks no encrypt confirm, as in the terminal', async () => {
+    fakeWorld({ projects: [{ id: 'proj-web', name: 'web', organization_id: ORG.id }], branches: [{ name: 'prod', is_protected: false }] });
+    writeFileSync(folder('.env'), 'A=1\n', 'utf-8');
+    spyOn(ServiceClient.prototype, 'getDecryptData').mockRejectedValue(new CapyError('No secrets', ERROR_CODES.NO_SECRETS, { status: 404 }) as never);
+    const out = await run({ project: 'web', branch: 'prod', encryptAnswer: undefined });
+    expect(out.json).toMatchObject({ ok: true, created: false });
+  });
+
+  test('an --encrypt-env that is neither yes nor no is ENCRYPT_ENV_INVALID, before anything is read', async () => {
+    const calls = fakeWorld();
+    const out = await run({ ...ALL_ANSWERS, encryptAnswer: 'sure' });
+    expect(out.exitCode).toBe(1);
+    expect(out.json).toMatchObject({ code: 'ENCRYPT_ENV_INVALID' });
+    expect(calls.authenticateSilent).not.toHaveBeenCalled();
+  });
+});
+
+describe('.gitignore after setup', () => {
+  test('one "# Capy" block holds the keep.lock rule and the other Capy rules (onboarding run 14)', async () => {
+    fakeWorld();
+    const out = await run({ ...ALL_ANSWERS, shareAnswer: 'no' });
+    expect(out.json).toMatchObject({ ok: true, created: true });
+    const ignore = readFileSync(folder('.gitignore'), 'utf-8');
+    expect(ignore.split('\n').filter((l) => l === '# Capy')).toHaveLength(1);
+    expect(ignore).toContain('/keep.lock');
+    expect(ignore).toContain('.env.pre-capy.old');
   });
 });

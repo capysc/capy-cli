@@ -536,16 +536,18 @@ program
   .option('--no-protected', 'Create it open to the project')
   .option('--share-setup [yes|no]', 'whether keep.lock is committed so copies of the same code point to the same Capy project (asked in a git repository); no sets up this folder only') // COPY-FLAG
   .option('--no-share-setup', 'Set up this folder only') // COPY-FLAG
+  .option('--encrypt-env [yes|no]', 'whether a new project encrypts this folder\'s .env and pushes its secrets (asked when the .env has any); no creates nothing') // COPY-FLAG
+  .option('--no-encrypt-env', 'Create nothing and leave the .env as it is') // COPY-FLAG
   .option('--json', 'accepted for symmetry: setup always answers in JSON') // COPY-FLAG
   .addHelpText('after', '\nAgents: run `capy setup --json`. On exit 3, show the human the elicitation and ask its questions, then run the command in its `answer`. Never answer for the human. The result with "setup": "complete" names the organization, project and branch, and lists under `integrations` what was found in this folder with the next command for each; discovery needs a provider token that an owner or admin saves with `capy system set`.\n') // COPY-FLAG
   .action(async (options, command) => {
     const { setupCommand } = await import('./commands/setupCommand');
     const merged = command.optsWithGlobals();
     // `--folder` is the program's own option, so it is read from the merged options.
-    const { org, project, name, branch, protectedAnswer, shareAnswer, folder } = setupOptionsFrom({ ...options, folder: merged.folder });
+    const { org, project, name, branch, protectedAnswer, shareAnswer, encryptAnswer, folder } = setupOptionsFrom({ ...options, folder: merged.folder });
     await setupCommand({
       code: options.code,
-      answers: { org, project, name, branch, protectedAnswer, shareAnswer, folder },
+      answers: { org, project, name, branch, protectedAnswer, shareAnswer, encryptAnswer, folder },
       envPath: merged.envPath,
       dryRun: merged.dryRun === true,
       devMode: true,
