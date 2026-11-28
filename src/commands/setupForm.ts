@@ -8,7 +8,7 @@
  */
 import type { ElicitationField, ElicitationForm } from '../ui/elicitation';
 import { SETUP_SHARING_QUESTION, SHARE_CHOICE, THIS_FOLDER_CHOICE, FOLDER_QUESTION, type ProjectSubfolder } from '../ui/projectSetup';
-import { setupDisplay } from '../ui/elicitationDisplay';
+import { folderQuestionDisplay, setupDisplay } from '../ui/elicitationDisplay';
 import type { SetupAnswers } from '../types/index';
 import { BRANCH_DESCRIPTION, BRANCH_NAME_PATTERN_SOURCE, DEFAULT_FIRST_BRANCH, FIRST_BRANCH_QUESTION } from '../core/branchNameRule';
 import { PROJECT_NAME_PATTERN_SOURCE } from '../core/projectNameRule';
@@ -294,7 +294,7 @@ export function setupForm(input: SetupFormInput): ElicitationForm {
       ...(input.projects !== undefined && input.gaps !== undefined ? { new_project_fields: fieldsOf({ ...input, orgChoices: undefined, projects: undefined, askShare: false, askEncrypt: undefined }).map((f) => f.name) } : {}),
       variables: input.variables,
     },
-    display: setupDisplay({
+    display: input.folderChoices !== undefined ? folderQuestionDisplay(input.folderChoices.here) : setupDisplay({
       org: input.org?.name,
       project: projectCell(input),
       branch: input.answers.branch,

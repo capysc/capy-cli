@@ -1,8 +1,9 @@
 import { readdirSync, statSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { join } from 'node:path';
 import inquirer from 'inquirer';
 import { isGitRepo } from '../deploy/git';
 import { isInteractive } from './interactive';
+import { folderTree, isListedFolderName, PACKAGE_MARKERS } from './folderTree';
 
 /** The folder picker's question and first choice; the agent's form asks the same. */
 export const FOLDER_QUESTION = 'Which folder contains your project?'; // COPY-FLAG
@@ -23,32 +24,12 @@ export const SHARE_CHOICE = {
   },
 } as const;
 
-/** Bound only after the person confirms a directory. Browsing performs no writes. */
+/**
+ * Bound only after the person confirms a folder. Browsing performs no writes.
+ * A tree the person opens and closes (CAP-929): see `folderTree.ts` for the keys.
+ */
 export async function pickProjectFolder(folder: string): Promise<string> {
-  const directories = readdirSync(folder, { withFileTypes: true })
-    .filter(entry => entry.isDirectory() && !entry.name.startsWith('.') && entry.name !== 'node_modules')
-    .map(entry => entry.name);
-  const parent = dirname(folder);
-  const { selected } = await inquirer.prompt<{ selected: string }>([{
-    type: 'list',
-    name: 'selected',
-    message: `${FOLDER_QUESTION}\n  ${folder}`,
-    choices: [
-      { name: THIS_FOLDER_CHOICE, value: folder },
-      { name: 'Enter a folder path…', value: '' },
-      ...(parent === folder ? [] : [{ name: '.. (up one folder)', value: parent }]),
-      ...directories.map(name => ({ name: name + '/', value: join(folder, name) })),
-    ],
-  }]);
-  if (selected === folder) return folder;
-  if (selected) return pickProjectFolder(selected);
-  const { path } = await inquirer.prompt<{ path: string }>([{
-    type: 'input',
-    name: 'path',
-    message: 'Project folder path',
-    validate: (value: string) => value.trim() !== '' && statSync(resolve(folder, value), { throwIfNoEntry: false })?.isDirectory() === true || 'Enter an existing folder path.',
-  }]);
-  return pickProjectFolder(resolve(folder, path));
+  return folderTree({ message: FOLDER_QUESTION, start: folder });
 }
 
 export async function chooseSetupSharing(folder: string, human: boolean): Promise<boolean> {
@@ -75,7 +56,7 @@ export async function chooseSetupSharing(folder: string, human: boolean): Promis
 }
 
 /** Files that mark a folder as a project, besides a `.env`. */
-const PROJECT_MARKERS: readonly string[] = ['.env', 'package.json', 'pyproject.toml', 'requirements.txt', 'go.mod', 'Cargo.toml', 'Gemfile', 'composer.json'];
+const PROJECT_MARKERS: readonly string[] = ['.env', ...PACKAGE_MARKERS];
 
 /** A subfolder that looks like a project, and the first marker file it holds (`.env` when it has one). */
 export interface ProjectSubfolder {
@@ -86,12 +67,12 @@ export interface ProjectSubfolder {
 /**
  * Every subfolder of `folder` that looks like a project (it holds a `.env` or a package file), as the terminal lists
  * them, with no cap (Vincent, 2026-11-27: "Can you not cap?"): those
- * with a `.env` first, since that is what setup encrypts, then by name. Read-only; skips hidden folders and
- * node_modules, as the terminal's picker does.
+ * with a `.env` first, since that is what setup encrypts, then by name. Read-only; skips hidden and dependency
+ * folders, as the terminal's picker does.
  */
 export function projectSubfolders(folder: string): readonly ProjectSubfolder[] {
   return readdirSync(folder, { withFileTypes: true })
-    .filter(entry => entry.isDirectory() && !entry.name.startsWith('.') && entry.name !== 'node_modules')
+    .filter(entry => entry.isDirectory() && isListedFolderName(entry.name))
     .map(entry => entry.name)
     .filter(name => /^[A-Za-z0-9_@%+=:,.-]+$/.test(name))
     .flatMap(name => {
