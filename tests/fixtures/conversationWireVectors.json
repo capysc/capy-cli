@@ -1,37 +1,95 @@
 {
   "scheme": "capy.conv.c.v1",
   "note": "Shared by capy-cli tests/fixtures and keep-app tests/fixtures. Do not edit by hand; regenerate in capy-cli.",
-  "inputs": {
-    "kLocal": "ABEiM0RVZneImaq7zN3u_wARIjNEVWZ3iJmqu8zd7v8",
-    "cliPrivate": "wcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcE",
-    "pagePrivate": "p6enp6enp6enp6enp6enp6enp6enp6enp6enp6enp6c",
-    "id": "6f1c2b3a-4d5e-4f60-8a1b-2c3d4e5f6a7b",
-    "userId": "user_01JTESTUSER",
-    "orgId": "org_01JTESTORG",
-    "projectId": "",
-    "purpose": "setup",
-    "transportId": "0b1c2d3e-4f50-4617-8a9b-0c1d2e3f4a5b",
-    "nonce": "AQIDBAUGBwgJCgsM",
-    "unlock": "remembered",
-    "protection": "passkey",
-    "helloPlain": "{\"v\":1}",
-    "firstPlain": "{\"tag\":\"x\"}",
-    "answerPlain": "ünïcode answer"
-  },
-  "outputs": {
-    "lpExample": "AAAAAWEAAAAAAAAAAgEC",
-    "cliPub": "BJkUmMLvfxyl_X8dLuAz3ArthHRdqbXrtgp9hUMH6_mWSkjM-U-l8gawVQ5iqtSeSg7CbctWIgHE3YvsbRHTn0Q",
-    "pagePub": "BEGLm2O9IRs5wPl2KL43H6LcFxT5Jy3WvDPhpg8VYjmDcokfapGUqp78sJgRWbrTdnRZIwJRfFnvzYRYixiBKeQ",
-    "k": "dh7OlNa8Gg-jWlhGyBwVJ-v98xzGWgBXG4xcD_5fT5o",
-    "ctx": "AAAAJDZmMWMyYjNhLTRkNWUtNGY2MC04YTFiLTJjM2Q0ZTVmNmE3YgAAACB2Hs6U1rwaD6NaWEbIHBUn6_3zHMZaAFcbjFwP_l9PmgAAABB1c2VyXzAxSlRFU1RVU0VSAAAADm9yZ18wMUpURVNUT1JHAAAAAAAAAAVzZXR1cAAAACQwYjFjMmQzZS00ZjUwLTQ2MTctOGE5Yi0wYzFkMmUzZjRhNWI",
-    "kAuth": "eaTa4vM9CuKaEC_ZQfeUZ43V5wvYHro0gxg65GJV26c",
-    "helloTag": "z_3xDCCmCwnSACADUDFRaYfLKVKl2IQRMw2gY09jR1Q",
-    "cliTag": "EZNmdLdTsZJ32dfXOW4vwnlV58KJZNupJdwgBPO67vQ",
-    "helloKey": "nUw6YeVPlAj7_8Mg8ZvFVzlZUOcdKykOQYXF7mRvwQU",
-    "c2p": "E8DyQXxj2bdVynvjbeAlz2-YLJa0FkqPvm_B9TVX_kI",
-    "p2c": "Wt1IBUuU38GmzSruCZpXWmT4c3Qj-IVxBEKJqfZZF1g",
-    "hello": "AQIDBAUGBwgJCgsMD1iLh79UJ-ZRhrpzabR4JxFXLMmoVE8",
-    "first": "AQIDBAUGBwgJCgsMFEt6ITH3QAVst1LxPZBfO9uIrNf9EVlCvWIV",
-    "answer": "AQIDBAUGBwgJCgsMct0He9ETwarkJibQ98i2_gMg5BZWBBvuM0UdqMZbqt8"
+  "lpExample": "AAAAAWEAAAAAAAAAAgEC",
+  "cases": [
+    {
+      "inputs": {
+        "kLocal": "ABEiM0RVZneImaq7zN3u_wARIjNEVWZ3iJmqu8zd7v8",
+        "cliPrivate": "wcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcE",
+        "pagePrivate": "p6enp6enp6enp6enp6enp6enp6enp6enp6enp6enp6c",
+        "id": "6f1c2b3a-4d5e-4f60-8a1b-2c3d4e5f6a7b",
+        "userId": "user_01JTESTUSER",
+        "orgId": "org_01JTESTORG",
+        "projectId": "",
+        "purpose": "setup",
+        "transportId": "0b1c2d3e-4f50-4617-8a9b-0c1d2e3f4a5b",
+        "unlock": "remembered",
+        "protection": "passkey",
+        "nonce": "AQIDBAUGBwgJCgsM",
+        "answerName": "DATABASE_URL",
+        "helloPlain": "{\"v\":1}",
+        "firstPlain": "{\"tag\":\"x\"}",
+        "answerPlain": "ünïcode answer"
+      },
+      "outputs": {
+        "cliPub": "BJkUmMLvfxyl_X8dLuAz3ArthHRdqbXrtgp9hUMH6_mWSkjM-U-l8gawVQ5iqtSeSg7CbctWIgHE3YvsbRHTn0Q",
+        "pagePub": "BEGLm2O9IRs5wPl2KL43H6LcFxT5Jy3WvDPhpg8VYjmDcokfapGUqp78sJgRWbrTdnRZIwJRfFnvzYRYixiBKeQ",
+        "k": "dh7OlNa8Gg-jWlhGyBwVJ-v98xzGWgBXG4xcD_5fT5o",
+        "ctx": "AAAAJDZmMWMyYjNhLTRkNWUtNGY2MC04YTFiLTJjM2Q0ZTVmNmE3YgAAACB2Hs6U1rwaD6NaWEbIHBUn6_3zHMZaAFcbjFwP_l9PmgAAABB1c2VyXzAxSlRFU1RVU0VSAAAADm9yZ18wMUpURVNUT1JHAAAAAAAAAAVzZXR1cAAAACQwYjFjMmQzZS00ZjUwLTQ2MTctOGE5Yi0wYzFkMmUzZjRhNWI",
+        "kAuth": "eaTa4vM9CuKaEC_ZQfeUZ43V5wvYHro0gxg65GJV26c",
+        "helloTag": "z_3xDCCmCwnSACADUDFRaYfLKVKl2IQRMw2gY09jR1Q",
+        "cliTag": "EZNmdLdTsZJ32dfXOW4vwnlV58KJZNupJdwgBPO67vQ",
+        "helloKey": "nUw6YeVPlAj7_8Mg8ZvFVzlZUOcdKykOQYXF7mRvwQU",
+        "c2p": "p50hopK3ud77Y8YBesbLGvI1ElteOxhkoBZIF8TkXlE",
+        "p2c": "ZVIBehTyca9ST72Ji8XnOZdFoPC21svH3HyAZMoweKs",
+        "hello": "AQIDBAUGBwgJCgsMD1iLh79UJ64LG_Oypu9Qag83JPA7DHk",
+        "first": "AQIDBAUGBwgJCgsMoxuK9CzRLC5u4_7VZWT06KEUnvCJGVsf9T0c",
+        "answer": "AQIDBAUGBwgJCgsMNI902AieFdtQ4FZv2R9FZDHmaKK7qb-SWm2vjbBwp_k"
+      }
+    },
+    {
+      "inputs": {
+        "kLocal": "8OHSw7Sllod4aVpLPC0eDw8eLTxLWml4h5altMPS4fA",
+        "cliPrivate": "PDw8PDw8PDw8PDw8PDw8PDw8PDw8PDw8PDw8PDw8PDw",
+        "pagePrivate": "Xl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl4",
+        "id": "1a2b3c4d-5e6f-4a1b-9c2d-3e4f5a6b7c8d",
+        "userId": "user_01JOTHERUSER",
+        "orgId": "org_01JOTHERORG",
+        "projectId": "prj_01JTESTPROJ",
+        "purpose": "rotate ü",
+        "transportId": "9f8e7d6c-5b4a-4392-8a1b-0c9d8e7f6a5b",
+        "unlock": "fresh",
+        "protection": "passphrase",
+        "nonce": "AQIDBAUGBwgJCgsM",
+        "answerName": "DB_ü",
+        "helloPlain": "{\"v\":1,\"note\":\"ß\"}",
+        "firstPlain": "{\"tag\":\"y\"}",
+        "answerPlain": ""
+      },
+      "outputs": {
+        "cliPub": "BEgAEf2GDq4wjMQpHul06qQN7W6Z4aUcyl0eaU_bhVr7v2ZBPJXTmcqI5YxiOBZtyzwH9sF1Ca-O0bi7Fc5KSf0",
+        "pagePub": "BK4vWF4kt3Vw4xyRCC48c_QDXx_kspdESxoblGmWaOkPNiKED6aecl06K-YWimd5roNLPPkvhmNw8HUwYEGIAa0",
+        "k": "aql3czR-f-AeZkT_Pw_aq40MT3u-Guo7zB907GugJoc",
+        "ctx": "AAAAJDFhMmIzYzRkLTVlNmYtNGExYi05YzJkLTNlNGY1YTZiN2M4ZAAAACBqqXdzNH5_4B5mRP8_D9qrjQxPe74a6jvMH3Tsa6AmhwAAABF1c2VyXzAxSk9USEVSVVNFUgAAAA9vcmdfMDFKT1RIRVJPUkcAAAAPcHJqXzAxSlRFU1RQUk9KAAAACXJvdGF0ZSDDvAAAACQ5ZjhlN2Q2Yy01YjRhLTQzOTItOGExYi0wYzlkOGU3ZjZhNWI",
+        "kAuth": "pgWI-VHbyqboSc_4mCkLOcj1R5b2rrsm4Sjob-OfM8E",
+        "helloTag": "n69DMpbhMc2Lwjj14CHKw5O8UQ1-NIgecyWz-YnbXO0",
+        "cliTag": "xJsrfUFOcWJwiArkQO0PyLWvIlUsUrZp4Fd4X-Sr_GU",
+        "helloKey": "93Oy4GNSOEecj73x_5qZa807tR_HQYUf2a6gzRFI0Js",
+        "c2p": "3HvoRaV8A29360HgSGkbJQCjYPue6_mNptLZiwmuU-8",
+        "p2c": "vU0Q5hTMmjgFuPI3k1mfMhfKzQRP6iZcTW-9shcweHw",
+        "hello": "AQIDBAUGBwgJCgsMmSET3ygqsdXcjLsGM6_bJ3MNnysvDAJ09tdbneAOFVOTxS0",
+        "first": "AQIDBAUGBwgJCgsMnT-P4_PvoVSLkKJnDswWRuG5CKorUPQwLFy_",
+        "answer": "AQIDBAUGBwgJCgsM4ygkJz8iVY4OXE7SqfT2sg"
+      }
+    }
+  ],
+  "refuse": {
+    "b64u": [
+      "AQIDBAUGBwgJCgsMNI902AieFdtQ4FZv2R9FZDHmaKK7qb-SWm2vjbBwp_k=",
+      "a",
+      "ab+c",
+      "ab/c",
+      "AB",
+      "AAB",
+      "A A"
+    ],
+    "points": [
+      "BAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQ",
+      "BJkUmMLvfxyl_X8dLuAz3ArthHRdqbXrtgp9hUMH6_mW",
+      "ApkUmMLvfxyl_X8dLuAz3ArthHRdqbXrtgp9hUMH6_mWSkjM-U-l8gawVQ5iqtSeSg7CbctWIgHE3YvsbRHTn0Q"
+    ],
+    "tamperedAnswer": "AQIDBAUGBwgJCgsMNI902AieFdtR4FZv2R9FZDHmaKK7qb-SWm2vjbBwp_k",
+    "shortRecord": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
   }
 }
