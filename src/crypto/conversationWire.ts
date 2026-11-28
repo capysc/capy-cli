@@ -110,7 +110,7 @@ export interface ConversationContext {
 }
 
 export const ctxBytes = (c: ConversationContext): Buffer =>
-  lp(uuid(c.id), key32(c.k), text(c.userId), text(c.orgId), text(c.projectId), text(c.purpose), uuid(c.transportId));
+  guard(() => lp(uuid(c.id), key32(c.k), text(c.userId), text(c.orgId), text(c.projectId), text(c.purpose), uuid(c.transportId)));
 
 /** The pin carried in the link as `#k=`: it names the CLI's conversation key. */
 export const pinFor = (id: string, cliPub: Uint8Array): Buffer => sha256(lp(L.k, uuid(id), point(cliPub)));
@@ -135,7 +135,7 @@ export interface ConversationKeyPair { readonly privateKey: Buffer; readonly pub
 export function newKeyPair(privateKey?: Uint8Array): ConversationKeyPair {
   return guard(() => {
     const ecdh = createECDH('prime256v1');
-    if (privateKey) ecdh.setPrivateKey(Buffer.from(key32(privateKey)));
+    if (privateKey !== undefined) ecdh.setPrivateKey(Buffer.from(key32(privateKey)));
     else ecdh.generateKeys();
     // getPrivateKey drops leading zero bytes; keep the scalar 32 bytes wide.
     const scalar = Buffer.alloc(32);
@@ -149,10 +149,14 @@ const onCurve = (value: Uint8Array): Buffer => {
   guard(() => ECDH.convertKey(raw, 'prime256v1', undefined, undefined, 'uncompressed'));
   return raw;
 };
-const peerOf = (role: Role, cliPub: Uint8Array, pagePub: Uint8Array): Uint8Array => {
+/** Both points are on the curve and distinct, and the held key is the role's own. The peer is the other point. */
+const peerOf = (own: ConversationKeyPair, role: Role, cliPub: Uint8Array, pagePub: Uint8Array): Uint8Array => {
   const cli = onCurve(cliPub);
   const page = onCurve(pagePub);
-  return oneOf(role, ['cli', 'page']) === 'cli' ? page : cli;
+  if (cli.equals(page)) return invalid();
+  const mine = oneOf(role, ['cli', 'page']) === 'cli' ? cli : page;
+  if (!(own?.publicKey instanceof Uint8Array) || !Buffer.from(own.publicKey).equals(mine)) return invalid();
+  return mine === cli ? page : cli;
 };
 const sharedSecret = (own: ConversationKeyPair, peerPub: Uint8Array): Buffer => {
   const peer = point(peerPub);
@@ -169,14 +173,14 @@ const sharedSecret = (own: ConversationKeyPair, peerPub: Uint8Array): Buffer => 
  */
 export function helloKey(own: ConversationKeyPair, role: Role, c: ConversationContext, cliPub: Uint8Array, pagePub: Uint8Array): Buffer {
   pinned(c, cliPub);
-  return hkdf(sharedSecret(own, peerOf(role, cliPub, pagePub)), sha256(lp(L.helloKey, uuid(c.id), key32(c.k))), Buffer.from(L.helloKey, 'utf8'));
+  return hkdf(sharedSecret(own, peerOf(own, role, cliPub, pagePub)), sha256(lp(L.helloKey, uuid(c.id), key32(c.k))), Buffer.from(L.helloKey, 'utf8'));
 }
 
 export interface SessionKeys { readonly c2p: Buffer; readonly p2c: Buffer }
 /** One key per direction from ECDH(Ce, Pe), salted from K_auth. Never keyed from K_local alone. */
 export function sessionKeys(own: ConversationKeyPair, role: Role, kAuth: Uint8Array, c: ConversationContext, cliPub: Uint8Array, pagePub: Uint8Array): SessionKeys {
   pinned(c, cliPub);
-  const secret = sharedSecret(own, peerOf(role, cliPub, pagePub));
+  const secret = sharedSecret(own, peerOf(own, role, cliPub, pagePub));
   const ctx = ctxBytes(c);
   const salt = hmac(kAuth, lp(L.sessionSalt, ctx));
   const info = (label: string): Buffer => lp(label, ctx, point(cliPub), point(pagePub));
@@ -197,12 +201,12 @@ export interface RecordHeader {
   readonly kind: string;
   readonly name: string;
 }
-const aad = (h: RecordHeader): Buffer => {
+const aad = (h: RecordHeader): Buffer => guard(() => {
   const kind = text(h.kind);
   const name = text(h.name);
   if (kind.length === 0 || kind.length > 64 || name.length > 256) return invalid();
   return lp(L.msg, uuid(h.id), oneOf(h.direction, ['c2p', 'p2c']), String(count(h.n, 1)), String(count(h.ack, 0)), kind, name);
-};
+});
 
 const seal = (key: Uint8Array, header: RecordHeader, plaintext: Uint8Array, nonce: Uint8Array): string => {
   const additional = aad(header);
@@ -239,7 +243,7 @@ export function openRecord(key: Uint8Array, header: RecordHeader, record: string
  * CLI's first message, which carries `cliTag`, is c2p 1.
  */
 export function acceptNumber(lastAccepted: number, n: number): boolean {
-  return Number.isSafeInteger(lastAccepted) && Number.isSafeInteger(n) && n === lastAccepted + 1;
+  return Number.isSafeInteger(lastAccepted) && lastAccepted >= 0 && Number.isSafeInteger(n) && n === lastAccepted + 1;
 }
 
 /**
@@ -248,5 +252,5 @@ export function acceptNumber(lastAccepted: number, n: number): boolean {
  * its `ack` is below the number of the latest question or cancel the CLI sent.
  */
 export function acceptAck(previousAck: number, ack: number, lastSent: number): boolean {
-  return [previousAck, ack, lastSent].every(Number.isSafeInteger) && ack >= previousAck && ack <= lastSent;
+  return [previousAck, ack, lastSent].every(Number.isSafeInteger) && previousAck >= 0 && ack >= previousAck && ack <= lastSent;
 }

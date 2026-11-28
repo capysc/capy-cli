@@ -150,7 +150,17 @@ describe('a lying service is refused', () => {
       () => w.sessionKeys(cli, 'nobody' as w.Role, kAuth, ctx, cli.publicKey, page.publicKey),
       () => w.newKeyPair(Buffer.alloc(32)),
     ];
+    cases.push(
+      () => w.ctxBytes(null as unknown as w.ConversationContext),
+      () => w.openRecord(s.p2c, null as unknown as w.RecordHeader, O.answer),
+      () => w.helloKey(cli, 'cli', ctx, cli.publicKey, cli.publicKey),
+      () => w.helloKey(cli, 'page', ctx, cli.publicKey, page.publicKey),
+      () => w.sessionKeys(page, 'cli', kAuth, ctx, cli.publicKey, page.publicKey),
+      () => w.newKeyPair(null as unknown as Uint8Array),
+    );
     for (const run of cases) expect(run).toThrow(w.ConversationWireError);
+    expect(w.acceptNumber(-1, 0)).toBe(false);
+    expect(w.acceptAck(-5, -3, 0)).toBe(false);
     expect(w.tagsEqual([1] as unknown as Uint8Array, [1] as unknown as Uint8Array)).toBe(false);
   });
 
